@@ -4920,13 +4920,25 @@ pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
 
 #[cfg(test)]
 pub fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
-    clients.dispatch(vec![OutboundEvent::broadcast(
-        gwt::BackendEvent::RuntimeHookEvent { event },
-    )]);
+    clients.dispatch(vec![OutboundEvent {
+        target: DispatchTarget::All,
+        event: gwt::BackendEvent::RuntimeHookEvent { event },
+        knowledge_wire_metadata: None,
+        terminal_stream_seq: None,
+    }]);
 }
 
 #[cfg(test)]
 mod tests {
+    fn transport_all(event: gwt::BackendEvent) -> crate::OutboundEvent {
+        crate::OutboundEvent {
+            target: crate::DispatchTarget::All,
+            event,
+            knowledge_wire_metadata: None,
+            terminal_stream_seq: None,
+        }
+    }
+
     use std::{
         collections::HashMap,
         net::IpAddr,
@@ -6330,7 +6342,7 @@ mod tests {
         let browser = clients.register("browser".to_string());
         let pane = clients.register_pane("pane".to_string());
 
-        clients.dispatch(vec![OutboundEvent::broadcast(terminal_snapshot(
+        clients.dispatch(vec![transport_all(terminal_snapshot(
             "foreign-tab::agent-1",
             "foreign snapshot",
         ))]);
@@ -9336,7 +9348,7 @@ mod tests {
         for (arm, policy) in [
             (
                 "ActiveWorkProjectionPrepared(prepared)",
-                "DispatchTarget::Project(project_key)",
+                "DispatchTarget::Project(prepared_dispatch.context.project_key)",
             ),
             (
                 "LaunchProgress { window_id, message }",
@@ -9347,7 +9359,7 @@ mod tests {
                 "project_key_for_window",
             ),
             ("ProjectIndexStatus {", "OutboundEvent::project("),
-            ("MigrationProgress {", "project_key_for_tab"),
+            ("MigrationProgress {", "handle_migration_progress"),
         ] {
             let body = main
                 .split(&format!("Event::UserEvent(UserEvent::{arm}"))
@@ -9370,17 +9382,7 @@ mod tests {
             .skip(1)
             .map(|tail| tail.split('{').next().unwrap())
             .collect();
-        assert_eq!(
-            direct_globals,
-            [
-                "IssueMonitorToast",
-                "UpdateProgress",
-                "UpdateReady",
-                "IssueMonitorToast",
-                "CloneProjectProgress",
-                "CloneProjectError",
-            ]
-        );
+        assert_eq!(direct_globals, ["UpdateProgress", "UpdateReady",]);
         let health = include_str!("runtime_health_poller.rs")
             .split("#[cfg(test)]")
             .next()
@@ -9398,8 +9400,9 @@ mod tests {
         let runtime = include_str!("app_runtime/runtime_events.rs");
         for event in ["ProcessLine", "LogEntryAppended"] {
             assert!(
-                runtime.contains(&format!("OutboundEvent::broadcast(BackendEvent::{event}")),
-                "global host diagnostic classification changed: {event}"
+                runtime.contains(&format!("BackendEvent::{event}"))
+                    && runtime.contains("project_events_for_open_surface"),
+                "diagnostics must be delivered only to projects with an open consumer: {event}"
             );
         }
     }
@@ -10271,8 +10274,7 @@ mod tests {
 
     fn terminal_output_at(pane: &str, data: &str, seq: u64) -> PreparedOutbound {
         prepare_outbound_event(
-            &OutboundEvent::broadcast(terminal_output(pane, data))
-                .with_terminal_stream_seq(Some(seq)),
+            &transport_all(terminal_output(pane, data)).with_terminal_stream_seq(Some(seq)),
         )
     }
 
@@ -10844,7 +10846,7 @@ mod tests {
         let queue = hub.register("busy-client".to_string());
 
         for index in 0..(LOSSY_HIGH_WATER * 4) {
-            hub.dispatch(vec![OutboundEvent::broadcast(terminal_output(
+            hub.dispatch(vec![transport_all(terminal_output(
                 "tab-1::agent-1",
                 &format!("chunk-{index}"),
             ))]);
@@ -10861,9 +10863,7 @@ mod tests {
             );
         }
 
-        hub.dispatch(vec![OutboundEvent::broadcast(lossless_error(
-            "after-flood",
-        ))]);
+        hub.dispatch(vec![transport_all(lossless_error("after-flood"))]);
         let (payloads, _) = drain_all(&queue);
         assert!(
             payloads
@@ -10881,7 +10881,7 @@ mod tests {
         let _queue = hub.register("stuck-client".to_string());
 
         let events: Vec<OutboundEvent> = (0..=LOSSLESS_HARD_CAP)
-            .map(|index| OutboundEvent::broadcast(lossless_error(&format!("fill-{index}"))))
+            .map(|index| transport_all(lossless_error(&format!("fill-{index}"))))
             .collect();
         hub.dispatch(events);
 
@@ -10914,11 +10914,9 @@ mod tests {
         }));
         let dispatch_hub = hub.clone();
         let dispatch_handle = std::thread::spawn(move || {
-            dispatch_hub.dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::ProjectOpenError {
-                    message: "blocked enqueue".to_string(),
-                },
-            )]);
+            dispatch_hub.dispatch(vec![transport_all(BackendEvent::ProjectOpenError {
+                message: "blocked enqueue".to_string(),
+            })]);
         });
 
         let dispatch_paused = dispatch_paused_rx.recv_timeout(Duration::from_secs(5));
@@ -11001,7 +10999,7 @@ mod tests {
             app_js
                 .text()
                 .expect("app.js body")
-                .contains("function websocketUrl()"),
+                .contains("function websocketUrl(projectKey = activeProjectKey())"),
             "expected embedded server to serve the shared frontend bundle script",
         );
 

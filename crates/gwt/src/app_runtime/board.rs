@@ -684,12 +684,14 @@ impl AppRuntime {
         let milestone_root = self
             .tabs
             .iter()
-            .find(|tab| {
-                same_worktree_path(&tab.project_root, project_root)
-                    && self.active_tab_id.as_deref() == Some(tab.id.as_str())
-            })
+            .find(|tab| same_worktree_path(&tab.project_root, project_root))
             .map(|tab| tab.project_root.clone());
         BoardProjectionRefreshJob {
+            context: self
+                .tabs
+                .iter()
+                .find(|tab| same_worktree_path(&tab.project_root, project_root))
+                .and_then(|tab| self.project_context(&tab.id)),
             project_root: project_root.to_path_buf(),
             windows,
             milestone_root,
@@ -705,9 +707,23 @@ impl AppRuntime {
         refreshed: BoardProjectionRefreshed,
     ) -> Vec<OutboundEvent> {
         let BoardProjectionRefreshed {
+            context,
             mut events,
             milestone,
         } = refreshed;
+        if !context
+            .as_ref()
+            .is_some_and(|context| self.project_context_is_current(context))
+        {
+            return Vec::new();
+        }
+        events.retain(|event| match &event.event {
+            BackendEvent::BoardEntries { id, .. } => {
+                self.project_key_for_window(id)
+                    == context.as_ref().map(|context| &context.project_key)
+            }
+            _ => false,
+        });
         if let Some((project_root, projection)) = milestone {
             events.extend(
                 self.apply_workspace_projection_title_sync_cache_only(&project_root, &projection),
@@ -731,9 +747,10 @@ impl AppRuntime {
 /// off it by [`run_board_projection_refresh`].
 #[derive(Debug)]
 pub(crate) struct BoardProjectionRefreshJob {
+    pub(crate) context: Option<super::ProjectContext>,
     pub(crate) project_root: PathBuf,
     windows: Vec<BoardRefreshWindow>,
-    /// Set when the project is the active tab: its latest post is recorded as
+    /// Set for an open project: its latest post is recorded as
     /// a Work milestone under this root.
     milestone_root: Option<PathBuf>,
 }
@@ -749,6 +766,7 @@ struct BoardRefreshWindow {
 /// loop by [`AppRuntime::apply_board_projection_refresh`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BoardProjectionRefreshed {
+    pub(crate) context: Option<super::ProjectContext>,
     pub(crate) events: Vec<OutboundEvent>,
     /// The Workspace projection after the latest post was recorded as a Work
     /// milestone, when it resolved to one.
@@ -765,8 +783,14 @@ pub(crate) fn run_board_projection_refresh(
     job: BoardProjectionRefreshJob,
     mut views: BoardScopedViews,
 ) -> (BoardProjectionRefreshed, BoardScopedViews) {
-    let mut refreshed = BoardProjectionRefreshed::default();
+    let mut refreshed = BoardProjectionRefreshed {
+        context: job.context.clone(),
+        ..Default::default()
+    };
     let mut retained = BoardScopedViews::new();
+    let Some(context) = job.context.as_ref() else {
+        return (refreshed, retained);
+    };
     let Ok(snapshot) = gwt::board_provider::load_snapshot(&job.project_root) else {
         return (refreshed, retained);
     };
@@ -795,13 +819,14 @@ pub(crate) fn run_board_projection_refresh(
         };
         let mut entries = board.entries;
         attach_board_body_html(&mut entries);
-        refreshed
-            .events
-            .push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
+        refreshed.events.push(OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::BoardEntries {
                 id: window.window_id,
                 entries,
                 has_more_before: board.has_more_before,
-            }));
+            },
+        ));
     }
     if let (Some(root), Some(entry)) = (job.milestone_root, snapshot.board.entries.last()) {
         match persist_workspace_board_milestone(&root, entry) {

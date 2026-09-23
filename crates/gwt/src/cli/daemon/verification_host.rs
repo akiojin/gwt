@@ -231,6 +231,30 @@ pub(crate) fn live_daemon_pids(worktree: &Path) -> Vec<u32> {
     let Ok(scope) = RuntimeScope::from_project_root(worktree, RuntimeTarget::Host) else {
         return Vec::new();
     };
+    live_daemon_pids_in(&scope)
+}
+
+/// Every live daemon of the project a verification lease target belongs to
+/// (Issue #4633).
+///
+/// The lease is host-wide, so its holder may belong to another project than
+/// the caller's worktree. The target's first segment is the holder's project
+/// scope hash — the same hash that names the daemon directory — so the
+/// holder's own daemons are found from the lease itself. `None` when the
+/// target does not carry a project scope.
+pub(crate) fn live_daemon_pids_for_lease_target(target: &str) -> Option<Vec<u32>> {
+    let (repo_hash, _) = target.split_once("--verification--")?;
+    let scope = RuntimeScope::new(
+        repo_hash,
+        "lease-target",
+        std::path::PathBuf::new(),
+        RuntimeTarget::Host,
+    )
+    .ok()?;
+    Some(live_daemon_pids_in(&scope))
+}
+
+fn live_daemon_pids_in(scope: &RuntimeScope) -> Vec<u32> {
     let gwt_home = gwt_core::paths::gwt_home();
     let Ok(entries) = std::fs::read_dir(scope.daemon_dir(&gwt_home)) else {
         return Vec::new();

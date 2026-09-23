@@ -392,7 +392,7 @@ impl AppRuntime {
             .as_ref()
             .is_some_and(|context| context.issue_monitor_autonomous_submit_started);
         let terminal_output =
-            Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
+            self.launch_error_terminal_output_event(window_id.clone(), &user_detail);
         if self.tracked_window_exists(&window_id) {
             self.launch_error_terminal_details
                 .insert(window_id.clone(), user_detail.clone());
@@ -401,7 +401,7 @@ impl AppRuntime {
                 WindowProcessStatus::Error,
                 Some(user_detail),
             );
-            events.push(terminal_output);
+            events.extend(terminal_output);
             // Issue #3927 (SPEC #3340 AS-44 / FR-048): a restore carries no
             // launch context, so a Monitor-owned restored window is
             // recognised through its Session's Issue link.
@@ -480,12 +480,12 @@ impl AppRuntime {
             }
             return events;
         }
-        let mut events = Self::status_events(
+        let mut events = self.status_events(
             window_id,
             WindowProcessStatus::Error,
             Some(user_detail.clone()),
         );
-        events.push(terminal_output);
+        events.extend(terminal_output);
         if let Some(context) = launch_feedback_context {
             events.push(OutboundEvent::reply(
                 context.client_id,
@@ -582,7 +582,11 @@ impl AppRuntime {
                 }
             },
         );
-        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+        let Some(context) = project_root.and_then(|root| self.project_context_for_root(root))
+        else {
+            return Vec::new();
+        };
+        vec![OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message: format!(
                 "Issue Monitor could not confirm the exact answered-session submit{durable_note}: {detail}"
@@ -649,30 +653,48 @@ impl AppRuntime {
         message.into_bytes()
     }
 
-    fn launch_error_terminal_output_event(window_id: String, detail: &str) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::TerminalOutput {
-            id: window_id,
-            data_base64: base64::engine::general_purpose::STANDARD
-                .encode(Self::launch_error_terminal_bytes(detail)),
-        })
+    fn launch_error_terminal_output_event(
+        &self,
+        window_id: String,
+        detail: &str,
+    ) -> Option<OutboundEvent> {
+        let key = self.project_key_for_window(&window_id)?.clone();
+        Some(OutboundEvent::project(
+            key,
+            BackendEvent::TerminalOutput {
+                id: window_id,
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(Self::launch_error_terminal_bytes(detail)),
+            },
+        ))
     }
 
     pub(super) fn status_events(
+        &self,
         window_id: impl Into<String>,
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
         let window_id = window_id.into();
+        let Some(key) = self.project_key_for_window(&window_id).cloned() else {
+            return Vec::new();
+        };
         vec![
-            OutboundEvent::broadcast(BackendEvent::WindowState {
-                window_id: window_id.clone(),
-                state: status,
-            }),
-            OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                id: window_id,
-                status,
-                detail,
-            }),
+            OutboundEvent::project(
+                key.clone(),
+                BackendEvent::WindowState {
+                    window_id: window_id.clone(),
+                    state: status,
+                },
+            ),
+            OutboundEvent::project(
+                key,
+                BackendEvent::TerminalStatus {
+                    id: window_id,
+                    status,
+                    detail,
+                },
+            ),
         ]
     }
 }

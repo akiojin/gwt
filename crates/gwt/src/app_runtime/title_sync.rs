@@ -76,12 +76,15 @@ impl AppRuntime {
         projection: &WorkspaceProjection,
         cache_only: bool,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
         let dynamic_title_changed =
             self.sync_agent_window_titles_from_workspace_projection(project_root, projection);
 
         let mut events = Vec::new();
         if dynamic_title_changed {
-            events.push(self.workspace_state_broadcast());
+            events.push(self.workspace_state_broadcast(&context));
         }
         let projection_event = if cache_only {
             // Issue #3783: watcher notifications run directly on the Tao event
@@ -90,9 +93,9 @@ impl AppRuntime {
             // rebuild here blocks every pane request, while replaying the
             // cache without this merge publishes stale title/status fields.
             self.merge_workspace_projection_into_cached_active_work(project_root, projection);
-            self.cached_active_work_projection_broadcast_for_workspace_watcher()
+            self.cached_active_work_projection_broadcast_for_workspace_watcher(&context.tab_id)
         } else {
-            self.active_work_projection_broadcast_for_active_tab()
+            self.active_work_projection_broadcast_for_tab(&context.tab_id)
         };
         if let Some(event) = projection_event {
             events.push(event);

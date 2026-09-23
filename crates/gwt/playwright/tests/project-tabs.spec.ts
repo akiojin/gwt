@@ -1,13 +1,24 @@
-import { expect, test } from "@playwright/test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
-import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test.describe("Project tabs", () => {
+  const browserErrors = new WeakMap<Page, string[]>();
+  test.beforeEach(async ({ page }) => {
+    browserErrors.set(page, collectBrowserErrors(page));
+  });
+  test.afterEach(async ({ page }) => {
+    expect(browserErrors.get(page)).toEqual([]);
+  });
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("live checkout bootstraps a project-scoped connection and accepts terminal input", async ({ page }) => {
+  test("live checkout bootstraps a project-scoped connection and accepts terminal input", async ({ page }, testInfo) => {
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     test.skip(!base, "requires browser-check isolated checkout server");
+    await withLiveGwtBackendLock(base!, testInfo, async () => {
     const errors: string[] = [];
     const sockets: string[] = [];
     let projectKey: string | undefined;
@@ -47,6 +58,7 @@ test.describe("Project tabs", () => {
     });
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
     await expect(page.locator(".project-tab").first()).toBeVisible();
+    await page.locator(".project-tab").first().click();
     await expect.poll(() => scopedWorkspaceReceived).toBe(true);
     expect(projectKey).toMatch(/^[0-9a-f]{16}$/);
     expect(sockets).toHaveLength(2);
@@ -85,6 +97,106 @@ test.describe("Project tabs", () => {
       await sendLiveGwtEvent(page, { kind: "close_window", id });
     }
     expect(errors).toEqual([]);
+    });
+  });
+
+  test("live projects stay independent while two clients mirror the same project", async ({ page, context }, testInfo) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base, "requires browser-check isolated checkout server with two projects");
+    await withLiveGwtBackendLock(base!, testInfo, async () => {
+      const other = await context.newPage();
+      const mirror = await context.newPage();
+      const pages = [page, other, mirror];
+      const errors = pages.map(collectBrowserErrors);
+      const frames = pages.map(() => [] as Array<Record<string, any>>);
+      const created: Array<{ page: Page; id: string }> = [];
+      const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+      const catalogProjectPath = await mkdtemp(join(tmpdir(), "gwt-4537-catalog-"));
+      let catalogProjectId: string | undefined;
+      try {
+        for (const [index, current] of pages.entries()) {
+          current.on("websocket", (socket) => {
+            socket.on("framereceived", ({ payload }) => {
+              const event = JSON.parse(String(payload));
+              if (event.kind === "hub_state" || event.kind === "workspace_state") {
+                frames[index].push({ ...event, socketProjectKey: new URL(socket.url()).searchParams.get("repo_hash") });
+              }
+            });
+          });
+          await gotoLiveGwt(current, base!, { enableTestBridge: true });
+          await expect.poll(() => frames[index].some((event) => event.kind === "hub_state")).toBe(true);
+          await expect(current.locator('.project-tab[aria-current="page"]')).toHaveCount(0);
+          await current.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+          await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
+        }
+        const catalog = frames[0].find((event) => event.kind === "hub_state")!.hub.projects;
+        expect(catalog.length, "isolated session must seed projects A and B").toBeGreaterThanOrEqual(2);
+        expect(catalog.every((entry) => !("workspace" in entry))).toBe(true);
+        const selected = [catalog[0], catalog[1], catalog[0]];
+        for (const [index, current] of pages.entries()) {
+          await current.locator(`[data-project-tab-id="${selected[index].id}"]`).click();
+          await expect.poll(() => frames[index].some((event) =>
+            event.kind === "workspace_state" && event.socketProjectKey === selected[index].project_key
+          )).toBe(true);
+          await expect(current.locator(`[data-project-tab-id="${selected[index].id}"]`))
+            .toHaveAttribute("aria-current", "page");
+        }
+
+        // Hub navigation stays available while every browser is project-bound.
+        await sendLiveGwtEvent(page, { kind: "reopen_recent_project", path: catalogProjectPath });
+        await expect.poll(() => frames[0].filter((event) => event.kind === "hub_state")
+          .at(-1)?.hub.projects.length).toBe(catalog.length + 1);
+        catalogProjectId = frames[0].filter((event) => event.kind === "hub_state")
+          .at(-1)!.hub.projects.find((entry) => !catalog.some((old) => old.id === entry.id)).id;
+        for (const [index, current] of pages.entries()) {
+          await expect(current.locator(`[data-project-tab-id="${catalogProjectId}"]`)).toBeVisible();
+          await expect(current.locator(`[data-project-tab-id="${selected[index].id}"]`))
+            .toHaveAttribute("aria-current", "page");
+        }
+        await sendLiveGwtEvent(page, { kind: "close_project_tab", tab_id: catalogProjectId });
+        for (const current of pages) {
+          await expect(current.locator(`[data-project-tab-id="${catalogProjectId}"]`)).toHaveCount(0);
+        }
+        catalogProjectId = undefined;
+
+        const aWindow = await createLiveProjectShell(page);
+        created.push({ page, id: aWindow });
+        await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
+        await expect(other.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
+        const bWindow = await createLiveProjectShell(other);
+        created.push({ page: other, id: bWindow });
+        await expect(page.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
+        await expect(mirror.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
+        await expect(page.locator(`[data-project-tab-id="${catalog[0].id}"]`)).toHaveAttribute("aria-current", "page");
+        await expect(other.locator(`[data-project-tab-id="${catalog[1].id}"]`)).toHaveAttribute("aria-current", "page");
+        await page.screenshot({ path: testInfo.outputPath(`project-isolation-${theme}-a.png`) });
+        await other.screenshot({ path: testInfo.outputPath(`project-isolation-${theme}-b.png`) });
+
+        // Closing through one A client updates its mirror without touching B.
+        await sendLiveGwtEvent(page, { kind: "close_window", id: aWindow });
+        await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
+        await expect(other.locator(`.workspace-window[data-id="${bWindow}"]`)).toBeVisible();
+        for (const [index, received] of frames.entries()) {
+          const snapshots = received.filter((event) => event.kind === "workspace_state");
+          expect(snapshots.length).toBeGreaterThan(0);
+          expect(snapshots.every((event) => event.socketProjectKey === selected[index].project_key
+            && event.workspace.tabs[0].project_key === selected[index].project_key
+            && event.workspace.tabs.length === 1
+            && event.workspace.tabs[0].id === selected[index].id)).toBe(true);
+        }
+      } finally {
+        for (const window of created) {
+          await sendLiveGwtEvent(window.page, { kind: "close_window", id: window.id }).catch(() => {});
+        }
+        if (catalogProjectId) {
+          await sendLiveGwtEvent(page, { kind: "close_project_tab", tab_id: catalogProjectId }).catch(() => {});
+        }
+        await other.close();
+        await mirror.close();
+        await rm(catalogProjectPath, { recursive: true, force: true });
+      }
+      expect(errors.flat()).toEqual([]);
+    });
   });
 
   test("project switching reconnects with the selected immutable scope", async ({ page }) => {
@@ -101,6 +213,8 @@ test.describe("Project tabs", () => {
     await installProjectTabsBackend(page, tabs);
     await page.goto(APP_URL);
     const urls = () => page.evaluate(() => window.__gwtProjectTabsSocketUrls);
+    await expect.poll(urls).toEqual(["ws://gwt-playwright.local/ws"]);
+    await page.locator(".project-tab").first().click();
     await expect.poll(urls).toEqual([
       "ws://gwt-playwright.local/ws",
       "ws://gwt-playwright.local/ws?repo_hash=0123456789abcdef",
@@ -134,6 +248,7 @@ test.describe("Project tabs", () => {
     });
     const first = page.locator(".project-tab").nth(0);
     const second = page.locator(".project-tab").nth(1);
+    await first.click();
     await expect(first).toHaveAttribute("aria-current", "page");
 
     expect(burstSize / streamedStateBoundary).toBeGreaterThanOrEqual(10);
@@ -193,6 +308,7 @@ test.describe("Project tabs", () => {
     });
     const first = page.locator(".project-tab").nth(0);
     const second = page.locator(".project-tab").nth(1);
+    await first.click();
     await expect(first).toHaveAttribute("aria-current", "page");
 
     const heapBefore = await sampleBrowserHeap(page);
@@ -364,6 +480,7 @@ test.describe("Project tabs", () => {
 
     await page.goto(APP_URL);
 
+    await page.locator('[data-project-tab-id="tab-running"]').click();
     const runningCue = page.locator(
       '[data-project-tab-id="tab-running"] [data-role="project-tab-state-cue"]',
     );
@@ -448,7 +565,7 @@ function projectTabsFixture(
 
 async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
   await page.addInitScript((fixture) => {
-    const tabs = Array.isArray(fixture)
+    const tabs = (Array.isArray(fixture)
       ? fixture
       : Array.from({ length: fixture }, (_, index) => {
           const number = String(index + 1).padStart(2, "0");
@@ -457,18 +574,17 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
             title: `known-project-${number}`,
             project_root: `/fixture/known-project-${number}`,
             kind: "git",
-            workspace: {
-              viewport: { x: 0, y: 0, zoom: 1 },
-              windows: [],
-            },
+            workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows: [] },
           };
-        });
-    const workspaceState = {
-      kind: "workspace_state",
-      workspace: {
+        })).map((tab, index) => ({
+          ...tab,
+          project_key: tab.project_key ?? (index + 1).toString(16).padStart(16, "0"),
+        }));
+    const hubState = {
+      kind: "hub_state",
+      hub: {
         app_version: "playwright",
-        tabs,
-        active_tab_id: tabs[0]?.id ?? null,
+        projects: tabs.map(({ id, project_key, title, kind }) => ({ id, project_key, title, kind })),
         recent_projects: [],
       },
     };
@@ -482,6 +598,7 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
       constructor(url) {
         super();
         this.url = url;
+        this.projectKey = new URL(url).searchParams.get("repo_hash");
         (window.__gwtProjectTabsSocketUrls ??= []).push(url);
         this.readyState = FixtureWebSocket.CONNECTING;
         window.__gwtProjectTabsFixtureSocket = this;
@@ -499,20 +616,18 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
           return;
         }
         if (message.kind === "frontend_ready") {
-          this.emit(workspaceState);
+          const tab = tabs.find((entry) => entry.project_key === this.projectKey);
+          this.emit(tab ? {
+            kind: "workspace_state",
+            workspace: { app_version: "playwright", tabs: [tab], active_tab_id: tab.id, recent_projects: [] },
+          } : hubState);
           return;
         }
         if (message.kind === "save_ui_trace") {
           this.savedUiTracePayload = message;
           return;
         }
-        if (
-          message.kind === "select_project_tab" &&
-          tabs.some((tab) => tab.id === message.tab_id)
-        ) {
-          workspaceState.workspace.active_tab_id = message.tab_id;
-          this.emitSync(workspaceState);
-        }
+
       }
 
       close() {
@@ -528,7 +643,8 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
 
       emitSync(payload) {
         this.dispatchEvent(
-          new MessageEvent("message", { data: JSON.stringify(payload) }),
+          new MessageEvent("message", { data: JSON.stringify(this.projectKey
+            ? { ...payload, project_key: this.projectKey } : payload) }),
         );
       }
 
@@ -549,4 +665,26 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
       value: FixtureWebSocket,
     });
   }, tabFixture);
+}
+
+function collectBrowserErrors(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  return errors;
+}
+
+async function createLiveProjectShell(page: Page): Promise<string> {
+  const shells = page.locator('.workspace-window[data-preset="shell"]');
+  const before = new Set(await shells.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.id)));
+  await sendLiveGwtEvent(page, {
+    kind: "create_window", preset: "shell",
+    bounds: { x: 80, y: 80, width: 720, height: 420 },
+  });
+  const created = async () => (await shells.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.id!)))
+    .filter((id) => !before.has(id));
+  await expect.poll(created, { timeout: 30_000 }).toHaveLength(1);
+  return (await created())[0];
 }
