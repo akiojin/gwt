@@ -7623,8 +7623,7 @@ impl IssueMonitorState {
     /// window: a steering request re-arms the timeout and a requeued issue is
     /// no longer launched. Issue #4608: a tracked window whose pane has also
     /// been silent for the whole timeout is not alive after all; it is released
-    /// and requeued like a lost launch (see
-    /// [`Self::silent_launch_release_reason`]).
+    /// and requeued like a lost launch (see `silent_launch_release_reason`).
     pub fn recover_stuck_autonomous(&mut self, now: &str) -> Vec<(u64, AutonomousFailureOutcome)> {
         // Fail-closed gate: never mutate autonomous state when the mode is off
         // (default), so the SPEC #3165 path is untouched.
