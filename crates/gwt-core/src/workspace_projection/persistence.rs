@@ -624,6 +624,47 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
         bool,
     ) -> Result<(T, Vec<WorkEvent>)>,
 ) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_event_log(
+        project_state_root,
+        work_event_root,
+        false,
+        preflight,
+        update,
+    )
+}
+
+/// Split-root transaction for machine-local close events (FR-384).
+/// Keeps the same migration, locking and pending-transaction recovery as
+/// shared Work events, but preserves close state across shared-source rebuilds.
+pub fn transact_workspace_close_state_for_work_event_root<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_event_log(
+        project_state_root,
+        work_event_root,
+        true,
+        |_, _, _| Ok(()),
+        update,
+    )
+}
+
+fn transact_workspace_state_for_work_event_root_with_event_log<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    machine_local_close_events: bool,
+    preflight: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection, bool) -> Result<()>,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
     let (current_path, work_items_path) =
         split_root_workspace_state_paths(project_state_root, work_event_root);
     with_split_root_workspace_state_lock(
@@ -646,6 +687,11 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
                 &current_path,
                 &work_items_path,
             )?;
+            let events_path = if machine_local_close_events {
+                work_items_path.with_file_name("work-events-closed.jsonl")
+            } else {
+                events_path
+            };
             let (result, transaction) = build_workspace_state_transaction_locked(
                 &current_path,
                 &work_items_path,
