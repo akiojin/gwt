@@ -317,7 +317,9 @@ drive them.
 - `board.show` with `params.all` set to true returns the project-wide
   Board, where agents post their own milestones, blockers, and handoffs.
   Read it before you read scrollback: it is the surface agents write for
-  each other, and it is far cheaper.
+  each other, and it is far cheaper. Add `params.unresolved` set to true
+  to list only the blocked entries whose escalation is still open; each
+  blocked entry carries `escalation.resolved`.
 - `pane.list` enumerates the live agent panes in this project.
 - `pane.read` with `params.id` and `params.lines` returns that pane's
   recent scrollback. Map an issue to its pane with `launched_window_id`

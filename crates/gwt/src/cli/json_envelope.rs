@@ -1372,12 +1372,17 @@ fn workspace_ensure(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
 }
 
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    reject_unknown_params(params, &["workspace", "all", "limit"], "board.show")?;
+    reject_unknown_params(
+        params,
+        &["workspace", "all", "limit", "unresolved"],
+        "board.show",
+    )?;
     Ok(CliCommand::Board(BoardCommand::Show {
         json: true,
         workspace: optional_string(params, "workspace")?,
         all: optional_bool(params, "all")?.unwrap_or(false),
         limit: optional_usize(params, "limit")?,
+        unresolved: optional_bool(params, "unresolved")?.unwrap_or(false),
     }))
 }
 
@@ -4291,7 +4296,10 @@ mod tests {
     fn board_show_rejects_unknown_params() {
         let error = err("board.show", json!({"limti": 15})).to_string();
         assert!(error.contains("limti"), "{error}");
-        assert!(error.contains("workspace, all, limit"), "{error}");
+        assert!(
+            error.contains("workspace, all, limit, unresolved"),
+            "{error}"
+        );
     }
 
     fn board_show_page(params: Value) -> Value {
@@ -4351,6 +4359,84 @@ mod tests {
         let all = board_show_page(json!({"all": true}));
         assert_eq!(all["board"]["entries"].as_array().unwrap().len(), 25);
         assert_eq!(all["page"]["truncated"], false);
+    }
+
+    /// Issue #4609: `board.show` exposes whether each escalation is still open,
+    /// and `unresolved:true` narrows the read to the open ones.
+    #[test]
+    fn board_show_reports_escalation_resolution_before_and_after_resolve() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let blocked_body = "事象: build.start が拒否された\n原因: Host が古い\n依頼: Host 更新\n再開条件: build.start が成功すること";
+        let mut run = |operation: &str, params: Value| {
+            let (code, output) = crate::cli::run_collect(&mut env, ok(operation, params)).unwrap();
+            assert_eq!(code, 0, "{output}");
+            output
+        };
+        for owner in ["4609", "4610"] {
+            run(
+                "board.post",
+                json!({"kind": "blocked", "body": blocked_body, "owners": [owner]}),
+            );
+        }
+        run(
+            "board.post",
+            json!({"kind": "status", "body": "not an escalation", "owners": ["4609"]}),
+        );
+        let show = |run: &mut dyn FnMut(&str, Value) -> String, params: Value| -> Vec<Value> {
+            let page: Value = serde_json::from_str(&run("board.show", params)).unwrap();
+            page["board"]["entries"].as_array().unwrap().clone()
+        };
+        let entries = show(&mut run, json!({"all": true}));
+        let blocked: Vec<&Value> = entries.iter().filter(|e| e["kind"] == "blocked").collect();
+        assert_eq!(blocked.len(), 2);
+        let target_id = blocked[0]["id"].as_str().unwrap().to_string();
+        assert_eq!(blocked[0]["escalation"]["resolved"], false);
+        assert!(blocked[0]["escalation"]["resolved_at"].is_null());
+        let status = entries.iter().find(|e| e["kind"] == "status").unwrap();
+        assert!(status.get("escalation").is_none(), "{status}");
+
+        let open = show(&mut run, json!({"all": true, "unresolved": true}));
+        assert_eq!(open.len(), 2, "only the two open escalations: {open:?}");
+
+        let resolved_out = run(
+            "board.post",
+            json!({"kind": "decision", "body": "Host を更新しました", "owners": ["4609"], "resolves": [target_id]}),
+        );
+        assert!(
+            resolved_out.contains("board escalations resolved:"),
+            "{resolved_out}"
+        );
+        let entries = show(&mut run, json!({"all": true}));
+        let resolver_id = entries.iter().find(|e| e["kind"] == "decision").unwrap()["id"].clone();
+        let target = entries
+            .iter()
+            .find(|e| e["id"] == target_id.as_str())
+            .unwrap();
+        assert_eq!(target["escalation"]["resolved"], true, "{target}");
+        assert_eq!(target["escalation"]["resolved_by_entry_id"], resolver_id);
+        assert!(target["escalation"]["resolved_at"].is_string(), "{target}");
+
+        let open = show(&mut run, json!({"all": true, "unresolved": true}));
+        assert_eq!(open.len(), 1, "{open:?}");
+        assert_ne!(open[0]["id"], target_id.as_str());
+        assert_eq!(open[0]["escalation"]["resolved"], false);
+
+        // AC-5: resolving an already-closed escalation stays idempotent.
+        let again = run(
+            "board.post",
+            json!({"kind": "decision", "body": "再度閉じる", "owners": ["4609"], "resolves": [target_id]}),
+        );
+        assert!(
+            again.contains("board escalations already closed:"),
+            "{again}"
+        );
     }
 
     #[test]

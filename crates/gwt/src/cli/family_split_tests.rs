@@ -73,6 +73,7 @@ fn cli_command_family_split_round_trip_parses() {
             workspace: None,
             all: false,
             limit: None,
+            unresolved: false,
         })
     );
 
