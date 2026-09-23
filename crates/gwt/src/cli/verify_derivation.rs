@@ -335,14 +335,28 @@ fn is_frontend_path(path: &str) -> bool {
 fn is_frontend_test_path(path: &str) -> bool {
     path.starts_with("crates/gwt/playwright/tests/")
         || path.contains("/__tests__/")
-        || [".spec.ts", ".spec.js", ".test.ts", ".test.js"]
-            .iter()
-            .any(|suffix| path.ends_with(suffix))
+        || [
+            ".spec.ts",
+            ".spec.js",
+            ".test.ts",
+            ".test.js",
+            ".test.mjs",
+            ".test.cjs",
+        ]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
 }
 
 /// Whether a changed path renders UI a human could be asked to look at.
+///
+/// Issue #4637: outside `crates/gwt/web/` a script extension alone proves
+/// nothing is rendered (`scripts/*.mjs` is tooling), so only markup and
+/// stylesheets keep the doubt-means-UI default there.
 fn is_ui_surface_path(path: &str) -> bool {
-    is_frontend_path(path) && !is_frontend_test_path(path)
+    is_frontend_path(path)
+        && !is_frontend_test_path(path)
+        && (path.starts_with("crates/gwt/web/")
+            || [".css", ".html"].iter().any(|ext| path.ends_with(ext)))
 }
 
 /// Inspect frontend changes even when plan derivation is trivial on an
@@ -741,6 +755,36 @@ mod tests {
             has_frontend_changes(committed.path()).unwrap(),
             "a spec alongside a stylesheet keeps the stylesheet's UI surface"
         );
+    }
+
+    /// Issue #4637: a script outside `crates/gwt/web/` renders nothing, so
+    /// its extension alone must not raise the visual gate — while any change
+    /// under `crates/gwt/web/` still does, alone or mixed with such a script.
+    #[test]
+    fn scripts_outside_the_web_tree_are_not_a_ui_surface() {
+        let cases: [(&[&str], bool); 5] = [
+            (&["scripts/foo.mjs"], false),
+            (&["scripts/foo.test.mjs"], false),
+            (&["scripts/foo.test.cjs"], false),
+            (&["crates/gwt/web/app.js"], true),
+            (&["crates/gwt/web/app.js", "scripts/foo.mjs"], true),
+        ];
+        for (changed, ui) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            fixture(dir.path());
+            for rel in changed {
+                write(dir.path(), rel, "export const x = 1;\n");
+            }
+            assert_eq!(has_frontend_changes(dir.path()).unwrap(), ui, "{changed:?}");
+            let surfaces = derive_for_host(dir.path(), VerificationHost::Other)
+                .unwrap()
+                .surfaces;
+            assert_eq!(
+                surfaces.contains(&"frontend".to_string()),
+                ui,
+                "{changed:?}: {surfaces:?}"
+            );
+        }
     }
 
     #[test]
