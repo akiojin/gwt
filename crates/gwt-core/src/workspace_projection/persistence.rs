@@ -4980,7 +4980,14 @@ fn record_workspace_pr_metadata_for_execution_at(
         let mut projection =
             load_workspace_work_items_from_path(works_path)?.ok_or_else(refusal)?;
         let mut matches = Vec::new();
-        for (index, item) in projection.work_items.iter().enumerate() {
+        // A discarded Work row is inert history: it keeps its containers but
+        // can never receive PR metadata, so it must not make a live row ambiguous.
+        for (index, item) in projection
+            .work_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !item.discarded)
+        {
             // SPEC #3590 FR-020: a stale Work of another owner or Session on
             // the same branch and worktree is not a candidate, so it cannot
             // make the delivering Session's own record ambiguous.

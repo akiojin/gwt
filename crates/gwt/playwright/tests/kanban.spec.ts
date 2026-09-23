@@ -1306,10 +1306,13 @@ async function installKnowledgeSelectionBackend(
           super();
           this.url = url;
           this.readyState = FixtureWebSocket.CONNECTING;
-          fixture.activeSocket = this;
+          // Issue #4538: a `/p/<key>` page also keeps an unscoped Hub
+          // catalog socket; the Project-scoped socket is the one under test.
+          this.projectScoped = new URL(url).searchParams.has("repo_hash");
+          if (this.projectScoped) fixture.activeSocket = this;
           setTimeout(() => {
             this.readyState = FixtureWebSocket.OPEN;
-            fixture.socketOpenCount += 1;
+            if (this.projectScoped) fixture.socketOpenCount += 1;
             this.dispatchEvent(new Event("open"));
           }, 0);
         }
@@ -1320,6 +1323,7 @@ async function installKnowledgeSelectionBackend(
             return;
           }
           const message = JSON.parse(raw);
+          if (!this.projectScoped) return;
           if (message.kind === "frontend_ready") {
             // Reconnect keeps the same workspace: re-emitting it would remount
             // the window and hide whether the retry ladder itself restarted.
