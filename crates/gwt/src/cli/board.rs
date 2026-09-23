@@ -615,6 +615,7 @@ fn report_resolutions(
     let mut already_closed = Vec::new();
     let mut still_open = Vec::new();
     let mut in_history = Vec::new();
+    let mut not_escalations = Vec::new();
     let mut unknown = Vec::new();
     for id in requested {
         let id = id.trim();
@@ -631,13 +632,20 @@ fn report_resolutions(
             }
             Some(escalation) if !escalation.is_open() => already_closed.push(id),
             Some(_) => still_open.push(id),
-            None => {
-                if gwt_core::coordination::board_entry_exists(repo_path, id).unwrap_or(false) {
-                    in_history.push(id);
-                } else {
-                    unknown.push(id);
+            // Only a `blocked` post opens an escalation, so any other kind
+            // found in history can never be folded and closed by a retry
+            // (Issue #4626).
+            None => match gwt_core::coordination::load_board_entry(repo_path, id) {
+                Ok(Some(entry))
+                    if entry.kind == gwt_core::coordination::BoardEntryKind::Blocked =>
+                {
+                    in_history.push(id)
                 }
-            }
+                Ok(Some(entry)) => {
+                    not_escalations.push(format!("{id} (kind: {})", entry.kind.as_str()))
+                }
+                _ => unknown.push(id),
+            },
         }
     }
     if !resolved.is_empty() {
@@ -664,6 +672,14 @@ fn report_resolutions(
             "board escalations present in Board history but missing from the index (scrolled out of the 500-entry window): {}\n\
              Retry params.resolves; the index should fold the historical blocked post and close it.\n",
             in_history.join(", ")
+        ));
+    }
+    if !not_escalations.is_empty() {
+        out.push_str(&format!(
+            "board entries named for resolution are not escalations: {}\n\
+             Only a `blocked` post opens an escalation, and resolving any other kind never closes anything. \
+             Name the blocked post's id instead; copy it from the wake prompt or issue.monitor.status.\n",
+            not_escalations.join(", ")
         ));
     }
     if !unknown.is_empty() {
@@ -1330,6 +1346,80 @@ mod tests {
             !out.contains("already closed"),
             "an unknown id is not an already-closed one: {out}"
         );
+    }
+
+    #[test]
+    fn board_family_run_post_says_a_non_escalation_entry_cannot_be_resolved() {
+        // Issue #4626: a `decision` id exists in Board history but was never an
+        // escalation. Telling the PM to retry would never close anything.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("担当が自発的に投稿した判断"),
+                s("--owner"),
+                s("2338"),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        let decision_id = gwt_core::coordination::load_snapshot(tmp.path())
+            .unwrap()
+            .board
+            .entries
+            .last()
+            .unwrap()
+            .id
+            .clone();
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("解消したつもり"),
+                s("--owner"),
+                s("2338"),
+                s("--resolves"),
+                s(&decision_id),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains(&format!(
+                "board entries named for resolution are not escalations: {decision_id} (kind: decision)"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("blocked"),
+            "the PM must be told what a resolvable id is: {out}"
+        );
+        assert!(
+            !out.contains("Retry"),
+            "a non-escalation id never folds, so retry must not be suggested: {out}"
+        );
+        assert!(!out.contains("missing from the index"), "{out}");
+        assert!(!out.contains("board escalations not found:"), "{out}");
+        assert!(!out.contains("board escalations resolved:"), "{out}");
     }
 
     #[test]
