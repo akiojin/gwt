@@ -4264,6 +4264,8 @@ fn sample_runtime_with_events(
         tabs,
         active_tab_id: active_tab_id.map(str::to_owned),
         project_states: super::initial_project_states(&project_tab_incarnations),
+        project_aggregates: HashMap::new(),
+        next_project_aggregate_revision: 0,
         project_tab_incarnations,
         next_project_incarnation,
         project_navigation_request: 0,
@@ -78038,3 +78040,5 @@ fn reopened_project_releases_old_pm_and_scan_worker_gates() {
 include!("pm_project_state_tests.rs");
 
 include!("project_owned_state_tests.rs");
+
+include!("project_aggregate_tests.rs");

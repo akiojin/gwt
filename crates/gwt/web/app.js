@@ -88,6 +88,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createToastStack } from "/toast-host.js";
+      import { createProjectPageMetadata } from "/project-page-metadata.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
@@ -927,6 +928,9 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           socket.send(JSON.stringify(message));
           return "sent";
         }
+        // Acknowledgements describe this connection's observed revision; a
+        // restarted server may reuse revision numbers. Never queue them.
+        if (message.kind === "project_aggregate_ack") return "unavailable";
         // Retain the origin across reconnects: switching projects must never
         // replay input or actions through another project's connection.
         pendingMessages.push({ projectKey: activeProjectKey(), message });
@@ -1267,6 +1271,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           },
         });
         setConnectionState(true);
+        projectPageMetadata.resetConnection();
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
         for (let index = 0; index < pendingMessages.length;) {
@@ -1287,6 +1292,19 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       function handleSocketMessage(event) {
         if (!socketReceiveDispatcher) {
           return;
+        }
+        // Browser chrome must update while background tabs suspend rAF.
+        // installSocketEventHandlers already fences the active connection;
+        // keep this control event synchronous and all render traffic deferred.
+        if (typeof event.data === "string" && /"kind"\s*:\s*"project_agent_aggregate"/.test(event.data)) {
+          let payload;
+          try { payload = JSON.parse(event.data); } catch { /* dispatcher reports malformed frames */ }
+          if (payload?.kind === "project_agent_aggregate") {
+            try { receive(payload); } catch (error) {
+              renderDegradationBanner.report({ source: "receive:project_agent_aggregate", error });
+            }
+            return;
+          }
         }
         socketReceiveDispatcher.handle(event);
       }
@@ -6054,6 +6072,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         renderAppState,
       });
 
+      const projectPageMetadata = createProjectPageMetadata({ document, window, send });
+
       const agentCompletionNotifier = createAgentCompletionNotifier({
         document,
         window,
@@ -6192,9 +6212,14 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             if (event.project_key === routeProjectKey) showProjectRouteNotFound();
             break;
           }
+          case "project_agent_aggregate": {
+            projectPageMetadata.update(event.aggregate);
+            break;
+          }
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            projectPageMetadata.setProjectName(activeProjectTab()?.title);
             // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
             // floating CTA in step with every canvas render.
             updatePmLauncher(activeWorkspace());
