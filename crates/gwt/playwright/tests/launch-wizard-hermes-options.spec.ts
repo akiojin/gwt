@@ -56,7 +56,7 @@ test.describe("Launch Wizard — Hermes options", () => {
     await installWorkspaceFixture(page);
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
     await injectWizard(page, HERMES_WIZARD);
     const modal = page.locator("#wizard-modal");
@@ -132,7 +132,7 @@ test.describe("Launch Wizard — Hermes options", () => {
     await installWorkspaceFixture(page);
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
     await injectWizard(page, {
       ...HERMES_WIZARD,
