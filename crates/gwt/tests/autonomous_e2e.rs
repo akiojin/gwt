@@ -489,6 +489,7 @@ mod idle_windows {
             status,
             review_dispatch,
             hold_reason: None,
+            last_output_at: None,
         }
     }
 

@@ -588,6 +588,7 @@ mod window_snapshot_publish_tests {
                 status: crate::WindowState::Stopped,
                 review_dispatch: false,
                 hold_reason: None,
+                last_output_at: None,
             }],
         };
 
