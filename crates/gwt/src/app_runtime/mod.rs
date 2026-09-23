@@ -10618,7 +10618,9 @@ impl AppRuntime {
             ) else {
                 continue;
             };
-            let admission_holds = prefs.launch_admission_provider_quota_holds(&at);
+            // Only a hold whose re-verification is not yet due is hastened;
+            // every due one is left out whatever the pool offers.
+            let admission_holds = prefs.launch_admission_provider_quota_holds(&at, |_| true);
             for (provider, evidence) in &prefs.provider_quota_hold_evidence {
                 if !admission_holds.contains_key(provider)
                     || !gwt::issue_monitor::provider_reports_healthy_for_agent(

@@ -102,8 +102,16 @@ mod tests {
     }
 
     fn monitor_with_pool(agents: &[&str]) -> IssueMonitorState {
+        monitor_with_pool_holding(agents, &[])
+    }
+
+    fn monitor_with_pool_holding(agents: &[&str], holds: &[(&str, &str)]) -> IssueMonitorState {
         let mut prefs = IssueMonitorPrefs {
             enabled: true,
+            provider_quota_holds: holds
+                .iter()
+                .map(|(provider, reset_at)| (provider.to_string(), reset_at.to_string()))
+                .collect(),
             ..IssueMonitorPrefs::default()
         };
         prefs.set_launch_profile_pool(agents.iter().map(|agent| profile(agent)).collect());
@@ -418,5 +426,154 @@ mod tests {
             .agent_status_at(&now)
             .effective_launch_profile
             .is_none());
+    }
+
+    /// The candidate `prefs` would launch at `now`, with the poller reading
+    /// every provider as `reported_healthy`.
+    fn launch_choice(prefs: &IssueMonitorPrefs, now: &str, reported_healthy: bool) -> String {
+        let pool = prefs.launch_profile_pool();
+        let selection = select_launch_profile(
+            &pool,
+            &prefs.launch_admission_provider_quota_holds(now, |_| reported_healthy),
+            &[],
+            prefs.launch_usage_threshold_percent,
+            &[],
+            None,
+            now,
+        );
+        pool[selection.selected.expect("a candidate is selectable")]
+            .agent_id
+            .clone()
+    }
+
+    /// Issue #4636 AC-1 / AC-5(a) / AC-6: a held head is skipped for a free
+    /// candidate even when its re-verification is due. The re-verification
+    /// only preempts a free candidate when the poller contradicts the hold.
+    #[test]
+    fn a_due_reverification_does_not_preempt_a_free_candidate() {
+        let mut monitor = monitor_with_pool(&["codex", "claude"]);
+        let formed_at = form_codex_hold(&mut monitor);
+        let reverify_at = after(&formed_at, PROVIDER_QUOTA_REVERIFY_INTERVAL_SECS);
+        let prefs = monitor.prefs();
+
+        assert_eq!(
+            launch_choice(&prefs, &after(&formed_at, 60), false),
+            "claude"
+        );
+        assert_eq!(
+            launch_choice(&prefs, &reverify_at, false),
+            "claude",
+            "a due re-verification must not spend a launch on a provider the poller still reads as exhausted"
+        );
+        assert_eq!(
+            launch_choice(&prefs, &reverify_at, true),
+            "codex",
+            "a poller reading that contradicts the hold still gets its re-verification launch"
+        );
+        assert_eq!(
+            monitor
+                .agent_status_at(&reverify_at)
+                .effective_launch_profile
+                .and_then(|effective| effective.agent_id)
+                .as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            monitor
+                .prefs()
+                .provider_quota_holds
+                .get("codex")
+                .map(String::as_str),
+            Some(RESET_AT),
+            "AC-6: choosing around a hold never shortens it"
+        );
+    }
+
+    /// Issue #4636 AC-2 / AC-5(b): with every candidate held, nothing
+    /// launches until the earliest reset or re-verification, and the stop is
+    /// reported as a blackout instead of being silent.
+    #[test]
+    fn every_candidate_held_stops_launches_and_reports_why() {
+        let claude_reset = "2026-09-20T00:00:00Z";
+        let mut monitor =
+            monitor_with_pool_holding(&["codex", "claude"], &[("claude", claude_reset)]);
+        let formed_at = form_codex_hold(&mut monitor);
+        let now = after(&formed_at, 60);
+
+        let status = monitor.agent_status_at(&now);
+        assert_eq!(
+            status
+                .quota_hold
+                .as_ref()
+                .map(|hold| hold.reset_at.as_str()),
+            Some(claude_reset)
+        );
+        assert!(monitor.next_launch_request(&now).is_none());
+        let blackout = status.agent_blackout.unwrap_or_default();
+        assert!(
+            blackout.contains("held") && blackout.contains(claude_reset),
+            "the all-held stop names when launches resume: {blackout:?}"
+        );
+
+        // The re-verification is the one launch a fully held pool admits.
+        let reverify_at = after(&formed_at, PROVIDER_QUOTA_REVERIFY_INTERVAL_SECS);
+        assert_eq!(
+            launch_choice(&monitor.prefs(), &reverify_at, false),
+            "codex"
+        );
+    }
+
+    /// Issue #4636 AC-4 / AC-5(c): once `held_until` passes, the provider is a
+    /// candidate again without anyone clearing the hold.
+    #[test]
+    fn an_expired_hold_returns_the_provider_to_the_pool() {
+        let mut monitor = monitor_with_pool(&["codex", "claude"]);
+        form_codex_hold(&mut monitor);
+        let prefs = monitor.prefs();
+
+        assert_eq!(launch_choice(&prefs, &after(RESET_AT, -1), false), "claude");
+        assert_eq!(launch_choice(&prefs, RESET_AT, false), "codex");
+        assert_eq!(
+            prefs.provider_quota_holds.get("codex").map(String::as_str),
+            Some(RESET_AT),
+            "AC-6: the hold record itself is left in place"
+        );
+    }
+
+    /// Issue #4636 AC-7 / AC-9(a): a provider hold is not copied onto the
+    /// Issue while another candidate can run it.
+    #[test]
+    fn a_provider_hold_does_not_park_the_issue_while_another_candidate_is_free() {
+        let mut monitor = monitor_with_pool(&["codex", "claude"]);
+        let formed_at = form_codex_hold(&mut monitor);
+
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.clone()),
+            None,
+            "the provider's reset must not become the Issue's retry floor"
+        );
+        assert!(monitor.retry_ready(42, &after(&formed_at, 1)));
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    }
+
+    /// Issue #4636 AC-8 / AC-9(b): with every candidate held the Issue waits
+    /// for the earliest reset, not for the provider it last tried.
+    #[test]
+    fn an_all_held_pool_parks_the_issue_until_the_earliest_reset() {
+        let claude_reset = "2026-09-20T00:00:00Z";
+        let mut monitor =
+            monitor_with_pool_holding(&["codex", "claude"], &[("claude", claude_reset)]);
+
+        form_codex_hold(&mut monitor);
+
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.clone())
+                .as_deref(),
+            Some(claude_reset)
+        );
     }
 }
