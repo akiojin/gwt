@@ -39,7 +39,7 @@ const REQUIRED_PAIRS = [
   ["--color-link-hover", "--color-surface-elevated", NORMAL_AA, "link on surface-elevated (hover)"],
   ["--agent-claude", "--color-canvas", LARGE_AA, "agent claude indicator"],
   ["--agent-codex", "--color-canvas", LARGE_AA, "agent codex indicator"],
-  ["--agent-gemini", "--color-canvas", LARGE_AA, "agent gemini indicator"],
+  ["--agent-hermes", "--color-canvas", LARGE_AA, "agent hermes indicator"],
   ["--agent-opencode", "--color-canvas", LARGE_AA, "agent opencode indicator"],
   ["--agent-copilot", "--color-canvas", LARGE_AA, "agent copilot indicator"],
   // Agent colors are also used as TEXT (e.g. .op-agent-kind chip foreground
@@ -48,7 +48,7 @@ const REQUIRED_PAIRS = [
   // regressions.
   ["--agent-claude", "--color-surface", NORMAL_AA, "agent claude as text on surface"],
   ["--agent-codex", "--color-surface", NORMAL_AA, "agent codex as text on surface"],
-  ["--agent-gemini", "--color-surface", NORMAL_AA, "agent gemini as text on surface"],
+  ["--agent-hermes", "--color-surface", NORMAL_AA, "agent hermes as text on surface"],
   ["--agent-opencode", "--color-surface", NORMAL_AA, "agent opencode as text on surface"],
   ["--agent-copilot", "--color-surface", NORMAL_AA, "agent copilot as text on surface"],
 ];

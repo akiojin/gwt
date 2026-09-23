@@ -624,6 +624,47 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
         bool,
     ) -> Result<(T, Vec<WorkEvent>)>,
 ) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_event_log(
+        project_state_root,
+        work_event_root,
+        false,
+        preflight,
+        update,
+    )
+}
+
+/// Split-root transaction for machine-local close events (FR-384).
+/// Keeps the same migration, locking and pending-transaction recovery as
+/// shared Work events, but preserves close state across shared-source rebuilds.
+pub fn transact_workspace_close_state_for_work_event_root<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_event_log(
+        project_state_root,
+        work_event_root,
+        true,
+        |_, _, _| Ok(()),
+        update,
+    )
+}
+
+fn transact_workspace_state_for_work_event_root_with_event_log<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    machine_local_close_events: bool,
+    preflight: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection, bool) -> Result<()>,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
     let (current_path, work_items_path) =
         split_root_workspace_state_paths(project_state_root, work_event_root);
     with_split_root_workspace_state_lock(
@@ -646,6 +687,11 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
                 &current_path,
                 &work_items_path,
             )?;
+            let events_path = if machine_local_close_events {
+                work_items_path.with_file_name("work-events-closed.jsonl")
+            } else {
+                events_path
+            };
             let (result, transaction) = build_workspace_state_transaction_locked(
                 &current_path,
                 &work_items_path,
@@ -3217,11 +3263,26 @@ fn validate_session_bound_owner_claim(
     Ok(())
 }
 
+/// Compare two persisted Session-bound paths.
+///
+/// A Work item routinely records execution containers created on another host,
+/// and those paths do not resolve here. Such a path cannot be this Session's
+/// container, so it compares unequal rather than failing the whole transaction:
+/// treating it as an I/O failure aborted every `workspace.update` for the Work
+/// and reached the agent as a permanent `transaction_conflict` (#4443). Every
+/// other I/O failure stays fail-closed, and two paths that are textually the
+/// same still match even when neither resolves.
 fn session_bound_paths_match(left: Option<&Path>, right: Option<&Path>) -> Result<bool> {
     let (Some(left), Some(right)) = (left, right) else {
         return Ok(false);
     };
-    Ok(canonical_session_bound_path(left)? == canonical_session_bound_path(right)?)
+    match (
+        resolved_session_bound_path(left)?,
+        resolved_session_bound_path(right)?,
+    ) {
+        (Some(left), Some(right)) => Ok(left == right),
+        _ => Ok(left == right),
+    }
 }
 
 fn canonical_session_bound_path(path: &Path) -> Result<PathBuf> {
@@ -3230,6 +3291,20 @@ fn canonical_session_bound_path(path: &Path) -> Result<PathBuf> {
         .map_err(|_| {
             GwtError::Other("Session-bound workspace path could not be canonicalized".to_string())
         })
+}
+
+/// Canonicalize a persisted path, reporting a path that does not exist as
+/// unresolved instead of as a failure.
+fn resolved_session_bound_path(path: &Path) -> Result<Option<PathBuf>> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(Some(crate::paths::normalize_windows_child_process_path(
+            &path,
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(GwtError::Other(
+            "Session-bound workspace path could not be canonicalized".to_string(),
+        )),
+    }
 }
 
 /// Compare persisted candidate state with an already-canonical authority.
@@ -4951,7 +5026,27 @@ fn record_workspace_pr_metadata_for_execution_at(
         let mut projection =
             load_workspace_work_items_from_path(works_path)?.ok_or_else(refusal)?;
         let mut matches = Vec::new();
-        for (index, item) in projection.work_items.iter().enumerate() {
+        // A discarded Work row is inert history: it keeps its containers but
+        // can never receive PR metadata, so it must not make a live row ambiguous.
+        for (index, item) in projection
+            .work_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !item.discarded)
+        {
+            // SPEC #3590 FR-020: a stale Work of another owner or Session on
+            // the same branch and worktree is not a candidate, so it cannot
+            // make the delivering Session's own record ambiguous.
+            if item.owner.as_deref() != Some(owner)
+                || item
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.session_id == session_id)
+                    .count()
+                    != 1
+            {
+                continue;
+            }
             for existing in &item.execution_containers {
                 if canonical_session_bound_branch(existing.branch.as_deref().unwrap_or_default())
                     == canonical_session_bound_branch(
@@ -4970,16 +5065,6 @@ fn record_workspace_pr_metadata_for_execution_at(
             return Err(refusal());
         };
         let item = &projection.work_items[*index];
-        if item.owner.as_deref() != Some(owner)
-            || item
-                .agents
-                .iter()
-                .filter(|agent| agent.session_id == session_id)
-                .count()
-                != 1
-        {
-            return Err(refusal());
-        }
         let mut updated = (*existing).clone();
         updated.pr_number = container.pr_number;
         updated.pr_url = container.pr_url.clone();
@@ -5228,6 +5313,10 @@ pub fn worktree_sources_needing_backfill(
 /// re-ingested copy of this event (W-16 intake on another machine) cannot
 /// regress a terminal item; the Idle surface state comes from the kind
 /// mapping in `workspace_work_event_status`.
+///
+/// Issue #4479 AC-1: the owner the branch already names travels on the event,
+/// so a Work materialized here is never created with `owner: null` while its
+/// execution container points at an Issue branch.
 pub fn record_workspace_backfill_event_paths(
     work_items_path: &Path,
     events_path: &Path,
@@ -5248,6 +5337,7 @@ fn workspace_backfill_event(
 ) -> WorkEvent {
     let mut event = WorkEvent::new(WorkEventKind::Backfill, work_id, updated_at);
     event.title = Some(branch.to_string());
+    event.owner = work_owner_for_branch(branch);
     event.execution_container = Some(WorkspaceExecutionContainerRef {
         branch: Some(branch.to_string()),
         worktree_path: Some(worktree_path.to_path_buf()),

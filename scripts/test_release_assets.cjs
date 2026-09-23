@@ -280,7 +280,9 @@ run("release flow helper checks the shared frontend bundle and release assets", 
   const releaseFlow = fs.readFileSync(path.join(__dirname, "check-release-flow.sh"), "utf8");
   assert.match(releaseFlow, /scripts\/test_release_assets\.cjs/);
   assert.match(releaseFlow, /scripts\/check-frontend-bundle\.sh/);
-  assert.match(releaseFlow, /script type=\"module\" src=\"\/app\.js\"/);
+  // Issue #4538: index.html boots the route bootstrap, which loads /app.js.
+  assert.match(releaseFlow, /script type=\"module\" src=\"\/frontend-bootstrap\.js\"/);
+  assert.match(releaseFlow, /"\/app\.js"/);
 });
 
 run("CI workflows call direct verification scripts and skip npm publish", () => {
@@ -330,7 +332,7 @@ run("Nightly CI proves the Rust suites with default parallelism three times", ()
   assert.match(nightlyWorkflow, /^ {2}test-windows-default-parallel:$/m);
   assert.match(nightlyWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
   assert.match(nightlyWorkflow, /1\.\.3 \| ForEach-Object/);
-  assert.match(nightlyWorkflow, /cargo test -p gwt --lib --all-features/);
+  assert.match(nightlyWorkflow, /cargo test -p gwt --lib --bin gwt --all-features/);
   // A scheduled run has no pull request to turn red, so the failure has to
   // reach a named destination or the schedule silently stops meaning anything.
   assert.match(nightlyWorkflow, /if: failure\(\)/);
@@ -349,9 +351,10 @@ run("Nightly CI proves the Rust suites with default parallelism three times", ()
       defaultParallelJob.indexOf("1..3 | ForEach-Object"),
     "the --no-run build must precede the timed three-run loop"
   );
-  // `--bin gwt` and `-p gwt-core` are excluded: each fails Windows default
-  // parallelism for its own reason, and including either would fail every PR.
-  // Assert the loop's cargo invocations positively — matching comment prose
+  // `-p gwt-core` is excluded: it fails Windows default parallelism on its
+  // own defects, and including it would fail every PR. `--bin gwt` is back
+  // since #4014 fixed the close-finalizer deadlock that stalled it. Assert
+  // the loop's cargo invocations positively — matching comment prose
   // negatively would pass or fail on how the exclusions happen to be worded.
   const loopBody = defaultParallelJob.slice(
     defaultParallelJob.indexOf("1..3 | ForEach-Object")
@@ -362,16 +365,18 @@ run("Nightly CI proves the Rust suites with default parallelism three times", ()
     .filter((line) => line.startsWith("cargo "));
   assert.deepStrictEqual(
     loopCommands,
-    ["cargo test -p gwt --lib --all-features"],
+    ["cargo test -p gwt --lib --bin gwt --all-features"],
     "the timed loop must run exactly the targets proven green under Windows default parallelism"
+  );
+  // The `--bin gwt` tests must be compiled outside the timed loop as well
+  // (#4014), or its first iteration pays for that build.
+  assert.match(
+    defaultParallelJob,
+    /cargo test -p gwt --lib --bin gwt --all-features --no-run/,
+    "the --no-run build must cover the --bin gwt target the loop runs"
   );
   // Keep each exclusion tied to its reason so it cannot quietly become
   // permanent once the underlying defect is fixed.
-  assert.match(
-    defaultParallelJob,
-    /deadlocks[\s\S]*?#4014/,
-    "the --bin gwt exclusion must carry its reason and its follow-up owner"
-  );
   assert.match(
     defaultParallelJob,
     /`-p gwt-core` is absent[\s\S]*?await their own owner/,

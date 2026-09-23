@@ -290,16 +290,30 @@ impl Drop for RouteTimer {
 /// the route total is the caller's `record_route`.
 pub struct RoutePhaseClock {
     route: PerfRoute,
+    started: Instant,
     last_mark: Instant,
 }
 
 impl RoutePhaseClock {
     /// Start the clock for `route`.
     pub fn start(route: PerfRoute) -> Self {
+        let now = Instant::now();
         Self {
             route,
-            last_mark: Instant::now(),
+            started: now,
+            last_mark: now,
         }
+    }
+
+    /// Record everything the clock has seen so far as `phase`, without moving
+    /// the mark.
+    ///
+    /// A route that spans more than one thread cannot mark its remainder: the
+    /// span between the last mark and the route's own end belongs to whoever
+    /// finishes it. Recording the clock's total lets a reader subtract it from
+    /// `route:<route>` and see that remainder (Issue #4283 AC-5).
+    pub fn mark_total(&self, phase: &str) {
+        record_route_phase(self.route, phase, self.started.elapsed());
     }
 
     /// Record the span since the previous mark as `phase`.
@@ -503,6 +517,20 @@ mod tests {
         assert!(
             (records[1].value - second_span_ms).abs() < 1e-6,
             "second mark spans only its own step"
+        );
+
+        // Issue #4283 AC-5: the route ends on another thread, so the clock also
+        // reports its own total — what a reader subtracts from the route to see
+        // the hand-back it cannot mark.
+        clock.mark_total("launch_thread");
+        let total = read_all()
+            .into_iter()
+            .find(|record| record.target == "phase:pane.create.launch_thread")
+            .expect("total sample");
+        assert!(
+            total.value >= 20.0,
+            "the total spans every mark, not just the last one: {}",
+            total.value
         );
     }
 

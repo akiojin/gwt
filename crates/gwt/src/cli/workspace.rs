@@ -2243,7 +2243,18 @@ fn workspace_ensure_agent_identity_matches(
 /// `gwt-spec` label) and `SPEC #<n>` (SPEC #3431 FR-070 — the spelling the
 /// knowledge-launch wizard stamped before it was aligned with the binding).
 /// Both are one-way: nothing downgrades a durable SPEC owner.
+///
+/// Issue #4479 AC-2: an unset stored owner is a third case, and it is neither
+/// a downgrade nor a spelling conflict — it is missing information. Refusing it
+/// left the worktree-scan placeholders of #4477 unusable: `workspace.update`
+/// only writes status / purpose / focus, `workspace.join` attaches without
+/// writing an owner, and no operation anywhere could set one, so the owning
+/// agent and the PM were equally stuck. Adopting the durable owner strictly
+/// adds information and is the only write that can close that gap.
 fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str>) -> bool {
+    if durable.is_some() && stored.map(str::trim).unwrap_or_default().is_empty() {
+        return true;
+    }
     gwt_core::workspace_projection::can_upgrade_work_owner(stored, durable)
 }
 
@@ -2426,8 +2437,23 @@ fn validate_workspace_ensure_recovery_state(
     if canonicalize_work_owner
         && !workspace_ensure_can_upgrade_owner(item.owner.as_deref(), expected_owner)
     {
+        // Issue #4479 AC-3: name the route out. An unset stored owner is
+        // adopted above, so what reaches here is a real competing claim: this
+        // container's canonical Work already belongs to another owner. Stating
+        // only the disagreement is what stranded #4477 — the same dead end
+        // #4444 is about — and naming an operation that does not exist is the
+        // dead end #4396 / #4465 burned agents on, so every operation below is
+        // one `gwtd` already accepts.
         return Err(GwtError::Other(format!(
-            "canonical Work {canonical_id} owner mismatch: durable={}, stored={}",
+            "canonical Work {canonical_id} owner mismatch: durable={}, stored={}. \
+             The stored owner is another owner's claim on this container, and \
+             workspace.ensure never reassigns one. Inspect it with \
+             workspace.candidates; if the stored owner's Issue is already \
+             closed, release the Work with workspace.work_prune \
+             params.ids=[\"{canonical_id}\"] (dry-run by default; pass \
+             params.dry_run=false to apply) and retry workspace.ensure. If that \
+             Issue is still open, two owners share one branch and the launch \
+             itself is wrong: report it on the Board instead of retrying",
             expected_owner.unwrap_or("<none>"),
             item.owner.as_deref().unwrap_or("<none>")
         )));
@@ -3591,7 +3617,17 @@ where
             });
             continue;
         }
-        let Some(number) = owner_issue_number(work.owner.as_deref()) else {
+        // Issue #4479: a worktree-scan placeholder now carries the owner its
+        // own branch names (AC-1), but that is derived noise, not a claim. Pass
+        // it to the placeholder rule below, which discards it when the worktree
+        // is gone and keeps it while the worktree lives — closing it as Done
+        // would be the same lie #3448 refused to tell.
+        let owner = if work_is_scan_placeholder(work) {
+            None
+        } else {
+            work.owner.as_deref()
+        };
+        let Some(number) = owner_issue_number(owner) else {
             plan.skipped.push(SkippedWork {
                 work_id: work.id.clone(),
                 reason: StaleWorkSkipReason::OwnerMissing,
@@ -3618,15 +3654,48 @@ where
     plan
 }
 
+/// A Work that holds nothing the worktree scan did not put there: no agent, a
+/// history of Backfill events only, and at most the owner its own branch names.
+///
+/// Issue #4479: the scan stamps that branch-derived owner onto its placeholders
+/// (AC-1), so "carries an owner" stopped separating real Work from derived
+/// noise — only provenance does. An owner the scan itself could have written is
+/// not evidence of real state; an owner it could not have written is.
+fn work_is_scan_placeholder(work: &WorkItem) -> bool {
+    let owner_is_scan_derived = match work
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+    {
+        None => true,
+        Some(stored) => work
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.branch.as_deref())
+            .any(|branch| {
+                gwt_core::workspace_projection::work_owner_for_branch(branch).as_deref()
+                    == Some(stored)
+            }),
+    };
+    owner_is_scan_derived
+        && work.agents.is_empty()
+        && !work.events.is_empty()
+        && work
+            .events
+            .iter()
+            .all(|event| event.kind == WorkEventKind::Backfill)
+}
+
 /// Issue #3448 / #3447: worktree scanning materializes one placeholder Work per
-/// branch (`kind: backfill`, title = branch name, no owner, no agents). When the
-/// worktree is later removed the placeholder survives as pure derived noise —
+/// branch (`kind: backfill`, title = branch name, the branch-derived owner, no
+/// agents). When the worktree is later removed it survives as pure derived noise —
 /// 470 of 788 rows on real data. Such a row is `discarded`, not `done`: it never
 /// represented work, so marking it complete would be a lie.
 ///
 /// Pure: `worktree_exists` answers "does this path still exist?". Fail-closed —
-/// an owner, an attached agent, any non-backfill event, or a still-present
-/// worktree each keeps the Work.
+/// an owner the scan could not have derived, an attached agent, any non-backfill
+/// event, or a still-present worktree each keeps the Work.
 pub(crate) fn classify_orphaned_backfill_works<F>(
     works: &[WorkItem],
     worktree_exists: F,
@@ -3643,19 +3712,7 @@ where
             });
             continue;
         }
-        let placeholder = work
-            .owner
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-            && work.agents.is_empty()
-            && !work.events.is_empty()
-            && work
-                .events
-                .iter()
-                .all(|event| event.kind == WorkEventKind::Backfill);
-        if !placeholder {
+        if !work_is_scan_placeholder(work) {
             plan.skipped.push(SkippedWork {
                 work_id: work.id.clone(),
                 reason: StaleWorkSkipReason::CarriesRealState,
@@ -3858,6 +3915,107 @@ pub(crate) mod tests {
             );
         }
 
+        // Issue #4479 AC-1 downstream: the branch-derived owner must not hand a
+        // placeholder to the closed-owner pass. That pass closes a Work as
+        // Done, and #3448 is explicit that a row which never represented work
+        // is discarded rather than completed — and only once its worktree is
+        // actually gone. Before AC-1 these rows were skipped here as
+        // `OwnerMissing`; they still are.
+        #[test]
+        fn a_scan_placeholder_is_never_closed_as_done_by_the_closed_owner_pass() {
+            let mut item = work(
+                "work-work-issue-3403-bc4a663e",
+                Some("Issue #3403"),
+                WorkspaceStatusCategory::Idle,
+            );
+            item.execution_containers = vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3403".to_string()),
+                worktree_path: Some(std::path::PathBuf::from("/still/present/work/issue-3403")),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }];
+            item.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "work-work-issue-3403-bc4a663e",
+                Utc::now(),
+            )];
+
+            let plan = super::super::classify_stale_works(&[item], |_| Some(false));
+
+            assert!(
+                plan.candidates.is_empty(),
+                "a derived placeholder is not a closable Work"
+            );
+            assert_eq!(plan.skipped.len(), 1);
+            assert_eq!(plan.skipped[0].reason, StaleWorkSkipReason::OwnerMissing);
+        }
+
+        // Issue #4479 AC-1 downstream: the worktree scan now stamps the
+        // branch-derived owner onto its placeholders, so "has an owner" stopped
+        // separating real Work from derived noise. What still separates them is
+        // provenance — an owner the scan itself could have written is not
+        // evidence of real state, and the placeholder must stay sweepable or
+        // #3448's cleanup silently stops reclaiming every `work/issue-*` row.
+        #[test]
+        fn orphaned_backfill_placeholder_with_its_branch_derived_owner_is_still_swept() {
+            let mut item = work(
+                "work-work-issue-3403-bc4a663e",
+                Some("Issue #3403"),
+                WorkspaceStatusCategory::Idle,
+            );
+            item.title = "work/issue-3403".to_string();
+            item.execution_containers = vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3403".to_string()),
+                worktree_path: Some(std::path::PathBuf::from(
+                    "/definitely/absent/work/issue-3403",
+                )),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }];
+            item.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "work-work-issue-3403-bc4a663e",
+                Utc::now(),
+            )];
+
+            let plan = super::super::classify_orphaned_backfill_works(&[item], |_| false);
+
+            assert_eq!(plan.candidates.len(), 1);
+            assert_eq!(plan.candidates[0].work_id, "work-work-issue-3403-bc4a663e");
+        }
+
+        // The converse: an owner the scan could not have derived is real state.
+        // A placeholder for `work/issue-3403` owned by a different Issue was
+        // stamped by something other than the worktree scan, so it survives.
+        #[test]
+        fn backfill_placeholder_with_a_foreign_owner_is_kept() {
+            let mut item = work("work-foreign-owner", None, WorkspaceStatusCategory::Idle);
+            item.owner = Some("Issue #9999".to_string());
+            item.execution_containers = vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3403".to_string()),
+                worktree_path: Some(std::path::PathBuf::from(
+                    "/definitely/absent/work/issue-3403",
+                )),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }];
+            item.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "work-foreign-owner",
+                Utc::now(),
+            )];
+
+            let plan = super::super::classify_orphaned_backfill_works(&[item], |_| false);
+
+            assert!(
+                plan.candidates.is_empty(),
+                "an owner the worktree scan could not have written is real state"
+            );
+        }
+
         // Real Work must never be swept by the placeholder rule, even when its
         // worktree is gone: an owner, an agent, or any non-backfill event all
         // prove it carried real state.
@@ -4038,7 +4196,7 @@ pub(crate) mod tests {
         _runtime_path: gwt_core::test_support::ScopedEnvVar,
         // Declared last so environment guards restore their values before the
         // process-global environment lock is released.
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: gwt_core::test_support::EnvLockGuard,
     }
 
     fn env_guard() -> WorkspaceTestEnvGuard {
@@ -4777,6 +4935,7 @@ pub(crate) mod tests {
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
+            permission_decision: None,
         };
         crate::cli::execution_state::save(worktree, &record).expect("save execution record");
     }
@@ -7615,6 +7774,78 @@ pub(crate) mod tests {
             before,
             "foreign canonical owner refusal must be zero-mutation"
         );
+
+        // Issue #4479 AC-3: the refusal has to name what to run next. Stating
+        // the disagreement alone left #4477's agent with nothing to do — the
+        // same dead end #4444 and #4465 are about. Every operation named here
+        // must exist, or the message is one more dead end (#4396).
+        let message = error.to_string();
+        for operation in [
+            "workspace.candidates",
+            "workspace.work_prune",
+            "workspace.ensure",
+        ] {
+            assert!(
+                message.contains(operation),
+                "owner mismatch must name {operation}: {message}"
+            );
+            assert!(
+                crate::cli::operation_catalog::names().any(|known| known == operation),
+                "{operation} must be a real operation"
+            );
+        }
+        assert!(
+            message.contains("work-"),
+            "the refusal must name the Work to repair: {message}"
+        );
+    }
+
+    /// Issue #4479 AC-2/AC-4: the reported #4477 record end to end — a Work
+    /// whose container already names the Issue branch but whose `owner` was
+    /// never written. `workspace.ensure` must adopt the durable owner and make
+    /// the Session usable again, not refuse with `stored=<none>`.
+    #[test]
+    fn workspace_ensure_writes_the_durable_owner_onto_an_ownerless_canonical_work() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let session_id = "session-ownerless-canonical-work";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
+        let work_id =
+            seed_exact_workspace_work(&project_root, &worktree, session_id, None, "codex");
+        let before_events = load_tracked_work_events(&worktree);
+
+        let result = ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Adopt the durable owner".to_string(),
+                current_focus: Some("Recover from owner: null".to_string()),
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("an ownerless canonical Work must adopt the durable owner");
+
+        assert_eq!(result.workspace_id, work_id);
+        let items = load_workspace_work_items(&project_root)
+            .expect("load corrected WorkItems")
+            .expect("corrected WorkItems");
+        let item = items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .expect("corrected Work");
+        assert_eq!(item.owner.as_deref(), Some("Issue #3412"));
+        let after_events = load_tracked_work_events(&worktree);
+        let additions = newly_persisted_work_events(&before_events, &after_events);
+        assert_eq!(additions.len(), 1, "one owner adoption is durable");
+        assert_eq!(additions[0].owner.as_deref(), Some("Issue #3412"));
     }
 
     #[test]
@@ -7666,8 +7897,6 @@ pub(crate) mod tests {
             Some("SPEC-3412")
         ));
         for (stored, durable) in [
-            (None, Some("SPEC-3412")),
-            (Some(""), Some("SPEC-3412")),
             (Some("Issue #03412"), Some("SPEC-3412")),
             (Some("Issue #3412 "), Some("SPEC-3412")),
             (Some("Issue #3412"), Some("SPEC-03412")),
@@ -7678,6 +7907,28 @@ pub(crate) mod tests {
             assert!(
                 !workspace_ensure_can_upgrade_owner(stored, durable),
                 "unexpected owner upgrade: stored={stored:?}, durable={durable:?}"
+            );
+        }
+    }
+
+    /// Issue #4479 AC-2: an unset stored owner is missing information, not a
+    /// competing claim, so the durable launch owner is adopted instead of
+    /// refused. Without this there is no operation anywhere — agent or PM —
+    /// that can write an owner onto an ownerless Work, and `workspace.ensure`
+    /// stays wedged at `stored=<none>` forever.
+    #[test]
+    fn workspace_ensure_adopts_the_durable_owner_onto_an_ownerless_work() {
+        for stored in [None, Some(""), Some("   ")] {
+            for durable in [Some("Issue #4477"), Some("SPEC-4477")] {
+                assert!(
+                    workspace_ensure_can_upgrade_owner(stored, durable),
+                    "an ownerless Work must adopt the durable owner: \
+                     stored={stored:?}, durable={durable:?}"
+                );
+            }
+            assert!(
+                !workspace_ensure_can_upgrade_owner(stored, None),
+                "with no durable owner there is nothing to adopt: stored={stored:?}"
             );
         }
     }
@@ -8467,6 +8718,7 @@ pub(crate) mod tests {
             &worktree,
             crate::cli::build::SKILL_NAME,
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: Some(3587),
                 started_at: Utc::now(),

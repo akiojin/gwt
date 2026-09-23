@@ -138,6 +138,7 @@ struct IssueMonitorLaunchProfileChoice {
 /// earlier candidate was passed over. `None` when the pool head launched, so
 /// both the fresh-launch and the exact-Resume paths can append it verbatim.
 fn issue_monitor_non_head_selection_toast(
+    context: &super::ProjectContext,
     issue_number: u64,
     selected_agent_id: Option<&str>,
     skipped_candidates: &[gwt::LaunchProfileSkip],
@@ -157,11 +158,15 @@ fn issue_monitor_non_head_selection_toast(
         reasons = %reasons,
         "Issue Monitor selected a non-head launch candidate"
     );
-    Some(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-        level: "info".to_string(),
-        message: format!("Issue #{issue_number} launches with {selected_agent_id}: {reasons}"),
-        issue_number: Some(issue_number),
-    }))
+    Some(OutboundEvent::project(
+        context.project_key.clone(),
+        BackendEvent::IssueMonitorToast {
+            notification_transition: None,
+            level: "info".to_string(),
+            message: format!("Issue #{issue_number} launches with {selected_agent_id}: {reasons}"),
+            issue_number: Some(issue_number),
+        },
+    ))
 }
 
 struct SilentIssueMonitorLaunchRequest {
@@ -291,27 +296,78 @@ impl AppRuntime {
         view
     }
 
-    pub(crate) fn launch_wizard_state_outbound(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: self
-                .launch_wizard
-                .as_ref()
-                .map(|wizard| Box::new(self.launch_wizard_view_for_session(wizard))),
+    pub(crate) fn launch_wizard_for(
+        &self,
+        context: &super::ProjectContext,
+    ) -> Option<&LaunchWizardSession> {
+        self.project_state(context)?.launch_wizard.as_ref()
+    }
+
+    pub(crate) fn launch_wizard_for_mut(
+        &mut self,
+        context: &super::ProjectContext,
+    ) -> Option<&mut LaunchWizardSession> {
+        self.project_state_mut(context)?.launch_wizard.as_mut()
+    }
+
+    pub(crate) fn take_launch_wizard(
+        &mut self,
+        context: &super::ProjectContext,
+    ) -> Option<LaunchWizardSession> {
+        self.project_state_mut(context)?.launch_wizard.take()
+    }
+
+    pub(crate) fn store_launch_wizard(&mut self, session: LaunchWizardSession) {
+        if let Some(state) = self.project_state_mut(&session.project_context) {
+            state.launch_wizard = Some(session);
+        }
+    }
+
+    pub(crate) fn project_context_for_wizard(
+        &self,
+        wizard_id: &str,
+    ) -> Option<super::ProjectContext> {
+        self.project_states.values().find_map(|state| {
+            let session = state.launch_wizard.as_ref()?;
+            (session.wizard_id == wizard_id
+                && self.project_context_is_current(&session.project_context))
+            .then(|| session.project_context.clone())
         })
+    }
+
+    pub(crate) fn launch_wizard_state_outbound(
+        &self,
+        context: &super::ProjectContext,
+    ) -> OutboundEvent {
+        OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::LaunchWizardState {
+                wizard: self
+                    .launch_wizard_for(context)
+                    .map(|wizard| Box::new(self.launch_wizard_view_for_session(wizard))),
+            },
+        )
     }
 
     pub(crate) fn launch_wizard_state_broadcast(
         &self,
+        context: &super::ProjectContext,
         wizard: Option<LaunchWizardView>,
     ) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: wizard.map(Box::new),
-        })
+        OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::LaunchWizardState {
+                wizard: wizard.map(Box::new),
+            },
+        )
     }
 
     #[cfg(test)]
-    pub(crate) fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
-        self.launch_wizard.take()
+    pub(crate) fn clear_launch_wizard(
+        &mut self,
+        context: &super::ProjectContext,
+    ) -> Option<LaunchWizardSession> {
+        self.take_launch_wizard(context)
     }
 
     pub(crate) fn open_launch_wizard(
@@ -352,6 +408,9 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         let tab_id = address.tab_id.clone();
+        let Some(context) = self.project_context(&tab_id) else {
+            return Vec::new();
+        };
         match self.open_launch_wizard_for_branch(
             &tab_id,
             &project_root,
@@ -359,7 +418,7 @@ impl AppRuntime {
             linked_issue_number,
             None,
         ) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Ok(()) => vec![self.launch_wizard_state_outbound(&context)],
             Err(error) => launch_agent_open_error(client_id, error),
         }
     }
@@ -391,6 +450,9 @@ impl AppRuntime {
         linked_issue_kind: Option<LinkedIssueKind>,
         workspace_resume_context: Option<WorkspaceResumeContext>,
     ) -> Result<(), String> {
+        let context = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
         let normalized_branch_name = normalize_branch_name(branch_name);
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
         let worktree_path = None;
@@ -435,7 +497,8 @@ impl AppRuntime {
         } else {
             super::LaunchWizardOrigin::ManualLaunchAgent
         };
-        self.launch_wizard = Some(LaunchWizardSession {
+        self.store_launch_wizard(LaunchWizardSession {
+            project_context: context.clone(),
             tab_id: tab_id.to_string(),
             wizard_id,
             wizard,
@@ -479,7 +542,9 @@ impl AppRuntime {
         linked_issue_kind: LinkedIssueKind,
         previous_profiles: gwt::LaunchWizardPreviousProfiles,
     ) -> Result<(), String> {
-        self.launch_wizard = Some(self.build_knowledge_launch_wizard_session(
+        self.project_context(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
+        self.store_launch_wizard(self.build_knowledge_launch_wizard_session(
             tab_id,
             project_root,
             base_branch_name,
@@ -561,6 +626,9 @@ impl AppRuntime {
         Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         LaunchWizardSession {
+            project_context: self
+                .project_context(tab_id)
+                .expect("wizard project is open"),
             tab_id: tab_id.to_string(),
             wizard_id,
             wizard,
@@ -576,13 +644,15 @@ impl AppRuntime {
 
     pub(crate) fn open_active_work_launch_wizard(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         branch_name: &str,
         linked_issue_number: Option<u64>,
     ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return launch_agent_open_error(client_id, "Open a project before adding an agent");
-        };
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let tab_id = context.tab_id.clone();
         let Some(tab) = self.tab(&tab_id) else {
             return launch_agent_open_error(client_id, "Project tab not found");
         };
@@ -609,10 +679,10 @@ impl AppRuntime {
             None,
         ) {
             Ok(()) => {
-                if let Some(session) = self.launch_wizard.as_mut() {
+                if let Some(session) = self.launch_wizard_for_mut(context) {
                     session.wizard.launch_path = LaunchWizardLaunchPath::ManualSetup;
                 }
-                vec![self.launch_wizard_state_outbound()]
+                vec![self.launch_wizard_state_outbound(context)]
             }
             Err(error) => launch_agent_open_error(client_id, error),
         }
@@ -653,10 +723,13 @@ impl AppRuntime {
         }
 
         let tab_id = address.tab_id.clone();
+        let Some(context) = self.project_context(&tab_id) else {
+            return Vec::new();
+        };
         let project_root = tab.project_root.clone();
         match self.open_start_work_for_project(&tab_id, &project_root) {
             Ok(()) => {
-                if let Some(session) = self.launch_wizard.as_mut() {
+                if let Some(session) = self.launch_wizard_for_mut(&context) {
                     session.agent_kanban_target = Some(AgentKanbanLaunchTarget {
                         board_id: address.raw_id,
                         lane_id,
@@ -703,6 +776,9 @@ impl AppRuntime {
         }
 
         let tab_id = address.tab_id.clone();
+        let Some(context) = self.project_context(&tab_id) else {
+            return Vec::new();
+        };
         let project_root = tab.project_root.clone();
         let branch_name = match gwt::start_work::resolve_launch_agent_base_branch(&project_root) {
             Ok(branch_name) => branch_name,
@@ -710,7 +786,7 @@ impl AppRuntime {
         };
         match self.open_launch_wizard_for_branch(&tab_id, &project_root, &branch_name, None, None) {
             Ok(()) => {
-                if let Some(session) = self.launch_wizard.as_mut() {
+                if let Some(session) = self.launch_wizard_for_mut(&context) {
                     session.agent_kanban_target = Some(AgentKanbanLaunchTarget {
                         board_id: address.raw_id,
                         lane_id,
@@ -724,25 +800,22 @@ impl AppRuntime {
     }
 
     fn activate_tab_for_launch_wizard_events(&mut self, tab_id: String) -> Vec<OutboundEvent> {
-        let previous_tab_id = self.active_tab_id.clone();
-        self.set_active_tab(tab_id);
-        let tab_changed = self.active_tab_id != previous_tab_id;
-        let mut events = Vec::new();
-        if tab_changed {
-            let _ = self.persist();
-            events.push(self.workspace_state_broadcast());
-            events.extend(self.active_project_snapshot_broadcasts());
-        }
-        events.push(self.launch_wizard_state_outbound());
-        events
+        let Some(context) = self.project_context(&tab_id) else {
+            return Vec::new();
+        };
+        vec![self.launch_wizard_state_outbound(&context)]
     }
 
     pub(crate) fn resume_workspace_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         source: gwt::WorkspaceResumeSource,
         journal_id: Option<String>,
     ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
         // SPEC-2359 / Issue #2757: Resume click failures must surface through
         // `LaunchWizardOpenError` (a client-scoped reply) instead of the
         // legacy `ProjectOpenError` broadcast, which the frontend renders only
@@ -751,9 +824,7 @@ impl AppRuntime {
         let error_event =
             |message: &str| vec![launch_wizard_open_error(client_id, "Resume Work", message)];
 
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return error_event("Open a project before resuming work");
-        };
+        let tab_id = context.tab_id.clone();
         let Some(tab) = self.tab(&tab_id) else {
             return error_event("Project tab not found");
         };
@@ -772,7 +843,7 @@ impl AppRuntime {
             .filter(|session| session.tab_id == tab_id)
             .collect::<Vec<_>>();
 
-        let (branch_candidate, context) = match source {
+        let (branch_candidate, resume_context) = match source {
             gwt::WorkspaceResumeSource::Current => {
                 let projection =
                     gwt_core::workspace_projection::load_workspace_projection(&project_root)
@@ -838,23 +909,27 @@ impl AppRuntime {
                     return self.focus_existing_live_work_agent_events(&window_id, None);
                 }
                 let linked_issue_number =
-                    workspace_resume_owner_issue_number(context.owner.as_deref());
+                    workspace_resume_owner_issue_number(resume_context.owner.as_deref());
                 return match self.open_launch_wizard_for_branch_with_context(
                     &tab_id,
                     &project_root,
                     &branch_name,
                     linked_issue_number,
                     None,
-                    Some(context),
+                    Some(resume_context),
                 ) {
-                    Ok(()) => vec![self.launch_wizard_state_outbound()],
+                    Ok(()) => vec![self.launch_wizard_state_outbound(context)],
                     Err(error) => error_event(&error),
                 };
             }
         }
 
-        match self.open_start_work_for_project_with_context(&tab_id, &project_root, Some(context)) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
+        match self.open_start_work_for_project_with_context(
+            &tab_id,
+            &project_root,
+            Some(resume_context),
+        ) {
+            Ok(()) => vec![self.launch_wizard_state_outbound(context)],
             Err(error) => error_event(&error),
         }
     }
@@ -865,11 +940,15 @@ impl AppRuntime {
 
     pub(crate) fn list_resumable_agents_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         operation_id: String,
         workspace_id: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let agents = self.collect_resumable_agents(workspace_id.as_deref());
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let agents = self.collect_resumable_agents(context, workspace_id.as_deref());
         vec![OutboundEvent::reply(
             client_id.to_string(),
             BackendEvent::WorkspaceResumableAgents {
@@ -882,12 +961,16 @@ impl AppRuntime {
 
     pub(crate) fn resume_workspace_agent_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         operation_id: String,
         session_id: String,
         agent_session_id: Option<String>,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
         let reply_error = |message: String| {
             vec![OutboundEvent::reply(
                 client_id.to_string(),
@@ -911,9 +994,7 @@ impl AppRuntime {
             )
         };
 
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return reply_error("Open a project before resuming an agent".to_string());
-        };
+        let tab_id = context.tab_id.clone();
         let Some(tab) = self.tab(&tab_id) else {
             return reply_error("Project tab not found".to_string());
         };
@@ -970,8 +1051,13 @@ impl AppRuntime {
                     .unwrap_or_else(|| format!("work-session-{}", linked_session.id));
             let branch =
                 (!linked_session.branch.trim().is_empty()).then(|| linked_session.branch.clone());
-            let mut events =
-                self.continue_work_events(client_id, operation_id.clone(), work_id, bounds);
+            let mut events = self.continue_work_events(
+                context,
+                client_id,
+                operation_id.clone(),
+                work_id,
+                bounds,
+            );
             let failure = events.iter().find_map(|outbound| match &outbound.event {
                 BackendEvent::ContinueWorkOutcome {
                     outcome: gwt::ContinueWorkOutcomeKind::Failed,
@@ -1240,6 +1326,9 @@ impl AppRuntime {
         }
 
         let tab_id = address.tab_id.clone();
+        let Some(context) = self.project_context(&tab_id) else {
+            return Vec::new();
+        };
         let project_root = tab.project_root.clone();
         let normalized_branch_name = normalize_branch_name(branch_name);
         // SPEC-2359 W-17 (FR-398): client-scoped ack so the requesting
@@ -1286,7 +1375,7 @@ impl AppRuntime {
             }
             let mut events = self.focus_window_events(&window_id, Some(bounds));
             if events.is_empty() {
-                events.push(self.workspace_state_broadcast());
+                events.push(self.workspace_state_broadcast(&context));
             }
             events.push(started_ack(
                 session.id.clone(),
@@ -1335,10 +1424,12 @@ impl AppRuntime {
     /// `lifecycle_status = Running` so the picker can show them and focus
     /// their window on click. Non-live entries require a backing Session
     /// toml on disk.
-    fn collect_resumable_agents(&self, workspace_id: Option<&str>) -> Vec<gwt::ResumableAgentView> {
-        let Some(tab_id) = self.active_tab_id.as_deref() else {
-            return Vec::new();
-        };
+    fn collect_resumable_agents(
+        &self,
+        context: &super::ProjectContext,
+        workspace_id: Option<&str>,
+    ) -> Vec<gwt::ResumableAgentView> {
+        let tab_id = context.tab_id.as_str();
         let Some(tab) = self.tab(tab_id) else {
             return Vec::new();
         };
@@ -1514,6 +1605,9 @@ impl AppRuntime {
         project_root: &Path,
         workspace_resume_context: Option<WorkspaceResumeContext>,
     ) -> Result<(), String> {
+        let context = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
         let base_branch = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
         let work_branch =
             gwt::start_work::reserve_start_work_branch_name_for_project(project_root, Utc::now())
@@ -1548,7 +1642,8 @@ impl AppRuntime {
         );
         Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
-        self.launch_wizard = Some(LaunchWizardSession {
+        self.store_launch_wizard(LaunchWizardSession {
+            project_context: context.clone(),
             tab_id: tab_id.to_string(),
             wizard_id: wizard_id.clone(),
             wizard,
@@ -1650,6 +1745,9 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         let tab_id = address.tab_id.clone();
+        let Some(project_context) = self.project_context(&tab_id) else {
+            return Vec::new();
+        };
         let proxy = self.proxy.clone();
         let client_id = client_id.to_string();
         let id = id.to_string();
@@ -1664,6 +1762,7 @@ impl AppRuntime {
                     });
             proxy.send(UserEvent::IssueLaunchWizardPrepared(
                 IssueLaunchWizardPrepared {
+                    project_context,
                     client_id,
                     id,
                     knowledge_kind: kind,
@@ -1679,20 +1778,15 @@ impl AppRuntime {
 
     pub(crate) fn open_issue_monitor_launch_wizard_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::IssueMonitorToast {
-                    level: "error".to_string(),
-                    message: "Open a project before launching monitored Issue work".to_string(),
-                    issue_number: Some(issue_number),
-                },
-            )];
-        };
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let project_root = context.project_root.clone();
         self.open_issue_monitor_launch_wizard_events_for_project(
             client_id,
             &project_root,
@@ -1712,11 +1806,15 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: "Project tab not found".to_string(),
                     issue_number: Some(issue_number),
                 },
             )];
+        };
+        let Some(context) = self.project_context(&tab_id) else {
+            return Vec::new();
         };
         let Some(tab) = self.tab(&tab_id) else {
             return Vec::new();
@@ -1725,6 +1823,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: "Issue Monitor launch requires a Git project".to_string(),
                     issue_number: Some(issue_number),
@@ -1735,6 +1834,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: "Complete the project migration before launching monitored Issue work"
                         .to_string(),
@@ -1751,6 +1851,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: error,
                             issue_number: Some(issue_number),
@@ -1768,7 +1869,7 @@ impl AppRuntime {
             previous_profiles,
         ) {
             Ok(()) => {
-                if let Some(session) = self.launch_wizard.as_mut() {
+                if let Some(session) = self.launch_wizard_for_mut(&context) {
                     session.issue_monitor_launch_issue_number = Some(issue_number);
                     session.origin = super::LaunchWizardOrigin::IssueMonitor;
                     session
@@ -1784,17 +1885,19 @@ impl AppRuntime {
                     OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "info".to_string(),
                             message: "Issue Monitor launch prepared".to_string(),
                             issue_number: Some(issue_number),
                         },
                     ),
-                    self.launch_wizard_state_outbound(),
+                    self.launch_wizard_state_outbound(&context),
                 ]
             }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: error,
                     issue_number: Some(issue_number),
@@ -1805,17 +1908,15 @@ impl AppRuntime {
 
     pub(crate) fn open_issue_monitor_configure_wizard_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            return self.open_issue_monitor_launch_wizard_events(
-                client_id,
-                issue_number,
-                linked_issue_kind,
-            );
-        };
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let project_root = context.project_root.clone();
         self.open_issue_monitor_configure_wizard_events_for_project(
             client_id,
             &project_root,
@@ -1831,6 +1932,12 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self
+            .issue_monitor_tab_id_for_project_root(project_root)
+            .and_then(|id| self.project_context(&id))
+        else {
+            return Vec::new();
+        };
         let events = self.open_issue_monitor_launch_wizard_events_for_project(
             client_id,
             project_root,
@@ -1838,7 +1945,7 @@ impl AppRuntime {
             linked_issue_kind,
         );
         if !matches!(
-            self.launch_wizard.as_mut(),
+            self.launch_wizard_for_mut(&context),
             Some(LaunchWizardSession {
                 wizard: _,
                 issue_monitor_profile_save: None,
@@ -1848,7 +1955,7 @@ impl AppRuntime {
             return events;
         }
         let pool = self.issue_monitor_saved_pool(project_root);
-        if let Some(session) = self.launch_wizard.as_mut() {
+        if let Some(session) = self.launch_wizard_for_mut(&context) {
             session.issue_monitor_profile_save = Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
                 issue_number: Some(issue_number),
@@ -1869,7 +1976,7 @@ impl AppRuntime {
                     }
                 }
                 if matches!(event.event, BackendEvent::LaunchWizardState { .. }) {
-                    event = self.launch_wizard_state_outbound();
+                    event = self.launch_wizard_state_outbound(&context);
                 }
                 event
             })
@@ -1878,22 +1985,18 @@ impl AppRuntime {
 
     pub(crate) fn open_issue_monitor_configure_profile_wizard_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
     ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::IssueMonitorToast {
-                    level: "error".to_string(),
-                    message: "Open a project before configuring Issue Monitor settings".to_string(),
-                    issue_number: None,
-                },
-            )];
-        };
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let tab_id = context.tab_id.clone();
         let Some(tab) = self.tab(&tab_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: "Project tab not found".to_string(),
                     issue_number: None,
@@ -1904,6 +2007,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: "Issue Monitor settings require a Git project".to_string(),
                     issue_number: None,
@@ -1914,6 +2018,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message:
                         "Complete the project migration before configuring Issue Monitor settings"
@@ -1961,7 +2066,8 @@ impl AppRuntime {
         wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
             method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
         });
-        self.launch_wizard = Some(LaunchWizardSession {
+        self.store_launch_wizard(LaunchWizardSession {
+            project_context: context.clone(),
             tab_id: tab_id.to_string(),
             wizard_id,
             wizard,
@@ -1982,12 +2088,13 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "info".to_string(),
                     message: "Issue Monitor settings opened".to_string(),
                     issue_number: None,
                 },
             ),
-            self.launch_wizard_state_outbound(),
+            self.launch_wizard_state_outbound(context),
         ]
     }
 
@@ -2048,8 +2155,15 @@ impl AppRuntime {
                 let selection = gwt::select_launch_profile(
                     &pool,
                     // Issue #4366 AC-4: a held provider due its
-                    // re-verification is selectable for that one launch.
-                    &prefs.launch_admission_provider_quota_holds(&now),
+                    // re-verification is selectable for that one launch —
+                    // over a free candidate only while the poller reads it
+                    // as usable (Issue #4636 AC-1).
+                    &prefs.launch_admission_provider_quota_holds(&now, |provider| {
+                        gwt::issue_monitor::provider_reports_healthy_for_agent(
+                            provider,
+                            &self.provider_usage_accounts,
+                        )
+                    }),
                     &[],
                     prefs.launch_usage_threshold_percent,
                     &[],
@@ -2110,19 +2224,16 @@ impl AppRuntime {
     #[cfg(test)]
     pub(crate) fn auto_launch_issue_monitor_delivery_events(
         &mut self,
+        context: &super::ProjectContext,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            return self.issue_monitor_launch_failed_delivery_events(
-                None,
-                issue_number,
-                "Project tab not found",
-                delivery_id.as_deref(),
-            );
-        };
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let project_root = context.project_root.clone();
         self.auto_launch_issue_monitor_delivery_events_for_project(
             &project_root,
             issue_number,
@@ -2140,6 +2251,12 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self
+            .issue_monitor_tab_id_for_project_root(project_root)
+            .and_then(|id| self.project_context(&id))
+        else {
+            return Vec::new();
+        };
         // Issue #4378 AC-2: hold deliveries until the startup generation
         // reaper reports back, so a launch never races a stale generation.
         if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
@@ -2233,6 +2350,7 @@ impl AppRuntime {
                     Ok(false) => return recovery_events,
                     Err(error) => {
                         recovery_events.extend(self.issue_monitor_control_error_events(
+                            Some(project_root),
                             None,
                             error,
                             "reclaim-launch-delivery-window",
@@ -2299,9 +2417,11 @@ impl AppRuntime {
                 recovery_events
             }
             Ok(None) => {
-                if self.launch_wizard.is_some() {
-                    recovery_events.push(OutboundEvent::broadcast(
+                if self.launch_wizard_for(&context).is_some() {
+                    recovery_events.push(OutboundEvent::project(
+                        context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "info".to_string(),
                             message: "Issue Monitor settings are already open".to_string(),
                             issue_number: Some(issue_number),
@@ -2319,7 +2439,7 @@ impl AppRuntime {
                     .into_iter()
                     .map(|mut event| {
                         if matches!(event.target, DispatchTarget::Client(_)) {
-                            event.target = DispatchTarget::Broadcast;
+                            event.target = DispatchTarget::Project(context.project_key.clone());
                         }
                         event
                     })
@@ -2378,8 +2498,9 @@ impl AppRuntime {
                             format!(" could not persist its delivery failure: {settlement_error}")
                         }
                     };
-                    recovery_events.push(OutboundEvent::broadcast(
+                    recovery_events.push(OutboundEvent::project(context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: format!(
                                 "Issue Monitor could not continue the exact answered session;{disposition}: {error}"
@@ -2441,6 +2562,9 @@ impl AppRuntime {
         project_root: &Path,
         dispatch: gwt::AutonomousReviewDispatch,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
         let prompt = build_review_dispatch_prompt(&dispatch);
         tracing::info!(
             issue = dispatch.issue_number,
@@ -2473,14 +2597,18 @@ impl AppRuntime {
             },
         ) {
             Ok(Some(events)) => events,
-            Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-                level: "warn".to_string(),
-                message: format!(
-                    "Independent review for #{} could not start (launch settings unavailable)",
-                    dispatch.issue_number
-                ),
-                issue_number: Some(dispatch.issue_number),
-            })],
+            Ok(None) => vec![OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    level: "warn".to_string(),
+                    message: format!(
+                        "Independent review for #{} could not start (launch settings unavailable)",
+                        dispatch.issue_number
+                    ),
+                    issue_number: Some(dispatch.issue_number),
+                },
+            )],
             Err(error) => self.issue_monitor_launch_failed_events(
                 Some(project_root),
                 dispatch.issue_number,
@@ -2494,6 +2622,9 @@ impl AppRuntime {
         requested_project_root: &Path,
         request: SilentIssueMonitorLaunchRequest,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
+        let context = self
+            .project_context_for_root(requested_project_root)
+            .ok_or_else(|| "Project tab not found".to_string())?;
         let SilentIssueMonitorLaunchRequest {
             issue_number,
             linked_issue_kind,
@@ -2531,6 +2662,7 @@ impl AppRuntime {
                 Ok(false) => return Ok(Some(Vec::new())),
                 Err(error) => {
                     return Ok(Some(self.issue_monitor_control_error_events(
+                        Some(&project_root),
                         None,
                         error,
                         "claim-launch-delivery",
@@ -2555,6 +2687,7 @@ impl AppRuntime {
             skipped: skipped_candidates,
         } = self.issue_monitor_launch_profile_choice(&project_root, None);
         let non_head_selection_toast = issue_monitor_non_head_selection_toast(
+            &context,
             issue_number,
             selected_agent_id.as_deref(),
             &skipped_candidates,
@@ -2636,9 +2769,20 @@ impl AppRuntime {
             linked_issue_kind,
             previous_profiles,
         );
-        let initial_prompt = review_prompt
-            .clone()
-            .unwrap_or_else(|| gwt::issue_monitor_launch_prompt(linked_issue_kind, issue_number));
+        let initial_prompt = review_prompt.clone().unwrap_or_else(|| {
+            // Issue #4630: a launch that consumed an operator requeue carries
+            // the operator's reason, read from the exact durable delivery.
+            let requeue_reason = gwt::issue_monitor_launch_delivery_requeue_reason(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+                issue_number,
+                delivery_id.as_deref(),
+            );
+            gwt::issue_monitor_launch_prompt_with_requeue_reason(
+                linked_issue_kind,
+                issue_number,
+                requeue_reason.as_deref(),
+            )
+        });
         session
             .wizard
             .apply(gwt::LaunchWizardAction::SetInitialPrompt {
@@ -2675,6 +2819,32 @@ impl AppRuntime {
         .map(|prefs| prefs.autonomous_mode)
         .unwrap_or(false);
         launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
+        // Issue #4543 AC-6: nothing else names this launch surface, and both
+        // steps above changed what the already-built config means. Re-decide
+        // now so the Execution Control Record describes the launch that ships.
+        launch_request
+            .record_permission_launch_source(gwt_agent::PermissionLaunchSource::SilentIssueMonitor);
+        // Issue #4544 AC-1 / AC-5: refuse here, before the window, for the same
+        // reason the unauthenticated-provider probe above refuses — and for
+        // both monitor launches, not just the implementing one.
+        //
+        // The launch-time gate in `app_runtime::launch` only sees producing
+        // owners, and the independent review agent deliberately carries no
+        // Execution Control Record (`set_review_dispatch_context`). Without
+        // this, a review launch on a provider that cannot skip permissions
+        // would sit at a prompt with nobody watching — the same failure the
+        // implementation path is protected from. The refusal funnels through
+        // the normal launch-failed path, so the active slot is released.
+        if let LaunchWizardLaunchRequest::Agent(config) = &launch_request {
+            if let Some(record) = gwt::cli::permission_readiness::pre_launch_block(
+                "issue",
+                issue_number,
+                &format!("monitor-launch:{issue_number}"),
+                &config.permission_decision,
+            ) {
+                return Err(format!("launch refused: {}", record.describe()));
+            }
+        }
         // Issue #3478 (AC-1): the unattended agent must know it is unattended,
         // so its hooks can convert a confirmation question into a NeedsHuman
         // handoff instead of letting it hold this slot until the stuck timeout.
@@ -2737,7 +2907,8 @@ impl AppRuntime {
             }
         };
         if let Some(holder_window_id) = resume_holder_window_id {
-            events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            events.push(OutboundEvent::project(context.project_key.clone(), BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: "warn".to_string(),
                 message: format!(
                     "Issue Monitor started a fresh session because native conversation is already held by window {holder_window_id}"
@@ -2751,11 +2922,15 @@ impl AppRuntime {
         } else {
             "Issue Monitor launch requested".to_string()
         };
-        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-            level: "info".to_string(),
-            message,
-            issue_number: Some(issue_number),
-        }));
+        events.push(OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::IssueMonitorToast {
+                notification_transition: None,
+                level: "info".to_string(),
+                message,
+                issue_number: Some(issue_number),
+            },
+        ));
         Ok(Some(events))
     }
 
@@ -2771,6 +2946,9 @@ impl AppRuntime {
         delivery_id: Option<String>,
         profile_agent_id: &str,
     ) -> Result<(Option<Vec<OutboundEvent>>, Option<String>), String> {
+        let context = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let autonomous_handoff =
             gwt::pending_autonomous_handoff_resumption_from_prefs(&prefs_path, issue_number)
@@ -3123,11 +3301,15 @@ impl AppRuntime {
                 return Err(error);
             }
         };
-        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-            level: "info".to_string(),
-            message: "Issue Monitor resumed existing session".to_string(),
-            issue_number: Some(issue_number),
-        }));
+        events.push(OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::IssueMonitorToast {
+                notification_transition: None,
+                level: "info".to_string(),
+                message: "Issue Monitor resumed existing session".to_string(),
+                issue_number: Some(issue_number),
+            },
+        ));
         Ok((Some(events), None))
     }
 
@@ -3259,6 +3441,7 @@ impl AppRuntime {
         prepared: IssueLaunchWizardPrepared,
     ) -> Vec<OutboundEvent> {
         let IssueLaunchWizardPrepared {
+            project_context: context,
             client_id,
             id,
             knowledge_kind,
@@ -3267,6 +3450,9 @@ impl AppRuntime {
             issue_number,
             result,
         } = prepared;
+        if !self.project_context_is_current(&context) {
+            return Vec::new();
+        }
         if self.tab(&tab_id).is_none() {
             return vec![OutboundEvent::reply(
                 &client_id,
@@ -3296,7 +3482,7 @@ impl AppRuntime {
                     issue_number,
                     linked_issue_kind,
                 ) {
-                    Ok(()) => vec![self.launch_wizard_state_outbound()],
+                    Ok(()) => vec![self.launch_wizard_state_outbound(&context)],
                     Err(error) => vec![OutboundEvent::reply(
                         &client_id,
                         knowledge_error_event(id, knowledge_kind, error, None, None),
@@ -3313,10 +3499,11 @@ impl AppRuntime {
     #[cfg(test)]
     pub(crate) fn handle_launch_wizard_action(
         &mut self,
+        context: &super::ProjectContext,
         action: gwt::LaunchWizardAction,
         bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        self.handle_launch_wizard_action_for_client(None, action, bounds)
+        self.handle_launch_wizard_action_for_client(context, None, action, bounds)
     }
 
     fn manual_launch_generation_disposition(
@@ -3674,11 +3861,15 @@ impl AppRuntime {
 
     pub(crate) fn handle_launch_wizard_action_for_client(
         &mut self,
+        context: &super::ProjectContext,
         client_id: Option<&str>,
         action: gwt::LaunchWizardAction,
         bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        let Some(mut session) = self.launch_wizard.take() else {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let Some(mut session) = self.take_launch_wizard(context) else {
             return Vec::new();
         };
         let action_stage = Self::launch_wizard_action_error_stage(&action);
@@ -3706,8 +3897,8 @@ impl AppRuntime {
                 &error,
             );
             session.wizard.error = Some(error);
-            self.launch_wizard = Some(session);
-            return vec![self.launch_wizard_state_outbound()];
+            self.store_launch_wizard(session);
+            return vec![self.launch_wizard_state_outbound(context)];
         }
         let mut apply_action = true;
         match &action {
@@ -3750,11 +3941,11 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 }
                 let mut events = self.focus_existing_live_work_agent_events(window_id, bounds);
-                events.push(self.launch_wizard_state_broadcast(None));
+                events.push(self.launch_wizard_state_broadcast(context, None));
                 return events;
             }
             gwt::LaunchWizardAction::StopAndStartSuccessor {
@@ -3772,8 +3963,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 }
                 let mut fixed_wizard = session.wizard.clone();
                 fixed_wizard.holder_decision = None;
@@ -3792,8 +3983,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 let LaunchWizardLaunchRequest::Agent(mut fixed_config) = *fixed_request else {
                     let error =
@@ -3806,8 +3997,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 let Some(intent) = session.manual_holder_intent.clone().filter(|intent| {
                     intent.fingerprint == *fingerprint
@@ -3843,8 +4034,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 let Some(runtime_incarnation) = intent.local_runtime_incarnation else {
                     let error =
@@ -3858,8 +4049,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 if let Err(error) = self.stop_exact_manual_holder_runtime(
                     window_id,
@@ -3878,8 +4069,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 }
                 let stopped = gwt_agent::Session::load(
                     &self
@@ -3915,8 +4106,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 }
                 fixed_config.execution_intent = gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
                     operation_id: intent.operation_id,
@@ -4009,7 +4200,7 @@ impl AppRuntime {
 
         match session.wizard.completion.take() {
             Some(LaunchWizardCompletion::Cancelled) => {
-                vec![self.launch_wizard_state_broadcast(None)]
+                vec![self.launch_wizard_state_broadcast(context, None)]
             }
             Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
@@ -4022,8 +4213,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 let Some(tab) = self.tab_mut(&address.tab_id) else {
                     let error = "Project tab not found".to_string();
@@ -4035,8 +4226,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 if !tab.workspace.focus_window(&address.raw_id, None) {
                     let error = "The selected session window is no longer available".to_string();
@@ -4048,18 +4239,12 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 }
-                let previous_tab_id = self.active_tab_id.clone();
-                self.set_active_tab(address.tab_id);
-                let tab_changed = self.active_tab_id != previous_tab_id;
                 let _ = self.persist();
-                let mut events = vec![self.workspace_state_broadcast()];
-                if tab_changed {
-                    events.extend(self.active_project_snapshot_broadcasts());
-                }
-                events.push(self.launch_wizard_state_broadcast(None));
+                let mut events = vec![self.workspace_state_broadcast(context)];
+                events.push(self.launch_wizard_state_broadcast(context, None));
                 events
             }
             Some(LaunchWizardCompletion::ResolveRuntime(config)) => {
@@ -4076,8 +4261,8 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 let wizard_id = session.wizard_id.clone();
                 let branch_name = session.wizard.branch_name.clone();
@@ -4098,8 +4283,8 @@ impl AppRuntime {
                         result: Box::new(result),
                     });
                 });
-                self.launch_wizard = Some(session);
-                vec![self.launch_wizard_state_outbound()]
+                self.store_launch_wizard(session);
+                vec![self.launch_wizard_state_outbound(context)]
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
                 if let Some(save_context) = session.issue_monitor_profile_save.clone() {
@@ -4119,13 +4304,15 @@ impl AppRuntime {
                         &error,
                     );
                     session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
                 };
                 session
                     .wizard
                     .mark_launch_materialization_pending("Preparing worktree...");
-                self.pending_launch_wizard_materializations
+                self.project_state_mut(context)
+                    .expect("current wizard project")
+                    .pending_launch_wizard_materializations
                     .insert(session.wizard_id.clone(), session.clone());
                 self.proxy
                     .send(UserEvent::LaunchWizardLaunchMaterializationRequested {
@@ -4134,12 +4321,12 @@ impl AppRuntime {
                         config,
                         bounds,
                     });
-                self.launch_wizard = Some(session);
-                vec![self.launch_wizard_state_outbound()]
+                self.store_launch_wizard(session);
+                vec![self.launch_wizard_state_outbound(context)]
             }
             None => {
-                self.launch_wizard = Some(session);
-                vec![self.launch_wizard_state_outbound()]
+                self.store_launch_wizard(session);
+                vec![self.launch_wizard_state_outbound(context)]
             }
         }
     }
@@ -4151,19 +4338,22 @@ impl AppRuntime {
         config: LaunchWizardLaunchRequest,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
-        let Some(pending_session) = self
-            .pending_launch_wizard_materializations
-            .remove(&wizard_id)
-        else {
+        let Some(pending_session) = self.project_states.values_mut().find_map(|state| {
+            state
+                .pending_launch_wizard_materializations
+                .remove(&wizard_id)
+        }) else {
             return Vec::new();
         };
+        let context = pending_session.project_context.clone();
+        if !self.project_context_is_current(&context) {
+            return Vec::new();
+        }
         let owns_visible_slot = self
-            .launch_wizard
-            .as_ref()
+            .launch_wizard_for(&context)
             .is_some_and(|session| session.wizard_id == wizard_id);
         let mut session = if owns_visible_slot {
-            self.launch_wizard
-                .take()
+            self.take_launch_wizard(&context)
                 .expect("matching visible launch wizard")
         } else {
             pending_session
@@ -4228,7 +4418,7 @@ impl AppRuntime {
                 match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
                     Ok(mut events) => {
                         if owns_visible_slot {
-                            events.insert(0, self.launch_wizard_state_broadcast(None));
+                            events.insert(0, self.launch_wizard_state_broadcast(&context, None));
                         }
                         events
                     }
@@ -4243,8 +4433,8 @@ impl AppRuntime {
                         session.wizard.clear_launch_materialization_pending();
                         session.wizard.error = Some(error);
                         if owns_visible_slot {
-                            self.launch_wizard = Some(session);
-                            vec![self.launch_wizard_state_outbound()]
+                            self.store_launch_wizard(session);
+                            vec![self.launch_wizard_state_outbound(&context)]
                         } else {
                             Vec::new()
                         }
@@ -4268,6 +4458,10 @@ impl AppRuntime {
             Box<gwt_agent::LaunchConfig>,
         ) -> Result<Vec<OutboundEvent>, String>,
     {
+        let context = session.project_context.clone();
+        if !self.project_context_is_current(&context) {
+            return Vec::new();
+        }
         let manual_project_root = self
             .tab(&session.tab_id)
             .map(|tab| tab.project_root.clone())
@@ -4285,8 +4479,8 @@ impl AppRuntime {
             session.wizard.clear_launch_materialization_pending();
             session.wizard.error = Some(error);
             return if owns_visible_slot {
-                self.launch_wizard = Some(session);
-                vec![self.launch_wizard_state_outbound()]
+                self.store_launch_wizard(session);
+                vec![self.launch_wizard_state_outbound(&context)]
             } else {
                 Vec::new()
             };
@@ -4308,10 +4502,14 @@ impl AppRuntime {
         requested_agent_id: &str,
         spawn_result: Result<Vec<OutboundEvent>, String>,
     ) -> Vec<OutboundEvent> {
+        let context = session.project_context.clone();
+        if !self.project_context_is_current(&context) {
+            return Vec::new();
+        }
         match spawn_result {
             Ok(mut events) => {
                 if owns_visible_slot {
-                    events.insert(0, self.launch_wizard_state_broadcast(None));
+                    events.insert(0, self.launch_wizard_state_broadcast(&context, None));
                 }
                 events
             }
@@ -4326,8 +4524,8 @@ impl AppRuntime {
                 session.wizard.clear_launch_materialization_pending();
                 session.wizard.error = Some(error);
                 if owns_visible_slot {
-                    self.launch_wizard = Some(session);
-                    vec![self.launch_wizard_state_outbound()]
+                    self.store_launch_wizard(session);
+                    vec![self.launch_wizard_state_outbound(&context)]
                 } else {
                     Vec::new()
                 }
@@ -4529,6 +4727,10 @@ impl AppRuntime {
         save_context: IssueMonitorProfileSaveContext,
         config: LaunchWizardLaunchRequest,
     ) -> Vec<OutboundEvent> {
+        let context = session.project_context.clone();
+        if !self.project_context_is_current(&context) {
+            return Vec::new();
+        }
         let IssueMonitorProfileSaveContext {
             client_id,
             issue_number,
@@ -4537,16 +4739,16 @@ impl AppRuntime {
         let LaunchWizardLaunchRequest::Agent(config) = config else {
             session.wizard.error =
                 Some("Issue Monitor settings require an agent launch target".to_string());
-            self.launch_wizard = Some(session);
-            return vec![self.launch_wizard_state_outbound()];
+            self.store_launch_wizard(session);
+            return vec![self.launch_wizard_state_outbound(&context)];
         };
         let Some(project_root) = self
             .tab(&session.tab_id)
             .map(|tab| tab.project_root.clone())
         else {
             session.wizard.error = Some("Project tab not found".to_string());
-            self.launch_wizard = Some(session);
-            return vec![self.launch_wizard_state_outbound()];
+            self.store_launch_wizard(session);
+            return vec![self.launch_wizard_state_outbound(&context)];
         };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let launch_profile = gwt::IssueMonitorLaunchProfile::from(config.as_ref());
@@ -4577,28 +4779,29 @@ impl AppRuntime {
                 session.wizard.error = Some(
                     "Failed to save Issue Monitor settings: authority epoch overflow".to_string(),
                 );
-                self.launch_wizard = Some(session);
-                return vec![self.launch_wizard_state_outbound()];
+                self.store_launch_wizard(session);
+                return vec![self.launch_wizard_state_outbound(&context)];
             }
             Err(error) => {
                 session.wizard.error =
                     Some(format!("Failed to save Issue Monitor settings: {error}"));
-                self.launch_wizard = Some(session);
-                return vec![self.launch_wizard_state_outbound()];
+                self.store_launch_wizard(session);
+                return vec![self.launch_wizard_state_outbound(&context)];
             }
         }
         let mut events = vec![
-            self.launch_wizard_state_broadcast(None),
+            self.launch_wizard_state_broadcast(&context, None),
             OutboundEvent::reply(
                 &client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "info".to_string(),
                     message: "Issue Monitor settings saved".to_string(),
                     issue_number,
                 },
             ),
         ];
-        events.extend(self.local_issue_monitor_events_for(Some(&client_id), |_| {}));
+        events.extend(self.local_issue_monitor_events_for(&context, Some(&client_id), |_| {}));
         events
     }
 
@@ -4607,26 +4810,30 @@ impl AppRuntime {
         wizard_id: String,
         result: Result<LaunchWizardHydration, String>,
     ) -> Vec<OutboundEvent> {
-        let Some(mut session) = self.launch_wizard.take() else {
+        let Some(context) = self.project_context_for_wizard(&wizard_id) else {
+            return Vec::new();
+        };
+        let Some(mut session) = self.take_launch_wizard(&context) else {
             return Vec::new();
         };
         if session.wizard_id != wizard_id {
-            self.launch_wizard = Some(session);
+            self.store_launch_wizard(session);
             return Vec::new();
         }
         match result {
             Ok(hydration) => {
                 session.wizard.apply_runtime_context(hydration);
                 let auto_submit_bounds = session.auto_submit_after_runtime_resolution.take();
-                self.launch_wizard = Some(session);
+                self.store_launch_wizard(session);
                 if let Some(bounds) = auto_submit_bounds {
                     return self.handle_launch_wizard_action_for_client(
+                        &context,
                         None,
                         gwt::LaunchWizardAction::Submit,
                         Some(bounds),
                     );
                 }
-                vec![self.launch_wizard_state_outbound()]
+                vec![self.launch_wizard_state_outbound(&context)]
             }
             Err(error) => {
                 Self::log_launch_wizard_error(
@@ -4637,8 +4844,8 @@ impl AppRuntime {
                     &error,
                 );
                 session.wizard.set_hydration_error(error);
-                self.launch_wizard = Some(session);
-                vec![self.launch_wizard_state_outbound()]
+                self.store_launch_wizard(session);
+                vec![self.launch_wizard_state_outbound(&context)]
             }
         }
     }
@@ -4723,6 +4930,9 @@ impl AppRuntime {
         config: ShellLaunchConfig,
         bounds: WindowGeometry,
     ) -> Result<Vec<OutboundEvent>, String> {
+        let context = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
         let tab = self
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
@@ -4773,11 +4983,12 @@ impl AppRuntime {
             }
         };
 
-        let mut events = vec![self.workspace_state_broadcast()];
-        if shell_work_registered && self.active_tab_id.as_deref() == Some(tab_id) {
+        let mut events = vec![self.workspace_state_broadcast(&context)];
+        if shell_work_registered {
             if let Some(tab) = self.tab(tab_id) {
                 if let Some(projection) = self.active_work_projection_for_tab(tab_id, tab) {
-                    events.push(OutboundEvent::broadcast(
+                    events.push(OutboundEvent::project(
+                        context.project_key.clone(),
                         BackendEvent::ActiveWorkProjection {
                             projection: Box::new(projection),
                         },
@@ -4785,13 +4996,13 @@ impl AppRuntime {
                 }
             }
         }
-        events.extend(Self::status_events(
+        events.extend(self.status_events(
             window_id.clone(),
             WindowProcessStatus::Running,
             Some("Launching...".to_string()),
         ));
 
-        let proxy = self.proxy.clone();
+        let proxy = self.proxy.for_project(context);
         let profile_config_path = self.profile_config_path()?;
         thread::spawn(move || {
             Self::spawn_wizard_shell_window_async(
@@ -4846,15 +5057,23 @@ impl AppRuntime {
         });
     }
 
-    pub(super) fn refresh_open_launch_wizard_from_cache(&mut self) {
-        let Some(session) = self.launch_wizard.as_mut() else {
+    pub(super) fn refresh_open_launch_wizard_from_cache(
+        &mut self,
+        project: &super::ProjectContext,
+    ) {
+        let Some(context) = self
+            .launch_wizard_for(project)
+            .map(|session| session.wizard.context.clone())
+        else {
             return;
         };
-        let context = session.wizard.context.clone();
         let agent_options = self.launch_wizard_cache.agent_options();
         let quick_start_entries = self
             .launch_wizard_cache
             .quick_start_entries(&context.quick_start_root, &context.normalized_branch_name);
+        let Some(session) = self.launch_wizard_for_mut(project) else {
+            return;
+        };
         session.wizard.apply_hydration(LaunchWizardHydration {
             selected_branch: Some(context.selected_branch),
             normalized_branch_name: context.normalized_branch_name,

@@ -6834,6 +6834,61 @@ fn session_bound_update_rejects_explicit_owner_conflict_without_mutation() {
     t812_assert_rejected_without_mutation(&result, &before, &after, "explicit owner conflict");
 }
 
+/// Issue #4443: a Work item routinely carries execution containers recorded on
+/// another host, and those paths do not resolve here. Treating an absent path
+/// as an I/O failure aborted the whole Session-bound transaction before
+/// `revalidate` ever ran, which reached the agent as a `transaction_conflict`
+/// that no retry, `workspace.ensure`, or `execution.continue` could clear.
+#[test]
+fn session_bound_update_ignores_execution_container_recorded_on_another_host() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+
+    let foreign_worktree = temp.path().join("another-host").join("work").join("target");
+    assert!(
+        !foreign_worktree.exists(),
+        "precondition: the other host's worktree does not exist here"
+    );
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems projection");
+    work_items
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work")
+        .execution_containers
+        .push(WorkspaceExecutionContainerRef {
+            branch: Some(T812_TARGET_BRANCH.to_string()),
+            worktree_path: Some(foreign_worktree),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+    save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+        .expect("seed the other host's execution container");
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Active),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("another host's container must not block this one".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("an execution container from another host must not fail the transaction");
+}
+
 #[test]
 fn session_bound_update_runs_pre_persist_hook_before_any_surface_mutation() {
     let _guard = lock_test_env();
@@ -7464,7 +7519,7 @@ fn unassigned_agent(session_id: &str, agent_id: &str) -> WorkspaceAgentSummary {
     a
 }
 
-fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+fn lock_test_env() -> crate::test_support::EnvLockGuard {
     crate::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -12207,6 +12262,57 @@ fn backfill_records_work_item_for_worktree_without_record() {
         "backfill must not carry an explicit status so apply_event terminal \
              preservation keeps closed items closed when the event is re-ingested"
     );
+    assert_eq!(
+        item.owner, None,
+        "a branch that names no Issue stays ownerless"
+    );
+}
+
+/// Issue #4479 AC-1/AC-4: the worktree scan is the only path that materializes
+/// a Work from nothing, and it used to leave `owner: null` even when the
+/// container already named the Issue branch. `workspace.ensure` then refused
+/// that record as an owner mismatch with `stored=<none>` and no route back.
+/// The regression is pinned on the exact reported shape: one Backfill event,
+/// `created_at == updated_at`, and an Issue branch.
+#[test]
+fn backfill_owns_the_work_when_the_worktree_branch_names_an_issue() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_root = temp.path().join("repo");
+    let worktree = temp.path().join("work-issue-4477");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    let work_items_path = temp.path().join("works.json");
+    let now = Utc.with_ymd_and_hms(2026, 9, 16, 11, 37, 7).unwrap();
+
+    let backfilled = reconcile_worktree_work_items_paths(
+        &work_items_path,
+        &project_root,
+        &[backfill_source(Some("work/issue-4477"), &worktree)],
+        now,
+    )
+    .expect("reconcile");
+    assert_eq!(backfilled, 1);
+
+    let projection = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load works")
+        .expect("projection exists");
+    let item = &projection.work_items[0];
+    assert_eq!(
+        item.owner.as_deref(),
+        Some("Issue #4477"),
+        "a Work whose container points at an Issue branch must carry that owner \
+         from the instant it is created"
+    );
+    assert_eq!(
+        item.created_at, item.updated_at,
+        "the reported record was never updated after creation; the owner has to \
+         be right at creation, not repaired later"
+    );
+    assert_eq!(
+        item.events.last().expect("backfill event").owner.as_deref(),
+        Some("Issue #4477"),
+        "the owner travels on the event, so a re-ingested copy on another \
+         machine folds to the same owner"
+    );
 }
 
 #[cfg(unix)]
@@ -13805,4 +13911,130 @@ fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
     ambiguous.work_items.push(duplicate);
     save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
     assert!(write("Issue #42", "delivery-session").is_err());
+}
+
+#[test]
+fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3403".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4605),
+        pr_url: Some("https://github.com/example/repo/pull/4605".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut original = container.clone();
+    original.pr_number = None;
+    original.pr_url = None;
+    original.pr_state = None;
+    let mut start = WorkEvent::new(WorkEventKind::Start, "live-work", now);
+    start.owner = Some("Issue #3403".into());
+    start.agent_session_id = Some("live-session".into());
+    start.execution_container = Some(original.clone());
+    projection.apply_event(start);
+    let live = projection.work_items[0].clone();
+    for n in 0..2 {
+        let mut discarded = live.clone();
+        discarded.id = format!("discarded-work-{n}");
+        discarded.owner = None;
+        discarded.discarded = true;
+        projection.work_items.push(discarded);
+    }
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let write = || {
+        record_workspace_pr_metadata_for_execution_at(
+            &works,
+            &events,
+            "Issue #3403",
+            "live-session",
+            &container,
+        )
+    };
+
+    write().expect("discarded rows must not make the live row ambiguous");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = |id: &str| saved.work_items.iter().find(|item| item.id == id).unwrap();
+    assert_eq!(
+        item("live-work").execution_containers,
+        vec![container.clone()]
+    );
+    assert_eq!(
+        item("discarded-work-0").execution_containers,
+        vec![original.clone()]
+    );
+
+    let mut two_live = saved.clone();
+    let mut duplicate = item("live-work").clone();
+    duplicate.id = "second-live-work".into();
+    two_live.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &two_live).unwrap();
+    assert!(
+        write().is_err(),
+        "two live rows stay ambiguous even when discarded rows are excluded"
+    );
+}
+
+/// SPEC #3590 FR-020 / FR-025: a stale Work left on the same branch and
+/// worktree by an earlier Session under another owner spelling must not make
+/// the delivering Session's own PR record ambiguous. Only the Work that this
+/// owner and Session hold is a candidate.
+#[test]
+fn execution_pr_metadata_ignores_a_stale_work_of_another_owner_and_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4661),
+        pr_url: Some("https://github.com/example/repo/pull/4661".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut bare = container.clone();
+    bare.pr_number = None;
+    bare.pr_url = None;
+    bare.pr_state = None;
+    for (id, owner, session) in [
+        ("current-work", "SPEC-42", "current-session"),
+        ("stale-work", "Issue #42", "stale-session"),
+    ] {
+        let mut start = WorkEvent::new(WorkEventKind::Start, id, now);
+        start.owner = Some(owner.into());
+        start.agent_session_id = Some(session.into());
+        start.execution_container = Some(bare.clone());
+        projection.apply_event(start);
+    }
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+
+    record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "SPEC-42",
+        "current-session",
+        &container,
+    )
+    .expect("the owned Work is the only candidate");
+
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let containers = |id: &str| {
+        saved
+            .work_items
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap()
+            .execution_containers
+            .clone()
+    };
+    assert_eq!(containers("current-work"), vec![container]);
+    assert_eq!(containers("stale-work"), vec![bare]);
 }

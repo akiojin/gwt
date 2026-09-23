@@ -29,6 +29,7 @@ pub mod execution_control_stop_check;
 pub mod forward;
 pub mod health;
 mod identity;
+pub mod known_workarounds;
 pub mod pm_loop_stop_check;
 pub mod provider_event;
 pub mod runtime_state;
@@ -316,7 +317,7 @@ pub fn run_daemon_hook<E: CliEnv>(
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, provider_event, runtime_state,
+        block_bash_policy, event_dispatcher, known_workarounds, provider_event, runtime_state,
         skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
         skill_register_spec_stop_check, workflow_policy, HookKind, HookOutput,
     };
@@ -343,6 +344,14 @@ pub fn run_daemon_hook<E: CliEnv>(
     }
     /// `Ok(exit_code)` when the envelope reached stdout, `Err(1)` otherwise.
     fn write_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> Result<i32, i32> {
+        // Issue #4542: denials are constructed in a dozen gates but serialized
+        // only here, so the known-workaround advisory attaches once and every
+        // present and future gate inherits it. It is fail-open by construction:
+        // a missing index, an exhausted budget or an unwritable ledger returns
+        // the gate's own text untouched, so this can never turn a denial into
+        // an error or a stall.
+        let repo_root = env.repo_path().to_path_buf();
+        let output = &known_workarounds::augment_denial(&repo_root, output.clone());
         match output.serialize_to(env.stdout()) {
             Ok(()) => {
                 if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
@@ -790,6 +799,62 @@ mod tests {
                     && row.message.contains("NotARealEvent")
             }),
             "hook failure must land in the error ledger: {listed:?}"
+        );
+    }
+
+    /// Issue #4542 AC-1/AC-2: the known-workaround advisory hangs off the one
+    /// place every gate's denial is serialized. This asserts both halves of
+    /// that wiring from the outside: the funnel really runs the advisory (the
+    /// occurrence ledger gained this signature), and a repository with neither
+    /// corpus still emits the gate's own denial, unchanged and well-formed,
+    /// instead of an error.
+    #[test]
+    fn denials_run_the_known_workaround_advisory_and_stay_intact_without_a_corpus() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": temp
+                    .path()
+                    .join(".gwt/skill-state/execution-control.json")
+                    .display()
+                    .to_string()
+            },
+        })
+        .to_string();
+
+        let code = run_daemon_hook(&mut env, "workflow-policy", &[]).expect("run hook");
+
+        assert_eq!(code, 2, "the trusted-state write guard must still deny");
+        let stdout = String::from_utf8(env.stdout.clone()).expect("utf8 stdout");
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("deny envelope");
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("deny reason");
+        assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            reason.starts_with(
+                "Execution/evidence state files are written only by their canonical operations"
+            ),
+            "the gate's own summary must survive the advisory: {reason}"
+        );
+        assert!(
+            !reason.contains("Known workarounds"),
+            "no corpus means no advisory, not a broken denial: {reason}"
+        );
+
+        let ledger = gwt_core::paths::gwt_work_notes_dir(temp.path()).join("deny-signatures.json");
+        let recorded = fs::read_to_string(&ledger).unwrap_or_else(|err| {
+            panic!(
+                "the denial funnel must count the block signature at {}: {err}",
+                ledger.display()
+            )
+        });
+        assert!(
+            recorded.contains("execution evidence state files written only canonical operations"),
+            "the normalized block signature must be the ledger key: {recorded}"
         );
     }
 

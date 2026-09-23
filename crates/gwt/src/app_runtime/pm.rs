@@ -410,8 +410,8 @@ impl AppRuntime {
         // is also where the settings panel learns about it. Skipped ensures
         // (opt-out, non-Git tab, backoff floor) still report — "not running"
         // is exactly the state the panel has to show.
-        if self.active_tab_id.as_deref() == Some(tab_id) {
-            events.extend(self.pm_status_broadcast_events());
+        if let Some(context) = self.project_context(tab_id) {
+            events.extend(self.pm_status_broadcast_events(&context));
         }
         events
     }
@@ -435,7 +435,10 @@ impl AppRuntime {
             return Vec::new();
         }
         let project_root = tab.project_root.clone();
-        if trigger != PmEnsureTrigger::Restart && self.pending_pm_closes.contains_key(&project_root)
+        if trigger != PmEnsureTrigger::Restart
+            && self
+                .project_state_for_root(&project_root)
+                .is_some_and(|state| state.pending_pm_closes.contains_key(&project_root))
         {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -518,8 +521,8 @@ impl AppRuntime {
     /// A non-Git or missing active tab produces an explicit unavailable
     /// snapshot. Shared Settings windows can outlive a project tab, so silence
     /// would leak the previous project's values into the new scope.
-    pub(crate) fn pm_status_event(&self) -> BackendEvent {
-        let Some(project_root) = self.active_pm_project_root() else {
+    pub(crate) fn pm_status_event(&self, context: &super::ProjectContext) -> BackendEvent {
+        let Some(project_root) = self.pm_project_root(context) else {
             let loop_interval_secs = pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS;
             return BackendEvent::PmStatus {
                 available: false,
@@ -598,8 +601,14 @@ impl AppRuntime {
     /// The PM settings snapshot as a broadcast, for the call sites that change
     /// PM state. Every PM state transition must pass through here — the panel
     /// has no other source of truth, so a silent transition leaves it stale.
-    pub(crate) fn pm_status_broadcast_events(&self) -> Vec<OutboundEvent> {
-        vec![OutboundEvent::broadcast(self.pm_status_event())]
+    pub(crate) fn pm_status_broadcast_events(
+        &self,
+        context: &super::ProjectContext,
+    ) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::project(
+            context.project_key.clone(),
+            self.pm_status_event(context),
+        )]
     }
 
     /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to
@@ -620,9 +629,11 @@ impl AppRuntime {
             .collect()
     }
 
-    fn active_pm_project_root(&self) -> Option<PathBuf> {
-        let tab_id = self.active_tab_id.clone()?;
-        self.tab(&tab_id)
+    fn pm_project_root(&self, context: &super::ProjectContext) -> Option<PathBuf> {
+        if !self.project_context_is_current(context) {
+            return None;
+        }
+        self.tab(&context.tab_id)
             .filter(|tab| tab.kind == gwt::ProjectKind::Git)
             .map(|tab| tab.project_root.clone())
     }
@@ -632,8 +643,12 @@ impl AppRuntime {
     /// Deliberately does not touch the running pane. The flag decides whether
     /// opening the project starts a PM; treating it as a stop switch would end
     /// a conversation the user only meant to stop auto-starting next time.
-    pub(crate) fn set_pm_auto_start_events(&mut self, enabled: bool) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_pm_project_root() else {
+    pub(crate) fn set_pm_auto_start_events(
+        &mut self,
+        context: &super::ProjectContext,
+        enabled: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
@@ -643,7 +658,7 @@ impl AppRuntime {
             tracing::warn!(%error, "failed to persist the PM auto-start setting");
             return Vec::new();
         }
-        self.pm_status_broadcast_events()
+        self.pm_status_broadcast_events(context)
     }
 
     /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
@@ -654,6 +669,7 @@ impl AppRuntime {
     /// running and reload the preference on their next loop/wake evaluation.
     pub(crate) fn set_pm_loop_interval_events(
         &mut self,
+        context: &super::ProjectContext,
         loop_interval_secs: u64,
     ) -> Vec<OutboundEvent> {
         if loop_interval_secs < pm_registry::PM_LOOP_INTERVAL_MIN_SECS {
@@ -664,7 +680,7 @@ impl AppRuntime {
             );
             return Vec::new();
         }
-        let Some(project_root) = self.active_pm_project_root() else {
+        let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
@@ -674,7 +690,7 @@ impl AppRuntime {
             tracing::warn!(%error, "failed to persist the PM loop interval");
             return Vec::new();
         }
-        self.pm_status_broadcast_events()
+        self.pm_status_broadcast_events(context)
     }
 
     /// SPEC-3431 FR-026: persist what the next PM start runs as.
@@ -686,11 +702,12 @@ impl AppRuntime {
     /// [`Self::restart_pm_agent_events`].
     pub(crate) fn set_pm_launch_profile_events(
         &mut self,
+        context: &super::ProjectContext,
         agent_id: &str,
         model: Option<String>,
         reasoning: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_pm_project_root() else {
+        let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
         if !pm_registry::pm_agent_is_supported(agent_id) {
@@ -714,7 +731,7 @@ impl AppRuntime {
             tracing::warn!(%error, "failed to persist the PM launch profile");
             return Vec::new();
         }
-        self.pm_status_broadcast_events()
+        self.pm_status_broadcast_events(context)
     }
 
     /// SPEC-3431 FR-026: apply the configured profile by restarting the PM.
@@ -724,10 +741,14 @@ impl AppRuntime {
     /// (T-016). A restart is not a stop — the worktree holds the PM's own
     /// notes — so clearing the registration up front makes that reap a no-op
     /// and leaves the worktree for the successor.
-    pub(crate) fn restart_pm_agent_events(&mut self) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
+    pub(crate) fn restart_pm_agent_events(
+        &mut self,
+        context: &super::ProjectContext,
+    ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
             return Vec::new();
-        };
+        }
+        let tab_id = context.tab_id.clone();
         let Some(project_root) = self.tab(&tab_id).map(|tab| tab.project_root.clone()) else {
             return Vec::new();
         };
@@ -772,15 +793,18 @@ impl AppRuntime {
         inbox: &[gwt::IssueMonitorInboxItem],
         now: &str,
     ) -> Option<PmWakeDecision> {
+        let context = self.project_context_for_root(project_root)?;
         let signals = pm_wake_signals(inbox);
-        let Some(seen) = self.pm_wake_seen.get(project_root) else {
-            self.pm_wake_seen
+        let Some(seen) = self.project_state(&context)?.pm_wake_seen.get(project_root) else {
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         };
         let fresh: Vec<String> = signals.difference(seen).cloned().collect();
         if fresh.is_empty() {
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         }
@@ -792,7 +816,8 @@ impl AppRuntime {
             .map(|prefs| prefs.enabled)
             .unwrap_or(false);
         if !monitor_enabled {
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         }
@@ -806,13 +831,15 @@ impl AppRuntime {
         };
         let Some(registration) = prefs.registration else {
             // No PM to wake; a later PM start reads status in its bootstrap.
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         };
         let Some(window_id) = self.live_pm_window_id(&registration.session_id) else {
             // A dead PM is the crash-resume path's job, never the wake's.
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         };
@@ -827,7 +854,8 @@ impl AppRuntime {
             // next snapshot.
             return None;
         }
-        self.pm_wake_seen
+        self.project_state_mut(&context)?
+            .pm_wake_seen
             .insert(project_root.to_path_buf(), signals);
         // Re-arm the budget and stamp the wake clock: new actionable work is
         // exactly what the park was waiting for, and the stamp keeps the
@@ -1185,7 +1213,7 @@ impl AppRuntime {
             .and_then(|writers| {
                 writers
                     .get(&principal_window_id)
-                    .cloned()
+                    .map(|entry| Arc::clone(&entry.handle))
                     .ok_or_else(|| "pm.message.send caller has no live PTY".to_string())
             }) {
             Ok(pty) => pty,
@@ -1273,10 +1301,11 @@ impl AppRuntime {
             },
         );
         let expected_pty = if target_is_live_agent {
-            self.pty_writers
-                .read()
-                .ok()
-                .and_then(|writers| writers.get(window_id).cloned())
+            self.pty_writers.read().ok().and_then(|writers| {
+                writers
+                    .get(window_id)
+                    .map(|entry| Arc::clone(&entry.handle))
+            })
         } else {
             None
         };
@@ -1441,11 +1470,11 @@ impl AppRuntime {
                                             })?;
                                             if !current
                                                 .get(&worker_window_id)
-                                                .is_some_and(|pty| Arc::ptr_eq(pty, &expected_pty))
+                                                .is_some_and(|entry| Arc::ptr_eq(&entry.handle, &expected_pty))
                                                 || !current
                                                     .get(&principal_window_id)
-                                                    .is_some_and(|pty| {
-                                                        Arc::ptr_eq(pty, &principal_pty)
+                                                    .is_some_and(|entry| {
+                                                        Arc::ptr_eq(&entry.handle, &principal_pty)
                                                     })
                                             {
                                                 return Err(
@@ -1706,11 +1735,17 @@ impl AppRuntime {
             .map(|pane| pane.has_unsent_user_input())
             .unwrap_or(false);
         if unsent {
-            self.pending_pm_wakes
+            let state = self
+                .project_state_for_root_mut(&decision.project_root)
+                .ok_or_else(|| "PM wake project is closed".to_string())?;
+            state
+                .pending_pm_wakes
                 .insert(decision.window_id.clone(), decision.clone());
             return Ok(PmWakeWrite::Deferred);
         }
-        self.pending_pm_wakes.remove(&decision.window_id);
+        if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+            state.pending_pm_wakes.remove(&decision.window_id);
+        }
         super::pty_io::write_pane_input_then_submit(&pane, &decision.delivery_prompt())?;
         Ok(PmWakeWrite::Injected)
     }
@@ -1719,7 +1754,12 @@ impl AppRuntime {
     /// or cleared. Missing pending entries are a no-op so every pane submit
     /// can call this cheaply.
     pub(crate) fn flush_pending_pm_wake(&mut self, window_id: &str) {
-        let Some(decision) = self.pending_pm_wakes.get(window_id).cloned() else {
+        let Some(decision) = self
+            .project_states
+            .values()
+            .find_map(|state| state.pending_pm_wakes.get(window_id))
+            .cloned()
+        else {
             return;
         };
         if self.pane_has_unsent_user_input(window_id) {
@@ -1893,19 +1933,29 @@ impl AppRuntime {
         }
     }
 
+    pub(super) fn pm_session_for_root(&self, project_root: &Path) -> Option<&String> {
+        self.project_state_for_root(project_root)?
+            .pm_sessions
+            .get(project_root)
+    }
+
     /// Keep the per-broadcast PM marker in step with the durable record.
     pub(super) fn sync_pm_session_cache(
         &mut self,
         project_root: &Path,
         registration: Option<&PmRegistration>,
     ) {
+        let Some(state) = self.project_state_for_root_mut(project_root) else {
+            return;
+        };
         match registration {
             Some(registration) => {
-                self.pm_sessions
+                state
+                    .pm_sessions
                     .insert(project_root.to_path_buf(), registration.session_id.clone());
             }
             None => {
-                self.pm_sessions.remove(project_root);
+                state.pm_sessions.remove(project_root);
             }
         }
     }
@@ -2043,9 +2093,12 @@ impl AppRuntime {
                     .collect()
             })
             .unwrap_or_default();
-        for combined in new_ids {
-            self.pending_pm_launches
-                .insert(combined, project_root.to_path_buf());
+        if let Some(state) = self.project_state_for_root_mut(project_root) {
+            for combined in new_ids {
+                state
+                    .pending_pm_launches
+                    .insert(combined, project_root.to_path_buf());
+            }
         }
     }
 
@@ -2102,8 +2155,14 @@ impl AppRuntime {
         &mut self,
         continuation: PmWorktreeContinuation,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context(continuation.tab_id()) else {
+            return Vec::new();
+        };
         let project_root = continuation.project_root().to_path_buf();
-        if !self
+        let Some(state) = self.project_state_mut(&context) else {
+            return Vec::new();
+        };
+        if !state
             .pending_pm_worktree_preparations
             .insert(project_root.clone())
         {
@@ -2113,7 +2172,7 @@ impl AppRuntime {
             );
             return Vec::new();
         }
-        let proxy = self.proxy.clone();
+        let proxy = self.proxy.for_project(context);
         let spawned = self.blocking_tasks.try_spawn(move || {
             let result = continuation.prepare();
             proxy.send(UserEvent::PmWorktreePrepared {
@@ -2124,7 +2183,9 @@ impl AppRuntime {
         if let Err(error) = spawned {
             // Nothing will report back, so release the gate here instead of
             // leaving the repository permanently unpreparable.
-            self.pending_pm_worktree_preparations.remove(&project_root);
+            if let Some(state) = self.project_state_for_root_mut(&project_root) {
+                state.pending_pm_worktree_preparations.remove(&project_root);
+            }
             return self.pm_worktree_preparation_failed_events(&project_root, &error);
         }
         Vec::new()
@@ -2136,7 +2197,11 @@ impl AppRuntime {
         continuation: PmWorktreeContinuation,
         result: Result<PathBuf, String>,
     ) -> Vec<OutboundEvent> {
-        self.pending_pm_worktree_preparations
+        let Some(state) = self.project_state_for_root_mut(continuation.project_root()) else {
+            return Vec::new();
+        };
+        state
+            .pending_pm_worktree_preparations
             .remove(continuation.project_root());
         let tab_id = continuation.tab_id().to_string();
         let mut events = match result {
@@ -2174,8 +2239,8 @@ impl AppRuntime {
         };
         // FR-026: the preparation is where the PM's live state actually
         // changes now, so it is also where the settings panel learns about it.
-        if self.active_tab_id.as_deref() == Some(tab_id.as_str()) {
-            events.extend(self.pm_status_broadcast_events());
+        if let Some(context) = self.project_context(&tab_id) {
+            events.extend(self.pm_status_broadcast_events(&context));
         }
         events
     }
@@ -2219,19 +2284,26 @@ impl AppRuntime {
         project_root: &Path,
         error: &str,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
         tracing::warn!(
             project_root = %project_root.display(),
             error,
             "failed to prepare the PM worktree; PM not started"
         );
-        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-            level: "error".to_string(),
-            message: format!(
-                "PM worktree preparation failed for {}: {error}",
-                project_root.display()
-            ),
-            issue_number: None,
-        })]
+        vec![OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::IssueMonitorToast {
+                notification_transition: None,
+                level: "error".to_string(),
+                message: format!(
+                    "PM worktree preparation failed for {}: {error}",
+                    project_root.display()
+                ),
+                issue_number: None,
+            },
+        )]
     }
 
     /// SPEC-3431 FR-026: the launch config for a fresh PM spawn.

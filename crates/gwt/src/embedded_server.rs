@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::app_runtime::ClientScope;
 use axum::{
     extract::{
         connect_info::ConnectInfo,
@@ -27,11 +28,11 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    AgentBuildAbortTerminalizationRequest, AgentWorkTerminalizationRequest,
-    AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest,
-    BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
+    AgentBuildAbortTerminalizationRequest, AgentWorkMaterializationProbeRequest,
+    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
 };
-use gwt_terminal::PtyHandle;
+use gwt_core::repo_hash::ProjectKey;
 use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt, net::TcpListener, runtime::Runtime, sync::oneshot};
 use uuid::Uuid;
@@ -41,7 +42,7 @@ use crate::{
     UploadedAttachment, UserEvent,
 };
 
-type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
+use crate::PtyWriterRegistry;
 
 /// SPEC-2359 W-17 (FR-394/FR-395): per-client outbound queue limits.
 ///
@@ -628,6 +629,24 @@ pub struct ClientHub {
 struct ClientRegistration {
     queue: Arc<ClientQueue>,
     receives_broadcasts: bool,
+    scope: ClientScope,
+}
+
+fn target_selects(
+    target: &DispatchTarget,
+    client_id: &str,
+    receives_broadcasts: bool,
+    scope: &ClientScope,
+) -> bool {
+    match target {
+        DispatchTarget::All => receives_broadcasts,
+        DispatchTarget::Hub => receives_broadcasts && *scope == ClientScope::Hub,
+        DispatchTarget::Project(key) => {
+            receives_broadcasts
+                && matches!(scope, ClientScope::Project(client_key) if client_key == key)
+        }
+        DispatchTarget::Client(id) => id == client_id,
+    }
 }
 
 impl ClientHub {
@@ -639,18 +658,36 @@ impl ClientHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
+    #[cfg(test)]
     pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
-        self.register_with_broadcasts(client_id, true)
+        self.register_scoped(client_id, ClientScope::Hub)
+    }
+
+    pub(super) fn register_scoped(
+        &self,
+        client_id: String,
+        scope: ClientScope,
+    ) -> Arc<ClientQueue> {
+        self.register_with_broadcasts(client_id, true, scope)
+    }
+
+    pub(super) fn scope(&self, client_id: &str) -> Option<ClientScope> {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(client_id)
+            .map(|registration| registration.scope.clone())
     }
 
     fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
-        self.register_with_broadcasts(client_id, false)
+        self.register_with_broadcasts(client_id, false, ClientScope::Hub)
     }
 
     fn register_with_broadcasts(
         &self,
         client_id: String,
         receives_broadcasts: bool,
+        scope: ClientScope,
     ) -> Arc<ClientQueue> {
         let queue = Arc::new(ClientQueue::default());
         self.clients
@@ -661,6 +698,7 @@ impl ClientHub {
                 ClientRegistration {
                     queue: queue.clone(),
                     receives_broadcasts,
+                    scope,
                 },
             );
         queue
@@ -729,7 +767,7 @@ impl ClientHub {
         // and per-client enqueue work happen outside the registry mutex. This
         // keeps register/unregister responsive even when the broadcast batch
         // is large or one client is slow to drain its queue.
-        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool, ClientScope)> = {
             let clients = self
                 .clients
                 .lock()
@@ -741,6 +779,7 @@ impl ClientHub {
                         id.clone(),
                         registration.queue.clone(),
                         registration.receives_broadcasts,
+                        registration.scope.clone(),
                     )
                 })
                 .collect()
@@ -763,24 +802,11 @@ impl ClientHub {
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
             let prepared = prepare_outbound_event(&outbound);
-            match outbound.target {
-                DispatchTarget::Broadcast => {
-                    for (client_id, queue, receives_broadcasts) in &snapshot {
-                        if !receives_broadcasts {
-                            continue;
-                        }
-                        if queue.enqueue(&prepared) {
-                            dead_clients.push(client_id.clone());
-                        }
-                    }
-                }
-                DispatchTarget::Client(client_id) => {
-                    if let Some((_, queue, _)) = snapshot.iter().find(|(id, _, _)| id == &client_id)
-                    {
-                        if queue.enqueue(&prepared) {
-                            dead_clients.push(client_id);
-                        }
-                    }
+            for (client_id, queue, receives_broadcasts, scope) in &snapshot {
+                if target_selects(&outbound.target, client_id, *receives_broadcasts, scope)
+                    && queue.enqueue(&prepared)
+                {
+                    dead_clients.push(client_id.clone());
                 }
             }
         }
@@ -813,7 +839,7 @@ impl ClientHub {
     /// Issue #3777: enqueue a background-serialized Active Work snapshot
     /// without reserializing its large Work/event graph on the tao thread.
     pub(super) fn dispatch_prepared_active_work(&self, payload: Arc<str>, target: DispatchTarget) {
-        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool, ClientScope)> = {
             let clients = self
                 .clients
                 .lock()
@@ -825,6 +851,7 @@ impl ClientHub {
                         id.clone(),
                         registration.queue.clone(),
                         registration.receives_broadcasts,
+                        registration.scope.clone(),
                     )
                 })
                 .collect()
@@ -842,11 +869,8 @@ impl ClientHub {
             stream_seq: None,
         };
         let mut dead_clients = Vec::new();
-        for (client_id, queue, receives_broadcasts) in snapshot {
-            let selected = match &target {
-                DispatchTarget::Broadcast => receives_broadcasts,
-                DispatchTarget::Client(target_id) => target_id == &client_id,
-            };
+        for (client_id, queue, receives_broadcasts, scope) in snapshot {
+            let selected = target_selects(&target, &client_id, receives_broadcasts, &scope);
             if selected && queue.enqueue(&prepared) {
                 dead_clients.push(client_id);
             }
@@ -874,11 +898,19 @@ struct ServerState {
     attachment_upload_token: String,
     attachment_uploads: AttachmentUploadStore,
     pty_writers: PtyWriterRegistry,
+    /// Issue #4538 AC-4: bearer token for `POST /internal/projects/open`,
+    /// published only through the `0600` tray lock file. `None` refuses every
+    /// control request.
+    control_token: Option<Arc<str>>,
+    project_open_timeout: Duration,
     // Held only so the in-process sink stays alive for the lifetime of the
     // server. Read directly through [`EmbeddedServer::access_log`] in tests.
     #[allow(dead_code)]
     access_log: AccessLogSink,
 }
+
+/// Upper bound on one `gwt open <path>` round trip through the runtime.
+const PROJECT_OPEN_CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct EmbeddedServer {
     url: String,
@@ -2727,6 +2759,31 @@ impl EmbeddedServer {
         )
     }
 
+    /// Test server that accepts `gwt open` control requests with `token`.
+    #[cfg(test)]
+    pub(super) fn start_with_control_token(
+        runtime: &Runtime,
+        proxy: AppEventProxy,
+        control_token: &str,
+        project_open_timeout: Duration,
+    ) -> std::io::Result<Self> {
+        let listener = runtime.block_on(TcpListener::bind(SocketAddr::new(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+        )))?;
+        Self::start_serving(
+            runtime,
+            listener.into_std()?,
+            0,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+            Some(control_token.to_string()),
+            project_open_timeout,
+        )
+    }
+
     /// SPEC-1942 FR-095 / FR-098: bind the embedded server to a caller-chosen
     /// IP / port and install the access-log middleware. Used by the current
     /// browser-server route for both loopback defaults and operator-chosen
@@ -2753,6 +2810,7 @@ impl EmbeddedServer {
             clients,
             pty_writers,
             attachment_uploads,
+            None,
         )
     }
 
@@ -2767,6 +2825,32 @@ impl EmbeddedServer {
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
+        control_token: Option<String>,
+    ) -> std::io::Result<Self> {
+        Self::start_serving(
+            runtime,
+            listener,
+            oauth_redirect_port,
+            proxy,
+            clients,
+            pty_writers,
+            attachment_uploads,
+            control_token,
+            PROJECT_OPEN_CONTROL_TIMEOUT,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_serving(
+        runtime: &Runtime,
+        listener: std::net::TcpListener,
+        oauth_redirect_port: u16,
+        proxy: AppEventProxy,
+        clients: ClientHub,
+        pty_writers: PtyWriterRegistry,
+        attachment_uploads: AttachmentUploadStore,
+        control_token: Option<String>,
+        project_open_timeout: Duration,
     ) -> std::io::Result<Self> {
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -2800,6 +2884,12 @@ impl EmbeddedServer {
         );
         let attachment_upload_token = Uuid::new_v4().to_string();
         let host_instance_id = Uuid::new_v4().to_string();
+        // SPEC #3248 FR-242: from here on this process *is* a Host, so the
+        // generation preflight must not ask some other Host to vouch for it.
+        // A `gwt` started from inside an agent pane inherits that pane's
+        // bridge environment, and without this marker it would preflight
+        // itself against the pane's parent Host and refuse its own launches.
+        gwt::cli::host_contract::mark_host_process();
         let access_log = AccessLogSink::default();
         let server_state = ServerState {
             proxy,
@@ -2809,6 +2899,8 @@ impl EmbeddedServer {
             attachment_upload_token,
             attachment_uploads,
             pty_writers,
+            control_token: control_token.map(Arc::from),
+            project_open_timeout,
             access_log: access_log.clone(),
         };
 
@@ -2834,6 +2926,23 @@ impl EmbeddedServer {
                 post(attachment_upload_handler),
             )
             .route("/ws", get(websocket_handler))
+            // Issue #4538 AC-1: per-project URLs share the entrypoint.
+            .route(
+                "/p/{repo_hash}",
+                get(
+                    |axum::extract::Path(repo_hash): axum::extract::Path<String>| async move {
+                        embedded_web::project_route_response(&repo_hash)
+                    },
+                ),
+            )
+            .route(
+                "/p/{repo_hash}/{*rest}",
+                get(|| async { embedded_web::project_not_found_response() }),
+            )
+            .route(
+                gwt::project_open_control::PROJECT_OPEN_CONTROL_PATH,
+                post(project_open_control_handler),
+            )
             .with_state(server_state)
             .layer(middleware::from_fn_with_state(
                 AccessLogPolicy::browser(access_log.clone()),
@@ -2958,6 +3067,7 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
     Router::new()
         .route("/internal/hook-live", post(hook_live_handler))
         .route("/internal/pane-ws", get(agent_pane_websocket_handler))
+        .route("/internal/host-contract", post(host_contract_handler))
         .route(
             "/internal/execution-binding-probe",
             post(execution_binding_probe_handler),
@@ -2971,6 +3081,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
             post(execution_adoption_handler),
         )
         .route("/internal/workspace-update", post(workspace_update_handler))
+        .route(
+            "/internal/work-materialization-probe",
+            post(work_materialization_probe_handler),
+        )
         .route(
             "/internal/work-terminalization",
             post(work_terminalization_handler),
@@ -3329,7 +3443,95 @@ fn should_drop_access_log_record(record: &AccessLogRecord) -> bool {
     record.method == "POST" && record.path == "/internal/hook-live" && record.status == 204
 }
 
+/// Issue #4538 AC-4 / AC-5: `gwt open <path>` asks the runtime to open a
+/// Project and answers with its ProjectKey once the async open has committed.
+/// Nothing is dispatched to the runtime before authorization and validation.
+async fn project_open_control_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    use gwt::project_open_control::{
+        authorize_control_request, parse_control_request, project_url_path,
+        ProjectOpenControlRejection, ProjectOpenControlResponse,
+        PROJECT_OPEN_CONTROL_MAX_BODY_BYTES,
+    };
+    let header_text = |name| headers.get(name).and_then(|value| value.to_str().ok());
+    let result = async {
+        authorize_control_request(header_text(AUTHORIZATION), state.control_token.as_deref())?;
+        let mut body = Vec::new();
+        let mut stream = request.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                ProjectOpenControlRejection::BadRequest(format!("failed to read body: {error}"))
+            })?;
+            if body.len() + chunk.len() > PROJECT_OPEN_CONTROL_MAX_BODY_BYTES {
+                return Err(ProjectOpenControlRejection::PayloadTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let path = parse_control_request(header_text(axum::http::header::CONTENT_TYPE), &body)?;
+        open_project_through_runtime(&state.proxy, path, state.project_open_timeout).await
+    }
+    .await;
+    match result {
+        Ok(project_key) => Json(ProjectOpenControlResponse {
+            url_path: project_url_path(project_key.as_str()),
+            project_key: project_key.to_string(),
+        })
+        .into_response(),
+        Err(rejection) => (
+            StatusCode::from_u16(rejection.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(gwt::project_open_control::ProjectOpenControlErrorBody {
+                error: rejection.message(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn open_project_through_runtime(
+    proxy: &AppEventProxy,
+    path: PathBuf,
+    timeout: Duration,
+) -> Result<ProjectKey, gwt::project_open_control::ProjectOpenControlRejection> {
+    use crate::app_runtime::{ProjectOpenControlFailure, ProjectOpenReply};
+    use gwt::project_open_control::ProjectOpenControlRejection as Rejection;
+    let (reply, outcome) = ProjectOpenReply::channel();
+    proxy.send(UserEvent::ControlProjectOpen { path, reply });
+    match tokio::time::timeout(timeout, outcome).await {
+        Err(_) => Err(Rejection::Timeout),
+        Ok(Err(_)) => Err(Rejection::Unavailable(
+            "gwt is not accepting project requests".to_string(),
+        )),
+        Ok(Ok(Ok(project_key))) => Ok(project_key),
+        Ok(Ok(Err(ProjectOpenControlFailure::Rejected(message)))) => {
+            Err(Rejection::Unprocessable(message))
+        }
+        Ok(Ok(Err(ProjectOpenControlFailure::Unavailable(message)))) => {
+            Err(Rejection::Unavailable(message))
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct WebsocketQuery {
+    repo_hash: Option<String>,
+}
+
+impl WebsocketQuery {
+    fn scope(self) -> Result<ClientScope, StatusCode> {
+        match self.repo_hash {
+            Some(hash) => ProjectKey::parse(&hash)
+                .map(ClientScope::Project)
+                .map_err(|_| StatusCode::BAD_REQUEST),
+            None => Ok(ClientScope::Hub),
+        }
+    }
+}
+
 async fn websocket_handler(
+    Query(query): Query<WebsocketQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
@@ -3337,7 +3539,11 @@ async fn websocket_handler(
     if !websocket_origin_authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    ws.on_upgrade(move |socket| client_session(socket, state))
+    let scope = match query.scope() {
+        Ok(scope) => scope,
+        Err(status) => return status.into_response(),
+    };
+    ws.on_upgrade(move |socket| client_session(socket, state, scope))
 }
 
 async fn agent_pane_websocket_handler(
@@ -3548,6 +3754,54 @@ async fn build_abort_terminalization_handler(
     }
 }
 
+async fn work_materialization_probe_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<AgentWorkMaterializationProbeRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "work_materialization_probe_requires_active_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        gwt::probe_bound_authenticated_work_materialization(
+            &project_root,
+            &session_id,
+            &execution_binding,
+            request,
+        )
+    })
+    .await;
+
+    match result {
+        Ok(Ok(receipt)) => Json(receipt).into_response(),
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host Work materialization probe failed before a response was produced",
+            ),
+        ),
+    }
+}
+
 fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusCode {
     match code {
         AgentWorkspaceUpdateErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
@@ -3558,6 +3812,48 @@ fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusC
         | AgentWorkspaceUpdateErrorCode::IdentityConflict
         | AgentWorkspaceUpdateErrorCode::TransactionConflict => StatusCode::CONFLICT,
         AgentWorkspaceUpdateErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Answer the Host contract preflight (SPEC #3248 FR-242, Issue #4546).
+///
+/// Deliberately the one authenticated route that does *not* demand execution
+/// authority. The preflight runs before a generation, a binding or a
+/// capability exists — requiring one here would make the contract unprovable
+/// exactly when it matters, and the launch would materialize first and
+/// discover the mismatch afterwards, which is the failure this route removes.
+///
+/// It touches no store and spawns no work: the answer is assembled from
+/// compile-time constants and the presented principal, which is what makes the
+/// zero-side-effect guarantee checkable rather than merely asserted.
+async fn host_contract_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<gwt::AgentHostContractRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
+        );
+    };
+    let capability_generation = principal
+        .execution_binding()
+        .map_or(0, |binding| binding.capability_generation);
+    match gwt::describe_authenticated_host_contract(
+        &request,
+        principal.session_id(),
+        &state.host_instance_id,
+        capability_generation,
+    ) {
+        Ok(receipt) => Json(receipt).into_response(),
+        Err(error) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
     }
 }
 
@@ -3954,7 +4250,7 @@ impl AgentPaneSessionScope {
 }
 
 enum ClientSessionScope {
-    Browser,
+    Browser(ClientScope),
     Agent(AgentPaneSessionScope),
 }
 
@@ -3973,7 +4269,7 @@ enum ScopedFrontendRequest {
 impl ClientSessionScope {
     fn refresh_agent_grant(&mut self, registry: &AgentCapabilityRegistry) -> bool {
         match self {
-            Self::Browser => true,
+            Self::Browser(_) => true,
             Self::Agent(scope) => {
                 let Some(grant) = registry.refresh_grant(&scope.grant) else {
                     return false;
@@ -3986,7 +4282,7 @@ impl ClientSessionScope {
 
     fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
-            Self::Browser => Some(ScopedFrontendRequest::Browser(event)),
+            Self::Browser(_) => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
                 if let FrontendEvent::PmPaneSendInput {
                     operation_id,
@@ -4015,21 +4311,21 @@ impl ClientSessionScope {
 
     fn filter_outbound(&mut self, payload: String) -> Option<String> {
         match self {
-            Self::Browser => Some(payload),
+            Self::Browser(_) => Some(payload),
             Self::Agent(scope) => scope.filter_outbound(payload),
         }
     }
 
     fn filter_repair_panes(&self, repair_panes: Vec<String>) -> Vec<String> {
         match self {
-            Self::Browser => repair_panes,
+            Self::Browser(_) => repair_panes,
             Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
         }
     }
 }
 
-async fn client_session(socket: WebSocket, state: ServerState) {
-    client_session_with_scope(socket, state, ClientSessionScope::Browser).await;
+async fn client_session(socket: WebSocket, state: ServerState, scope: ClientScope) {
+    client_session_with_scope(socket, state, ClientSessionScope::Browser(scope)).await;
 }
 
 async fn agent_pane_client_session(
@@ -4152,7 +4448,9 @@ async fn client_session_with_scope(
 ) {
     let client_id = Uuid::new_v4().to_string();
     let outbound = match &scope {
-        ClientSessionScope::Browser => state.clients.register(client_id.clone()),
+        ClientSessionScope::Browser(scope) => state
+            .clients
+            .register_scoped(client_id.clone(), scope.clone()),
         ClientSessionScope::Agent(_) => state.clients.register_pane(client_id.clone()),
     };
     let (mut sender, mut receiver) = socket.split();
@@ -4547,6 +4845,10 @@ fn handle_frontend_message(
         }
     };
 
+    let Some(ClientScope::Project(project_key)) = state.clients.scope(client_id) else {
+        return;
+    };
+
     // Issue #4145 AC-1: the prompt-send route is the submit reaching the PTY,
     // covering both the WebSocket fast path and the event-loop fallback below.
     // Only a submit is timed — Issue #3611 is the reminder that per-keystroke
@@ -4581,7 +4883,11 @@ fn handle_frontend_message(
 
     let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
     let mut resolution_marked = false;
-    if let Some((pty, pty_writer_count)) = pty_handle {
+    if let Some((entry, pty_writer_count)) = pty_handle {
+        if entry.project_key != project_key {
+            return;
+        }
+        let pty = &entry.handle;
         if approval_resolution {
             // `EventLoopProxy::send_event` completes the tao channel enqueue
             // synchronously. Enqueue the causal marker before the PTY write so
@@ -4764,13 +5070,25 @@ pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
 
 #[cfg(test)]
 pub fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
-    clients.dispatch(vec![OutboundEvent::broadcast(
-        gwt::BackendEvent::RuntimeHookEvent { event },
-    )]);
+    clients.dispatch(vec![OutboundEvent {
+        target: DispatchTarget::All,
+        event: gwt::BackendEvent::RuntimeHookEvent { event },
+        knowledge_wire_metadata: None,
+        terminal_stream_seq: None,
+    }]);
 }
 
 #[cfg(test)]
 mod tests {
+    fn transport_all(event: gwt::BackendEvent) -> crate::OutboundEvent {
+        crate::OutboundEvent {
+            target: crate::DispatchTarget::All,
+            event,
+            knowledge_wire_metadata: None,
+            terminal_stream_seq: None,
+        }
+    }
+
     use std::{
         collections::HashMap,
         net::IpAddr,
@@ -4875,6 +5193,13 @@ mod tests {
         }
     }
 
+    use crate::app_runtime::ClientScope;
+    use gwt_core::repo_hash::ProjectKey;
+
+    fn project_a() -> ProjectKey {
+        ProjectKey::parse("0123456789abcdef").unwrap()
+    }
+
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
         let (proxy, events) = AppEventProxy::stub();
         (
@@ -4886,6 +5211,8 @@ mod tests {
                 attachment_upload_token: "upload-token".to_string(),
                 attachment_uploads: AttachmentUploadStore::in_system_temp(),
                 pty_writers: Arc::new(RwLock::new(HashMap::new())),
+                control_token: None,
+                project_open_timeout: Duration::from_secs(1),
                 access_log: super::AccessLogSink::default(),
             },
             events,
@@ -6136,7 +6463,7 @@ mod tests {
 
     #[test]
     fn browser_client_scope_preserves_existing_unrestricted_websocket_contract() {
-        let mut scope = super::ClientSessionScope::Browser;
+        let mut scope = super::ClientSessionScope::Browser(ClientScope::Hub);
         assert!(matches!(
             scope.filter_inbound(FrontendEvent::TerminalInput {
                 id: "any-project::terminal-1".to_string(),
@@ -6167,7 +6494,7 @@ mod tests {
         let browser = clients.register("browser".to_string());
         let pane = clients.register_pane("pane".to_string());
 
-        clients.dispatch(vec![OutboundEvent::broadcast(terminal_snapshot(
+        clients.dispatch(vec![transport_all(terminal_snapshot(
             "foreign-tab::agent-1",
             "foreign snapshot",
         ))]);
@@ -7435,6 +7762,96 @@ mod tests {
         server.shutdown();
     }
 
+    // SPEC #3248 FR-242 / Issue #4546 AC-1: the preflight is authenticated,
+    // reachable only on the agent router, and — unlike every other agent
+    // route — answerable to a principal that holds no execution authority
+    // yet. That last property is the whole point: the contract has to be
+    // provable *before* a generation exists, or the launch mints one first
+    // and discovers the mismatch afterwards.
+    #[test]
+    fn host_contract_route_authenticates_without_demanding_execution_authority() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = server.agent_capability_issuer();
+        // An Inspection principal: authenticated, but carrying no execution
+        // binding — exactly the state a launch is in before genesis.
+        let inspection = issuer
+            .issue(project.path(), "session-preflight")
+            .expect("inspection capability");
+        let mut host_contract_url = reqwest::Url::parse(&inspection.url).expect("agent hook URL");
+        host_contract_url.set_path("/internal/host-contract");
+        let request = serde_json::json!({
+            "schema_version": gwt::AGENT_HOST_CONTRACT_SCHEMA_VERSION,
+            "operation_id": "host-contract:genesis",
+            "nonce": "nonce-route",
+        });
+        let client = reqwest::blocking::Client::new();
+
+        // The browser surface must not expose it at all.
+        let browser_response = client
+            .post(format!("{}internal/host-contract", server.url()))
+            .json(&request)
+            .send()
+            .expect("browser host-contract request");
+        assert_eq!(browser_response.status(), HttpStatusCode::NOT_FOUND);
+
+        // An unauthenticated caller learns nothing.
+        let anonymous = client
+            .post(host_contract_url.clone())
+            .json(&request)
+            .send()
+            .expect("anonymous host-contract request");
+        assert_eq!(anonymous.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let response = client
+            .post(host_contract_url.clone())
+            .bearer_auth(&inspection.token)
+            .json(&request)
+            .send()
+            .expect("authenticated host-contract request");
+        assert_eq!(response.status(), HttpStatusCode::OK);
+        let receipt = response
+            .json::<gwt::AgentHostContractReceipt>()
+            .expect("host contract receipt");
+        assert_eq!(receipt.operation_id, "host-contract:genesis");
+        assert_eq!(receipt.nonce, "nonce-route");
+        assert_eq!(receipt.session_id, "session-preflight");
+        assert_eq!(
+            receipt.execution_generation_contract_version,
+            gwt::EXECUTION_GENERATION_CONTRACT_VERSION
+        );
+        assert!(!receipt.host_instance_id.trim().is_empty());
+        assert_eq!(receipt.host_version, env!("CARGO_PKG_VERSION"));
+        // No generation exists yet, so the capability generation is zero —
+        // and that must not read as a defective receipt.
+        assert_eq!(receipt.capability_generation, 0);
+
+        // A malformed question is refused without inventing an answer.
+        let malformed = client
+            .post(host_contract_url)
+            .bearer_auth(&inspection.token)
+            .json(&serde_json::json!({
+                "schema_version": gwt::AGENT_HOST_CONTRACT_SCHEMA_VERSION,
+                "operation_id": "",
+                "nonce": "nonce-route",
+            }))
+            .send()
+            .expect("malformed host-contract request");
+        assert_eq!(malformed.status(), HttpStatusCode::BAD_REQUEST);
+
+        server.shutdown();
+    }
+
     #[test]
     fn workspace_update_route_authenticates_before_host_mutation_service() {
         let runtime = Runtime::new().expect("tokio runtime");
@@ -7630,6 +8047,7 @@ mod tests {
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
+                permission_decision: None,
             },
         )
         .expect("save completed predecessor");
@@ -8151,6 +8569,59 @@ mod tests {
         session
             .save(&gwt_core::paths::gwt_sessions_dir())
             .expect("persist initial execution binding");
+        let work_id = "work-materialization-probe-route";
+        let now = chrono::Utc::now();
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.agents = vec![gwt_core::workspace_projection::WorkspaceAgentSummary {
+            session_id: session.id.clone(),
+            window_id: Some("project::agent-materialization-probe".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: Some(repo.clone()),
+            branch: Some(session.branch.clone()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status:
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: Some(work_id.to_string()),
+            updated_at: now,
+        }];
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save materialization probe assignment");
+        let mut work_items =
+            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let mut work_event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id,
+            now,
+        );
+        work_event.title = Some("Materialization probe route".to_string());
+        work_event.owner = Some("Issue #2359".to_string());
+        work_event.agent_id = Some("codex".to_string());
+        work_event.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+        work_event.agent_session_id = Some(session.id.clone());
+        work_event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(session.branch.clone()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        work_items.apply_event(work_event);
+        let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &work_items_path,
+            &work_items,
+        )
+        .expect("save materialized Work");
 
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy_a, events_a) = AppEventProxy::stub();
@@ -8381,6 +8852,82 @@ mod tests {
         assert_eq!(receipt.execution_binding, rotated.identity);
         assert_eq!(receipt.capability_generation, rotated.capability_generation);
         assert!(!receipt.host_instance_id.trim().is_empty());
+
+        let materialization_request = gwt::AgentWorkMaterializationProbeRequest {
+            schema_version: gwt::AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+            claimed_session_id: session.id.clone(),
+            owner_number: 2359,
+            observation: gwt::observe_agent_runtime(&repo).expect("runtime observation"),
+        };
+        let materialization_probe = |target: &HookForwardTarget| {
+            let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+            url.set_path("/internal/work-materialization-probe");
+            client
+                .post(url)
+                .bearer_auth(&target.token)
+                .json(&materialization_request)
+                .send()
+                .expect("Work materialization probe request")
+        };
+        let projection_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
+        let projection_before =
+            std::fs::read(&projection_path).expect("projection before route probes");
+        let work_items_before =
+            std::fs::read(&work_items_path).expect("WorkItems before route probes");
+        let stale_materialization = materialization_probe(&target_a);
+        assert_eq!(stale_materialization.status(), HttpStatusCode::CONFLICT);
+        let current_materialization = materialization_probe(&target_b);
+        assert_eq!(current_materialization.status(), HttpStatusCode::OK);
+        let materialization_receipt: gwt::AgentWorkMaterializationProbeReceipt =
+            current_materialization
+                .json()
+                .expect("current Work materialization receipt");
+        assert_eq!(materialization_receipt.owner_number, 2359);
+        assert_eq!(materialization_receipt.work_id, work_id);
+        assert_eq!(
+            std::fs::read(&projection_path).expect("projection after route probes"),
+            projection_before,
+            "materialization route must not mutate Workspace projection"
+        );
+        assert_eq!(
+            std::fs::read(&work_items_path).expect("WorkItems after route probes"),
+            work_items_before,
+            "materialization route must not mutate WorkItems"
+        );
+        let missing_work_items =
+            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &work_items_path,
+            &missing_work_items,
+        )
+        .expect("remove assigned Work from route fixture");
+        let missing_before =
+            std::fs::read(&work_items_path).expect("missing WorkItems before rejection");
+        let missing_materialization = materialization_probe(&target_b);
+        assert_eq!(missing_materialization.status(), HttpStatusCode::CONFLICT);
+        let missing_error: serde_json::Value = missing_materialization
+            .json()
+            .expect("missing Work rejection wire response");
+        let missing_code: gwt::AgentWorkspaceUpdateErrorCode =
+            serde_json::from_value(missing_error["code"].clone())
+                .expect("typed missing Work error code");
+        assert_eq!(
+            missing_code,
+            gwt::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+        );
+        assert_eq!(missing_error["reason"], "workspace_ensure_required");
+        assert!(missing_error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("workspace.ensure")));
+        assert_eq!(
+            missing_error["recovery_operations"],
+            serde_json::json!(["workspace.ensure"])
+        );
+        assert_eq!(
+            std::fs::read(&work_items_path).expect("WorkItems after missing rejection"),
+            missing_before,
+            "missing Work rejection must not mutate WorkItems"
+        );
 
         let dispatched_before_corruption = events_b
             .lock()
@@ -8731,6 +9278,7 @@ mod tests {
             &repo,
             "build-spec",
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: Some(owner.number),
                 started_at: now,
@@ -8852,8 +9400,318 @@ mod tests {
     }
 
     #[test]
+    fn websocket_handshake_binds_scope_until_disconnect_and_reconnect() {
+        let runtime = Runtime::new().unwrap();
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let url = server
+            .agent_capability_issuer()
+            .pane_websocket_url()
+            .to_string();
+        runtime.block_on(async {
+            let invalid = connect_async(format!("{url}?repo_hash=invalid")).await.unwrap_err();
+            assert!(matches!(invalid, WebSocketError::Http(response) if response.status() == StatusCode::BAD_REQUEST));
+            for expected in [ClientScope::Project(project_a()), ClientScope::Hub] {
+                let scoped_url = match &expected { ClientScope::Project(key) => format!("{url}?repo_hash={key}"), ClientScope::Hub => url.clone() };
+                let (mut socket, _) = connect_async(scoped_url).await.unwrap();
+                socket.send(WebSocketMessage::Text(r#"{"kind":"frontend_ready","repo_hash":"fedcba9876543210"}"#.into())).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if !events.lock().unwrap().is_empty() { break; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+                {
+                    let registration = clients.clients.lock().unwrap();
+                    assert_eq!(registration.len(), 1);
+                    assert_eq!(registration.values().next().unwrap().scope, expected);
+                }
+                events.lock().unwrap().clear();
+                socket.close(None).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while clients.has_clients() { tokio::task::yield_now().await; }
+                }).await.unwrap();
+            }
+        });
+        server.shutdown();
+    }
+
+    // AC-5 inventory: host process/log streams, provider usage (including
+    // its session rows), runtime health, and Board sign-in are global host
+    // views. Uploads are host staging addressed by opaque upload_id and reply
+    // only to their HTTP caller; attaching one to a pane follows scoped input.
+    // Project-derived hook/PTY/projection payloads must go through runtime
+    // routing, never a new direct transport broadcast.
+    #[test]
+    fn transport_direct_dispatch_inventory_stays_explicit() {
+        let server = include_str!("embedded_server.rs")
+            .split("#[cfg(test)]\npub fn broadcast_runtime_hook_event")
+            .next()
+            .unwrap();
+        assert_eq!(
+            server.matches(".dispatch(").count(),
+            1,
+            "classify every new direct transport dispatch"
+        );
+        let oauth = server
+            .split("async fn oauth_callback_handler(")
+            .nth(1)
+            .unwrap()
+            .split("struct AttachmentUploadTokenResponse")
+            .next()
+            .unwrap();
+        assert!(oauth.contains("OutboundEvent::broadcast("));
+        assert!(oauth.contains("board_auth_status_event("));
+        let upload = server
+            .split("async fn attachment_upload_handler(")
+            .nth(1)
+            .unwrap()
+            .split("async fn access_log_middleware(")
+            .next()
+            .unwrap();
+        assert!(
+            !upload.contains(".dispatch("),
+            "upload staging replies only to its HTTP caller"
+        );
+        let hook = server
+            .split("async fn hook_live_handler(")
+            .nth(1)
+            .unwrap()
+            .split("async fn workspace_update_handler(")
+            .next()
+            .unwrap();
+        assert!(hook.contains("UserEvent::RuntimeHook(event)"));
+        assert!(
+            !hook.contains(".dispatch("),
+            "hook events require project routing in the runtime"
+        );
+        let main = include_str!("main.rs")
+            .split("fn main() ->")
+            .nth(1)
+            .unwrap();
+        for (arm, policy) in [
+            (
+                "ActiveWorkProjectionPrepared(prepared)",
+                "DispatchTarget::Project(prepared_dispatch.context.project_key)",
+            ),
+            (
+                "LaunchProgress { window_id, message }",
+                "project_key_for_window",
+            ),
+            (
+                "LaunchTerminalOutput { window_id, data }",
+                "project_key_for_window",
+            ),
+            ("ProjectIndexStatus {", "OutboundEvent::project("),
+            ("MigrationProgress {", "handle_migration_progress"),
+        ] {
+            let body = main
+                .split(&format!("Event::UserEvent(UserEvent::{arm}"))
+                .nth(1)
+                .unwrap()
+                .split("Event::UserEvent(")
+                .next()
+                .unwrap();
+            assert!(
+                body.contains(policy),
+                "direct event {arm} must use {policy}"
+            );
+            assert!(!body.contains("OutboundEvent::broadcast("));
+        }
+        // Only host monitor/update notifications and pre-project clone navigation
+        // retain direct global construction in the event loop.
+        let compact: String = main.chars().filter(|c| !c.is_whitespace()).collect();
+        let direct_globals: Vec<_> = compact
+            .split("OutboundEvent::broadcast(BackendEvent::")
+            .skip(1)
+            .map(|tail| tail.split('{').next().unwrap())
+            .collect();
+        assert_eq!(direct_globals, ["UpdateProgress", "UpdateReady",]);
+        let health = include_str!("runtime_health_poller.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(health.matches(".dispatch(").count(), 1);
+        assert!(health.contains("BackendEvent::RuntimeHealth { snapshot }"));
+        let usage = include_str!("usage_poller.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(usage.matches(".dispatch(").count(), 1);
+        assert!(usage.contains("OutboundEvent::broadcast("));
+        assert!(usage.contains("BackendEvent::ProviderUsage {"));
+        assert!(usage.contains("sessions: snapshot.sessions"));
+        let runtime = include_str!("app_runtime/runtime_events.rs");
+        for event in ["ProcessLine", "LogEntryAppended"] {
+            assert!(
+                runtime.contains(&format!("BackendEvent::{event}"))
+                    && runtime.contains("project_events_for_open_surface"),
+                "diagnostics must be delivered only to projects with an open consumer: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_query_validates_project_scope() {
+        assert_eq!(
+            super::WebsocketQuery::default().scope().unwrap(),
+            ClientScope::Hub
+        );
+        assert_eq!(
+            super::WebsocketQuery {
+                repo_hash: Some(project_a().to_string())
+            }
+            .scope()
+            .unwrap(),
+            ClientScope::Project(project_a())
+        );
+        for hash in ["", "../project", "0123456789ABCDEF", "0123456789abcde"] {
+            assert_eq!(
+                super::WebsocketQuery {
+                    repo_hash: Some(hash.into())
+                }
+                .scope()
+                .unwrap_err(),
+                axum::http::StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[test]
+    fn client_hub_filters_both_dispatch_paths_by_connection_scope() {
+        let hub = ClientHub::default();
+        let a = hub.register_scoped("a".into(), ClientScope::Project(project_a()));
+        let b = hub.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        let home = hub.register("home".into());
+        let agent = hub.register_pane("agent".into());
+        let queues = [&a, &b, &home, &agent];
+        for (target, expected) in [
+            (crate::DispatchTarget::Project(project_a()), [1, 0, 0, 0]),
+            (crate::DispatchTarget::Hub, [0, 0, 1, 0]),
+            (crate::DispatchTarget::All, [1, 1, 1, 0]),
+            (crate::DispatchTarget::Client("agent".into()), [0, 0, 0, 1]),
+        ] {
+            let outbound = match &target {
+                crate::DispatchTarget::Project(key) => {
+                    OutboundEvent::project(key.clone(), lossless_error("scope"))
+                }
+                _ => crate::OutboundEvent {
+                    target: target.clone(),
+                    event: lossless_error("scope"),
+                    knowledge_wire_metadata: None,
+                    terminal_stream_seq: None,
+                },
+            };
+            hub.dispatch(vec![outbound]);
+            for (queue, count) in queues.iter().zip(expected) {
+                assert_eq!(drain_all(queue).0.len(), count);
+            }
+            hub.dispatch_prepared_active_work(Arc::from("{}"), target);
+            for (queue, count) in queues.iter().zip(expected) {
+                assert_eq!(drain_all(queue).0.len(), count);
+            }
+        }
+        assert_eq!(hub.scope("a"), Some(ClientScope::Project(project_a())));
+        hub.unregister("a");
+        assert_eq!(hub.scope("a"), None);
+        hub.register("a".into());
+        assert_eq!(hub.scope("a"), Some(ClientScope::Hub));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_input_rejects_other_project_without_writing_or_fallback() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "scoped-pane".into(),
+            "sh".into(),
+            vec!["-c".into(), "cat >/dev/null".into()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .unwrap();
+        let handle = pane.shared_pty();
+        state.pty_writers.write().unwrap().insert(
+            "pane-a".into(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: handle.clone(),
+            }),
+        );
+        state.clients.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        state.clients.register("hub".into());
+        for client_id in ["b", "hub", "unknown"] {
+            handle_frontend_message(
+                &state,
+                client_id,
+                &AtomicU64::new(0),
+                FrontendEvent::TerminalInput {
+                    id: "pane-a".into(),
+                    data: "x".into(),
+                },
+                Instant::now(),
+            );
+        }
+        assert!(!handle.has_unsent_user_input());
+        assert!(events.lock().unwrap().is_empty());
+        state
+            .clients
+            .register_scoped("a".into(), ClientScope::Project(project_a()));
+        handle_frontend_message(
+            &state,
+            "a",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "pane-a".into(),
+                data: "x".into(),
+            },
+            Instant::now(),
+        );
+        assert!(handle.has_unsent_user_input());
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_input_rejects_hub_and_unregistered_clients_before_fallback() {
+        let (state, events) = sample_server_state();
+        state.clients.register("hub".to_string());
+        for client_id in ["hub", "unknown"] {
+            handle_frontend_message(
+                &state,
+                client_id,
+                &AtomicU64::new(0),
+                FrontendEvent::TerminalInput {
+                    id: "project-a-pane".into(),
+                    data: "x".into(),
+                },
+                Instant::now(),
+            );
+        }
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
@@ -8884,6 +9742,9 @@ mod tests {
     #[test]
     fn invalidated_fast_path_generation_cancels_resolution_without_fallback_input() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let pane = gwt_terminal::Pane::new(
             "stale-pane".to_string(),
             "sh".to_string(),
@@ -8896,11 +9757,13 @@ mod tests {
         .expect("long-running stale pane");
         let stale_generation = pane.shared_pty();
         stale_generation.invalidate_input_generation();
-        state
-            .pty_writers
-            .write()
-            .expect("writer registry")
-            .insert("tab-1::agent-1".to_string(), stale_generation);
+        state.pty_writers.write().expect("writer registry").insert(
+            "tab-1::agent-1".to_string(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: stale_generation,
+            }),
+        );
 
         handle_frontend_message(
             &state,
@@ -8938,6 +9801,9 @@ mod tests {
     #[test]
     fn handle_frontend_message_fast_path_marks_submit_before_write_and_ignores_navigation() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let pane = gwt_terminal::Pane::new(
             "test-pane".to_string(),
             "sh".to_string(),
@@ -8948,11 +9814,13 @@ mod tests {
             None,
         )
         .expect("long-running test pane");
-        state
-            .pty_writers
-            .write()
-            .expect("writer registry")
-            .insert("tab-1::agent-1".to_string(), pane.shared_pty());
+        state.pty_writers.write().expect("writer registry").insert(
+            "tab-1::agent-1".to_string(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: pane.shared_pty(),
+            }),
+        );
 
         handle_frontend_message(
             &state,
@@ -9001,6 +9869,9 @@ mod tests {
     #[test]
     fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let pane = gwt_terminal::Pane::new(
             "test-pane".to_string(),
             "sh".to_string(),
@@ -9011,11 +9882,13 @@ mod tests {
             None,
         )
         .expect("long-running test pane");
-        state
-            .pty_writers
-            .write()
-            .expect("writer registry")
-            .insert("tab-1::pm-window".to_string(), pane.shared_pty());
+        state.pty_writers.write().expect("writer registry").insert(
+            "tab-1::pm-window".to_string(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: pane.shared_pty(),
+            }),
+        );
 
         handle_frontend_message(
             &state,
@@ -9553,8 +10426,7 @@ mod tests {
 
     fn terminal_output_at(pane: &str, data: &str, seq: u64) -> PreparedOutbound {
         prepare_outbound_event(
-            &OutboundEvent::broadcast(terminal_output(pane, data))
-                .with_terminal_stream_seq(Some(seq)),
+            &transport_all(terminal_output(pane, data)).with_terminal_stream_seq(Some(seq)),
         )
     }
 
@@ -10126,7 +10998,7 @@ mod tests {
         let queue = hub.register("busy-client".to_string());
 
         for index in 0..(LOSSY_HIGH_WATER * 4) {
-            hub.dispatch(vec![OutboundEvent::broadcast(terminal_output(
+            hub.dispatch(vec![transport_all(terminal_output(
                 "tab-1::agent-1",
                 &format!("chunk-{index}"),
             ))]);
@@ -10143,9 +11015,7 @@ mod tests {
             );
         }
 
-        hub.dispatch(vec![OutboundEvent::broadcast(lossless_error(
-            "after-flood",
-        ))]);
+        hub.dispatch(vec![transport_all(lossless_error("after-flood"))]);
         let (payloads, _) = drain_all(&queue);
         assert!(
             payloads
@@ -10163,7 +11033,7 @@ mod tests {
         let _queue = hub.register("stuck-client".to_string());
 
         let events: Vec<OutboundEvent> = (0..=LOSSLESS_HARD_CAP)
-            .map(|index| OutboundEvent::broadcast(lossless_error(&format!("fill-{index}"))))
+            .map(|index| transport_all(lossless_error(&format!("fill-{index}"))))
             .collect();
         hub.dispatch(events);
 
@@ -10196,11 +11066,9 @@ mod tests {
         }));
         let dispatch_hub = hub.clone();
         let dispatch_handle = std::thread::spawn(move || {
-            dispatch_hub.dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::ProjectOpenError {
-                    message: "blocked enqueue".to_string(),
-                },
-            )]);
+            dispatch_hub.dispatch(vec![transport_all(BackendEvent::ProjectOpenError {
+                message: "blocked enqueue".to_string(),
+            })]);
         });
 
         let dispatch_paused = dispatch_paused_rx.recv_timeout(Duration::from_secs(5));
@@ -10283,7 +11151,7 @@ mod tests {
             app_js
                 .text()
                 .expect("app.js body")
-                .contains("function websocketUrl()"),
+                .contains("function websocketUrl(projectKey = activeProjectKey())"),
             "expected embedded server to serve the shared frontend bundle script",
         );
 
@@ -10495,6 +11363,9 @@ mod tests {
         workspace_update_url.set_path("/internal/workspace-update");
         let mut work_terminalization_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
         work_terminalization_url.set_path("/internal/work-terminalization");
+        let mut work_materialization_probe_url =
+            reqwest::Url::parse(&hook.url).expect("agent hook URL");
+        work_materialization_probe_url.set_path("/internal/work-materialization-probe");
         let mut build_abort_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
         build_abort_url.set_path("/internal/build-abort-terminalization");
         let mut execution_binding_probe_url =
@@ -10521,6 +11392,17 @@ mod tests {
                 "branch": "work/observed"
             },
             "terminal_kind": "done"
+        });
+        let materialization_probe_request = serde_json::json!({
+            "schema_version": 1,
+            "claimed_session_id": "session-1",
+            "owner_number": 2359,
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            }
         });
         let binding_probe_request = serde_json::json!({
             "schema_version": gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
@@ -10568,6 +11450,16 @@ mod tests {
             HttpStatusCode::UNAUTHORIZED
         );
 
+        let materialization_probe_response = client
+            .post(work_materialization_probe_url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&materialization_probe_request)
+            .send()
+            .expect("unauthorized Work materialization probe request");
+        assert_eq!(
+            materialization_probe_response.status(),
+            HttpStatusCode::UNAUTHORIZED
+        );
         let build_abort_response = client
             .post(build_abort_url)
             .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
@@ -10592,6 +11484,7 @@ mod tests {
             "/internal/hook-live",
             "/internal/execution-binding-probe",
             "/internal/workspace-update",
+            "/internal/work-materialization-probe",
             "/internal/work-terminalization",
             "/internal/build-abort-terminalization",
         ] {
@@ -10926,6 +11819,281 @@ mod tests {
         assert_eq!(healthz.method, "GET");
         assert_eq!(healthz.status, 200);
 
+        server.shutdown();
+    }
+
+    // Issue #4538 AC-1: per-project URLs serve the shared entrypoint for a
+    // canonical ProjectKey and a deterministic, path-free 404 otherwise.
+    #[test]
+    fn per_project_routes_serve_the_entrypoint_or_a_path_free_not_found() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let client = reqwest::blocking::Client::new();
+        let get = |path: &str| {
+            let response = client
+                .get(format!("{}{path}", server.url()))
+                .send()
+                .expect("request");
+            let status = response.status();
+            (status, response.text().expect("body"))
+        };
+
+        let (hub_status, hub) = get("");
+        let (project_status, project) = get("p/0123456789abcdef");
+        assert_eq!(hub_status, HttpStatusCode::OK);
+        assert_eq!(project_status, HttpStatusCode::OK);
+        assert_eq!(project, hub, "Hub and Project share one route bootstrap");
+
+        let home = std::env::var("HOME").unwrap_or_default();
+        for path in [
+            "p/ZZZ",
+            "p/0123456789ABCDEF",
+            "p/0123456789abcdef0",
+            "p/..%2F..%2Fetc",
+            "p/0123456789abcdef/extra",
+        ] {
+            let (status, body) = get(path);
+            assert_eq!(status, HttpStatusCode::NOT_FOUND, "{path}");
+            assert!(body.contains("Project not found"), "{path}: {body}");
+            assert!(body.contains(r#"href="/""#), "not-found links to the Hub");
+            if !home.is_empty() {
+                assert!(!body.contains(&home), "no filesystem path in {path}");
+            }
+        }
+        assert!(
+            events.lock().expect("events").is_empty(),
+            "routing never reaches the runtime"
+        );
+        server.shutdown();
+    }
+
+    fn post_project_open(
+        server: &EmbeddedServer,
+        authorization: Option<&str>,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (HttpStatusCode, serde_json::Value) {
+        let mut request = reqwest::blocking::Client::new()
+            .post(format!("{}internal/projects/open", server.url()))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body);
+        if let Some(authorization) = authorization {
+            request = request.header(reqwest::header::AUTHORIZATION, authorization);
+        }
+        let response = request.send().expect("control request");
+        let status = response.status();
+        (status, response.json().unwrap_or(serde_json::Value::Null))
+    }
+
+    fn project_open_body(path: &std::path::Path) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "path": path.display().to_string() })).unwrap()
+    }
+
+    fn answer_control_open(
+        events: Arc<Mutex<Vec<UserEvent>>>,
+        answer: impl FnOnce(std::path::PathBuf, crate::app_runtime::ProjectOpenReply) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let request = {
+                    let mut events = events.lock().expect("events");
+                    events
+                        .iter()
+                        .position(|event| matches!(event, UserEvent::ControlProjectOpen { .. }))
+                        .map(|index| events.remove(index))
+                };
+                if let Some(UserEvent::ControlProjectOpen { path, reply }) = request {
+                    answer(path, reply);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            panic!("control open request never reached the runtime");
+        })
+    }
+
+    // Issue #4538 AC-4 / AC-5: the control request is authorized and fully
+    // validated before the runtime sees it; runtime outcomes map to fixed
+    // statuses and nothing speculative happens on failure.
+    #[test]
+    fn project_open_control_rejects_before_dispatching_to_the_runtime() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start_with_control_token(
+            &runtime,
+            proxy,
+            "secret-token",
+            Duration::from_secs(10),
+        )
+        .expect("embedded server");
+        let absolute = std::env::temp_dir().join("gwt-4538-project");
+        let valid = project_open_body(&absolute);
+        let cases: Vec<(Option<&str>, &str, Vec<u8>, HttpStatusCode)> = vec![
+            (
+                None,
+                "application/json",
+                valid.clone(),
+                HttpStatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("Bearer wrong"),
+                "application/json",
+                valid.clone(),
+                HttpStatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "text/plain",
+                valid.clone(),
+                HttpStatusCode::BAD_REQUEST,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                vec![b'{', 0xfe, b'}'],
+                HttpStatusCode::BAD_REQUEST,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                br#"{"path":"/x","unexpected":1}"#.to_vec(),
+                HttpStatusCode::BAD_REQUEST,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                vec![b' '; gwt::project_open_control::PROJECT_OPEN_CONTROL_MAX_BODY_BYTES + 1],
+                HttpStatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                br#"{"path":"relative/path"}"#.to_vec(),
+                HttpStatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ];
+        for (authorization, content_type, body, expected) in cases {
+            let (status, error) = post_project_open(&server, authorization, content_type, body);
+            assert_eq!(status, expected, "{authorization:?} {content_type}");
+            assert!(error["error"].is_string(), "{error}");
+        }
+        assert!(
+            events.lock().expect("events").is_empty(),
+            "no rejected request reaches the runtime"
+        );
+        server.shutdown();
+    }
+
+    #[test]
+    fn project_open_control_answers_with_the_committed_project_key() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start_with_control_token(
+            &runtime,
+            proxy,
+            "secret-token",
+            Duration::from_secs(10),
+        )
+        .expect("embedded server");
+        let target = std::env::temp_dir().join("gwt-4538-project");
+        let expected_path = target.clone();
+        let responder = answer_control_open(events.clone(), move |path, reply| {
+            assert_eq!(path, expected_path, "the exact path is forwarded");
+            reply.send(Ok(ProjectKey::parse("0123456789abcdef").unwrap()));
+        });
+        let (status, body) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&target),
+        );
+        responder.join().expect("responder");
+        assert_eq!(status, HttpStatusCode::OK);
+        assert_eq!(body["project_key"], "0123456789abcdef");
+        assert_eq!(body["url_path"], "/p/0123456789abcdef");
+
+        let responder = answer_control_open(events.clone(), |_, reply| {
+            reply.send(Err(
+                crate::app_runtime::ProjectOpenControlFailure::Rejected(
+                    "not a project".to_string(),
+                ),
+            ));
+        });
+        let (status, body) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&target),
+        );
+        responder.join().expect("responder");
+        assert_eq!(status, HttpStatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "not a project");
+
+        // The runtime dropped the request without answering (event loop gone).
+        let responder = answer_control_open(events, |_, reply| drop(reply));
+        let (status, _) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&target),
+        );
+        responder.join().expect("responder");
+        assert_eq!(status, HttpStatusCode::SERVICE_UNAVAILABLE);
+        server.shutdown();
+    }
+
+    #[test]
+    fn project_open_control_times_out_when_the_runtime_never_answers() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start_with_control_token(
+            &runtime,
+            proxy,
+            "secret-token",
+            Duration::from_millis(300),
+        )
+        .expect("embedded server");
+        let (status, body) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&std::env::temp_dir().join("gwt-4538-project")),
+        );
+        assert_eq!(status, HttpStatusCode::GATEWAY_TIMEOUT);
+        assert!(body["error"].as_str().unwrap().contains("timed out"));
+        assert_eq!(events.lock().expect("events").len(), 1);
+        server.shutdown();
+    }
+
+    #[test]
+    fn project_open_control_refuses_everything_without_a_published_token() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let (status, _) = post_project_open(
+            &server,
+            Some("Bearer "),
+            "application/json",
+            project_open_body(&std::env::temp_dir()),
+        );
+        assert_eq!(status, HttpStatusCode::UNAUTHORIZED);
+        assert!(events.lock().expect("events").is_empty());
         server.shutdown();
     }
 }

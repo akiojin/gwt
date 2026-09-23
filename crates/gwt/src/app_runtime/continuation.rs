@@ -2115,7 +2115,7 @@ fn compensate_genesis_workspace_projection(
         );
     }
 
-    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+    gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
         project_root,
         worktree_path,
         |projection, work_items, _persisted| {
@@ -2385,7 +2385,7 @@ pub(super) fn abort_prepared_execution(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn abort_prepared_execution_and_remove_exact_session<F>(
+pub(super) fn abort_prepared_execution_and_remove_exact_session<F>(
     worktree: &Path,
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     execution: &PendingContinueWorkExecution,
@@ -2423,7 +2423,7 @@ where
     }
 }
 
-fn pending_continue_work_session_identity(
+pub(super) fn pending_continue_work_session_identity(
     pending: &PendingContinueWork,
 ) -> Result<gwt_agent::SessionExecutionIdentity, String> {
     let mut session = gwt_agent::Session::new(
@@ -3567,14 +3567,29 @@ impl AppRuntime {
         }
     }
 
+    fn cache_continue_work_outcome(
+        &mut self,
+        context: &super::ProjectContext,
+        operation_id: String,
+        outcome: CachedContinueWorkOutcome,
+    ) {
+        if let Some(state) = self.project_state_mut(context) {
+            state.continue_work_outcomes.insert(operation_id, outcome);
+        }
+    }
+
     fn continue_work_correlated_outcome_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         operation_id: String,
         outcome: CachedContinueWorkOutcome,
     ) -> Vec<OutboundEvent> {
         let mut clients = vec![client_id.to_string()];
-        if let Some(waiters) = self.continue_work_waiters.remove(&operation_id) {
+        if let Some(waiters) = self
+            .project_state_mut(context)
+            .and_then(|state| state.continue_work_waiters.remove(&operation_id))
+        {
             clients.extend(waiters);
         }
         clients.sort();
@@ -3600,6 +3615,7 @@ impl AppRuntime {
         window_id: &str,
         pending: &PendingContinueWork,
     ) -> Option<Vec<OutboundEvent>> {
+        let context = self.project_context_for_root(&pending.project_root)?;
         if !self.window_lookup.contains_key(window_id)
             || matches!(
                 self.window_status(window_id),
@@ -3669,15 +3685,15 @@ impl AppRuntime {
             error_code: None,
             retryable: false,
         };
-        self.continue_work_outcomes
-            .insert(pending.operation_id.clone(), outcome.clone());
+        self.cache_continue_work_outcome(&context, pending.operation_id.clone(), outcome.clone());
         let mut events = self.continue_work_correlated_outcome_events(
+            &context,
             &pending.client_id,
             pending.operation_id.clone(),
             outcome,
         );
-        events.push(self.workspace_state_broadcast());
-        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
+        events.push(self.workspace_state_broadcast(&context));
+        if let Some(projection) = self.active_work_projection_broadcast_for_tab(&context.tab_id) {
             events.push(projection);
         }
         Some(events)
@@ -4183,15 +4199,17 @@ impl AppRuntime {
 
     fn resolve_continue_work_target(
         &self,
+        context: &super::ProjectContext,
         work_id: &str,
     ) -> Result<ContinueWorkTarget, ContinueWorkFailure> {
-        let tab_id = self.active_tab_id.clone().ok_or_else(|| {
-            ContinueWorkFailure::failed(
-                "no_active_project",
-                "Open a project before continuing Work.",
-                false,
-            )
-        })?;
+        if !self.project_context_is_current(context) {
+            return Err(ContinueWorkFailure::failed(
+                "project_not_found",
+                "The project is no longer available.",
+                true,
+            ));
+        }
+        let tab_id = context.tab_id.clone();
         let tab = self.tab(&tab_id).ok_or_else(|| {
             ContinueWorkFailure::failed(
                 "project_not_found",
@@ -4332,15 +4350,17 @@ impl AppRuntime {
 
     fn resolve_continue_work_target_for_durable_operation(
         &self,
+        context: &super::ProjectContext,
         operation_id: &str,
     ) -> Result<Option<ContinueWorkTarget>, ContinueWorkFailure> {
-        let tab_id = self.active_tab_id.clone().ok_or_else(|| {
-            ContinueWorkFailure::failed(
-                "no_active_project",
-                "Open a project before continuing Work.",
-                false,
-            )
-        })?;
+        if !self.project_context_is_current(context) {
+            return Err(ContinueWorkFailure::failed(
+                "project_not_found",
+                "The project is no longer available.",
+                true,
+            ));
+        }
+        let tab_id = context.tab_id.clone();
         let tab = self.tab(&tab_id).ok_or_else(|| {
             ContinueWorkFailure::failed(
                 "project_not_found",
@@ -4594,6 +4614,7 @@ impl AppRuntime {
 
     fn continue_work_failure_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         operation_id: String,
         work_id: String,
@@ -4606,9 +4627,8 @@ impl AppRuntime {
             error_code: Some(failure.code.to_string()),
             retryable: failure.retryable,
         };
-        self.continue_work_outcomes
-            .insert(operation_id.clone(), outcome.clone());
-        self.continue_work_correlated_outcome_events(client_id, operation_id, outcome)
+        self.cache_continue_work_outcome(context, operation_id.clone(), outcome.clone());
+        self.continue_work_correlated_outcome_events(context, client_id, operation_id, outcome)
     }
 
     fn continue_work_uncached_failure_events(
@@ -4637,7 +4657,11 @@ impl AppRuntime {
         error_code: Option<String>,
         retryable: bool,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(&pending.project_root) else {
+            return Vec::new();
+        };
         self.continue_work_correlated_outcome_events(
+            &context,
             &pending.client_id,
             pending.operation_id.clone(),
             CachedContinueWorkOutcome {
@@ -4829,6 +4853,9 @@ impl AppRuntime {
         target: &ContinueWorkTarget,
         attempt: &DurableContinueWorkAttempt,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context(&target.tab_id) else {
+            return Vec::new();
+        };
         if let Err(failure) =
             self.validate_durable_continue_work_candidate_if_present(target, attempt)
         {
@@ -4969,6 +4996,7 @@ impl AppRuntime {
         }
 
         self.continue_work_failure_events(
+            &context,
             client_id,
             operation_id,
             work_id,
@@ -4989,6 +5017,9 @@ impl AppRuntime {
         target: &ContinueWorkTarget,
         attempt: DurableContinueWorkAttempt,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context(&target.tab_id) else {
+            return Vec::new();
+        };
         if attempt.work_id() != Some(work_id.as_str()) {
             return self.continue_work_uncached_failure_events(
                 client_id,
@@ -5093,7 +5124,7 @@ impl AppRuntime {
                     },
                 );
                 return match cleanup {
-                    Ok(true) => self.continue_work_failure_events(
+                    Ok(true) => self.continue_work_failure_events(&context,
                         client_id,
                         operation_id,
                         work_id,
@@ -5440,17 +5471,18 @@ impl AppRuntime {
             error_code: None,
             retryable: false,
         };
-        self.continue_work_outcomes
-            .insert(operation_id.clone(), cached_outcome.clone());
-        self.pending_continue_work
-            .retain(|_, pending| pending.operation_id != operation_id);
+        self.cache_continue_work_outcome(&context, operation_id.clone(), cached_outcome.clone());
+        self.pending_continue_work.retain(|_, pending| {
+            pending.operation_id != operation_id || pending.project_root != context.project_root
+        });
         events.extend(self.continue_work_correlated_outcome_events(
+            &context,
             client_id,
             operation_id,
             cached_outcome,
         ));
-        events.push(self.workspace_state_broadcast());
-        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
+        events.push(self.workspace_state_broadcast(&context));
+        if let Some(projection) = self.active_work_projection_broadcast_for_tab(&context.tab_id) {
             events.push(projection);
         }
         events
@@ -5458,11 +5490,15 @@ impl AppRuntime {
 
     pub(crate) fn continue_work_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         operation_id: String,
         work_id: String,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
         if !canonical_public_id(&operation_id, 256) || !canonical_public_id(&work_id, 512) {
             return self.continue_work_uncached_failure_events(
                 client_id,
@@ -5475,7 +5511,11 @@ impl AppRuntime {
                 ),
             );
         }
-        if let Some(cached) = self.continue_work_outcomes.get(&operation_id).cloned() {
+        if let Some(cached) = self
+            .project_state(context)
+            .and_then(|state| state.continue_work_outcomes.get(&operation_id))
+            .cloned()
+        {
             if cached.work_id != work_id {
                 return self.continue_work_uncached_failure_events(
                     client_id,
@@ -5488,12 +5528,23 @@ impl AppRuntime {
                     ),
                 );
             }
-            return self.continue_work_correlated_outcome_events(client_id, operation_id, cached);
+            return self.continue_work_correlated_outcome_events(
+                context,
+                client_id,
+                operation_id,
+                cached,
+            );
         }
         if let Some((window_id, pending)) = self
             .pending_continue_work
             .iter()
-            .find(|(_, pending)| pending.operation_id == operation_id)
+            .find(|(window_id, pending)| {
+                pending.operation_id == operation_id
+                    && self
+                        .window_lookup
+                        .get(window_id.as_str())
+                        .is_some_and(|address| address.tab_id == context.tab_id)
+            })
             .map(|(window_id, pending)| (window_id.clone(), pending.clone()))
         {
             if pending.work_id != work_id {
@@ -5509,19 +5560,30 @@ impl AppRuntime {
                 );
             }
             if !pending_execution_is_activated(&pending) {
-                self.continue_work_waiters
-                    .entry(operation_id.clone())
-                    .or_default()
-                    .insert(client_id.to_string());
+                if let Some(state) = self.project_state_mut(context) {
+                    state
+                        .continue_work_waiters
+                        .entry(operation_id.clone())
+                        .or_default()
+                        .insert(client_id.to_string());
+                }
                 return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
             }
         }
         if self
             .pending_continue_work
-            .values()
-            .any(|pending| pending.work_id == work_id && pending.operation_id != operation_id)
+            .iter()
+            .any(|(window_id, pending)| {
+                pending.work_id == work_id
+                    && pending.operation_id != operation_id
+                    && self
+                        .window_lookup
+                        .get(window_id.as_str())
+                        .is_some_and(|address| address.tab_id == context.tab_id)
+            })
         {
             return self.continue_work_failure_events(
+                context,
                 client_id,
                 operation_id,
                 work_id,
@@ -5533,10 +5595,12 @@ impl AppRuntime {
             );
         }
 
-        let target = match self.resolve_continue_work_target(&work_id) {
+        let target = match self.resolve_continue_work_target(context, &work_id) {
             Ok(target) => target,
             Err(failure) if failure.code == "work_state_unavailable" => {
-                match self.resolve_continue_work_target_for_durable_operation(&operation_id) {
+                match self
+                    .resolve_continue_work_target_for_durable_operation(context, &operation_id)
+                {
                     Ok(Some(target)) => target,
                     Ok(None) => {
                         return self.continue_work_uncached_failure_events(
@@ -5557,7 +5621,13 @@ impl AppRuntime {
                 }
             }
             Err(failure) => {
-                return self.continue_work_failure_events(client_id, operation_id, work_id, failure)
+                return self.continue_work_failure_events(
+                    context,
+                    client_id,
+                    operation_id,
+                    work_id,
+                    failure,
+                )
             }
         };
         // Issue #3759: Continue work is the GUI recovery route for a
@@ -5576,6 +5646,7 @@ impl AppRuntime {
             Ok(None) => true,
             Err(error) => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5630,6 +5701,7 @@ impl AppRuntime {
             legacy_disposition,
         ) {
             return self.continue_work_failure_events(
+                context,
                 client_id,
                 operation_id,
                 work_id,
@@ -5645,6 +5717,7 @@ impl AppRuntime {
             Ok(Some(ledger)) => ledger,
             Ok(None) => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5657,6 +5730,7 @@ impl AppRuntime {
             }
             Err(error) => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5670,6 +5744,7 @@ impl AppRuntime {
             Ok(attempt) => attempt,
             Err(failure) => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5694,6 +5769,7 @@ impl AppRuntime {
                     .flatten()
                 else {
                     return self.continue_work_failure_events(
+                        context,
                         client_id,
                         operation_id,
                         work_id,
@@ -5740,7 +5816,8 @@ impl AppRuntime {
                         ) {
                             let mut events = self
                                 .focus_existing_live_work_agent_events(&window_id, Some(bounds));
-                            self.continue_work_outcomes.insert(
+                            self.cache_continue_work_outcome(
+                                context,
                                 operation_id.clone(),
                                 CachedContinueWorkOutcome {
                                     work_id: work_id.clone(),
@@ -5770,7 +5847,7 @@ impl AppRuntime {
                         Some((record.primary_session_id, reason))
                     }
                     ActiveOwnerLiveness::Unknown => {
-                        return self.continue_work_failure_events(
+                        return self.continue_work_failure_events(context,
                             client_id,
                             operation_id,
                             work_id,
@@ -5783,6 +5860,7 @@ impl AppRuntime {
             }
             Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked) => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5796,6 +5874,7 @@ impl AppRuntime {
             Some(gwt::cli::execution_state::ExecutionControlStatus::Completed) => None,
             None => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5820,6 +5899,7 @@ impl AppRuntime {
             }
             _ => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5854,6 +5934,7 @@ impl AppRuntime {
             Ok(Some(binding)) => binding,
             _ => {
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -5920,6 +6001,7 @@ impl AppRuntime {
         };
         if let Err(error) = prepared {
             return self.continue_work_failure_events(
+                context,
                 client_id,
                 operation_id,
                 work_id,
@@ -5969,6 +6051,7 @@ impl AppRuntime {
                     );
                 }
                 return self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -6014,6 +6097,7 @@ impl AppRuntime {
                 );
             }
             return self.continue_work_failure_events(
+                context,
                 client_id,
                 operation_id,
                 work_id,
@@ -6051,6 +6135,7 @@ impl AppRuntime {
                 "Work authority disappeared before continuation dispatch",
             );
             return self.continue_work_failure_events(
+                context,
                 client_id,
                 operation_id,
                 work_id,
@@ -6108,6 +6193,7 @@ impl AppRuntime {
                     );
                 }
                 self.continue_work_failure_events(
+                    context,
                     client_id,
                     operation_id,
                     work_id,
@@ -6139,6 +6225,13 @@ impl AppRuntime {
         detail: &str,
         pane: LaunchPaneDisposition,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self
+            .window_lookup
+            .get(window_id)
+            .and_then(|address| self.project_context(&address.tab_id))
+        else {
+            return Vec::new();
+        };
         let Some(pending) = self.pending_continue_work.get(window_id).cloned() else {
             return Vec::new();
         };
@@ -6219,7 +6312,8 @@ impl AppRuntime {
         };
         self.pending_continue_work.remove(window_id);
         let message = format!("Continue work launch failed before activation: {detail}");
-        self.continue_work_outcomes.insert(
+        self.cache_continue_work_outcome(
+            &context,
             pending.operation_id.clone(),
             CachedContinueWorkOutcome {
                 work_id: pending.work_id.clone(),
@@ -6244,6 +6338,9 @@ impl AppRuntime {
         window_id: &str,
         pending: &PendingFreshExecutionLaunch,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(&pending.project_root) else {
+            return Vec::new();
+        };
         let Some(active_session) = self.active_agent_sessions.get(window_id).cloned() else {
             return Vec::new();
         };
@@ -6274,18 +6371,16 @@ impl AppRuntime {
         // the readiness handoff diagnostic. Retire it here so a reconnecting
         // client is not told a started agent is still unready.
         self.window_details.remove(window_id);
-        let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
+        let mut events = vec![self.workspace_state_broadcast(&context)];
+        if let Some(projection) =
+            self.active_work_projection_broadcast_for_tab(&active_session.tab_id)
+        {
             events.push(projection);
         }
         let composed_status = self
             .window_status(window_id)
             .unwrap_or(WindowProcessStatus::Running);
-        events.extend(Self::status_events(
-            window_id.to_string(),
-            composed_status,
-            None,
-        ));
+        events.extend(self.status_events(window_id.to_string(), composed_status, None));
         // SPEC #3200 FR-052: the spawn path deliberately defers the Issue
         // Monitor completion for a fresh execution launch until this
         // SessionStart finalizer. It owns the same `launch_feedback_context`,
@@ -6442,7 +6537,7 @@ impl AppRuntime {
                 let events = match pane {
                     LaunchPaneDisposition::Teardown => {
                         self.stop_window_runtime_without_session_projection(window_id);
-                        let mut events = Self::status_events(
+                        let mut events = self.status_events(
                             window_id.to_string(),
                             WindowProcessStatus::Error,
                             Some(detail.to_string()),
@@ -6578,16 +6673,26 @@ impl AppRuntime {
     /// waiting. The window keeps its runtime state — only the detail changes,
     /// and it is stored so a client that reconnects later still sees it.
     fn readiness_handoff_events(&mut self, window_id: &str, detail: String) -> Vec<OutboundEvent> {
+        let Some(context) = self
+            .window_lookup
+            .get(window_id)
+            .and_then(|address| self.project_context(&address.tab_id))
+        else {
+            return Vec::new();
+        };
         self.window_details
             .insert(window_id.to_string(), detail.clone());
         let status = self
             .window_status(window_id)
             .unwrap_or(WindowProcessStatus::Running);
-        vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-            id: window_id.to_string(),
-            status,
-            detail: Some(detail),
-        })]
+        vec![OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::TerminalStatus {
+                id: window_id.to_string(),
+                status,
+                detail: Some(detail),
+            },
+        )]
     }
 
     pub(crate) fn finalize_fresh_execution_launch_session_start(
@@ -6791,6 +6896,13 @@ impl AppRuntime {
         window_id: &str,
         readiness_nonce: Option<&str>,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self
+            .window_lookup
+            .get(window_id)
+            .and_then(|address| self.project_context(&address.tab_id))
+        else {
+            return Vec::new();
+        };
         let Some(pending) = self.pending_continue_work.get(window_id).cloned() else {
             return Vec::new();
         };
@@ -7038,7 +7150,8 @@ impl AppRuntime {
         // Issue #3482: see `completed_fresh_execution_launch_events` — a late
         // SessionStart must retire the readiness handoff diagnostic.
         self.window_details.remove(window_id);
-        self.continue_work_outcomes.insert(
+        self.cache_continue_work_outcome(
+            &context,
             pending.operation_id.clone(),
             CachedContinueWorkOutcome {
                 work_id: pending.work_id.clone(),
@@ -7050,8 +7163,8 @@ impl AppRuntime {
         );
         let mut events =
             self.continue_work_pending_outcome_events(&pending, pending.outcome, None, None, false);
-        events.push(self.workspace_state_broadcast());
-        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
+        events.push(self.workspace_state_broadcast(&context));
+        if let Some(projection) = self.active_work_projection_broadcast_for_tab(&context.tab_id) {
             events.push(projection);
         }
         events

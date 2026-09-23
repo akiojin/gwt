@@ -220,10 +220,74 @@ pub(crate) fn locate(worktree: &Path) -> (DaemonAvailability, Option<DaemonEndpo
     }
 }
 
+/// Every live daemon in this project, by pid (Issue #4561).
+///
+/// A holder whose lease records `spawn_host: daemon` launched its commands
+/// from one of these instead of from its own process tree, so this is where a
+/// waiter has to look for the work the lease is protecting. Liveness is the
+/// only filter: the protocol version decides whether a daemon can *accept* a
+/// new workload, not whether it is already running one.
+pub(crate) fn live_daemon_pids(worktree: &Path) -> Vec<u32> {
+    let Ok(scope) = RuntimeScope::from_project_root(worktree, RuntimeTarget::Host) else {
+        return Vec::new();
+    };
+    live_daemon_pids_in(&scope)
+}
+
+/// Every live daemon of the project a verification lease target belongs to
+/// (Issue #4633).
+///
+/// The lease is host-wide, so its holder may belong to another project than
+/// the caller's worktree. The target's first segment is the holder's project
+/// scope hash — the same hash that names the daemon directory — so the
+/// holder's own daemons are found from the lease itself. `None` when the
+/// target does not carry a project scope.
+pub(crate) fn live_daemon_pids_for_lease_target(target: &str) -> Option<Vec<u32>> {
+    let (repo_hash, _) = target.split_once("--verification--")?;
+    let scope = RuntimeScope::new(
+        repo_hash,
+        "lease-target",
+        std::path::PathBuf::new(),
+        RuntimeTarget::Host,
+    )
+    .ok()?;
+    Some(live_daemon_pids_in(&scope))
+}
+
+fn live_daemon_pids_in(scope: &RuntimeScope) -> Vec<u32> {
+    let gwt_home = gwt_core::paths::gwt_home();
+    let Ok(entries) = std::fs::read_dir(scope.daemon_dir(&gwt_home)) else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(payload) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(endpoint) = serde_json::from_slice::<DaemonEndpoint>(&payload) else {
+            continue;
+        };
+        if endpoint.scope.repo_hash != scope.repo_hash
+            || endpoint.scope.target != scope.target
+            || !endpoint.has_live_owner(crate::process::is_process_alive)
+            || pids.contains(&endpoint.pid)
+        {
+            continue;
+        }
+        pids.push(endpoint.pid);
+    }
+    pids
+}
+
 /// Run one verification command on the daemon and wait for it to finish.
-pub(crate) fn run(
+pub(crate) fn run<G>(
     endpoint: &DaemonEndpoint,
     request: &VerificationSpawnRequest,
+    on_started: impl FnOnce(u32) -> G,
 ) -> Result<DelegatedRun, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -242,6 +306,9 @@ pub(crate) fn run(
             }
             other => return Err(format!("expected VerificationAccepted, got: {other:?}")),
         };
+        // Keep the caller's command scope alive until completion or error.
+        // The PID is already part of the existing protocol response.
+        let _command_scope = on_started(accepted.pid);
 
         // No timeout: a verification matrix legitimately runs for an hour, and
         // the daemon already bounds the child by this connection's lifetime.
@@ -284,7 +351,7 @@ mod tests {
     /// it was observed failing for exactly this reason. The placement tests
     /// have to pin the variable rather than inherit it.
     fn without_declared_spawn_host() -> (
-        std::sync::MutexGuard<'static, ()>,
+        gwt_core::test_support::EnvLockGuard,
         gwt_core::test_support::ScopedEnvVar,
     ) {
         let guard = crate::env_test_lock()

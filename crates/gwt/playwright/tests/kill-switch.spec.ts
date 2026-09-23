@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { APP_URL, installEmbeddedRoutes, APP_PROJECT_KEY } from "./_helpers/embedded-frontend";
+import { liveGwtProjectUrl } from "./_helpers/live-gwt";
 
 // SPEC-2356 Anshin Addendum — Phase 1 kill-switch + attention UI.
 //
@@ -13,6 +14,41 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 //     frames the window on click
 test.describe("Anshin Phase 1 kill-switch + attention", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
+
+  test("completed turn input readiness is distinct from model response wait", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installKillSwitchBackend(page);
+    // Issue #4538: the live server serves the Project app at `/p/<key>`.
+    await page.goto(liveBase ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : APP_URL);
+    const win = page.locator('.workspace-window[data-id="agent-1"]');
+    await expect(win).toBeVisible({ timeout: 10_000 });
+    const chip = win.locator(".status-chip");
+    // The running turn includes the quiet interval awaiting a model response;
+    // Stop returns the provider to its prompt without terminating its process.
+    for (const [state, label, description] of [
+      ["running", "Running", "Turn in progress, including waiting for a model response"],
+      ["idle", "Idle", "Turn ended; ready for input"],
+      ["waiting", "Waiting", "Waiting for approval or an external condition"],
+      ["error", "Error", "Error"],
+      ["stopped", "Stopped", "Stopped"],
+    ]) {
+      await page.evaluate((state) => window.__emit({
+        kind: "window_state", window_id: "agent-1", state,
+      }), state);
+      await expect(chip.locator(".status-label")).toHaveText(label);
+      await expect(chip).toHaveAttribute("title", description);
+      await expect(chip).toHaveAttribute("aria-label", label === description
+        ? label
+        : `${label}: ${description}`);
+    }
+    expect(errors).toEqual([]);
+  });
 
   // SPEC #3885 FR-015 (user ruling 2026-09-03) supersedes FR-041's titlebar
   // STOP: stopping an agent is offered only from the Issue row's ⋯ menu
@@ -347,6 +383,7 @@ async function installKillSwitchBackend(page) {
               id: "tab-1",
               title: "Kill Switch Fixture",
               project_root: "/fixture",
+              project_key: "0123456789abcdef",
               kind: "git",
               workspace: {
                 viewport: { x: 0, y: 0, zoom: 1 },

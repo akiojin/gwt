@@ -231,8 +231,10 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         linked_issue_number: None,
         windows_shell: None,
         suppress_execution_control: false,
+        explicit_follow_up: false,
         execution_intent: gwt_agent::ExecutionLaunchIntent::Automatic,
         launch_route: gwt_agent::LaunchRoute::Manual,
+        permission_decision: gwt_agent::PermissionModeDecision::default(),
     };
 
     let mut refreshed_paths = Vec::new();

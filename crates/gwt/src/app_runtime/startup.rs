@@ -1179,21 +1179,21 @@ impl AppRuntime {
                 session.status,
                 gwt_agent::AgentStatus::Idle | gwt_agent::AgentStatus::Stopped
             )
-            && !session.last_exit_code.is_some_and(|code| code != 0)
+            && session.last_exit_code.is_none_or(|code| code == 0)
             && session.last_exit_signal.is_none()
             && !self.runtimes.contains_key(id)
-            && !self
+            && self
                 .window_details
                 .get(id)
-                .is_some_and(|text| !text.trim().is_empty())
-            && !self
+                .is_none_or(|text| text.trim().is_empty())
+            && self
                 .launch_error_terminal_details
                 .get(id)
-                .is_some_and(|text| !text.trim().is_empty())
-            && !window
+                .is_none_or(|text| text.trim().is_empty())
+            && window
                 .dynamic_title_detail
                 .as_ref()
-                .is_some_and(|text| !text.trim().is_empty())
+                .is_none_or(|text| text.trim().is_empty())
             && gwt::cli::execution_state::diagnose_for_projection(
                 &session.worktree_path,
                 Some(&session.id),
@@ -1556,8 +1556,10 @@ impl AppRuntime {
                 crate::app_runtime::pm::PmEnsureTrigger::Automatic,
             ));
         }
-        for window_id in self.pending_pm_launches.keys() {
-            gwt::perf::startup::track_new_terminal(window_id);
+        for state in self.project_states.values() {
+            for window_id in state.pending_pm_launches.keys() {
+                gwt::perf::startup::track_new_terminal(window_id);
+            }
         }
         events
     }
@@ -1793,7 +1795,11 @@ impl AppRuntime {
             Some(session.branch.as_str()),
             &session.worktree_path,
         ));
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = self
+            .project_context(tab_id)
+            .map(|context| self.workspace_state_broadcast(&context))
+            .into_iter()
+            .collect::<Vec<_>>();
         events.append(&mut self.spawn_restored_agent_session(
             tab_id,
             session,
@@ -1887,7 +1893,9 @@ impl AppRuntime {
                                 Some(&combined),
                                 reason,
                             );
-                            events.push(self.workspace_state_broadcast());
+                            if let Some(context) = self.project_context(tab_id) {
+                                events.push(self.workspace_state_broadcast(&context));
+                            }
                         }
                         continue;
                     }
@@ -2138,15 +2146,7 @@ impl AppRuntime {
     fn update_resume_notice_events(&mut self) -> Vec<OutboundEvent> {
         self.pending_update_resume_notice
             .take()
-            .map(|(level, message)| {
-                vec![OutboundEvent::broadcast(
-                    gwt::BackendEvent::IssueMonitorToast {
-                        level,
-                        message,
-                        issue_number: None,
-                    },
-                )]
-            })
+            .map(|(level, message)| vec![OutboundEvent::global_update_notice(level, message)])
             .unwrap_or_default()
     }
 

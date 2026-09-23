@@ -80,6 +80,28 @@ pub enum IssueCommand {
     SpecRepair {
         number: u64,
     },
+    /// Issue #4541: run the deterministic SPEC artifact lint and, unless
+    /// `snapshot` is off, finalize the Intake Inspection Snapshot with the
+    /// lint result and seed the Finding Disposition Ledger from it.
+    SpecLint {
+        number: u64,
+        /// Empty means the default `spec` / `plan` / `tasks` set.
+        sections: Vec<String>,
+        snapshot: bool,
+        directive_epoch: Option<String>,
+        phase_slice: Option<String>,
+    },
+    /// Issue #4541 AC-6: decide whether intake may declare the owner complete
+    /// — GitHub-entity readback per section plus a disposition for every
+    /// critical finding.
+    SpecInspectionComplete {
+        number: u64,
+    },
+    /// Issue #4392 AC-3: rewrite an Issue's cache entry together with its
+    /// validation receipt, the state no other operation could restore.
+    CacheRepair {
+        number: u64,
+    },
     SpecRename {
         number: u64,
         title: String,

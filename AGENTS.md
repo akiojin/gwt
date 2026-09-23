@@ -72,6 +72,30 @@
 4. 今回の要求が求めていない境界をテストしない。緑のテストを更なる抽象化の口実にしない。
 5. テスト追加前に自問する: このテストはどの受け入れ要件を検証するか / 無ければ既存テストはこのリグレッションを見逃すか / 実装より単純か。テストコードが実装より長く複雑なら過剰設計として扱う。
 
+### テスト衛生ゲート（test hygiene gate）
+
+テストの flake を事後に 1 件ずつ直す運用は機能しなかったため（SPEC #4551）、
+既知の flake 機序は `crates/gwt-core/tests/test_hygiene_test.rs` が
+**書いた時点で落とす**。テストコードを書く前に次を守る:
+
+1. **壁時計に依存しない。** テストコード中の `Duration::from_millis(N)` は
+   `N >= 100` のみ許可する。`from_micros` / `from_nanos` は不可。
+   飽和した CI runner のスケジューリング遅延は数十 ms 単位で出るため、
+   100ms 未満の実時間で順序を assert する前提は原理的に固定できない。
+   deadline を「待つ」のではなく「経過を観測してから応答する」形にする。
+2. **process 全体の状態は施錠して触る。** テスト関数内の `env::set_var` /
+   `env::remove_var` / `env::set_current_dir` は、同じ関数内で
+   `gwt_core::test_support::env_lock()` / `env_test_lock()` を取得するか、
+   `ScopedEnvVar` / `ScopedGwtHome` で包む。
+3. **正当な例外は理由付きで宣言する。** 違反行またはその直前行に
+   `// test-hygiene: allow-short-duration <理由>` もしくは
+   `// test-hygiene: allow-unlocked-env <理由>` を置く。理由本文が空なら通らない。
+4. **`test_hygiene_baseline.txt` に行を足さない。** これは SPEC #4551 導入時点の
+   既存違反を据え置いた一覧で、縮む一方の台帳である。違反を直したら該当行を削除する
+   （残っているとゲートが落ちる）。一括整理の後は
+   `cargo test -p gwt-core --test test_hygiene_test -- --ignored regenerate_the_baseline`
+   で再生成できる。
+
 ### モデル配分（Model Allocation）
 
 - 要求の明確化・Plan のレビュー: より強いモデルを使う。
@@ -277,7 +301,9 @@
 - 初回の `cargo build -p gwt --bin gwtd` は lease 不要の bootstrap step であり heavy な検証コマンドではない。順序は build → `verify.plan` → `verify.run` とし、lease を保持・待機したまま build しない（正本は `coordination_guidance.rs` の「gwtd bootstrap order」、生成 gwt-coordination / gwt-verify / gwt-search SKILL.md と同一文面）
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`
-- テスト: `cargo test -p gwt-core -p gwt --all-features`
+- テスト: `cargo nextest run -p gwt-core -p gwt --all-features --test-threads=1`（`cargo install cargo-nextest --locked --version 0.9.146` で導入）。`.config/nextest.toml` により単一テストを120秒で失敗させ、後続を継続する。doctest は `cargo test --workspace --all-features --doc`。同一process内の競合調査・nightly flake検出には従来の `cargo test` を使うが、per-test timeoutは適用されない。
+- このrepoの canonical matrix は上記nextestコマンドを明示 `verify.plan` に登録する。汎用deriveはcargo testを導出するため、そのまま流用しない。test-gh-guard付きbinaryの復旧用に `cargo build -p gwt --bin gwtd` を最後に含める。
+- カバレッジ: `node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features` の後に `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"` と `... 80 --scope-exclude "crates/(gwt-core|gwt)/"`（CI の coverage.yml と同一）。`cargo llvm-cov` を直接呼ぶと、raw profile の切り詰めがテスト失敗と区別できない FAIL になる（Issue #4628）
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
 - GUI のユーザー確認が必要な実装では、ビルド済みなら `target/debug/gwt`、未ビルドなら `cargo run -p gwt --bin gwt` で起動し、標準出力の `gwt browser URL: http://127.0.0.1:<port>/` をユーザーに共有する。共有前に `curl -fsS -I <URL>` などで HTTP 200 を確認し、ユーザーが同じ URL で手動確認できる状態にする。

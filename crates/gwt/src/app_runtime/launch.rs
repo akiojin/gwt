@@ -981,6 +981,178 @@ fn install_authenticated_active_resume_binding(
     Ok(())
 }
 
+/// SPEC #3248 FR-239 / AS-216: drop the producing owner when this launch opens
+/// a *delivered* one — closed, with its whole source state already in the
+/// configured base.
+///
+/// Dropping it here is what makes Inspection zero-mutation: no Execution
+/// Control Record, no Work, no action obligation, and therefore no
+/// verification, commit, push, or PR is ever demanded of a session that has
+/// nothing to deliver. That demand is the bug — an already shipped Issue could
+/// only settle as terminally Blocked, because no new PR existed to point at.
+///
+/// The GitHub Issue is never touched either way. Only an explicit follow-up
+/// intent produces against a delivered owner (FR-240); ambiguity about the
+/// source surface falls to Inspection rather than to producing work.
+fn producing_owner_after_delivery_check(
+    worktree: &Path,
+    producing_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
+    explicit_follow_up: bool,
+) -> Option<gwt::cli::execution_state::ExecutionOwnerKey> {
+    producing_owner.filter(|owner| {
+        let disposition = gwt::cli::delivered_owner::classify_launch_for_owner(
+            worktree,
+            worktree,
+            owner.number,
+            if explicit_follow_up {
+                gwt::cli::delivered_owner::FollowUpIntent::ExplicitFollowUp
+            } else {
+                gwt::cli::delivered_owner::FollowUpIntent::Default
+            },
+        );
+        if disposition.is_inspection() {
+            tracing::info!(
+                owner = owner.number,
+                disposition = disposition.describe(),
+                "delivered owner opens for inspection; no execution was materialized"
+            );
+        }
+        !disposition.is_inspection()
+    })
+}
+
+#[cfg(test)]
+mod delivered_owner_launch_tests {
+    use super::*;
+
+    fn git(worktree: &Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A worktree whose `origin/develop` already contains its whole source
+    /// state — the shape a delivered owner leaves behind.
+    fn delivered_worktree(worktree: &Path) {
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/t/delivered-owner.git",
+            ],
+            vec!["commit", "--allow-empty", "-qm", "init"],
+            vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            vec!["checkout", "-q", "-b", "work/issue-3290"],
+        ] {
+            git(worktree, &args);
+        }
+    }
+
+    fn cache_owner_state(worktree: &Path, number: u64, state: &str) {
+        let root = gwt::issue_cache::issue_cache_root_for_repo_path(worktree)
+            .expect("the fixture repo resolves a repo hash");
+        let dir = root.join(number.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({"number": number, "state": state, "labels": []}).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn owner(number: u64) -> gwt::cli::execution_state::ExecutionOwnerKey {
+        gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number,
+        }
+    }
+
+    // AC-1 / AS-216: opening a closed, zero-diff owner drops the producing
+    // owner, which is what keeps the launch zero-mutation.
+    #[test]
+    fn a_delivered_owner_opens_for_inspection() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        delivered_worktree(dir.path());
+        cache_owner_state(dir.path(), 3290, "closed");
+
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(3290)), false),
+            None,
+            "a delivered owner materializes no execution"
+        );
+    }
+
+    // AC-1 / AS-217: an explicit follow-up is the one intent that produces
+    // against a delivered owner.
+    #[test]
+    fn an_explicit_follow_up_produces_against_a_delivered_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        delivered_worktree(dir.path());
+        cache_owner_state(dir.path(), 3290, "closed");
+
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(3290)), true),
+            Some(owner(3290))
+        );
+    }
+
+    // AC-1: an open owner, and a closed owner that still holds source work,
+    // both keep the unchanged producing path. This is the regression that
+    // matters most — the check must not quietly stop ordinary launches.
+    #[test]
+    fn open_owners_and_undelivered_source_keep_producing() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        delivered_worktree(dir.path());
+        cache_owner_state(dir.path(), 4545, "open");
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(4545)), false),
+            Some(owner(4545)),
+            "an open owner is never delivered"
+        );
+
+        // An owner the cache does not know is not evidence of delivery.
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(9999)), false),
+            Some(owner(9999))
+        );
+
+        cache_owner_state(dir.path(), 3290, "closed");
+        std::fs::create_dir_all(dir.path().join("crates/gwt/src")).unwrap();
+        std::fs::write(dir.path().join("crates/gwt/src/new.rs"), "pub fn x() {}\n").unwrap();
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(3290)), false),
+            Some(owner(3290)),
+            "a closed owner with undelivered source still produces"
+        );
+    }
+
+    // AC-1: a launch with no linked owner is untouched by the check.
+    #[test]
+    fn an_unlinked_launch_is_unaffected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), None, false),
+            None
+        );
+    }
+}
+
 struct FinalizedAgentCapabilityLaunch<'a> {
     issuer: Option<&'a AgentCapabilityIssuer>,
     sessions_dir: &'a Path,
@@ -996,6 +1168,11 @@ struct FinalizedAgentCapabilityLaunch<'a> {
     execution_entrypoint: &'a str,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     container_runtime: Option<&'a gwt_docker::detect::ResolvedContainerRuntime>,
+    /// Issue #4543 AC-5: the Permission Mode Decision this launch was
+    /// materialized under, recorded onto the Execution Control Record this
+    /// install creates. `None` for the test installs that stand a record up
+    /// without a `LaunchConfig`.
+    permission_decision: Option<&'a gwt_agent::PermissionModeDecision>,
 }
 
 impl FinalizedAgentCapabilityLaunch<'_> {
@@ -1024,6 +1201,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             execution_entrypoint,
             runtime_target,
             container_runtime,
+            permission_decision,
         } = self;
         if let Some(binding) = prepared_continuation {
             if producing_owner.is_some() {
@@ -1598,13 +1776,14 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             None,
             None,
         )?;
-        gwt::cli::execution_state::materialize_at_launch(
+        gwt::cli::execution_state::materialize_at_launch_with_permission_decision(
             worktree,
             owner.kind,
             owner.number,
             &session.id,
             execution_entrypoint,
             false,
+            permission_decision,
         )
         .map_err(|error| error.to_string())?;
         gwt::cli::execution_state::ensure_generation_ledger(
@@ -3430,13 +3609,14 @@ impl AppRuntime {
         wizard_id: String,
         candidates: Vec<String>,
     ) -> Vec<OutboundEvent> {
-        if let Some(session) = self.launch_wizard.as_mut() {
-            if session.wizard_id == wizard_id {
-                session.wizard.open_branch_candidates = candidates;
-                return vec![self.launch_wizard_state_outbound()];
-            }
-        }
-        Vec::new()
+        let Some(context) = self.project_context_for_wizard(&wizard_id) else {
+            return Vec::new();
+        };
+        let Some(session) = self.launch_wizard_for_mut(&context) else {
+            return Vec::new();
+        };
+        session.wizard.open_branch_candidates = candidates;
+        vec![self.launch_wizard_state_outbound(&context)]
     }
 
     pub(crate) fn live_sessions_for_branch(
@@ -3491,6 +3671,114 @@ impl AppRuntime {
             .collect()
     }
 
+    /// Release only the exact durable launch carried by a stale worker. The
+    /// reopened project's window and pending-operation maps are never touched.
+    pub(crate) fn cleanup_stale_project_completion(&self, event: &UserEvent) {
+        let completion = match event {
+            UserEvent::LaunchComplete { result, .. } => match result.as_ref() {
+                Ok(completion) => completion,
+                Err(_) => return, // The worker already rolls back failed preparation.
+            },
+            UserEvent::ProjectCompletion { event, .. } => {
+                self.cleanup_stale_project_completion(event);
+                return;
+            }
+            _ => return,
+        };
+        let (launch, session_id, branch, _, worktree, agent, issue, _, _, mode, prepared, runtime) =
+            completion;
+        self.revoke_unbound_agent_capability(
+            launch
+                .env
+                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                .map(String::as_str),
+        );
+        let cleanup = (|| -> Result<(), String> {
+            if let Some(handshake) = &runtime.active_launch_handshake {
+                if !gwt::cli::execution_state::finish_active_session_launch_handshake(
+                    &self.sessions_dir,
+                    handshake,
+                )
+                .map_err(|error| error.to_string())?
+                {
+                    return Ok(()); // A newer launch owns this Session's handshake.
+                }
+            }
+            if self
+                .active_agent_sessions
+                .values()
+                .any(|active| &active.session_id == session_id)
+            {
+                return Ok(());
+            }
+            let Some(expected) = runtime.expected_execution_identity.as_ref() else {
+                return Ok(());
+            };
+            let current =
+                gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+                    .ok()
+                    .and_then(|session| {
+                        gwt_agent::SessionExecutionIdentity::from_session(&session).ok()
+                    })
+                    .flatten();
+            if current.as_ref() != Some(expected) {
+                return Ok(());
+            }
+            let reason = "project generation closed before launch PTY handoff";
+            if let Some(pending) = self.pending_continue_work.values().find(|pending| {
+                pending.binding.session_id == *session_id
+                    && super::continuation::pending_continue_work_session_identity(pending)
+                        .as_ref()
+                        .ok()
+                        == Some(expected)
+            }) {
+                super::continuation::abort_prepared_execution_and_remove_exact_session(
+                    &pending.worktree_path,
+                    pending.owner,
+                    &pending.execution,
+                    reason,
+                    &self.sessions_dir,
+                    expected,
+                    || Ok(()),
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            if launch
+                .env
+                .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+            {
+                return rollback_materialized_fresh_execution_launch(
+                    &self.sessions_dir,
+                    session_id,
+                    worktree,
+                    reason,
+                    agent,
+                );
+            }
+            if *prepared || *mode == gwt_agent::SessionMode::Normal {
+                let genesis = materialized_genesis_launch_from_session(
+                    &self.sessions_dir,
+                    session_id,
+                    worktree,
+                    expected.project_state_root.as_deref().unwrap_or(worktree),
+                    branch,
+                    *issue,
+                    agent,
+                )?;
+                terminalize_materialized_genesis_launch(
+                    &self.sessions_dir,
+                    genesis.as_ref(),
+                    reason,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = cleanup {
+            tracing::warn!(%session_id, %error, "stale project launch retained exact recovery evidence");
+        }
+    }
+
     pub(crate) fn handle_launch_complete(
         &mut self,
         window_id: String,
@@ -3521,7 +3809,10 @@ impl AppRuntime {
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
         // SPEC-3431 FR-001: a PM launch registers its session once it exists.
         // Removed unconditionally so a failed launch leaves no stale marker.
-        let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
+        let pending_pm_project_root = self
+            .project_states
+            .values_mut()
+            .find_map(|state| state.pending_pm_launches.remove(&window_id));
         // Issue #4145 AC-1: `inflight_launches` already stamps the spawn
         // request, so the pane-create route is the span from that stamp to this
         // completion — worktree resolution, Docker probing, runner health
@@ -4113,20 +4404,24 @@ impl AppRuntime {
                         }
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
-                        let mut events = vec![self.workspace_state_broadcast()];
+                        let mut events = self
+                            .project_context(&tab_id)
+                            .map(|context| self.workspace_state_broadcast(&context))
+                            .into_iter()
+                            .collect::<Vec<_>>();
                         if pm_launch_registered {
-                            events.extend(self.pm_status_broadcast_events());
+                            if let Some(context) = self.project_context(&tab_id) {
+                                events.extend(self.pm_status_broadcast_events(&context));
+                            }
                         }
-                        if workspace_projection_updated
-                            && self.active_tab_id.as_deref() == Some(tab_id.as_str())
-                        {
+                        if workspace_projection_updated {
                             // Issue #4406 AC-5: acknowledge the launch from the
                             // cached rail and rebuild off the event loop.
                             // Rebuilding here made `LaunchComplete` the second
                             // heaviest dispatch of the 20 minute window
                             // (436,894ms over 71 launches).
                             if let Some(event) =
-                                self.cached_active_work_projection_broadcast_for_active_tab()
+                                self.cached_active_work_projection_broadcast_for_tab(&tab_id)
                             {
                                 events.push(event);
                             }
@@ -4139,12 +4434,15 @@ impl AppRuntime {
                         let composed_status = self
                             .window_status(&window_id)
                             .unwrap_or(WindowProcessStatus::Running);
-                        events.extend(Self::status_events(
-                            window_id.clone(),
-                            composed_status,
-                            is_fresh_execution_launch
-                                .then(|| "Waiting for authenticated SessionStart...".to_string()),
-                        ));
+                        events.extend(
+                            self.status_events(
+                                window_id.clone(),
+                                composed_status,
+                                is_fresh_execution_launch.then(|| {
+                                    "Waiting for authenticated SessionStart...".to_string()
+                                }),
+                            ),
+                        );
                         let autonomous_handoff_delivery =
                             launch_feedback_context.as_ref().and_then(|context| {
                                 context
@@ -4370,11 +4668,15 @@ impl AppRuntime {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         self.launch_error_terminal_details.remove(&window_id);
-                        let mut events = vec![self.workspace_state_broadcast()];
+                        let mut events = self
+                            .project_context(&address.tab_id)
+                            .map(|context| self.workspace_state_broadcast(&context))
+                            .into_iter()
+                            .collect::<Vec<_>>();
                         let composed_status = self
                             .window_status(&window_id)
                             .unwrap_or(WindowProcessStatus::Running);
-                        events.extend(Self::status_events(window_id, composed_status, None));
+                        events.extend(self.status_events(window_id, composed_status, None));
                         events
                     }
                     Err(error) => {
@@ -4398,7 +4700,7 @@ impl AppRuntime {
         let window_id = combined_window_id(tab_id, raw_id);
         if !preset.requires_process() {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
-            return Self::status_events(window_id, WindowProcessStatus::Running, None);
+            return self.status_events(window_id, WindowProcessStatus::Running, None);
         }
         // Issue #4145 AC-1: a process pane is created synchronously here —
         // shell resolution, env, resource policy and the PTY spawn all happen
@@ -4419,7 +4721,7 @@ impl AppRuntime {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
                     .insert(window_id.clone(), detail.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
         };
 
@@ -4430,7 +4732,7 @@ impl AppRuntime {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
                     .insert(window_id.clone(), detail.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
         };
 
@@ -4439,14 +4741,14 @@ impl AppRuntime {
             Err(error) => {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
             }
         }
         .with_project_root(&project_root);
         let (mut env, remove_env) = effective_env.into_parts();
 
         // SPEC-2809 (revised) — Surface the launch pipeline for AI
-        // agent presets (Codex / Claude / Gemini / Agent) so the Console
+        // agent presets (Codex / Claude / Agent) so the Console
         // window's `agent` tab shows what gwt is doing leading up to the
         // PTY spawn. Plain `Shell` panes do not emit launch banners
         // because nothing distinguishes them from arbitrary terminals.
@@ -4464,7 +4766,7 @@ impl AppRuntime {
                 Err(error) => {
                     self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                     self.window_details.insert(window_id.clone(), error.clone());
-                    return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+                    return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
                 }
             }
         } else {
@@ -4509,7 +4811,7 @@ impl AppRuntime {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
                     .insert(window_id.clone(), detail.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
             if let Some(tab) = self.tab_mut(tab_id) {
                 let _ = tab
@@ -4552,7 +4854,7 @@ impl AppRuntime {
                 let composed_status = self
                     .window_status(&window_id)
                     .unwrap_or(WindowProcessStatus::Running);
-                Self::status_events(window_id, composed_status, None)
+                self.status_events(window_id, composed_status, None)
             }
             Err(error) => {
                 if let Some(id) = stage_id {
@@ -4563,7 +4865,7 @@ impl AppRuntime {
                 }
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
-                Self::status_events(window_id, WindowProcessStatus::Error, Some(error))
+                self.status_events(window_id, WindowProcessStatus::Error, Some(error))
             }
         }
     }
@@ -5014,7 +5316,12 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let events = self.focus_window_events(window_id, bounds);
         if events.is_empty() {
-            vec![self.workspace_state_broadcast()]
+            self.window_lookup
+                .get(window_id)
+                .and_then(|address| self.project_context(&address.tab_id))
+                .map(|context| self.workspace_state_broadcast(&context))
+                .into_iter()
+                .collect()
         } else {
             events
         }
@@ -5026,6 +5333,9 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
+        let context = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
             placement,
             workspace_resume_context,
@@ -5192,15 +5502,15 @@ impl AppRuntime {
                 .insert(key, (window_id.clone(), std::time::Instant::now()));
         }
 
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = vec![self.workspace_state_broadcast(&context)];
         let composed_status = self.window_status(&window_id).unwrap_or(initial_status);
-        events.extend(Self::status_events(
+        events.extend(self.status_events(
             window_id.clone(),
             composed_status,
             Some("Launching...".to_string()),
         ));
 
-        let proxy = self.proxy.clone();
+        let proxy = self.proxy.for_project(context);
         let sessions_dir = self.sessions_dir.clone();
         let agent_capability_issuer = self.agent_capability_issuer.clone();
         if let Some(context) = workspace_resume_context {
@@ -5420,6 +5730,15 @@ impl AppRuntime {
                     )
                 })?;
             phases.mark("managed_assets");
+            // Issue #4283 AC-5: a split of the phase above, not a sibling of
+            // it. Materialization takes one lock per worktree and a short one
+            // per repository; when this is most of `managed_assets` the fleet
+            // is queueing rather than the work getting slower.
+            gwt::perf::record_route_phase(
+                gwt::perf::PerfRoute::PaneCreate,
+                "asset_lock_wait",
+                managed_assets.lock_wait,
+            );
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,
                 &worktree_path,
@@ -5700,6 +6019,32 @@ impl AppRuntime {
                     })
                 })
                 .flatten();
+            let producing_owner = producing_owner_after_delivery_check(
+                &worktree_path,
+                producing_owner,
+                config.explicit_follow_up,
+            );
+            // Issue #4543 AC-5: cloned out of `config` so the record write can
+            // borrow it while the install still holds `&mut config.env_vars`.
+            let permission_decision = config.permission_decision.clone();
+            // Issue #4544 AC-1: refuse a producing-work launch whose permission
+            // mode cannot be honored, before anything observable exists.
+            //
+            // This sits above the capability install on purpose: everything the
+            // AC names — the prompt the agent would be handed, the agent window,
+            // the Execution Control Record that pass evidence hangs off, and any
+            // PR or verification the session could then attempt — is downstream
+            // of `install_with_prepared_claim`. Blocking here means an
+            // unsupported launch produces a gate decision and nothing else.
+            if let Some(owner) = producing_owner {
+                gwt::cli::permission_readiness::block_launch_if_unready(
+                    &worktree_path,
+                    owner.kind.as_str(),
+                    owner.number,
+                    &session_id,
+                    &permission_decision,
+                )?;
+            }
             let capability_install = FinalizedAgentCapabilityLaunch {
                 issuer: agent_capability_issuer.as_ref(),
                 sessions_dir: &sessions_dir,
@@ -5714,6 +6059,7 @@ impl AppRuntime {
                 container_runtime: docker_launch_binding
                     .as_ref()
                     .map(DockerLaunchBinding::runtime),
+                permission_decision: Some(&permission_decision),
             }
             .install_with_prepared_claim(
                 &mut config.env_vars,
@@ -5843,6 +6189,12 @@ impl AppRuntime {
             ))
         })();
 
+        // Issue #4283 AC-5: everything above runs on this launch thread, while
+        // `route:pane.create` is closed by the GUI event loop when it handles
+        // the dispatch below. `route:pane.create` minus this sample is that
+        // hand-back, which no mark on this thread can reach.
+        phases.mark_total("launch_thread");
+
         // Drop (= final drain + join) BEFORE dispatching the result so the
         // tail of the mirrored docker output lands in the terminal ahead of
         // the success transition or the `[gwt] Launch failed` summary —
@@ -5882,8 +6234,10 @@ impl AppRuntime {
                         runtime_context,
                     ),
                     |proxy, project_index_root| {
-                        crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
-                            .spawn(proxy, project_index_root);
+                        crate::project_index_bootstrap::request_project_index_refresh(
+                            &proxy,
+                            project_index_root,
+                        );
                     },
                 );
             }
@@ -5920,7 +6274,12 @@ impl AppRuntime {
     ///   worktree deletion remains an independent vetted cleanup operation. A
     ///   `done` close records a Done event and `discarded` records a Discard
     ///   event. Re-closing an already-closed Work is a noop.
-    pub(crate) fn close_work(&mut self, work_id: &str, close_kind: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn close_work(
+        &mut self,
+        context: &super::ProjectContext,
+        work_id: &str,
+        close_kind: &str,
+    ) -> Vec<OutboundEvent> {
         let work_id = work_id.trim();
         if work_id.is_empty() {
             return Vec::new();
@@ -5938,10 +6297,10 @@ impl AppRuntime {
             }
         };
 
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            tracing::warn!(work_id = %work_id, "Work close has no active project tab");
+        if !self.project_context_is_current(context) {
             return Vec::new();
-        };
+        }
+        let project_root = context.project_root.clone();
 
         // The session id of an agent-session Work is encoded in the Work id
         // (`work-session-<session_id>`). A live agent owns the Work when any
@@ -6003,7 +6362,7 @@ impl AppRuntime {
 
         // Broadcast the refreshed projection so the Work leaves the active
         // surface for every connected client.
-        self.active_work_projection_broadcast_for_active_tab()
+        self.active_work_projection_broadcast_for_tab(&context.tab_id)
             .into_iter()
             .collect()
     }
@@ -6905,6 +7264,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("install exact bound launch authority");
@@ -6961,6 +7321,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("materialize predecessor generation");
@@ -7033,6 +7394,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7067,6 +7429,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a concurrent launch must start beside a live holder");
@@ -7128,6 +7491,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect("prepare another concurrent candidate");
@@ -7219,6 +7583,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7254,6 +7619,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a concurrent launch must start beside a live holder");
@@ -7360,6 +7726,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7395,6 +7762,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must supersede an unreachable holder");
@@ -7456,6 +7824,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7517,6 +7886,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must self-heal a lost pointer instead of failing before the PTY");
@@ -7586,6 +7956,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7648,6 +8019,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must start a successor over a Completed generation");
@@ -7743,6 +8115,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7798,6 +8171,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must supersede a holder with exact terminal proof");
@@ -7904,6 +8278,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("install rebound continuation authority");
@@ -7955,6 +8330,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("materialize predecessor generation");
@@ -8081,6 +8457,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a SuccessorCreated resume must install its already-active authority");
@@ -8135,6 +8512,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("a stale rebound binding must fail closed");
@@ -8181,6 +8559,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("rebound continuation must not mint genesis authority");
@@ -8217,6 +8596,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut predecessor_env)
         .expect("materialize predecessor generation");
@@ -8297,6 +8677,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "resume",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("issue exact Prepared capability");
@@ -8359,6 +8740,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect("materialize predecessor generation");
@@ -8441,6 +8823,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "resume",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("capability issuance must reject a same-id replacement");
@@ -8535,6 +8918,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #1974",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("prepare a fresh lifetime from the generation-less Blocked predecessor");
@@ -8625,6 +9009,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect("materialize predecessor generation");
@@ -8677,6 +9062,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("explicit fresh launch must prepare a new lifetime from legacy Blocked");
@@ -8742,6 +9128,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
             container_runtime: Some(&runtime),
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("invalid Docker hook endpoint must fail");
@@ -8798,6 +9185,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("producing launch requires its Host capability issuer");
@@ -8858,6 +9246,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("closing Host issuer must refuse producing launch");
@@ -8915,6 +9304,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env);
         std::fs::remove_dir(&session_path).expect("remove injected Session path blocker");
@@ -8979,6 +9369,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect_err("unreconciled Active authority must reject a blind retry");

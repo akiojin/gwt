@@ -9,6 +9,7 @@ pub mod distribute;
 pub mod git_exclude;
 pub mod git_hooks;
 pub mod hooks;
+pub mod inspection_guidance;
 pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
@@ -940,6 +941,13 @@ mod tests {
                 "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
+                // SPEC #3248 FR-243 (Issue #4545 AC-4): the guidance has to
+                // separate a trusted No Action from both terminal outcomes,
+                // or a delivered owner keeps getting filed as Blocked.
+                "execution.no_action",
+                "delivered owner",
+                "neither Completed nor Blocked",
+                "A delivered owner is not a blocker",
             ] {
                 assert!(
                     execute_skill.contains(required),

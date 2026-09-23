@@ -11,7 +11,7 @@ use crate::{
     daemon_runtime::RuntimeHookEvent,
     file_content::{Encoding, Newline},
     file_tree::FileTreeEntry,
-    issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView},
+    issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView, MonitorNotificationTransition},
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
@@ -326,6 +326,11 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    ProjectAggregateAck {
+        revision: u64,
+        visible: bool,
+        focused: bool,
+    },
     /// Explicit, client-scoped Recovery Center refresh. Durable identities are
     /// discovered from the active project and never accepted from the client.
     LoadRecoveryCenter {
@@ -395,11 +400,14 @@ pub enum FrontendEvent {
     ReopenRecentProject {
         path: String,
     },
-    SelectProjectTab {
-        tab_id: String,
+    PreviewCloseProject {
+        project_key: String,
     },
-    CloseProjectTab {
-        tab_id: String,
+    ConfirmCloseProject {
+        token: CloseProjectToken,
+    },
+    CancelCloseProject {
+        token: CloseProjectToken,
     },
     CreateWindow {
         preset: WindowPreset,
@@ -620,6 +628,8 @@ pub enum FrontendEvent {
     },
     LoadLogs {
         id: String,
+        #[serde(default)]
+        scope: LogScopeSelection,
     },
     /// SPEC-2809 Phase F2 — Console window mounts and asks the backend for
     /// the current `ProcessConsoleHub` ring buffer so historical lines
@@ -1259,17 +1269,37 @@ pub struct WorkspaceView {
     pub work_items: Vec<WorkspaceHistoryView>,
 }
 
+/// Select the owning project's log or process-wide diagnostics.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogScopeSelection {
+    #[default]
+    Project,
+    Global,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectTabView {
     pub id: String,
+    /// Canonical repository identity used to bind a browser connection.
+    pub project_key: String,
     pub title: String,
     pub project_root: String,
+    pub project_scope: String,
     pub kind: ProjectKind,
     pub workspace: WorkspaceView,
     #[serde(default)]
     pub running_agent_count: u32,
     #[serde(default)]
     pub running_agents: Vec<RunningAgentSummary>,
+}
+
+/// Client-bound, single-use authority for one incarnation of an open Project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseProjectToken {
+    pub project_key: String,
+    pub generation: u64,
+    pub nonce: String,
 }
 
 // SPEC-2013 FR-011: project tab close 確認 modal が表示する running agent の
@@ -1287,6 +1317,10 @@ pub struct RecentProjectView {
     pub path: String,
     pub title: String,
     pub kind: ProjectKind,
+    /// Issue #4538 AC-3: path-free `/p/<key>` link target. `None` until the
+    /// runtime has resolved the repository identity off the tao thread.
+    #[serde(default)]
+    pub project_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1323,6 +1357,22 @@ pub struct ProfileSnapshotView {
     #[serde(default)]
     pub os_env: Vec<ProfileEnvEntryView>,
     pub merged_preview: Vec<ProfileEnvEntryView>,
+}
+
+/// Lightweight project catalog. No workspace, terminal, or agent payloads.
+#[derive(Debug, Clone, Serialize)]
+pub struct HubProjectView {
+    pub id: String,
+    pub project_key: String,
+    pub title: String,
+    pub kind: ProjectKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HubStateView {
+    pub app_version: String,
+    pub projects: Vec<HubProjectView>,
+    pub recent_projects: Vec<RecentProjectView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1795,9 +1845,42 @@ pub enum UpdateAutoApplyPhase {
     Applying,
 }
 
+/// Server-owned project attention summary. It describes runtime state, not Work completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAgentAggregate {
+    pub running_count: usize,
+    pub block_count: usize,
+    pub error_count: usize,
+    pub unread: bool,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
+    CloseProjectPreview {
+        token: CloseProjectToken,
+        title: String,
+        running_agents: Vec<RunningAgentSummary>,
+    },
+    CloseProjectError {
+        project_key: String,
+        message: String,
+    },
+    ProjectClosed {
+        project_key: String,
+    },
+    ProjectAgentAggregate {
+        aggregate: ProjectAgentAggregate,
+    },
+    HubState {
+        hub: HubStateView,
+    },
+    /// Issue #4538 AC-1: a `/p/<hash>` client whose hash resolves to neither
+    /// an open Project nor a Recent entry. Carries the hash only, never a path.
+    ProjectNotFound {
+        project_key: String,
+    },
     /// SPEC-2359 US-66 (T-527): canonical Rust name is Work-based; the wire
     /// `kind` stays `workspace_state` as the legacy adapter spelling so no
     /// frontend/client breaks.
@@ -1946,6 +2029,8 @@ pub enum BackendEvent {
         message: String,
     },
     IssueMonitorToast {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notification_transition: Option<MonitorNotificationTransition>,
         level: String,
         message: String,
         issue_number: Option<u64>,
@@ -2630,6 +2715,31 @@ impl BackendEventPolicy {
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     BackendEventPolicy::new(
+        "close_project_preview",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "close_project_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "project_closed",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_agent_aggregate",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "hub_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "workspace_state",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3150,6 +3260,12 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
+            BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
+            BackendEvent::CloseProjectError { .. } => "close_project_error",
+            BackendEvent::ProjectClosed { .. } => "project_closed",
+            BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
+            BackendEvent::HubState { .. } => "hub_state",
+            BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
@@ -3326,10 +3442,86 @@ mod tests {
         backend_event_policy, AttachmentProgressPhase, BackendEvent,
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
-        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
+        IndexSearchScope, IndexSearchTarget, LogScopeSelection, ProfileEntryView,
+        ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
         RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn close_project_protocol_rejects_legacy_tab_operations_and_preserves_delivery() {
+        for kind in ["select_project_tab", "close_project_tab"] {
+            assert!(
+                serde_json::from_value::<super::FrontendEvent>(serde_json::json!({
+                    "kind": kind, "tab_id": "a"
+                }))
+                .is_err()
+            );
+        }
+        let token = super::CloseProjectToken {
+            project_key: "a".into(),
+            generation: 7,
+            nonce: "opaque".into(),
+        };
+        for event in [
+            super::BackendEvent::CloseProjectPreview {
+                token,
+                title: "A".into(),
+                running_agents: Vec::new(),
+            },
+            super::BackendEvent::CloseProjectError {
+                project_key: "a".into(),
+                message: "expired".into(),
+            },
+            super::BackendEvent::ProjectClosed {
+                project_key: "a".into(),
+            },
+        ] {
+            assert_eq!(event.delivery_policy().kind, event.event_kind());
+            assert!(!event.delivery_policy().coalesces_on_frontend());
+        }
+    }
+
+    #[test]
+    fn issue_monitor_control_errors_never_fall_back_to_global_delivery() {
+        let runtime = include_str!("app_runtime/mod.rs");
+        let errors = runtime
+            .split("fn issue_monitor_control_error_events(")
+            .nth(1)
+            .unwrap()
+            .split("fn quick_register_issue_events(")
+            .next()
+            .unwrap();
+        assert!(
+            !errors.contains("OutboundEvent::broadcast("),
+            "project control errors must never reach unrelated clients"
+        );
+        assert!(
+            errors.contains("project_context_for_root"),
+            "control errors must resolve their explicit project owner"
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_uses_project_context_instead_of_active_tab() {
+        let runtime = include_str!("app_runtime/mod.rs");
+        let update = runtime
+            .split("pub(crate) fn update_staged_events(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn register_agent_backend_connection_probe(")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "active_project_root(",
+            "active_auto_update_drain(",
+            "self.update_auto_apply",
+        ] {
+            assert!(
+                !update.contains(forbidden),
+                "update lifecycle must use each project's context, found {forbidden}"
+            );
+        }
+    }
 
     #[test]
     fn knowledge_search_results_retains_the_baseline_rust_shape() {
@@ -5259,6 +5451,85 @@ mod tests {
             value["entries"][0]["detail"],
             Value::String("tail retry".to_string())
         );
+    }
+
+    #[test]
+    fn load_logs_scope_selection_defaults_legacy_payload_to_project() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_logs",
+            "id": "logs-legacy"
+        }))
+        .expect("deserialize legacy load_logs payload");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::LoadLogs {
+                id,
+                scope: LogScopeSelection::Project,
+            } if id == "logs-legacy"
+        ));
+    }
+
+    #[test]
+    fn load_logs_scope_selection_accepts_global_snake_case() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_logs",
+            "id": "logs-global",
+            "scope": "global"
+        }))
+        .expect("deserialize global load_logs payload");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::LoadLogs {
+                id,
+                scope: LogScopeSelection::Global,
+            } if id == "logs-global"
+        ));
+    }
+
+    #[test]
+    fn log_entries_serializes_optional_project_scope_compatibly() {
+        let mut scoped = LogEvent::new(LogLevel::Info, "gwt::project", "project entry");
+        scoped.project_scope = Some("0123456789abcdef".to_string());
+        let scoped_value = serde_json::to_value(BackendEvent::LogEntries {
+            id: "logs-project".to_string(),
+            entries: vec![scoped],
+        })
+        .expect("serialize scoped log_entries");
+        assert_eq!(
+            scoped_value["entries"][0]["project_scope"],
+            Value::String("0123456789abcdef".to_string())
+        );
+
+        let legacy_value = serde_json::to_value(BackendEvent::LogEntries {
+            id: "logs-legacy".to_string(),
+            entries: vec![LogEvent::new(
+                LogLevel::Info,
+                "gwt::legacy",
+                "unscoped entry",
+            )],
+        })
+        .expect("serialize unscoped log_entries");
+        assert!(legacy_value["entries"][0].get("project_scope").is_none());
+    }
+
+    #[test]
+    fn log_entry_appended_serializes_optional_project_scope_compatibly() {
+        let mut scoped = LogEvent::new(LogLevel::Warn, "gwt::project", "live project entry");
+        scoped.project_scope = Some("fedcba9876543210".to_string());
+        let scoped_value = serde_json::to_value(BackendEvent::LogEntryAppended { entry: scoped })
+            .expect("serialize scoped log_entry_appended");
+        assert_eq!(
+            scoped_value["entry"]["project_scope"],
+            Value::String("fedcba9876543210".to_string())
+        );
+
+        let legacy_value = serde_json::to_value(BackendEvent::LogEntryAppended {
+            entry: LogEvent::new(LogLevel::Info, "gwt::legacy", "unscoped live entry"),
+        })
+        .expect("serialize unscoped log_entry_appended");
+        assert!(legacy_value["entry"].get("project_scope").is_none());
     }
 
     #[test]

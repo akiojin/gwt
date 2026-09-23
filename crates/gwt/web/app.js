@@ -1,7 +1,7 @@
+import { createCloseProjectController } from "/close-project-confirm-modal.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
-      // project-tabs-renderer / close-project-tab-confirm-modal view imports
       // moved to /project-shell-surface.js with the project shell chrome.
       import {
         initOperatorShell,
@@ -11,6 +11,12 @@
         applyRuntimeHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
+      import {
+        parseFrontendRoute,
+        projectUrlPath,
+        renderRouteNotFound,
+        routeWebSocketUrl,
+      } from "/frontend-route.js";
       import { createStartupMetrics } from "/startup-metrics.js";
       import {
         TITLEBAR_DOCK_HIT_HEIGHT,
@@ -58,6 +64,7 @@
       import {
         createAgentCompletionNotifier,
         createAgentAttentionToaster,
+        notificationForTransition,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
@@ -82,6 +89,7 @@
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createToastStack } from "/toast-host.js";
+      import { createProjectPageMetadata } from "/project-page-metadata.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
@@ -170,6 +178,7 @@
         presetSupportsWaitingStatus,
         selectNextAgentFocusWindowId,
         windowRuntimeLabel,
+        windowRuntimeDescription,
       } from "/window-runtime-state.js";
       import {
         applyWindowWorktreeData,
@@ -412,7 +421,6 @@
           mutatedBy: Object.freeze([
             "renderAppState",
             "renderWorkspace",
-            "renderProjectTabs",
             "renderProjectPicker",
             "renderProjectOnboarding",
             "renderWindowList",
@@ -434,6 +442,16 @@
       let inputTraceSeq = 0;
 
       let socket = null;
+      let hubSocket = null;
+      let hubReconnectTimer = null;
+      const pendingHubMessages = [];
+      let socketProjectKey = null;
+      // Issue #4538 AC-2: this browser tab is bound to exactly one Project by
+      // its `/p/<repo-hash>` URL. The Project WebSocket scope comes from the
+      // route, never from in-page selection, so reconnects rebind the same
+      // Project and workspace actions never change the URL.
+      const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      let routeProjectMissing = false;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
       // (replaying stale terminal_output / workspace_state). `generation`
@@ -484,7 +502,7 @@
         active_tab_id: null,
         recent_projects: [],
       };
-      let renderedProjectTabsKey = "";
+      let hubCatalog = null;
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /workspace-render-sync.js) so a failed sync
       // never leaves a committed key behind.
@@ -495,23 +513,6 @@
       // availability) and maximizedViewportSyncFrame moved to
       // /project-shell-surface.js.
 
-      function projectTabsRenderKey(state) {
-        const tabs = state?.tabs || [];
-        const parts = [];
-        appendRenderKeyPart(parts, "active_tab_id");
-        appendRenderKeyPart(parts, state?.active_tab_id || null);
-        appendRenderKeyPart(parts, "tabs");
-        appendRenderKeyPart(parts, tabs.length);
-        for (const tab of tabs) {
-          appendRenderKeyPart(parts, "id");
-          appendRenderKeyPart(parts, tab?.id || "");
-          appendRenderKeyPart(parts, "title");
-          appendRenderKeyPart(parts, tab?.title || "");
-          appendRenderKeyPart(parts, "project_root");
-          appendRenderKeyPart(parts, tab?.project_root || "");
-        }
-        return parts.join("");
-      }
 
       // SPEC-3064 Phase 3 (E7): recentProjectsRenderKey moved to
       // /project-shell-surface.js with the recent-projects renderers.
@@ -811,10 +812,6 @@
         // instead of passing the (not yet initialized) consts directly.
         renderIndexPanelInAllSettingsWindows: () =>
           renderIndexPanelInAllSettingsWindows(),
-        // SPEC-3064 Phase 3 (E7): refreshProjectTabStateCues lives in the
-        // project shell surface, whose factory also runs after this one —
-        // close over the binding for the same reason.
-        refreshProjectTabStateCues: () => refreshProjectTabStateCues(),
         requestFullIndexStatusRefresh: () => requestFullIndexStatusRefresh(),
       });
 
@@ -915,11 +912,29 @@
       }
 
       function send(message) {
-        if (socket && socket.readyState === WebSocket.OPEN) {
+        if (isHubNavigationMessage(message.kind)) {
+          if (hubSocket?.readyState === WebSocket.OPEN) {
+            hubSocket.send(JSON.stringify(message));
+            return "sent";
+          }
+          pendingHubMessages.push(message);
+          return "queued";
+        }
+        if ((message.kind === "terminal_input" || message.kind === "pane_send_input")
+          && !activeProjectKey()) {
+          return "unavailable";
+        }
+        if (socket && socket.readyState === WebSocket.OPEN
+          && socketProjectKey === activeProjectKey()) {
           socket.send(JSON.stringify(message));
           return "sent";
         }
-        pendingMessages.push(message);
+        // Acknowledgements describe this connection's observed revision; a
+        // restarted server may reuse revision numbers. Never queue them.
+        if (message.kind === "project_aggregate_ack") return "unavailable";
+        // Retain the origin across reconnects: switching projects must never
+        // replay input or actions through another project's connection.
+        pendingMessages.push({ projectKey: activeProjectKey(), message });
         return "queued";
       }
 
@@ -928,7 +943,8 @@
         // generic reconnect queue. Keep the OPEN check and direct send in one
         // synchronous operation; a close race is reported as false.
         const activeSocket = socket;
-        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN
+          || socketProjectKey !== activeProjectKey()) {
           return false;
         }
         try {
@@ -1025,8 +1041,7 @@
         if (!session || line.length === 0) {
           return false;
         }
-        send({ kind: "pane_send_input", session_id: session, text: line });
-        return true;
+        return send({ kind: "pane_send_input", session_id: session, text: line }) !== "unavailable";
       }
 
       function sendFocusedPaneInput(text) {
@@ -1213,13 +1228,24 @@
         }
       }
 
-      function websocketUrl() {
-        const url = new URL(window.location.href);
-        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-        url.pathname = "/ws";
-        url.search = "";
-        url.hash = "";
-        return url.toString();
+      function activeProjectKey() {
+        if (routeProjectKey) return routeProjectKey;
+        const key = activeProjectTab()?.project_key;
+        return typeof key === "string" && /^[0-9a-f]{16}$/.test(key) ? key : null;
+      }
+
+      function websocketUrl(projectKey = activeProjectKey()) {
+        return routeWebSocketUrl(window.location.href, projectKey);
+      }
+
+      // Issue #4538 AC-1: the route's hash resolved to no open or Recent
+      // Project. Show the path-free not-found view and stop reconnecting.
+      function showProjectRouteNotFound() {
+        routeProjectMissing = true;
+        for (const connection of [socket, hubSocket]) {
+          try { connection?.close(); } catch { /* already closed */ }
+        }
+        renderRouteNotFound(document);
       }
 
       function handleSocketOpen() {
@@ -1245,11 +1271,18 @@
             });
           },
         });
+        projectPageMetadata.resetConnection();
         setConnectionState(true);
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
-        while (pendingMessages.length > 0) {
-          socket.send(JSON.stringify(pendingMessages.shift()));
+        for (let index = 0; index < pendingMessages.length;) {
+          const pending = pendingMessages[index];
+          if (pending.projectKey !== socketProjectKey) {
+            index += 1;
+            continue;
+          }
+          pendingMessages.splice(index, 1);
+          socket.send(JSON.stringify(pending.message));
         }
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
@@ -1260,6 +1293,19 @@
       function handleSocketMessage(event) {
         if (!socketReceiveDispatcher) {
           return;
+        }
+        // Browser chrome must update while background tabs suspend rAF.
+        // installSocketEventHandlers already fences the active connection;
+        // keep this control event synchronous and all render traffic deferred.
+        if (typeof event.data === "string" && /"kind"\s*:\s*"project_agent_aggregate"/.test(event.data)) {
+          let payload;
+          try { payload = JSON.parse(event.data); } catch { /* dispatcher reports malformed frames */ }
+          if (payload?.kind === "project_agent_aggregate") {
+            try { receive(payload); } catch (error) {
+              renderDegradationBanner.report({ source: "receive:project_agent_aggregate", error });
+            }
+            return;
+          }
         }
         socketReceiveDispatcher.handle(event);
       }
@@ -1314,6 +1360,7 @@
       }
 
       function handleSocketClose() {
+        closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
         setConnectionState(false);
@@ -1324,18 +1371,85 @@
       }
 
       function installSocketEventHandlers(activeSocket) {
-        activeSocket.addEventListener("open", handleSocketOpen);
-        activeSocket.addEventListener("message", handleSocketMessage);
-        activeSocket.addEventListener("close", handleSocketClose);
+        for (const [kind, handler] of [
+          ["open", handleSocketOpen],
+          ["message", handleSocketMessage],
+          ["close", handleSocketClose],
+        ]) {
+          activeSocket.addEventListener(kind, (event) => {
+            if (socket === activeSocket) handler(event);
+          });
+        }
+      }
+
+      function isHubNavigationMessage(kind) {
+        return ["open_project_dialog", "reopen_recent_project",
+          "select_clone_project_parent", "github_repository_search", "clone_project_start"].includes(kind);
+      }
+
+      function isHubNavigationResult(kind) {
+        return ["hub_state", "project_open_error",
+          "clone_project_parent_selected", "github_repository_search_results",
+          "github_repository_search_error", "clone_project_progress", "clone_project_done",
+          "clone_project_error"].includes(kind);
+      }
+
+      function connectHubSocket() {
+        if (routeProjectMissing) return;
+        if (hubSocket && hubSocket.readyState <= WebSocket.OPEN) return;
+        if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+        hubReconnectTimer = null;
+        const connection = new WebSocket(websocketUrl(null));
+        hubSocket = connection;
+        const dispatcher = createSocketReceiveDispatcher({
+          receive: (event) => {
+            if (hubSocket === connection
+              && (socket === connection || isHubNavigationResult(event.kind))) receive(event);
+          },
+          onTrace: traceUi,
+          shouldTrace: uiTraceWiring.isTracing,
+          onReceiveError: (error, eventKind) => renderDegradationBanner.report({
+            source: `receive:${eventKind || "unknown"}`, error,
+          }),
+        });
+        connection.addEventListener("open", () => {
+          if (hubSocket !== connection) return;
+          if (socket === connection) handleSocketOpen();
+          else connection.send(JSON.stringify({ kind: "frontend_ready" }));
+          for (const message of pendingHubMessages.splice(0)) connection.send(JSON.stringify(message));
+        });
+        connection.addEventListener("message", (event) => {
+          if (hubSocket === connection) dispatcher.handle(event);
+        });
+        connection.addEventListener("close", () => {
+          if (hubSocket !== connection) return;
+          if (socket === connection) handleSocketClose();
+          if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+          hubReconnectTimer = window.setTimeout(connectSocket, 1000);
+        });
       }
 
       function connectSocket() {
-        if (socket && socket.readyState <= WebSocket.OPEN) {
+        if (routeProjectMissing) return;
+        const projectKey = activeProjectKey();
+        connectHubSocket();
+        if (socket && socket.readyState <= WebSocket.OPEN
+          && socketProjectKey === projectKey) {
           return;
         }
-        socket = new WebSocket(websocketUrl());
+        agentCompletionNotifier.reset();
+        const previousSocket = socket;
+        socket = null;
+        socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher = null;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        if (previousSocket && previousSocket !== hubSocket && socketProjectKey) previousSocket.close();
+        socketProjectKey = projectKey;
+        socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;
         setConnectionState(false);
-        installSocketEventHandlers(socket);
+        if (projectKey) installSocketEventHandlers(socket);
+        else if (socket.readyState === WebSocket.OPEN) handleSocketOpen();
       }
 
       function emptyWorkspace() {
@@ -1351,7 +1465,6 @@
         }
         return (
           appState.tabs.find((tab) => tab.id === appState.active_tab_id) ||
-          appState.tabs[0] ||
           null
         );
       }
@@ -1565,12 +1678,6 @@
         "antigravity-cli": "Antigravity CLI",
         "antigravity cli": "Antigravity CLI",
         antigravity_cli: "Antigravity CLI",
-        gemini: "Gemini CLI (legacy)",
-        "gemini-cli": "Gemini CLI (legacy)",
-        "gemini cli": "Gemini CLI (legacy)",
-        "gemini cli legacy": "Gemini CLI (legacy)",
-        "gemini-cli-legacy": "Gemini CLI (legacy)",
-        gemini_cli: "Gemini CLI (legacy)",
         opencode: "OpenCode",
         "open-code": "OpenCode",
         open_code: "OpenCode",
@@ -1737,24 +1844,42 @@
       // moved to /project-shell-surface.js; renderAppState below calls the
       // imported renderers.
 
+      function mergeProjectCatalog(state) {
+        if (!hubCatalog) return state;
+        const tabs = hubCatalog.projects.map((project) => ({
+          ...project,
+          ...state.tabs?.find((tab) => tab.id === project.id),
+        }));
+        const routeTabId = tabs.find((tab) => tab.project_key === routeProjectKey)?.id ?? null;
+        return {
+          ...state,
+          tabs,
+          active_tab_id: tabs.some((tab) => tab.id === state.active_tab_id)
+            ? state.active_tab_id : routeTabId,
+          recent_projects: hubCatalog.recent_projects || [],
+        };
+      }
+
+      function receiveHubState(hub) {
+        hubCatalog = hub;
+        renderAppState({ ...appState, app_version: hub.app_version });
+      }
+
       function renderAppState(nextState) {
         dismissOperatorBriefing();
         return traceMeasure(
           UI_TRACE_EVENT.renderAppState,
           { tabs: Array.isArray(nextState?.tabs) ? nextState.tabs.length : 0 },
           () => {
-            appState = nextState || {
+            appState = mergeProjectCatalog(nextState || {
               app_version: "",
               tabs: [],
               active_tab_id: null,
               recent_projects: [],
-            };
+            });
+            // Rebind before rendering can emit requests for the new project.
+            connectSocket();
             setVersionState(appState.app_version, versionState.latest);
-            const nextProjectTabsKey = projectTabsRenderKey(appState);
-            if (renderedProjectTabsKey !== nextProjectTabsKey) {
-              renderedProjectTabsKey = nextProjectTabsKey;
-              renderProjectTabs();
-            }
             const tab = activeProjectTab();
             renderProjectPicker(tab);
             updateActionAvailability(tab);
@@ -2514,6 +2639,28 @@
         frameWindow(nextWindowId);
       }
 
+      const closeProjectController = createCloseProjectController({
+        document, send,
+        onClosed: (projectKey) => {
+          if (projectKey !== routeProjectKey) return;
+          routeProjectMissing = true;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+          const oldSocket = socket;
+          const oldHubSocket = hubSocket;
+          socket = null;
+          hubSocket = null;
+          pendingMessages.length = 0;
+          pendingHubMessages.length = 0;
+          oldSocket?.close();
+          oldHubSocket?.close();
+          window.location.assign("/");
+        },
+        onError: (message) => window.alert(message),
+      });
+      document.body.append(closeProjectController.modal);
+      document.getElementById("close-project-button")?.addEventListener("click", () => closeProjectController.request(routeProjectKey));
+
       function shouldHandleFocusShortcut(event) {
         if (event.repeat) {
           return false;
@@ -2527,7 +2674,8 @@
         if (
           modal.classList.contains("open") ||
           wizardModal.classList.contains("open") ||
-          cloneProjectModal?.classList.contains("open")
+          cloneProjectModal?.classList.contains("open") ||
+          document.querySelector(".modal-backdrop.open")
         ) {
           return false;
         }
@@ -3535,7 +3683,7 @@
             if (!element) {
               renderWindowList();
               refreshWindowTabTelemetry(windowData);
-              refreshProjectTabStateCues();
+
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -3566,10 +3714,14 @@
             recomputeOperatorTelemetry();
             refreshWindowTabTelemetry(windowData);
             label.textContent = windowRuntimeLabel(runtimeState);
+            const runtimeDescription = windowRuntimeDescription(runtimeState, windowData?.preset);
             const statusTitle = effectiveDetail
-              ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
-              : windowRuntimeLabel(runtimeState);
+              ? `${runtimeDescription}: ${effectiveDetail}`
+              : runtimeDescription;
             chip.title = statusTitle;
+            chip.setAttribute("aria-label", statusTitle === windowRuntimeLabel(runtimeState)
+              ? statusTitle
+              : `${windowRuntimeLabel(runtimeState)}: ${statusTitle}`);
             label.title = statusTitle;
             if (overlay) {
               const messageEl = overlay.querySelector(".overlay-message");
@@ -3593,7 +3745,7 @@
               }
             }
             renderWindowList();
-            refreshProjectTabStateCues();
+
           },
         );
       }
@@ -4700,6 +4852,7 @@
         activeProjectTab,
         visibleBounds,
         getActiveWorkProjection: () => activeWorkProjection,
+        projectWindowContextById,
       });
 
       recoveryCenterController = createRecoveryCenterController({
@@ -4728,7 +4881,8 @@
           return send(message);
         }
         const activeSocket = socket;
-        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN
+          || socketProjectKey !== activeProjectKey()) {
           return "unavailable";
         }
         try {
@@ -4774,8 +4928,8 @@
           timeoutMs: 12_000,
           onActivate: () => {
             if (notice.projectId) {
-              frontendUnits.projectWorkspaceShell.clearProjectUnread(notice.projectId);
-              send({ kind: "select_project_tab", tab_id: notice.projectId });
+              const project = appState.tabs.find((tab) => tab.id === notice.projectId);
+              if (project?.project_key && project.project_key !== routeProjectKey) window.open(projectUrlPath(project.project_key), "_blank", "noopener");
             }
           },
         };
@@ -5042,11 +5196,6 @@
         requestWindowList,
         renderWindowList,
         toggleWindowList,
-        renderProjectTabs,
-        refreshProjectTabStateCues,
-        markProjectUnread,
-        clearProjectUnread,
-        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -5913,23 +6062,19 @@
         renderWindowList,
         windowDisplayTitle,
         toggleWindowList,
-        renderProjectTabs,
-        markProjectUnread,
-        clearProjectUnread,
-        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
         renderAppState,
       });
 
+      const projectPageMetadata = createProjectPageMetadata({ document, window, send });
+
       const agentCompletionNotifier = createAgentCompletionNotifier({
         document,
         window,
         showToast: showAgentCompletionToast,
-        onProjectUnread: (projectId) => {
-          projectWorkspaceShell.markProjectUnread(projectId);
-        },
+        onProjectUnread: () => {},
       });
 
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
@@ -6050,13 +6195,27 @@
       });
 
       function receive(event) {
+        if (closeProjectController.receive(event)) return;
         if (shouldDropLiveEventForTestMode(event)) {
           return;
         }
         switch (event.kind) {
+          case "hub_state": {
+            receiveHubState(event.hub);
+            break;
+          }
+          case "project_not_found": {
+            if (event.project_key === routeProjectKey) showProjectRouteNotFound();
+            break;
+          }
+          case "project_agent_aggregate": {
+            projectPageMetadata.update(event.aggregate);
+            break;
+          }
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            projectPageMetadata.setProjectName(activeProjectTab()?.title);
             // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
             // floating CTA in step with every canvas render.
             updatePmLauncher(activeWorkspace());
@@ -6164,21 +6323,27 @@
           case "issue_monitor_launch_failed":
             scheduleIssueMonitorProjectionRefresh();
             break;
-          case "issue_monitor_toast":
+          case "issue_monitor_toast": {
+            const monitorNotice = notificationForTransition({
+              source: "monitor",
+              state: event?.notification_transition,
+              issueNumber: event?.issue_number,
+            });
             // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
             // into the notification center history FIRST and independently of
             // any display path, so events that fire while no Issue window is
             // open (or while the operator is away) are never lost. The backend
-            // IssueMonitorToast carries {level, message, issue_number} only —
-            // the title is a literal.
+            // The optional typed transition changes wording on this one surface;
+            // inbox snapshots never generate a second notification.
             notificationCenter.record({
               kind: "issue-monitor",
               level: event?.level,
-              title: "Issue Monitor",
+              title: monitorNotice?.title || "Issue Monitor",
               message: event?.message,
               issueNumber: event?.issue_number,
             });
             break;
+          }
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
             break;

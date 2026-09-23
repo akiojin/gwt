@@ -163,6 +163,10 @@ impl AgentBridgeFailure {
         }
     }
 
+    pub(crate) fn reason(&self) -> AgentBridgeFailureReason {
+        self.reason
+    }
+
     pub(crate) fn is_exact_workspace_ensure_required(&self) -> bool {
         self.exact_workspace_ensure_required
             && self.reason == AgentBridgeFailureReason::WorkspaceEnsureRequired
@@ -233,6 +237,22 @@ impl std::fmt::Display for AgentBridgeFailure {
         }
         Ok(())
     }
+}
+
+/// HTTP statuses that mean "not now", not "no" (Issue #3696).
+///
+/// These are the shapes a Host emits while it is restarting, rate limiting, or
+/// behind a proxy that timed out. The caller's own retry clears them, so they
+/// must classify as transport rather than as a refusal the owner has to settle.
+fn is_retryable_bridge_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::BAD_GATEWAY
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            | reqwest::StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 fn read_bounded_agent_bridge_error_body(
@@ -436,6 +456,29 @@ impl std::fmt::Debug for HookForwardTarget {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum AgentBridgeRequestError {
+    OperationUnavailable,
+    NotSent(String),
+    Rejected(crate::AgentWorkspaceUpdateError),
+    Unknown(String),
+}
+
+impl std::fmt::Display for AgentBridgeRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OperationUnavailable => formatter
+                .write_str("Host Work materialization probe endpoint is unavailable (HTTP 404)"),
+            Self::NotSent(message) | Self::Unknown(message) => formatter.write_str(message),
+            Self::Rejected(error) => write!(
+                formatter,
+                "Host bridge rejected the request ({:?}); no local fallback was attempted",
+                error.code
+            ),
+        }
+    }
+}
+
 impl HookForwardTarget {
     pub fn from_env() -> Option<Self> {
         let url = std::env::var(GWT_HOOK_FORWARD_URL_ENV).ok()?;
@@ -529,11 +572,31 @@ impl HookForwardTarget {
         Ok(url)
     }
 
+    pub fn work_materialization_probe_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/work-materialization-probe");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
     pub fn blocked_build_abort_terminalization_url(&self) -> Result<Url, String> {
         self.validate()?;
         let mut url =
             Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
         url.set_path("/internal/build-abort-terminalization");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
+    pub fn host_contract_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/host-contract");
         url.set_query(None);
         url.set_fragment(None);
         Ok(url)
@@ -550,11 +613,84 @@ impl HookForwardTarget {
     }
 }
 
+/// Ask the running Host which execution contract it serves (SPEC #3248
+/// FR-242).
+///
+/// Unlike every other bridge call this one never returns an error: the point
+/// of a preflight is to *classify* the failure, and collapsing "no Host",
+/// "no route" and "wrong Host" into one `Err(String)` would throw away exactly
+/// the distinctions AS-220 has to act on. The verdict is
+/// [`crate::cli::host_contract::classify`]'s job.
+#[must_use]
+pub fn fetch_host_contract_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentHostContractRequest,
+) -> crate::cli::host_contract::HostContractProbe {
+    use crate::cli::host_contract::HostContractProbe;
+
+    let url = match target.host_contract_url() {
+        Ok(url) => url,
+        Err(detail) => return HostContractProbe::Unreachable { detail },
+    };
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return HostContractProbe::Unreachable {
+                detail: format!("the Host contract client could not be built: {error}"),
+            }
+        }
+    };
+    let response = match client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return HostContractProbe::Unreachable {
+                detail: format!("the Host contract route could not be reached: {error}"),
+            }
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let detail = read_bounded_agent_bridge_error_body(
+            response,
+            "the Host contract rejection body could not be read safely",
+        )
+        .map(|body| {
+            serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body)
+                .ok()
+                .and_then(|error| error.reason.or(error.diagnostic_reason))
+                .unwrap_or_else(|| format!("http_status={}", status.as_u16()))
+        })
+        .unwrap_or_else(|error| error.to_string());
+        return HostContractProbe::Rejected {
+            http_status: status.as_u16(),
+            detail,
+        };
+    }
+    match response.json::<crate::AgentHostContractReceipt>() {
+        Ok(receipt) => HostContractProbe::Answered(Box::new(receipt)),
+        Err(error) => HostContractProbe::Malformed {
+            detail: format!("the Host contract receipt could not be parsed: {error}"),
+        },
+    }
+}
+
 pub fn send_execution_adoption_via_agent_bridge(
     target: &HookForwardTarget,
     request: &crate::AgentExecutionAdoptionRequest,
     expected_session: &gwt_agent::Session,
 ) -> Result<crate::AgentExecutionAdoptionReceipt, String> {
+    // SPEC #3248 FR-242: adoption transfers an execution binding and reissues
+    // the capability, so the receiving Host proves its contract first.
+    crate::cli::host_contract::require("execution-adoption").map_err(|error| error.to_string())?;
     let mut url = target.execution_continuation_url()?;
     url.set_path("/internal/execution-adoption");
     let client = reqwest::blocking::Client::builder()
@@ -617,12 +753,31 @@ pub fn send_execution_continuation_via_agent_bridge(
     target: &HookForwardTarget,
     request: &crate::AgentExecutionContinuationRequest,
 ) -> Result<crate::AgentExecutionContinuationReceipt, String> {
+    send_execution_continuation_via_agent_bridge_detailed(target, request)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn send_execution_continuation_via_agent_bridge_detailed(
+    target: &HookForwardTarget,
+    request: &crate::AgentExecutionContinuationRequest,
+) -> Result<crate::AgentExecutionContinuationReceipt, AgentBridgeFailure> {
+    // SPEC #3248 FR-242: this request asks the Host to mint a successor
+    // generation, bind the Session to it and issue the capability. The
+    // contract is proven first, so a Host that cannot carry that authority is
+    // never asked to create it.
+    crate::cli::host_contract::require("execution-continuation").map_err(|error| {
+        let mut failure = AgentBridgeFailure::new(
+            AgentBridgeFailureReason::AuthorityMismatch,
+            "the running Host does not serve the required execution contract",
+        );
+        failure.diagnostic_reason = Some(error.to_string());
+        failure
+    })?;
     let url = target.execution_continuation_url().map_err(|_| {
         AgentBridgeFailure::new(
             AgentBridgeFailureReason::TransportFailure,
             "Host continuation bridge target is invalid",
         )
-        .to_string()
     })?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -633,7 +788,6 @@ pub fn send_execution_continuation_via_agent_bridge(
                 AgentBridgeFailureReason::TransportFailure,
                 "failed to build the Host continuation bridge client",
             )
-            .to_string()
         })?;
     let response = client
         .post(url)
@@ -645,15 +799,13 @@ pub fn send_execution_continuation_via_agent_bridge(
                 AgentBridgeFailureReason::TransportFailure,
                 "Host continuation bridge is unavailable; no local fallback was attempted",
             )
-            .to_string()
         })?;
     let status = response.status();
     if !status.is_success() {
         let body = read_bounded_agent_bridge_error_body(
             response,
             "Host continuation bridge rejection body could not be read safely; no local fallback was attempted",
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
         let diagnostic_code = diagnostic
             .as_ref()
@@ -665,6 +817,12 @@ pub fn send_execution_continuation_via_agent_bridge(
             || diagnostic_reason.as_deref() == Some("authority_mismatch")
         {
             AgentBridgeFailureReason::AuthorityMismatch
+        } else if is_retryable_bridge_status(status) {
+            // Issue #3696: a Host that is momentarily busy or restarting is not
+            // refusing the operation. Reporting these as OperationRejected made
+            // them a `permission` escalation — an alarm the owner cannot act on
+            // for something the caller clears by retrying.
+            AgentBridgeFailureReason::TransportFailure
         } else {
             AgentBridgeFailureReason::OperationRejected
         };
@@ -674,8 +832,7 @@ pub fn send_execution_continuation_via_agent_bridge(
             diagnostic.as_ref(),
             false,
             "Host continuation bridge rejected the operation; no local fallback was attempted",
-        )
-        .to_string());
+        ));
     }
     let receipt = response
         .json::<crate::AgentExecutionContinuationReceipt>()
@@ -684,7 +841,6 @@ pub fn send_execution_continuation_via_agent_bridge(
                 AgentBridgeFailureReason::ReceiptMismatch,
                 "Host continuation bridge returned an invalid success response",
             )
-            .to_string()
         })?;
     if receipt.schema_version != crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION
         || receipt.operation_id != request.operation_id
@@ -695,8 +851,7 @@ pub fn send_execution_continuation_via_agent_bridge(
         return Err(AgentBridgeFailure::new(
             AgentBridgeFailureReason::ReceiptMismatch,
             "Host continuation bridge returned mismatched authority evidence",
-        )
-        .to_string());
+        ));
     }
     Ok(receipt)
 }
@@ -891,6 +1046,81 @@ fn send_terminalization_via_agent_bridge(
         return Err(AgentBridgeFailure::new(
             AgentBridgeFailureReason::ReceiptMismatch,
             "Host Work terminalization bridge returned an unsupported response schema; no local fallback was attempted",
+        ));
+    }
+    Ok(receipt)
+}
+
+// Host contract compatibility policy: checkout clients can be newer than the
+// installed Host. Distinguish explicit operation absence from authentication,
+// server and transport failures. Absence never proves the requested invariant:
+// a caller may continue only through an equivalent, bounded validation path,
+// with durable evidence identifying that path. Otherwise refuse with recovery
+// guidance. Never infer success or retry a mutation locally from a missing API.
+pub(crate) fn send_work_materialization_probe_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkMaterializationProbeRequest,
+) -> Result<crate::AgentWorkMaterializationProbeReceipt, AgentBridgeRequestError> {
+    let url = target
+        .work_materialization_probe_url()
+        .map_err(AgentBridgeRequestError::NotSent)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| {
+            AgentBridgeRequestError::NotSent(
+                "failed to build the Host Work materialization probe client".to_string(),
+            )
+        })?;
+    let response = client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+        .map_err(|_| {
+            AgentBridgeRequestError::Unknown(
+                "Host Work materialization probe is unavailable; no build lifecycle state was created"
+                    .to_string(),
+            )
+        })?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(AgentBridgeRequestError::OperationUnavailable);
+    }
+    if !status.is_success() {
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host Work materialization probe rejection body could not be read safely; no build lifecycle state was created",
+        )
+        .map_err(|error| AgentBridgeRequestError::Unknown(error.to_string()))?;
+        return match serde_json::from_slice::<WorkspaceBridgeErrorResponse>(&body) {
+            Ok(error) => Err(AgentBridgeRequestError::Rejected(
+                crate::AgentWorkspaceUpdateError::new(
+                    error.code,
+                    "Host Work materialization probe rejected the request; no build lifecycle state was created",
+                ),
+            )),
+            Err(_) => Err(AgentBridgeRequestError::Unknown(format!(
+                "Host Work materialization probe failed with HTTP {status}; no build lifecycle state was created"
+            ))),
+        };
+    }
+    let receipt = response
+        .json::<crate::AgentWorkMaterializationProbeReceipt>()
+        .map_err(|_| {
+            AgentBridgeRequestError::Unknown(
+                "Host Work materialization probe returned an invalid success response; no build lifecycle state was created"
+                    .to_string(),
+            )
+        })?;
+    if receipt.schema_version != crate::AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION
+        || receipt.owner_number != request.owner_number
+        || receipt.work_id.trim().is_empty()
+    {
+        return Err(AgentBridgeRequestError::Unknown(
+            "Host Work materialization probe returned an unsupported or incomplete receipt; no build lifecycle state was created"
+                .to_string(),
         ));
     }
     Ok(receipt)
@@ -1466,7 +1696,7 @@ mod tests {
         Json, Router,
     };
 
-    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
         crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1820,6 +2050,25 @@ mod tests {
                     ),
                 )
                 .route(
+                    "/internal/work-materialization-probe",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture materialization probe request");
+                            (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response()
+                        },
+                    ),
+                )
+                .route(
                     "/internal/execution-continuation",
                     post(
                         |headers: HeaderMap,
@@ -2031,6 +2280,13 @@ mod tests {
             );
             assert_eq!(
                 target
+                    .work_materialization_probe_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/work-materialization-probe")
+            );
+            assert_eq!(
+                target
                     .blocked_build_abort_terminalization_url()
                     .unwrap_or_else(|error| panic!("{host}: {error}"))
                     .as_str(),
@@ -2064,6 +2320,13 @@ mod tests {
             }
             .work_terminalization_url()
             .expect_err("non-canonical terminal bridge target must fail closed");
+            assert!(!error.contains("secret"));
+            let error = HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .work_materialization_probe_url()
+            .expect_err("non-canonical materialization probe target must fail closed");
             assert!(!error.contains("secret"));
         }
     }
@@ -2141,6 +2404,44 @@ mod tests {
             .expect_err("oversized continuation diagnostics must fail closed");
         assert!(error.contains("transport_failure"), "{error}");
         oversized_server.receive();
+    }
+
+    #[test]
+    fn work_materialization_probe_preserves_host_wire_rejection_code() {
+        let server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "workspace_ensure_required",
+                "reason": "workspace_ensure_required",
+                "message": "private-host-message-sentinel; run workspace.ensure",
+                "recovery_operations": ["workspace.ensure"]
+            }),
+        );
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "probe-private-token".to_string(),
+        };
+        let request = crate::AgentWorkMaterializationProbeRequest {
+            schema_version: crate::AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+            claimed_session_id: "session-materialization-rejection".to_string(),
+            owner_number: 3403,
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/workspace/repo".to_string(),
+                git_toplevel: "/workspace/repo".to_string(),
+                repo_hash: "repo-hash".to_string(),
+                branch: "work/issue-3403".to_string(),
+            },
+        };
+        let error = send_work_materialization_probe_via_agent_bridge(&target, &request)
+            .expect_err("real Host rejection must remain a typed refusal");
+        assert!(
+            matches!(&error, AgentBridgeRequestError::Rejected(error)
+                if error.code == crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("private-host-message-sentinel"));
+        assert!(!error.to_string().contains("probe-private-token"));
+        server.receive();
     }
 
     #[test]
@@ -2327,6 +2628,61 @@ mod tests {
             .expect_err("mismatched receipt must be typed");
         assert!(receipt.contains("receipt_mismatch"), "{receipt}");
         receipt_server.receive();
+
+        let continuation_request = crate::AgentExecutionContinuationRequest {
+            schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+            operation_id: "continuation-reason-codes".to_string(),
+        };
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let transient_server = BindingProbeServer::start(
+                status,
+                serde_json::json!({
+                    "code": "temporarily_unavailable",
+                    "reason": "retry_later",
+                    "message": "the Host is temporarily unavailable"
+                }),
+            );
+            let refusal = send_execution_continuation_via_agent_bridge_detailed(
+                &HookForwardTarget {
+                    url: transient_server.forward_url.clone(),
+                    token: "continuation-transient-secret".to_string(),
+                },
+                &continuation_request,
+            )
+            .expect_err("transient continuation rejection must stay typed");
+            assert_eq!(
+                refusal.reason(),
+                AgentBridgeFailureReason::TransportFailure,
+                "{status} is retryable transport, not a human permission decision: {refusal}"
+            );
+            transient_server.receive();
+        }
+
+        let permission_server = BindingProbeServer::start(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "code": "invalid_request",
+                "reason": "operation_rejected",
+                "message": "the continuation operation is structurally refused"
+            }),
+        );
+        let permission = send_execution_continuation_via_agent_bridge_detailed(
+            &HookForwardTarget {
+                url: permission_server.forward_url.clone(),
+                token: "continuation-permission-secret".to_string(),
+            },
+            &continuation_request,
+        )
+        .expect_err("stable 400 continuation refusal must stay typed");
+        assert_eq!(
+            permission.reason(),
+            AgentBridgeFailureReason::OperationRejected
+        );
+        permission_server.receive();
     }
 
     #[test]

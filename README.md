@@ -14,7 +14,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 ## Why gwt
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
-  `Grok Build`, `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`,
+  `Grok Build`, `Antigravity CLI`, `OpenCode`, `Copilot`,
   and custom agents from a shared canvas.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
@@ -101,8 +101,10 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
   curl -fsSL https://antigravity.google/cli/install.sh | bash
   ```
 
-  Gemini CLI remains available in gwt as a legacy option for eligible
-  Standard/Enterprise or API-key workflows.
+  Gemini CLI is no longer a built-in agent. Legacy Gemini settings and saved
+  sessions are ignored with a warning naming the unavailable entry; the files
+  are left unchanged. User-defined external commands remain supported through
+  custom agents.
 
   Grok Build is provided by xAI's official `grok` command. Install it with
   `npm install -g @xai-official/grok`, then authenticate on first launch or set
@@ -127,10 +129,28 @@ the tray menu:
   `http://127.0.0.1:<port>/`. The same URL can be opened in any other
   browser too.
 - **Copy URL** — copies the running tray process URL to the OS clipboard.
+- **Projects** — opens a project URL from the open projects followed by Recent,
+  with running and error counts. The tray icon shows an error badge while an
+  open project has an agent error.
 - **About GWT** — opens the browser About / Version surface for the
   running tray process.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
   PTY children down in order.
+
+Project browser tabs show agent RUN / BLOCK counts in their titles and a
+status favicon. BLOCK includes waiting, stopped, and error states; shell
+windows are excluded. An unread marker clears when the project tab is visible
+and focused. Hub metadata stays fixed.
+
+The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
+from GitHub, Recent projects, and the currently open projects. Every project
+has its own URL, `http://127.0.0.1:<port>/p/<project-hash>`, and project links
+open in a new browser tab, so one browser tab shows one project. Different
+projects keep their windows and launch dialogs separate; two browser tabs on
+the same project URL share its live workspace. Bookmarking or restoring a
+project URL reopens a recent project automatically; an unknown project URL
+shows "Project not found" with a link back to the Hub. The **Hub** link in a
+project's header opens the Hub in a new tab.
 
 Autostart lives in **Settings > System > Launch GWT at login**. Enabling it
 installs an OS-native per-user entry (macOS LaunchAgent / Windows HKCU Run /
@@ -140,7 +160,8 @@ OS login as a tray-resident process. The browser is not opened automatically.
 ```bash
 gwt                                 # install tray + start embedded server (loopback)
 gwt --bind 0.0.0.0 --port 60745     # bind the embedded server to a LAN/VPN-reachable address
-gwt open                            # open the running tray's URL in the OS default browser
+gwt open                            # open the running tray's Hub URL in the OS default browser
+gwt open ~/src/my-repo              # open that project (opening it first if needed) at its /p/<hash> URL
 ```
 
 `--bind <ip>` defaults to `127.0.0.1`. When `--port` is omitted and no port has
@@ -228,6 +249,11 @@ Unknown parameter keys are rejected with the accepted keys listed.
 The existing `board` field is preserved; `page.total_entries` counts the visible
 provider snapshot before the CLI limit, `page.returned_entries` counts returned
 entries, and `page.truncated` indicates clipping by that limit.
+Every `blocked` entry carries an `escalation` object: `resolved` (boolean),
+`resolved_at`, and `resolved_by_entry_id`. A blocked entry missing from the
+escalation index reports `indexed: false` and `resolved: null`. Set
+`params.unresolved: true` (default `false`) to return only blocked entries whose
+escalation is still open; the filter applies before `limit`.
 
 Response cost is roughly the entry count times serialized entry size, plus
 metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte cap;
@@ -385,6 +411,13 @@ are kept by default because their rebuild lands on whoever opens them next.
 Running worktrees, the main worktree, the calling worktree, and the worktree
 hosting the running `gwtd` are never touched, whatever the flags say.
 
+The Workspace panel's `Clean Up Ready` count uses the same idea for whole
+worktrees: a merged or change-free Workspace stays cleanup-ready when its only
+uncommitted difference is something gwt itself wrote — its `.gwt/` namespace,
+the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
+`.claude/settings.local.json` that still carries no hand-written content.
+Anything else you have not committed keeps the Workspace out of the count.
+
 ### Autonomous mode (opt-in)
 
 Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →
@@ -422,6 +455,23 @@ reopened is never closed again by the same merge.
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
 scrollable notification stack so nothing is lost while you are away.
+
+Agent state notices say **stopped**, **error**, or **needs human**; an idle agent
+is not evidence of completed work. Runtime desktop notices require five minutes
+of continuously observed Running and an unfocused/hidden page. A different state
+or reconnection resets that duration. Monitor NeedsHuman uses its existing notice
+stream immediately, including issues without an agent window; it does not create
+another notice from inbox snapshots. Session Interrupted is outside this notice
+stream because the resume picker exposes historical snapshots only.
+
+Native permission adapters distinguish macOS authorization settings, Windows
+notification settings, and Linux's unavailable authorization query. Unknown,
+default, denied, or failed queries do not authorize delivery, and permissions are
+never requested automatically. Linux GetCapabilities describes server features,
+not user consent. These adapters do not yet add zero-tab native delivery: that
+transport remains a separate part of SPEC #3287. Debug-binary tests cover policy
+and browser behavior; signed-bundle macOS permission/delivery and Windows/Linux
+native interaction require separate host verification.
 
 Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
 persist per project. The human-gated baseline is SPEC
@@ -879,10 +929,43 @@ gwtd <<'JSON'
 JSON
 ```
 
+- Lint a SPEC artifact before handing it to a reviewer. The run checks FR / AS
+  / T numbering, traceability-table consistency, supersede inline annotations,
+  and section marker / roundtrip health, records the result in the Intake
+  Inspection Snapshot, seeds the Finding Disposition Ledger, and prints the
+  reviewer checklist. It exits non-zero when a critical finding is present.
+  It also reports missing indexed comment IDs and unindexed artifact comments
+  (including section and part numbers), without rewriting or deleting them.
+  Section writes serialize writers sharing the host cache and check fresh body
+  content before replacing the index; cross-host/external writes and unknown
+  network outcomes are outside this guarantee.
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.lint","params":{"number":1784}}
+JSON
+```
+
+- Check whether the SPEC may be declared complete. Every section needs a
+  GitHub-entity readback matching the snapshot, and every critical finding
+  needs a disposition:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.inspection.complete","params":{"number":1784}}
+JSON
+```
+
 ## Logs
+
+Open the Logs surface and select **Project** for that project’s events, or
+**Global** for startup and diagnostics without a project. Background events
+remain with their originating project when you switch projects.
 
 - App logs:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
+- Startup and global diagnostics:
+  `~/.gwt/logs/gwt.log.YYYY-MM-DD`
 - Session state:
   `~/.gwt/session.json`
 - Project workspace state:
@@ -920,6 +1003,13 @@ processes or unavailable samples do not imply low CPU usage. A warning is an
 observation, not proof that a particular worktree caused the load; inspect
 active filesystem consumers and Spotlight privacy settings before attributing it.
 
+Spotlight's own indexing daemon is reported from the Issue Monitor snapshot
+instead: `spotlight` in `issue.monitor.status` lists every `mds_stores`
+process with its CPU percentage and carries a `warning` once one of them
+exceeds 100%. On a host with hundreds of worktrees the daemon can outrank the
+agents themselves, which otherwise only reads as a slow host. The block is
+present with no processes and no warning on platforms without Spotlight.
+
 ## Development
 
 ### Build
@@ -948,8 +1038,12 @@ cargo bundle -p gwt --format osx
 ### Test
 
 ```bash
-cargo test -p gwt-core -p gwt --all-features
+cargo install cargo-nextest --locked --version 0.9.146
+cargo nextest run -p gwt-core -p gwt --all-features --test-threads=1
+cargo test -p gwt-core -p gwt --all-features --doc
 ```
+
+Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
 ### Serializing heavy verification
 

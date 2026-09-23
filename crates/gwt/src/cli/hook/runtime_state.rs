@@ -115,6 +115,18 @@ fn write_state_with_status(
                 serde_json::to_value(incarnation)?,
             );
         }
+        // Issue #4643: the launch's process identity outlives every hook
+        // event. Dropping it left the sweep with nothing but a live Host to
+        // judge by, so closed panes kept their worktrees forever.
+        for (key, value) in [
+            ("host_started_at", previous.host_started_at),
+            ("child_pid", previous.child_pid.map(u64::from)),
+            ("child_started_at", previous.child_started_at),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.to_string(), serde_json::Value::from(value));
+            }
+        }
         if let Some(completed_at) = previous.last_completed_hook_event_at {
             object.insert(
                 "last_completed_hook_event_at".to_string(),
@@ -480,7 +492,7 @@ mod tests {
 
     use super::*;
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_lock() -> gwt_core::test_support::EnvLockGuard {
         crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -655,15 +667,23 @@ mod tests {
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
             .unwrap()
             .unwrap();
-        gwt_agent::SessionRuntimeState::for_execution(AgentStatus::Running, &identity, 41)
-            .save(&path)
-            .unwrap();
+        let mut runtime =
+            gwt_agent::SessionRuntimeState::for_execution(AgentStatus::Running, &identity, 41);
+        runtime.host_started_at = Some(1_000);
+        runtime.child_pid = Some(4_242);
+        runtime.child_started_at = Some(2_000);
+        runtime.save(&path).unwrap();
 
         write_for_event_with_pending_discussion(&path, "Stop", None).unwrap();
 
         let updated = gwt_agent::SessionRuntimeState::load(&path).unwrap();
         assert_eq!(updated.execution_identity.as_ref(), Some(&identity));
         assert_eq!(updated.runtime_incarnation, Some(41));
+        // Issue #4643: the PTY child identity is the only sidecar-local
+        // evidence that the launch has ended; a hook event must not erase it.
+        assert_eq!(updated.host_started_at, Some(1_000));
+        assert_eq!(updated.child_pid, Some(4_242));
+        assert_eq!(updated.child_started_at, Some(2_000));
         assert_eq!(updated.source_event.as_deref(), Some("Stop"));
     }
 

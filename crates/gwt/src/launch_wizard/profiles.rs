@@ -350,6 +350,25 @@ mod tests {
         newer.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
         newer.save(dir.path()).expect("save newer session");
 
+        // Issue #4660 AC-6: a retired built-in record must not prevent the
+        // loader from retaining valid sessions or selecting their profile.
+        let retired = sample_session_record(
+            "feature/retired",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            None,
+        );
+        let retired_toml = toml::to_string(&retired)
+            .expect("serialize retired session fixture")
+            .replace("type = \"Codex\"", "type = \"Gemini\"");
+        std::fs::write(dir.path().join("retired-gemini.toml"), retired_toml)
+            .expect("write legacy Gemini session");
+        let sessions = load_launch_sessions(dir.path());
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|session| session.id == older.id));
+        assert!(sessions.iter().any(|session| session.id == newer.id));
+
         let profile =
             load_previous_launch_profile(&worktree, dir.path()).expect("previous profile");
 

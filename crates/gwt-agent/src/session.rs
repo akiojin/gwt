@@ -978,8 +978,10 @@ impl Session {
     /// legacy migration applied should use [`Session::load_and_migrate`].
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut session: Self = toml::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut session: Self = toml::from_str(&content).map_err(|error| {
+            tracing::warn!(path = %path.display(), %error, "Cannot load session; leaving it unchanged");
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
         session.normalize_fast_mode_fields();
         Ok(session)
     }
@@ -4290,10 +4292,39 @@ display_name = "Claude Code"
     }
 
     #[test]
+    fn removed_gemini_session_is_rejected_without_conversion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-gemini.toml");
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let encoded = toml::to_string(&session)
+            .unwrap()
+            .replace("type = \"Codex\"", "type = \"Gemini\"");
+        std::fs::write(&path, encoded).unwrap();
+        let log_file = tempfile::tempfile().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(log_file.try_clone().unwrap())
+            .finish();
+        let error =
+            tracing::subscriber::with_default(subscriber, || Session::load(&path)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("unknown variant `Gemini`"));
+        use std::io::{Read, Seek};
+        let mut log_file = log_file;
+        log_file.rewind().unwrap();
+        let mut warning = String::new();
+        log_file.read_to_string(&mut warning).unwrap();
+        assert!(warning.contains("WARN"), "{warning}");
+        assert!(warning.contains("unknown variant `Gemini`"), "{warning}");
+        assert!(warning.contains("legacy-gemini.toml"), "{warning}");
+    }
+
+    #[test]
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
-        session.model = Some("gemini-3-flash-preview".into());
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::OpenCode);
+        session.model = Some("test-model".into());
         session.tool_version = Some("0.1.0".into());
         session.agent_session_id = Some("agent-abc".into());
         session.reasoning_level = Some("high".into());
@@ -4319,8 +4350,8 @@ display_name = "Claude Code"
         let loaded = Session::load(&path).unwrap();
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.branch, "feature/x");
-        assert_eq!(loaded.agent_id, AgentId::Gemini);
-        assert_eq!(loaded.model, Some("gemini-3-flash-preview".into()));
+        assert_eq!(loaded.agent_id, AgentId::OpenCode);
+        assert_eq!(loaded.model, Some("test-model".into()));
         assert_eq!(loaded.tool_version, Some("0.1.0".into()));
         assert_eq!(loaded.agent_session_id, Some("agent-abc".into()));
         assert_eq!(loaded.reasoning_level, Some("high".into()));
@@ -4343,7 +4374,7 @@ display_name = "Claude Code"
             ]
         );
         assert_eq!(loaded.workflow_bypass, Some(WorkflowBypass::Release));
-        assert_eq!(loaded.display_name, "Gemini CLI (legacy)");
+        assert_eq!(loaded.display_name, "OpenCode");
     }
 
     #[test]
@@ -4423,7 +4454,7 @@ display_name = "Claude Code"
     fn load_legacy_toml_without_runtime_fields_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.toml");
-        let session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::OpenCode);
         let mut legacy = toml::map::Map::new();
         legacy.insert("id".into(), toml::Value::String(session.id.clone()));
         legacy.insert(
@@ -4444,7 +4475,7 @@ display_name = "Claude Code"
             toml::Value::try_from(session.status).unwrap(),
         );
         legacy.insert("tool_version".into(), toml::Value::String("1.2.3".into()));
-        legacy.insert("model".into(), toml::Value::String("gemini-pro".into()));
+        legacy.insert("model".into(), toml::Value::String("test-model".into()));
         legacy.insert("reasoning_level".into(), toml::Value::String("high".into()));
         legacy.insert("skip_permissions".into(), toml::Value::Boolean(true));
         legacy.insert("codex_fast_mode".into(), toml::Value::Boolean(false));
@@ -4725,6 +4756,7 @@ display_name = "Claude Code"
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),
@@ -4982,6 +5014,7 @@ display_name = "Claude Code"
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),
@@ -6161,7 +6194,7 @@ display_name = "Claude Code"
             .build();
         without_provenance.command = absolute_npx.to_string();
 
-        let mut unrelated = crate::AgentLaunchBuilder::new(AgentId::Gemini)
+        let mut unrelated = crate::AgentLaunchBuilder::new(AgentId::OpenCode)
             .working_dir(r"C:\worktree")
             .branch("feature/npx-plan")
             .version("latest")
@@ -6169,7 +6202,7 @@ display_name = "Claude Code"
         unrelated.command = absolute_npx.to_string();
         unrelated.tool_runtime_provenance = Some(ToolRuntimeProvenance {
             schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "@google/gemini-cli".to_string(),
+            official_package: "opencode-ai".to_string(),
             requested_selector: "latest".to_string(),
             resolved_exact_version: "0.1.0".to_string(),
             runner_kind: ToolRuntimeRunnerKind::Npx,

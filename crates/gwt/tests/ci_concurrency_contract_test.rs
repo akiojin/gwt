@@ -40,6 +40,10 @@ const REQUIRED_CHECKS: &[&str] = &[
     "Cargo Deny (advisories + sources)",
     "Check (Windows)",
     "Check (macOS)",
+    // Issue #4522. Added to the protection contexts once lint.yml's
+    // `Clippy (macOS)` job had landed on develop — adding a context before
+    // the job exists strands every open PR on a check that never reports.
+    "Clippy (macOS)",
 ];
 
 /// Heavy, non-required jobs in `test.yml` that a documentation edit cannot

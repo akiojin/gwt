@@ -95,6 +95,18 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
 
     const agentField = wizard.getByLabel("Agent", { exact: true });
     const tag = await agentField.evaluate((node) => node.tagName.toLowerCase());
+    // Issue #4660: the real backend catalog retires Gemini while preserving
+    // the other built-ins, regardless of the count-adaptive control layout.
+    const agentOptions = agentField.locator(
+      tag === "select" ? "option" : ".launch-segmented__option",
+    );
+    const agentIds = await agentOptions.evaluateAll((options) =>
+      options.map((option) =>
+        option.getAttribute("value") ?? option.getAttribute("data-value"),
+      ),
+    );
+    expect(agentIds).not.toContain("gemini");
+    expect(agentIds).toEqual(expect.arrayContaining(["claude", "codex", "grok", "agy"]));
     if (tag === "select") {
       await expect(agentField.locator('option[value="grok"]')).toHaveText(
         "Grok Build",

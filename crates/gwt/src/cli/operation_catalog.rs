@@ -166,6 +166,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "execution.no_action",
+        aliases: &["execution.no-action"],
+    },
+    Operation {
         name: "execution.release_prepared",
         aliases: &[],
     },
@@ -220,6 +224,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "intake.outcome.record",
         aliases: &["intake.outcome-record"],
+    },
+    Operation {
+        name: "issue.cache.repair",
+        aliases: &[],
     },
     Operation {
         name: "issue.close",
@@ -357,6 +365,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "issue.spec.edit",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.spec.inspection.complete",
+        aliases: &["issue.spec.inspection-complete"],
+    },
+    Operation {
+        name: "issue.spec.lint",
         aliases: &[],
     },
     Operation {

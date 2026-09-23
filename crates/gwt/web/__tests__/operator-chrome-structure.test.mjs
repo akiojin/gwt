@@ -11,6 +11,8 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const runtimeCpuUnitsPattern =
+  /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 // Issue #3365 — the renderWorkspace key/skip lifecycle lives in this module.
 const workspaceRenderSyncSource = readFileSync(
   resolve(here, "../workspace-render-sync.js"),
@@ -71,10 +73,6 @@ const windowWorktreeFormPath = resolve(here, "../window-worktree-form.js");
 const windowWorktreeFormSource = existsSync(windowWorktreeFormPath)
   ? readFileSync(windowWorktreeFormPath, "utf8")
   : "";
-const projectTabsRendererSource = readFileSync(
-  resolve(here, "../project-tabs-renderer.js"),
-  "utf8",
-);
 const windowTabsRendererSource = readFileSync(
   resolve(here, "../window-tabs-renderer.js"),
   "utf8",
@@ -86,7 +84,7 @@ const workspaceOverviewPath = resolve(here, "../workspace-kanban-surface.js");
 const workspaceOverviewSource = existsSync(workspaceOverviewPath)
   ? readFileSync(workspaceOverviewPath, "utf8")
   : "";
-const appAndProjectTabsSource = `${appSource}\n${projectTabsRendererSource}`;
+const appAndProjectTabsSource = appSource;
 const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
 // Issue #2694 Phase D: the formerly-inline <style> block now lives at
 // /styles/app.css and is loaded via `<link rel="stylesheet">`. The grep
@@ -680,6 +678,7 @@ test("old lane identity vocabulary is absent from production presentation wiring
 });
 
 test("Agent title role badges resolve runtime identity instead of generic presets", () => {
+  assert.doesNotMatch(appSource.match(/const AGENT_ROLE_LABELS = Object.freeze\(\{[\s\S]*?\}\)/)?.[0] || "", /gemini/i);
   assert.match(
     appSource,
     /const\s+AGENT_ROLE_LABELS\s*=\s*Object\.freeze\(\{[\s\S]*claude:\s*"Claude Code"[\s\S]*codex:\s*"Codex"[\s\S]*grok:\s*"Grok Build"/,
@@ -1297,6 +1296,12 @@ test("body markup wires Mission Briefing reveal lines (US-1 AS-1)", () => {
   assert.match(online.textContent, /OPERATOR ONLINE/);
 });
 
+test("head suppresses the browser's implicit favicon request", () => {
+  const favicon = document.querySelector('link[rel="icon"]');
+  assert.ok(favicon, "expected an explicit favicon declaration");
+  assert.equal(favicon.getAttribute("href"), "data:,");
+});
+
 test("font preload hints exist for Mona/Hubot/JetBrains", () => {
   const preloads = Array.from(document.querySelectorAll("link[rel=preload][as=font]")).map((l) => l.href);
   for (const expected of ["MonaSans.woff2", "HubotSans-Bold.woff2", "JetBrainsMono.woff2"]) {
@@ -1354,15 +1359,19 @@ test("Status Strip exposes a compact PERF cell for runtime health", () => {
   const cell = document.getElementById("op-strip-runtime-health");
   assert.ok(cell, "expected runtime health PERF cell");
   assert.match(cell.textContent ?? "", /PERF/);
-  assert.equal(cell.getAttribute("aria-label"), "Runtime performance");
+  assert.match(cell.getAttribute("aria-label") ?? "", /Runtime performance/);
+  assert.match(cell.getAttribute("aria-label") ?? "", runtimeCpuUnitsPattern);
+  assert.match(cell.getAttribute("title") ?? "", runtimeCpuUnitsPattern);
   assert.match(operatorShellSource, /applyRuntimeHealth/);
 });
 
 test("Runtime health PERF detail uses structured diagnostic classes", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   for (const token of [
+    "formatRuntimeAggregateCpu",
     "runtimeHealthStateLabel",
     "op-runtime-health-detail__summary",
+    "op-runtime-health-detail__units",
     "op-runtime-health-detail__chip",
     "op-runtime-health-detail__queue",
     "op-runtime-health-detail__process-list",
@@ -1375,8 +1384,13 @@ test("Runtime health PERF detail uses structured diagnostic classes", () => {
   }
   assert.match(
     operatorShellSource,
-    /value\.textContent\s*=\s*`\$\{runtimeHealthStateLabel\(state\)\}\s+\$\{formatRuntimeCpu/,
-    "compact PERF value must be severity-first",
+    /const cpuLabel\s*=\s*formatRuntimeAggregateCpu\(snapshot\.cpu_percent\)/,
+    "compact PERF value must derive its CPU label from the aggregate-only formatter",
+  );
+  assert.match(
+    operatorShellSource,
+    /value\.textContent\s*=\s*`\$\{stateLabel\}\s+\$\{cpuLabel\}\s+\$\{memoryLabel\}`/,
+    "compact PERF value must remain severity-first and render the aggregate CPU label",
   );
   assert.match(
     css,
@@ -2142,6 +2156,137 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("shared overlays use semantic z-index tokens in interaction order", () => {
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const baseTokens = tokensCss.match(/:root\s*\{([^}]*)\}/)?.[1];
+  assert.ok(baseTokens, "expected unthemed :root tokens");
+
+  const zIndexToken = (name) => {
+    const match = baseTokens.match(new RegExp(`${name}:\\s*(\\d+)\\s*;`));
+    assert.ok(match, `expected integer ${name} in the base token set`);
+    return Number(match[1]);
+  };
+
+  const popover = zIndexToken("--z-popover");
+  const projectOverlay = zIndexToken("--z-project-overlay");
+  const overlay = zIndexToken("--z-overlay");
+  const modal = zIndexToken("--z-modal");
+  const systemDegradation = zIndexToken("--z-system-degradation");
+  const systemConnection = zIndexToken("--z-system-connection");
+  const systemNotice = zIndexToken("--z-notice-stack");
+  const systemContextMenu = zIndexToken("--z-system-context-menu");
+  const systemPopover = zIndexToken("--z-system-popover");
+  const systemWindow = zIndexToken("--z-system-window");
+  const systemModal = zIndexToken("--z-system-modal");
+  assert.ok(
+    projectOverlay < popover,
+    "project popovers must stay above blocking project overlays",
+  );
+  assert.ok(
+    popover < overlay,
+    "blocking overlays must paint above non-modal popovers",
+  );
+  assert.ok(
+    overlay < modal,
+    "shared dialogs must stay above command palette overlays",
+  );
+  assert.ok(modal < systemDegradation);
+  assert.ok(systemDegradation < systemConnection);
+  assert.ok(systemConnection < systemNotice);
+  assert.ok(systemNotice < systemContextMenu);
+  assert.ok(systemContextMenu < systemPopover);
+  assert.ok(systemPopover < systemWindow);
+  assert.ok(systemWindow < systemModal);
+
+  const tokenizedRules = [
+    {
+      name: "shared modal backdrop",
+      rule: inlineStyle.match(/\.modal-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "project picker and onboarding overlay",
+      rule: inlineStyle.match(/\.project-picker,\s*\.project-onboarding\s*\{[^}]*\}/)?.[0],
+      token: "--z-project-overlay",
+    },
+    {
+      name: "command palette overlay",
+      rule: componentsStyle.match(/\.op-palette-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-overlay",
+    },
+    {
+      name: "runtime health popover",
+      rule: componentsStyle.match(/\.op-runtime-health-detail\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage popover",
+      rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage modal overlay",
+      rule: componentsStyle.match(/\.op-usage-modal-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "render degradation banner",
+      rule: componentsStyle.match(/\.render-degradation-banner\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-degradation",
+    },
+    {
+      name: "connection overlay",
+      rule: componentsStyle.match(/\.connection-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-connection",
+    },
+    {
+      name: "operator notice stack",
+      rule: inlineStyle.match(/\.operator-notice-stack\s*\{[^}]*\}/)?.[0],
+      token: "--z-notice-stack",
+    },
+    {
+      name: "terminal context menu",
+      rule: componentsStyle.match(/\.terminal-context-menu\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-context-menu",
+    },
+    {
+      name: "Board destination popover",
+      rule: inlineStyle.match(/\.board-destination-popover\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-popover",
+    },
+    {
+      name: "global surface window",
+      rule: componentsStyle.match(/\.op-global-window\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-window",
+    },
+    {
+      name: "update modal",
+      rule: componentsStyle.match(/\.update-modal\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-modal",
+    },
+  ];
+
+  for (const { name, rule, token } of tokenizedRules) {
+    assert.ok(rule, `expected ${name} CSS rule`);
+    assert.match(rule, new RegExp(`z-index:\\s*var\\(${token}\\)`));
+    assert.doesNotMatch(rule, /z-index:\s*-?\d+/, `${name} must not use a raw z-index`);
+  }
+
+  assert.doesNotMatch(
+    `${inlineStyle}\n${componentsStyle}`,
+    /z-index:\s*[1-9]\d{3,}\b/,
+    "global interaction and safety tiers must not reintroduce raw high z-index values",
+  );
+  const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[^}]*\}/)?.[0];
+  assert.ok(modalShellRule, "expected shared modal shell rule");
+  assert.doesNotMatch(
+    modalShellRule,
+    /z-index:/,
+    "the modal backdrop owns the shared modal tier without a competing child tier",
+  );
+
+});
+
 test("WebView modal text uses native selection and terminal overlays use explicit copy", () => {
   const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[\s\S]*?\}/);
   assert.ok(modalShellRule, "expected shared modal shell CSS rule");
@@ -2863,23 +3008,6 @@ test("Selected list rows mark active item with aria-current", () => {
   );
 });
 
-test("Project tabs mark the active project with aria-current=\"page\"", () => {
-  // Project tabs use role="button" but represent a navigation choice. The
-  // appropriate ARIA pattern is aria-current="page" on the active tab so
-  // screen readers announce it as the current location. Inactive tabs
-  // must explicitly clear the attribute so the previously-active tab
-  // doesn't retain the marker after a switch.
-  assert.match(
-    projectTabsRendererSource,
-    /button\.setAttribute\("aria-current",\s*"page"\)/,
-    "expected the active project tab to set aria-current=\"page\"",
-  );
-  assert.match(
-    projectTabsRendererSource,
-    /button\.removeAttribute\("aria-current"\)/,
-    "expected inactive project tabs to remove aria-current",
-  );
-});
 
 test("Error regions declare role=\"alert\" so screen readers announce them", () => {
   // Without role="alert" (or aria-live="assertive"), errors that appear
@@ -4090,115 +4218,9 @@ test("Board workspace id sync avoids stringify and reuses active Work id cache",
   );
 });
 
-test("workspace_state hot path gates Project Tabs redraw by tab shell key", () => {
-  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
-  assert.match(
-    appSource,
-    /let\s+renderedProjectTabsKey\s*=/,
-    "app.js must track the last rendered Project Tabs shell key",
-  );
-  assert.match(
-    appSource,
-    /function\s+projectTabsRenderKey\s*\(/,
-    "app.js must define a Project Tabs shell key helper",
-  );
-  assert.match(
-    renderAppStateBody,
-    /projectTabsRenderKey\s*\(\s*appState\s*\)/,
-    "renderAppState must derive the next Project Tabs shell key from appState",
-  );
-  assert.match(
-    renderAppStateBody,
-    /renderedProjectTabsKey[\s\S]*!==[\s\S]*nextProjectTabsKey[\s\S]*renderProjectTabs\(\)/,
-    "renderAppState must redraw Project Tabs only when the shell key changes",
-  );
-});
 
-test("Project Tabs shell key ignores workspace geometry but includes tab identity", () => {
-  const keyBody = extractFunctionBody(appSource, "projectTabsRenderKey");
-  assert.match(
-    keyBody,
-    /active_tab_id/,
-    "Project Tabs shell key must include active_tab_id",
-  );
-  for (const field of ["id", "title", "project_root"]) {
-    assert.match(
-      keyBody,
-      new RegExp(`\\b${field}\\b`),
-      `Project Tabs shell key must include tab ${field}`,
-    );
-  }
-  for (const workspaceField of ["workspace", "windows", "geometry", "viewport"]) {
-    assert.doesNotMatch(
-      keyBody,
-      new RegExp(`\\b${workspaceField}\\b`),
-      `Project Tabs shell key must ignore ${workspaceField}`,
-    );
-  }
-});
 
-test("Project Tabs shell key avoids JSON stringify allocation", () => {
-  const keyBody = extractFunctionBody(appSource, "projectTabsRenderKey");
-  assert.match(
-    appSource,
-    /function\s+appendRenderKeyPart\s*\(/,
-    "app.js must expose the primitive render-key append helper",
-  );
-  assert.match(
-    keyBody,
-    /appendRenderKeyPart\s*\(/,
-    "Project Tabs shell key must append primitive fields directly",
-  );
-  assert.doesNotMatch(
-    keyBody,
-    /JSON\.stringify\s*\(/,
-    "Project Tabs shell key must not serialize an object graph on every workspace_state",
-  );
-  assert.doesNotMatch(
-    keyBody,
-    /\.map\s*\(/,
-    "Project Tabs shell key must not allocate a mapped tab array",
-  );
-  assert.match(
-    keyBody,
-    /for\s*\(\s*const\s+tab\s+of\s+tabs\s*\)/,
-    "Project Tabs shell key must iterate tabs directly",
-  );
-});
 
-test("Project Tabs renderer avoids mapped selector snapshots on tab switches", () => {
-  const renderBody = extractFunctionBody(projectTabsRendererSource, "renderProjectTabs");
-  assert.doesNotMatch(
-    renderBody,
-    /nextTabs\.map\s*\(/,
-    "Project Tabs renderer must not allocate a mapped tab id source",
-  );
-  assert.doesNotMatch(
-    renderBody,
-    /querySelectorAll\s*\(/,
-    "Project Tabs renderer hot path must walk existing child buttons directly",
-  );
-  assert.doesNotMatch(
-    renderBody,
-    /Array\.from\s*\(/,
-    "Project Tabs renderer must not snapshot child buttons into an array",
-  );
-  assert.doesNotMatch(
-    renderBody,
-    /nextTabs\.forEach\s*\(/,
-    "Project Tabs renderer must not allocate a per-render callback for tab ordering",
-  );
-  assert.match(
-    renderBody,
-    /for\s*\(\s*let\s+index\s*=\s*0;\s*index\s*<\s*nextTabs\.length;\s*index\s*\+=\s*1\s*\)/,
-    "Project Tabs renderer must update tabs with an indexed direct loop",
-  );
-  assert.match(
-    renderBody,
-    /projectTabs\.children/,
-    "Project Tabs renderer must reuse the live child collection for stale cleanup and ordering",
-  );
-});
 
 test("hidden project picker does not rebuild Recent Projects on workspace_state", () => {
   // SPEC-3064 Phase 3 (E7): the picker / recent-projects renderers and
@@ -5371,7 +5393,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
   const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
   const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
-  const stateCuesIndex = statusBody.indexOf("refreshProjectTabStateCues()");
 
   assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
   assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
@@ -5380,7 +5401,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
     ["overlay lookup/writes", overlayIndex],
     ["telemetry recompute", telemetryIndex],
     ["Window List refresh", windowListIndex],
-    ["project tab state cue refresh", stateCuesIndex],
   ]) {
     assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
     assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
@@ -5409,11 +5429,6 @@ test("Runtime status updates repaint tab telemetry when the target window is hid
     branchBody,
     /refreshWindowTabTelemetry\s*\(\s*windowData\s*\)\s*;/,
     "hidden target status updates must repaint visible sibling tab telemetry",
-  );
-  assert.match(
-    branchBody,
-    /refreshProjectTabStateCues\s*\(\s*\)\s*;/,
-    "hidden target status updates must still refresh project tab state cues",
   );
 });
 

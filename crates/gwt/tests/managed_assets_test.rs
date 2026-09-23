@@ -639,7 +639,7 @@ fn refresh_managed_assets_for_an_agent_without_a_surface_still_heals_existing_ta
         .expect("create stale claude skill dir");
     std::fs::write(&stale_claude_skill, "stale").expect("seed stale claude skill");
 
-    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Gemini)
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Copilot)
         .expect("refresh assets for an agent without a managed surface");
 
     assert!(
@@ -1201,4 +1201,81 @@ fn json_commands(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     collect(&value, &mut out);
     out
+}
+
+/// Issue #4283 AC-6: pane creation must not queue behind the managed-asset
+/// materialization of an unrelated worktree.
+///
+/// The lock used to be keyed on the repository's main worktree root, so one
+/// exclusive file lock covered every worktree of the repository. Every pane
+/// launch, every fresh-worktree SessionStart self-heal and every startup
+/// hook-config self-heal took it around the full ~350 ms materialization, and
+/// the fleet serialized: `phase:pane.create.managed_assets` measured a p50 of
+/// 34,001 ms against a 330–660 ms uncontended cost.
+///
+/// The bound is expressed as a deadline rather than as a wall-clock assertion:
+/// with a sibling worktree's lock held for the whole test, materialization here
+/// must still finish inside the operation deadline. Under the old key it waited
+/// for the holder and failed the deadline instead.
+#[test]
+fn materializing_one_worktree_does_not_wait_on_a_sibling_worktrees_asset_lock() {
+    use std::time::{Duration, Instant};
+
+    let _env_guard = env_lock();
+    let home = tempdir().expect("tempdir");
+    let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    run_git(&repo, &["init", "-q", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "test"]);
+    std::fs::write(repo.join("README.md"), "seed\n").expect("seed file");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-qm", "seed"]);
+
+    let sibling = home.path().join("sibling");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "sibling",
+            sibling.to_str().expect("sibling path"),
+        ],
+    );
+    for worktree in [&repo, &sibling] {
+        std::fs::create_dir_all(worktree.join(".claude/skills")).expect("claude surface");
+        std::fs::create_dir_all(worktree.join(".codex/skills")).expect("codex surface");
+    }
+
+    let cli_bin = home.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+
+    let held_path = gwt::managed_asset_lock_path(&repo);
+    std::fs::create_dir_all(held_path.parent().expect("lock dir")).expect("create lock dir");
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&held_path)
+        .expect("open sibling lock");
+    fs2::FileExt::lock_exclusive(&held).expect("hold sibling lock");
+
+    let deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + Duration::from_secs(20),
+    );
+    let outcome = refresh_managed_gwt_assets_for_agent(&sibling, &AgentId::ClaudeCode);
+    drop(deadline);
+    fs2::FileExt::unlock(&held).expect("release sibling lock");
+
+    outcome.expect(
+        "a sibling worktree's held managed-asset lock must not block this worktree's \
+         materialization",
+    );
 }

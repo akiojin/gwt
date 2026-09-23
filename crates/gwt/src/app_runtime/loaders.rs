@@ -91,8 +91,12 @@ impl AppRuntime {
             )];
         }
 
+        let Some(context) = self.project_context(&address.tab_id) else {
+            return Vec::new();
+        };
         spawn_branch_load_async(
             self.proxy.clone(),
+            context,
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
@@ -131,8 +135,12 @@ impl AppRuntime {
                 },
             )];
         };
+        let Some(context) = self.project_context(&address.tab_id) else {
+            return Vec::new();
+        };
         spawn_remote_start_work_branches_async(
             self.proxy.clone(),
+            context,
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
@@ -140,7 +148,17 @@ impl AppRuntime {
         Vec::new()
     }
 
+    #[cfg(test)]
     pub(crate) fn load_logs_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        self.load_logs_scoped_events(client_id, id, gwt::LogScopeSelection::default())
+    }
+
+    pub(crate) fn load_logs_scoped_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        selection: gwt::LogScopeSelection,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
                 client_id,
@@ -178,8 +196,21 @@ impl AppRuntime {
             )];
         }
 
-        match load_log_entries_from_dir(&self.log_dir) {
-            Ok(outcome) => {
+        let scope = if matches!(selection, gwt::LogScopeSelection::Global) {
+            None
+        } else {
+            self.project_log_scope_for_tab(&address.tab_id)
+        };
+        let log_dir = scope.map(|scope| scope.log_dir()).unwrap_or(&self.log_dir);
+        match load_log_entries_from_dir(log_dir) {
+            Ok(mut outcome) => {
+                if let Some(scope) = scope {
+                    for entry in &mut outcome.entries {
+                        entry
+                            .project_scope
+                            .get_or_insert_with(|| scope.as_str().to_string());
+                    }
+                }
                 let mut events = vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::LogEntries {
@@ -191,7 +222,12 @@ impl AppRuntime {
                     events.push(OutboundEvent::reply(
                         client_id,
                         BackendEvent::LogEntryAppended {
-                            entry: skipped_lines_warning(&outcome.diagnostics),
+                            entry: {
+                                let mut warning = skipped_lines_warning(&outcome.diagnostics);
+                                warning.project_scope =
+                                    scope.map(|scope| scope.as_str().to_string());
+                                warning
+                            },
                         },
                     ));
                 }

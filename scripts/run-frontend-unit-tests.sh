@@ -2,6 +2,10 @@
 set -euo pipefail
 
 bash scripts/run-node-tests-with-linkedom.sh \
+  crates/gwt/web/__tests__/close-project.test.mjs \
+  crates/gwt/web/__tests__/socket-project-scope.test.mjs \
+  crates/gwt/web/__tests__/frontend-route.test.mjs \
+  crates/gwt/web/__tests__/hub-app.test.mjs \
   crates/gwt/web/__tests__/contrast.test.mjs \
   crates/gwt/web/__tests__/theme-manager.test.mjs \
   crates/gwt/web/__tests__/theme-segmented.test.mjs \
@@ -70,14 +74,11 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/viewport-persist-throttle.test.mjs \
   crates/gwt/web/__tests__/viewport-sync.test.mjs \
   crates/gwt/web/__tests__/agent-completion-notifications.test.mjs \
+  crates/gwt/web/__tests__/project-page-metadata.test.mjs \
   crates/gwt/web/__tests__/toast-host.test.mjs \
   crates/gwt/web/__tests__/notification-center.test.mjs \
   crates/gwt/web/__tests__/notification-fanout.test.mjs \
-  crates/gwt/web/__tests__/project-switcher.test.mjs \
-  crates/gwt/web/__tests__/project-tabs-renderer.test.mjs \
-  crates/gwt/web/__tests__/close-project-tab.smoke.test.mjs \
   crates/gwt/web/__tests__/window-tabs-renderer.test.mjs \
-  crates/gwt/web/__tests__/project-tab-style.test.mjs \
   crates/gwt/web/__tests__/playwright-embedded-routes.test.mjs \
   crates/gwt/web/__tests__/viewport-persist-wiring.test.mjs \
   crates/gwt/web/__tests__/system-settings-interaction-guard-wiring.test.mjs \
@@ -89,6 +90,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/surface-window-reopen.test.mjs \
   crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \
+  crates/gwt/web/__tests__/logs-scope-facet.test.mjs \
   crates/gwt/web/__tests__/window-runtime-state.test.mjs \
   crates/gwt/web/__tests__/window-list-model.test.mjs \
   crates/gwt/web/__tests__/window-close-confirm-modal.test.mjs

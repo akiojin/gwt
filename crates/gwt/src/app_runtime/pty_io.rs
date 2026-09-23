@@ -306,6 +306,9 @@ fn spawn_window_close_fallback_thread(
 /// the line is inserted on the prompt but never submitted — so the submit has
 /// to be a write of its own, after the TUI has settled.
 const PANE_SUBMIT_SETTLE: Duration = Duration::from_millis(400);
+/// How long a pane close keeps waiting for its PTY child to exit before it
+/// stops trying to record the terminal status (Issue #4643 AC-1).
+const PANE_CLOSE_EXIT_PROOF_WAIT: Duration = Duration::from_secs(30);
 
 /// Split one pane payload into the body and its submit terminator. Input that
 /// carries no terminator is not a submit and is returned whole, so raw
@@ -522,6 +525,40 @@ impl AppRuntime {
         self.pane_send_input_to_window_events(client_id, &window_id, text)
     }
 
+    /// Browser sessions can resolve a pane only inside their immutable project.
+    pub(crate) fn pane_send_input_for_project_events(
+        &mut self,
+        client_id: ClientId,
+        project_key: &gwt_core::repo_hash::ProjectKey,
+        session_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let target = self.tabs.iter().find_map(|tab| {
+            if self.project_key_for_tab(&tab.id) != Some(project_key) {
+                return None;
+            }
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| window.session_id.as_deref() == Some(session_id))
+                .map(|window| combined_window_id(&tab.id, &window.id))
+        });
+        let Some(window_id) = target else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some(
+                        "no pane bound to this session in the connected project".to_string(),
+                    ),
+                },
+            )];
+        };
+        self.pane_send_input_to_window_events(client_id, &window_id, text)
+    }
+
     /// Inject input into one already-authorized pane identity. Capability
     /// callers resolve this exact combined window id inside their authenticated
     /// project before reaching the PTY; this helper never performs a
@@ -636,6 +673,15 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+        let Some(project_key) = self
+            .window_lookup
+            .get(id)
+            .and_then(|address| self.project_tab_incarnations.get(&address.tab_id))
+            .map(|incarnation| incarnation.project_key.clone())
+        else {
+            tracing::warn!(window_id = %id, "refusing PTY writer without project ownership");
+            return;
+        };
         let Ok(pane_guard) = pane.lock() else {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -649,10 +695,19 @@ impl AppRuntime {
         drop(pane_guard);
         match self.pty_writers.write() {
             Ok(mut guard) => {
-                let previous = guard.insert(id.to_string(), Arc::clone(&pty));
+                let previous = guard.insert(
+                    id.to_string(),
+                    Arc::new(crate::PtyWriterEntry {
+                        project_key,
+                        handle: Arc::clone(&pty),
+                    }),
+                );
                 drop(guard);
                 gwt::perf::startup::pty_ready(id);
-                if let Some(previous) = previous.filter(|previous| !Arc::ptr_eq(previous, &pty)) {
+                if let Some(previous) = previous
+                    .map(|entry| Arc::clone(&entry.handle))
+                    .filter(|previous| !Arc::ptr_eq(previous, &pty))
+                {
                     previous.revoke_input_generation();
                     let window_id = id.to_string();
                     if let Err(_error) = thread::Builder::new()
@@ -688,7 +743,7 @@ impl AppRuntime {
                 let previous = guard.remove(id);
                 drop(guard);
                 if let Some(previous) = previous {
-                    previous.invalidate_input_generation();
+                    previous.handle.invalidate_input_generation();
                 }
             }
             Err(_error) => {
@@ -856,7 +911,14 @@ impl AppRuntime {
         });
         let pty_writers = Arc::clone(&self.pty_writers);
         let sessions_dir = self.sessions_dir.clone();
-        let proxy = self.proxy.clone();
+        // Durable cleanup belongs to the captured pane even after its project
+        // closes. Its in-memory completion, however, must not mutate a reopened
+        // project's PM close fence or monitor snapshot.
+        let proxy = project_root
+            .as_deref()
+            .and_then(|root| self.project_context_for_root(root))
+            .map(|context| self.proxy.for_project(context))
+            .unwrap_or_else(|| self.proxy.clone());
         let window_lifecycle_generations = Arc::clone(&self.window_lifecycle_generations);
         let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let window_id = window_id.to_string();
@@ -899,8 +961,8 @@ impl AppRuntime {
                     let writer = closing_pty.as_ref().and_then(|closing_pty| {
                         writers
                             .get(&window_id)
-                            .filter(|current| Arc::ptr_eq(current, closing_pty))
-                            .cloned()
+                            .filter(|current| Arc::ptr_eq(&current.handle, closing_pty))
+                            .map(|entry| Arc::clone(&entry.handle))
                     });
                     if writer.is_some() {
                         writers.remove(&window_id);
@@ -1185,6 +1247,15 @@ impl AppRuntime {
             }
 
             if let Some(runtime) = runtime.as_mut() {
+                // Issue #4014: the reader thread stays in `read` until the PTY
+                // signals EOF. On Windows the ConPTY output pipe only does so
+                // once the pseudoconsole is closed, and the reader itself pins
+                // the pane - and with it the master - alive, so joining first
+                // would never return. The child was killed and reaped above, so
+                // releasing the descriptors here (Issue #4142 already drops the
+                // master and writer together) closes the pseudoconsole and lets
+                // the join below complete.
+                runtime.pty.release_descriptors();
                 if let Some(handle) = runtime.output_thread.take() {
                     finalizer_ok &= handle.join().is_ok();
                 }
@@ -1524,7 +1595,9 @@ impl AppRuntime {
                 Some((identity, runtime.incarnation))
             });
         self.remove_window_state_tracking(window_id);
-        self.pending_pm_wakes.remove(window_id);
+        for state in self.project_states.values_mut() {
+            state.pending_pm_wakes.remove(window_id);
+        }
         self.deregister_pty_writer(window_id);
         let mut threads = RuntimeStopThreads {
             output_thread: None,
@@ -1588,18 +1661,35 @@ impl AppRuntime {
                     let sessions_dir = self.sessions_dir.clone();
                     let window_id = window_id.to_string();
                     thread::spawn(move || {
+                        // Issue #4643: an agent routinely needs more than the
+                        // stall threshold to exit after SIGHUP. Giving up at
+                        // the threshold left the closed pane's sidecar live
+                        // forever, so keep waiting for the exit proof and
+                        // only report the stall once.
                         let started = Instant::now();
-                        let deadline = Instant::now() + Duration::from_secs(2);
+                        let stall_after = Duration::from_secs(2);
+                        let deadline = started + PANE_CLOSE_EXIT_PROOF_WAIT;
+                        let mut stall_reported = false;
                         let mut exited = false;
                         while Instant::now() < deadline {
                             if pty.try_wait().ok().flatten().is_some() {
                                 exited = true;
                                 break;
                             }
+                            if !stall_reported && started.elapsed() >= stall_after {
+                                stall_reported = true;
+                                let elapsed_ms = u64::try_from(started.elapsed().as_millis())
+                                    .unwrap_or(u64::MAX);
+                                tracing::warn!(
+                                    target: "gwt.pane.teardown",
+                                    window_id = %window_id,
+                                    elapsed_ms,
+                                    "{}",
+                                    pane_teardown_stall_message(&window_id, "process_exit", elapsed_ms)
+                                );
+                            }
                             thread::sleep(Duration::from_millis(10));
                         }
-                        let elapsed_ms =
-                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                         if exited {
                             let _ = gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
                                 &sessions_dir,
@@ -1608,12 +1698,13 @@ impl AppRuntime {
                                 gwt_agent::AgentStatus::Stopped,
                             );
                         } else {
+                            // The sidecar keeps its PTY child identity, so the
+                            // worktree sweep still sees this launch end the
+                            // moment the child does (Issue #4643 AC-2).
                             tracing::warn!(
                                 target: "gwt.pane.teardown",
                                 window_id = %window_id,
-                                elapsed_ms,
-                                "{}",
-                                pane_teardown_stall_message(&window_id, "process_exit", elapsed_ms)
+                                "closed pane's PTY child did not exit; its runtime sidecar was not terminalized"
                             );
                         }
                     });

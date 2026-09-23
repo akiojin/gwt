@@ -5,12 +5,16 @@
 //!
 //! `fsevent-sys` 5.2.0 deprecated its whole surface in favour of
 //! `objc2-core-services`, so every call below trips `deprecated`, which the
-//! repository's `-D warnings` clippy gate promotes to an error. CI only runs
-//! clippy on Linux and Windows, where this `cfg(target_os = "macos")` module
-//! never compiles, so the breakage is invisible there and lands on every macOS
-//! agent's `verify.run` instead. Accept the deprecation here until the port to
-//! `objc2-core-services` lands; the allow is scoped to this adapter so no other
-//! deprecated API slips through the gate.
+//! repository's `-D warnings` clippy gate promotes to an error. Accept the
+//! deprecation here until the port to `objc2-core-services` lands (#4518); the
+//! allow is scoped to this adapter so no other deprecated API slips through
+//! the gate.
+//!
+//! When the suppression was added, clippy ran on Linux and Windows only, where
+//! this `cfg(target_os = "macos")` module never compiles — so the breakage was
+//! invisible to CI and surfaced as every macOS agent's `verify.run` failing at
+//! once. lint.yml's `Clippy (macOS)` job (#4522) now compiles this module, so
+//! removing the allow below fails CI rather than develop.
 #![allow(deprecated)]
 
 use std::{

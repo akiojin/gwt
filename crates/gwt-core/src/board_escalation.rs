@@ -335,7 +335,8 @@ fn body_has_section(body: &str, aliases: &[&str]) -> bool {
 
 /// Why an operation was refused in a way the agent cannot work around
 /// (Issue #3655 AC-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationRefusalKind {
     /// The target is terminal and can never accept this operation again.
     Immutability,
@@ -344,6 +345,8 @@ pub enum OperationRefusalKind {
     /// The operation is not permitted here, or reaches a surface that refuses
     /// to act at all.
     Permission,
+    /// Durable authority or evidence failed its integrity contract.
+    Integrity,
 }
 
 impl OperationRefusalKind {
@@ -352,6 +355,7 @@ impl OperationRefusalKind {
             Self::Immutability => "immutability",
             Self::Authority => "authority",
             Self::Permission => "permission",
+            Self::Integrity => "integrity",
         }
     }
 
@@ -365,6 +369,9 @@ impl OperationRefusalKind {
             }
             Self::Permission => {
                 "この操作はこの surface で拒否されました。まず拒否メッセージが示す順序・前提の不足を担当が解消して再試行し、それでも通らなければ PM 側での代行、または設定・ツール側の修正が必要です。"
+            }
+            Self::Integrity => {
+                "durable authority の整合性を回復する必要があります。監査可能な repair 経路を確認してから再実行してください。"
             }
         }
     }
@@ -385,17 +392,42 @@ impl OperationRefusalKind {
 ///   and a refused authority is contractually forbidden from writing anything
 ///   locally — an escalation there would itself be the mutation the refusal
 ///   promises not to make.
-fn refusal_eligible_operation(operation: &str) -> bool {
-    const FAMILIES: &[&str] = &[
-        "execution.",
-        "workspace.ensure",
-        "pane.close",
-        "pane.stop",
-        "pane.send",
-    ];
+fn legacy_refusal_eligible_operation(operation: &str) -> bool {
+    const FAMILIES: &[&str] = &["workspace.ensure", "pane.close", "pane.stop", "pane.send"];
     FAMILIES
         .iter()
         .any(|family| operation.starts_with(family) || operation == family.trim_end_matches('.'))
+}
+
+/// Operations allowed to auto-escalate when their producer supplies a typed
+/// human-required disposition. Scope eligibility is stable operation data; it
+/// does not inspect display prose.
+///
+/// # Disposition table (Issue #3696 AC-2, absorbing #3710)
+///
+/// `execution.*` used to reach [`classify_operation_refusal`], where the
+/// substring `refused` alone decided the verdict. That filed the agent's own
+/// next step as "PM 側での代行が必要" — the misfire this Issue was opened for.
+/// The family now escalates only on a typed disposition the refusing operation
+/// itself supplies, so the table below is the whole contract:
+///
+/// | Refusal | Disposition | Escalates |
+/// | --- | --- | --- |
+/// | Verification evidence missing / stale / failing / plan changed (`verification_*`) | agent-recoverable → `verify.run` | no |
+/// | Open action obligations (`open_action_obligations`) | agent-recoverable → `execution.blocked` | no |
+/// | Trusted store busy (`*_store_busy`) | agent-recoverable → retry the same operation | no |
+/// | Host bridge transport down / `workspace.ensure` required | agent-recoverable → retry / `workspace.ensure` | no |
+/// | Terminal record (`execution_record_terminal`) | human-required, [`OperationRefusalKind::Immutability`] | yes |
+/// | Foreign owner / binding mismatch (`execution_owner_mismatch`, `execution_binding_mismatch`) | human-required, [`OperationRefusalKind::Authority`] | yes |
+/// | Record integrity failed (`execution_record_integrity_failed`) | human-required, [`OperationRefusalKind::Integrity`] | yes |
+/// | Host bridge structurally rejected the operation | human-required, [`OperationRefusalKind::Permission`] | yes |
+///
+/// An `execution.*` refusal that supplies no disposition escalates nothing.
+/// That direction is deliberate: the failure this Issue records is an alarm
+/// nobody could act on, and a missing disposition is a gap in the producer,
+/// not evidence that the owner must intervene.
+pub fn structured_refusal_eligible_operation(operation: &str) -> bool {
+    operation.starts_with("execution.") || legacy_refusal_eligible_operation(operation)
 }
 
 /// Decide whether a failed operation is a governance refusal worth escalating.
@@ -406,7 +438,7 @@ fn refusal_eligible_operation(operation: &str) -> bool {
 /// lifecycle operation would raise an alarm, and every unrelated command that
 /// happens to say "unavailable" would too.
 pub fn classify_operation_refusal(operation: &str, error: &str) -> Option<OperationRefusalKind> {
-    if !refusal_eligible_operation(operation) {
+    if !legacy_refusal_eligible_operation(operation) {
         return None;
     }
     let lowered = error.to_lowercase();
@@ -493,6 +525,44 @@ pub fn render_operation_refusal_body(
          事象・原因を補足してください。",
         kind = kind.as_str(),
         request = kind.request_hint(),
+    )
+}
+
+/// Render the four-section body for a refusal that arrived with a typed
+/// disposition (Issue #3696, absorbing #3710).
+///
+/// Unlike [`render_operation_refusal_body`], the 原因 line names the cause
+/// outright instead of hedging with `未判定`. It can: the refusing operation
+/// declared this cause itself, and an inconsistent declaration is dropped
+/// before it reaches here. The hedge exists in the untyped renderer precisely
+/// because a substring match is not evidence of anything — that guess is what
+/// filed agent-recoverable refusals as owner work.
+///
+/// The display text still travels, as evidence rather than as the verdict, so
+/// later audits survive a wording change.
+pub fn render_structured_operation_refusal_body(
+    operation: &str,
+    error: &str,
+    kind: OperationRefusalKind,
+    reason_code: &str,
+    cause: &str,
+    recovery_action: Option<&str>,
+) -> String {
+    format!(
+        "事象: JSON operation `{operation}` が拒否されました。\n\
+         ```\n{error}\n```\n\
+         原因: {kind}（cause=`{cause}`、reason_code=`{reason_code}`）。この拒否は担当 agent の \
+         入力・順序の修正では解消できないと、操作自身が宣言しています。\n\
+         依頼: {request}\n\
+         再開条件: 上記が解消され、`{operation}` 相当の操作が通る状態になること。\n\
+         \n\
+         構造化拒否: reason_code=`{reason_code}`, cause=`{cause}`, recovery_action=`{recovery}`\n\
+         \n\
+         この投稿は gwt が自動起票しました（Issue #3655 AC-2 / Issue #3696）。担当 agent は \
+         必要に応じて事象・原因を補足してください。",
+        kind = kind.as_str(),
+        request = kind.request_hint(),
+        recovery = recovery_action.unwrap_or("none"),
     )
 }
 
@@ -948,13 +1018,14 @@ mod tests {
     }
 
     #[test]
-    fn the_three_production_refusals_from_the_issue_are_all_classified() {
+    fn execution_refusals_require_typed_disposition_while_legacy_families_remain_classified() {
         assert_eq!(
             classify_operation_refusal(
                 "execution.reopen",
                 "Completed issue #2338 is immutable; use a fresh launch for new work"
             ),
-            Some(OperationRefusalKind::Immutability)
+            None,
+            "execution refusals require operation-local typed disposition"
         );
         assert_eq!(
             classify_operation_refusal(

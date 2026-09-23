@@ -31,10 +31,6 @@ fn js_braced_block_after<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
     None
 }
 
-fn project_tabs_renderer_js() -> &'static str {
-    root_js_module_source("/project-tabs-renderer.js")
-}
-
 fn terminal_context_menu_js() -> &'static str {
     root_js_module_source("/terminal-context-menu.js")
 }
@@ -123,6 +119,8 @@ fn frontend_bundle_source() -> &'static str {
         include_str!("../web/styles/app.css"),
         "\n",
         include_str!("../web/app.js"),
+        "\n",
+        include_str!("../web/frontend-route.js"),
         "\n",
         include_str!("../web/branch-list-state.js"),
         "\n",
@@ -1484,7 +1482,6 @@ fn embedded_web_window_status_chip_uses_running_idle_stopped_error_variants() {
 fn embedded_web_project_bar_omits_index_status_badge() {
     let html = frontend_styles_bundle();
     let js = app_js();
-    let project_tabs_js = project_tabs_renderer_js();
 
     // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
     // surface and its supporting controller / progress-toast wiring must
@@ -1525,13 +1522,7 @@ fn embedded_web_project_bar_omits_index_status_badge() {
                 && settings_surface_js().contains("renderIndexSettingsPanel({"),
             "SPEC-1939 Phase 15: Settings must drop Index while the Index window keeps the health panel",
         );
-    assert!(
-        html.contains(".project-tab-state-cue")
-            && project_tabs_js.contains("projectTabAgentCueState")
-            && project_tabs_js.contains("projectTabStateForRuntimeState")
-            && !project_tabs_js.contains("aggregateProjectTabDotState"),
-        "SPEC-2013 Phase 6: project tab state cue must reflect agent runtime state, not Index health",
-    );
+    assert!(!index_html().contains("id=\"project-tabs\""));
 }
 
 #[test]
@@ -1577,7 +1568,7 @@ fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
     assert!(
         html.contains("--agent-claude")
             && html.contains("--agent-codex")
-            && html.contains("--agent-gemini")
+            && html.contains("--agent-hermes")
             && html.contains("--agent-opencode")
             && html.contains("--agent-copilot")
             && html.contains("--agent-custom"),
@@ -1918,39 +1909,31 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         "expected socket listener registration to be isolated behind an installer",
     );
     assert!(
-        html.contains("activeSocket.addEventListener(\"open\", handleSocketOpen)")
-            && html.contains("activeSocket.addEventListener(\"message\", handleSocketMessage)")
-            && html.contains("activeSocket.addEventListener(\"close\", handleSocketClose)"),
-        "expected socket listeners to be registered through named handlers",
+        html.contains("[\"open\", handleSocketOpen]")
+            && html.contains("[\"message\", handleSocketMessage]")
+            && html.contains("[\"close\", handleSocketClose]")
+            && html.contains("activeSocket.addEventListener(kind, (event) => {")
+            && html.contains("if (socket === activeSocket) handler(event);"),
+        "expected named socket handlers to ignore events from replaced connections",
     );
 }
 
 #[test]
 fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
     let html = frontend_bundle_source();
-    // Issue #2694 Phase C: handleSocketOpen now also re-initializes the
-    // per-connection dispatcher before the frontend_ready handshake. The
-    // regex below is intentionally `[\s\S]*?` (non-greedy any) between
-    // setConnectionState and the pendingMessages flush so dispatcher
-    // setup is allowed inside the function, but the ordering assertion
-    // — frontend_ready strictly precedes the queued-message replay — is
-    // preserved. Recovery Center also reloads after the readiness handshake.
-    //
-    // Issue #4433: the contract is that ordering, not "the flush is the last
-    // statement". handleSocketOpen now re-subscribes to in-flight branch
-    // cleanups after the flush, so the match deliberately stops at the end of
-    // the while loop instead of anchoring on the function's closing brace.
+    // Readiness must precede queue replay, and replay must match the immutable
+    // connection scope. Other projects retain their own pending messages.
     let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}"#,
-        )
-        .expect("valid regex");
+        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+    )
+    .expect("valid regex");
 
     assert!(
         html.contains("function connectSocket()"),
         "expected socket transport bootstrap helper in embedded html",
     );
     assert!(
-            html.contains("socket = new WebSocket(websocketUrl());")
+            html.contains("socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;")
                 && html.contains("setConnectionState(false);")
                 && html.contains("installSocketEventHandlers(socket);"),
             "expected socket bootstrap to create the websocket, reset connection state, and install handlers",
@@ -1998,13 +1981,18 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
 #[test]
 fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
     let html = frontend_bundle_source();
+    // Issue #4538: the Project app and the Hub share one route helper.
+    let delegation = regex::Regex::new(
+        r#"function websocketUrl\(projectKey = activeProjectKey\(\)\)\s*\{\s*return routeWebSocketUrl\(window\.location\.href, projectKey\);\s*\}"#,
+    )
+    .expect("valid regex");
     let websocket_url = regex::Regex::new(
-            r#"function websocketUrl\(\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
+            r#"export function routeWebSocketUrl\(locationHref, projectKey\)\s*\{\s*const url = new URL\(locationHref\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*if \(projectKey\) url\.searchParams\.set\("repo_hash", projectKey\);\s*return url\.toString\(\);\s*\}"#,
         )
         .expect("valid regex");
 
     assert!(
-            websocket_url.is_match(html),
+            delegation.is_match(html) && websocket_url.is_match(html),
             "expected embedded bundle to derive the websocket endpoint from window.location without host-specific branches",
         );
     assert!(
@@ -2165,7 +2153,8 @@ fn embedded_web_branches_surface_remains_branch_browser() {
 fn embedded_web_serves_every_root_module_import() {
     let embedded_web_source = include_str!("embedded_web.rs");
     let embedded_server_source = include_str!("embedded_server.rs");
-    let mut module_graph_source = String::from(app_js());
+    // index.html loads the route bootstrap, which loads app.js / hub-app.js.
+    let mut module_graph_source = format!("{}\n{}", index_html(), app_js());
     for asset in root_js_module_assets() {
         module_graph_source.push('\n');
         module_graph_source.push_str(asset.source);
@@ -2209,7 +2198,7 @@ fn embedded_web_root_js_module_registry_covers_app_imports() {
 
     for module_path in [
         "/branch-cleanup-modal.js",
-        "/close-project-tab-confirm-modal.js",
+        "/close-project-confirm-modal.js",
         "/migration-modal.js",
         "/window-docking.js",
         "/board-surface.js",
@@ -3858,24 +3847,11 @@ fn embedded_web_project_picker_exposes_github_clone_action_and_modal() {
 // Clone from GitHub intake actions, so the top toolbar carries a single
 // project control and no split-button group remains.
 #[test]
-fn embedded_web_top_toolbar_is_single_projects_switcher() {
+fn embedded_web_top_toolbar_exposes_close_project() {
     let html = index_html();
-
-    assert!(
-        !html.contains("id=\"open-project-group\"")
-            && !html.contains("class=\"split-button-group\"")
-            && !html.contains("id=\"open-project-menu\""),
-        "the Open Project split-button group must be removed from the top toolbar"
-    );
-    assert!(
-        html.contains("id=\"project-switcher-button\"")
-            && html.contains("aria-controls=\"project-switcher-panel\""),
-        "top toolbar must mount the single Projects switcher button"
-    );
-    assert!(
-        html.contains("id=\"project-switcher-panel\"") && html.contains("role=\"listbox\""),
-        "Projects switcher panel must mount as a listbox"
-    );
+    assert!(html.contains("id=\"close-project-button\""));
+    assert!(!html.contains("id=\"project-switcher-button\""));
+    assert!(!html.contains("id=\"project-tabs\""));
 }
 
 /// Launch Wizard hydration can add QuickStart, Docker, and Advanced form

@@ -40,6 +40,7 @@ pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;
 pub mod native_app;
+pub mod native_notification_permission;
 pub(crate) mod path_filter;
 #[doc(hidden)]
 pub mod perf;
@@ -48,12 +49,14 @@ pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
+pub mod project_open_control;
 pub mod protocol;
 pub mod pty_start_gate;
 pub mod recovery_delivery;
 pub mod runtime_daemon_events;
 pub mod session_inventory;
 pub mod spec_tasks;
+pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
@@ -72,7 +75,7 @@ mod test_guard;
 mod recovery_delivery_tests;
 
 #[cfg(test)]
-pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+pub(crate) fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
     gwt_core::test_support::env_lock()
 }
 
@@ -82,18 +85,22 @@ pub use agent_project_state::{
     apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
-    continue_authenticated_execution, observe_agent_runtime, prepare_resume_producing_authority,
-    probe_authenticated_execution_binding, probe_authenticated_prepared_execution_binding,
+    continue_authenticated_execution, describe_authenticated_host_contract, observe_agent_runtime,
+    prepare_resume_producing_authority, probe_authenticated_execution_binding,
+    probe_authenticated_prepared_execution_binding, probe_bound_authenticated_work_materialization,
     AgentBuildAbortTerminalizationRequest, AgentExecutionAdoptionReceipt,
     AgentExecutionAdoptionRequest, AgentExecutionBindingProbeReceipt,
     AgentExecutionBindingProbeRequest, AgentExecutionContinuationOutcome,
-    AgentExecutionContinuationReceipt, AgentExecutionContinuationRequest, AgentRuntimeObservation,
-    AgentWorkTerminalKind, AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
-    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
-    AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
-    AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION, AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
-    AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
-    AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+    AgentExecutionContinuationReceipt, AgentExecutionContinuationRequest, AgentHostContractReceipt,
+    AgentHostContractRequest, AgentRuntimeObservation, AgentWorkMaterializationProbeReceipt,
+    AgentWorkMaterializationProbeRequest, AgentWorkTerminalKind, AgentWorkTerminalizationOutcome,
+    AgentWorkTerminalizationReceipt, AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError,
+    AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt,
+    AgentWorkspaceUpdateRequest, AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+    AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+    AGENT_HOST_CONTRACT_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+    AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+    EXECUTION_GENERATION_CONTRACT_VERSION,
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
@@ -140,9 +147,10 @@ pub use issue_monitor::{
     clear_wait_on_record, decide_merged_issue_settlement, declare_wait_on_record,
     delegation_recorded, establish_issue_monitor_authority_fence, invalidate_wait_on_record,
     is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
-    issue_monitor_authority_fence_path, issue_monitor_launch_plan,
-    issue_monitor_launch_profile_pool_summary, issue_monitor_launch_profile_summary,
-    issue_monitor_launch_prompt, issue_monitor_prefs_path_for_repo_path,
+    issue_monitor_authority_fence_path, issue_monitor_launch_delivery_requeue_reason,
+    issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
+    issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
+    issue_monitor_launch_prompt_with_requeue_reason, issue_monitor_prefs_path_for_repo_path,
     load_issue_monitor_authority_fence, load_issue_monitor_prefs,
     mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,
@@ -210,7 +218,8 @@ pub use launch_wizard::{
     ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
-    refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    managed_asset_lock_path, refresh_existing_managed_gwt_assets_for_worktree,
+    refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     refresh_managed_gwt_assets_for_worktree, ManagedAssetMaterialization,
 };
@@ -219,12 +228,12 @@ pub use native_app::{
     MACOS_APP_BUNDLE_NAME, MACOS_BUNDLE_IDENTIFIER,
 };
 pub use persistence::{
-    default_session_state, default_workspace_state, empty_workspace_state,
-    legacy_workspace_state_path, load_restored_workspace_state, load_session_state,
-    load_workspace_state, migrate_legacy_workspace_state, pause_process_windows_for_restore,
-    project_title_from_path, save_session_state, save_workspace_state,
-    save_workspace_state_durable, workspace_state_path, AgentKanbanLane, CanvasViewport,
-    PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
+    collapse_duplicate_session_tabs, default_session_state, default_workspace_state,
+    empty_workspace_state, legacy_workspace_state_path, load_restored_workspace_state,
+    load_session_state, load_workspace_state, migrate_legacy_workspace_state,
+    pause_process_windows_for_restore, project_title_from_path, save_session_state,
+    save_workspace_state, save_workspace_state_durable, workspace_state_path, AgentKanbanLane,
+    CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
     PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowPlacement,
     WindowProcessStatus, WindowState, WindowWorktreeForm,
 };
@@ -238,14 +247,14 @@ pub use protocol::{
     AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContinueWorkOutcomeKind,
     CustomAgentErrorCode, FileAttachment, FileContentErrorKind, FileContentMode,
     FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
-    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
-    ManagedHookHealthView, ManagedHookPendingDiscussionView, ManagedHookPendingGoalView,
-    ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView, ProfileEnvEntryView,
-    ProfileSnapshotView, ProjectTabView, RecentProjectView, RecoveryCenterItemState,
-    RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary, UiTraceEntry,
-    UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
-    WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
-    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
-    WorkspaceResumeSource, WorkspaceView,
+    HubProjectView, HubStateView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
+    IndexSearchTarget, LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
+    ManagedHookPendingGoalView, ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView,
+    ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
+    RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary,
+    UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
+    WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView,
+    WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
+    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

@@ -29,6 +29,8 @@ use crate::cli::CliEnv;
 pub(crate) mod admission;
 /// Issue #4405: starved-versus-progressing reading of the lease holder.
 pub(crate) mod holder_activity;
+mod renewal;
+pub(crate) use renewal::CommandProgress;
 
 const CARGO_SCOPED_SUBCOMMANDS: &[&str] = &["test", "t", "nextest"];
 /// Flags that widen a `cargo test` past a single target, wherever they sit.
@@ -215,14 +217,15 @@ pub enum VerificationLeaseCommand {
 }
 
 pub(super) fn run<E: CliEnv>(
-    _env: &mut E,
+    env: &mut E,
     command: VerificationLeaseCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
         VerificationLeaseCommand::Status => {
             let mut status = status()?;
-            observe_holder_activity(&mut status);
+            let worktree = resolve_current_worktree_root(env.repo_path());
+            observe_holder_activity(&mut status, &worktree);
             render(out, "held", "free", &status);
             Ok(0)
         }
@@ -236,14 +239,25 @@ pub(super) fn run<E: CliEnv>(
                 .to_string(),
         )),
         VerificationLeaseCommand::Release { lease_id, reason } => {
-            release(&lease_id, reason.as_deref(), out)
+            let worktree = resolve_current_worktree_root(env.repo_path());
+            release(
+                &lease_id,
+                reason.as_deref(),
+                &mut SystemReclaimer::new(&worktree),
+                out,
+            )
         }
     }
 }
 
-fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32, SpecOpsError> {
+fn release(
+    lease_id: &str,
+    reason: Option<&str>,
+    reclaimer: &mut dyn OrphanReclaimer,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
     let Some(control) = control_dir_for(lease_id) else {
-        return Err(missing_lease(lease_id));
+        return reclaim_orphan(lease_id, reason, reclaimer, out);
     };
     // Issue #4360: the holder waits for this file to exist and then reads the
     // reason out of it, so a plain write lets it read the empty moment between
@@ -265,6 +279,219 @@ fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32
     }
     push_status_fields(out, &status()?);
     Ok(0)
+}
+
+/// Issue #4633: how long a holder that looked orphaned is watched again
+/// before it is ended. The first reading spans [`PROGRESS_WINDOW`]; this one
+/// has to show the same — parent gone, nothing of its own running, no CPU
+/// beyond noise — over a window long enough to cover the gap between two
+/// commands of a live matrix.
+///
+/// [`PROGRESS_WINDOW`]: holder_activity::PROGRESS_WINDOW
+const ORPHAN_CONFIRM_WINDOW: Duration = Duration::from_secs(10);
+
+/// What reclaiming an orphaned canonical lease needs from the host, so the
+/// decision can be exercised without ending real processes.
+trait OrphanReclaimer {
+    /// Read the holder `pid` after waiting `pause`; a later call compares
+    /// against the earlier one. `None` when the holder is gone.
+    fn observe(
+        &mut self,
+        pid: u32,
+        status: &HeavyLeaseStatus,
+        pause: Duration,
+    ) -> Option<holder_activity::HolderActivity>;
+
+    /// End the holder: politely first, then — `force` — unconditionally.
+    fn terminate(&mut self, pid: u32, force: bool) -> Result<(), String>;
+}
+
+struct SystemReclaimer {
+    worktree: PathBuf,
+    probe: holder_activity::HolderProbe,
+}
+
+impl SystemReclaimer {
+    fn new(worktree: &Path) -> Self {
+        Self {
+            worktree: worktree.to_path_buf(),
+            probe: holder_activity::HolderProbe::default(),
+        }
+    }
+}
+
+impl OrphanReclaimer for SystemReclaimer {
+    fn observe(
+        &mut self,
+        pid: u32,
+        status: &HeavyLeaseStatus,
+        pause: Duration,
+    ) -> Option<holder_activity::HolderActivity> {
+        std::thread::sleep(pause);
+        let workload = holder_workload(
+            status.holder_spawn_host.as_deref(),
+            status.target.as_deref(),
+            &self.worktree,
+        );
+        self.probe.observe(pid, &workload, status.acquired_at_ms)
+    }
+
+    fn terminate(&mut self, pid: u32, force: bool) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+            // SAFETY: `kill` has no memory-safety preconditions. `ESRCH` means
+            // the holder is already gone, which is what the caller wants.
+            let rc = unsafe { libc::kill(pid as libc::pid_t, signal) };
+            let err = std::io::Error::last_os_error();
+            if rc == 0 || err.raw_os_error() == Some(libc::ESRCH) {
+                Ok(())
+            } else {
+                Err(format!("failed to signal holder pid {pid}: {err}"))
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (pid, force);
+            Err("reclaiming an orphaned verification holder is supported on Unix only".to_string())
+        }
+    }
+}
+
+/// Where the lease's work runs (Issue #4561), looking for a `daemon` holder's
+/// work under the daemons of the holder's own project (Issue #4633): the lease
+/// is host-wide, and the caller's worktree may belong to another project.
+fn holder_workload(
+    spawn_host: Option<&str>,
+    target: Option<&str>,
+    worktree: &Path,
+) -> holder_activity::HolderWorkload {
+    holder_activity::workload_for(spawn_host, || {
+        target
+            .and_then(crate::cli::daemon::verification_host::live_daemon_pids_for_lease_target)
+            .unwrap_or_else(|| crate::cli::daemon::verification_host::live_daemon_pids(worktree))
+    })
+}
+
+/// Issue #4633 AC-2/AC-3: free a canonical lease whose holder is orphaned.
+///
+/// A canonical lease is a kernel lock inside its `verify.run`, so the only way
+/// to free it from outside is to end that process. That is allowed for one
+/// holder only: one whose requester is gone and which has nothing left to
+/// run, confirmed by two readings [`ORPHAN_CONFIRM_WINDOW`] apart. Every other
+/// holder keeps the protection it had — the manual API cannot touch it.
+fn reclaim_orphan(
+    lease_id: &str,
+    reason: Option<&str>,
+    reclaimer: &mut dyn OrphanReclaimer,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let coordinator = open_coordinator()?;
+    let held = |coordinator: &IndexCoordinator| {
+        coordinator
+            .heavy_lease_status()
+            .ok()
+            .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id))
+    };
+    let Some(status) = held(&coordinator) else {
+        return Err(missing_lease(lease_id));
+    };
+    let Some(owner) = status.owner.clone() else {
+        return Err(canonical_refusal(lease_id, None));
+    };
+    let first = reclaimer.observe(owner.pid, &status, Duration::ZERO);
+    let Some(first) = first.filter(holder_activity::HolderActivity::orphaned) else {
+        return Err(canonical_refusal(
+            lease_id,
+            first.map(|activity| activity.describe()).as_deref(),
+        ));
+    };
+    let Some(reason) = reason.map(str::trim).filter(|reason| !reason.is_empty()) else {
+        return Err(unexpected(format!(
+            "verification lease {lease_id} is held by an orphaned holder ({}). Reclaiming it \
+             ends pid {} and is recorded in the lease ledger, so it needs a reason: pass \
+             `params.reason`.",
+            first.describe(),
+            owner.pid
+        )));
+    };
+    let confirmed = reclaimer.observe(owner.pid, &status, ORPHAN_CONFIRM_WINDOW);
+    let Some(confirmed) = confirmed.filter(holder_activity::HolderActivity::orphaned) else {
+        return Err(canonical_refusal(
+            lease_id,
+            Some(&format!(
+                "the holder looked orphaned, but a second reading {}s later did not confirm it: {}",
+                ORPHAN_CONFIRM_WINDOW.as_secs(),
+                confirmed
+                    .map(|activity| activity.describe())
+                    .unwrap_or_else(|| "the holder is gone".to_string())
+            )),
+        ));
+    };
+    // The lease must still be the same one, under the same owner, right
+    // before its holder is ended: a pid is only a name, and ten seconds is
+    // long enough for the lease to change hands.
+    if held(&coordinator).and_then(|status| status.owner) != Some(owner.clone()) {
+        return Err(missing_lease(lease_id));
+    }
+    reclaimer.terminate(owner.pid, false).map_err(unexpected)?;
+    if await_settled(lease_id).is_err() {
+        reclaimer.terminate(owner.pid, true).map_err(unexpected)?;
+        await_settled(lease_id)?;
+    }
+    let target = status.target.as_deref().unwrap_or("unknown");
+    let record = format!(
+        "orphaned holder pid {} reclaimed by pid {}: {reason}",
+        owner.pid,
+        std::process::id()
+    );
+    coordinator.record_lease_reclaimed(lease_id, target, owner.clone(), &record);
+    out.push_str("verification lease: reclaimed\n");
+    out.push_str(&format!("lease_id: {lease_id}\n"));
+    out.push_str(&format!("reclaimed_pid: {}\n", owner.pid));
+    out.push_str(&format!("reason: {reason}\n"));
+    out.push_str(&format!("holder_state_detail: {}\n", confirmed.describe()));
+    out.push_str(&format!(
+        "recorded: {} (kind reclaimed)\n",
+        coordinator.lease_event_log_path().display()
+    ));
+    push_status_fields(out, &self::status()?);
+    Ok(0)
+}
+
+/// Issue #4633 AC-4: what a caller closing a pane in `worktree` should know
+/// about the canonical lease, if that worktree holds it.
+///
+/// Closing a pane does not end a `verify.run` it started: the runner keeps
+/// the lease until its matrix finishes, which is the right outcome while it
+/// is still working. So the close is not refused and the runner is not ended
+/// first — the caller is told, and told how to reclaim the lease if the
+/// runner is left with nothing to run.
+pub(crate) fn closing_pane_lease_note(worktree: &Path) -> Option<String> {
+    let project = project_scope_hash(worktree);
+    let worktree_hash = compute_worktree_hash(worktree).ok()?;
+    let target = TargetKey::verification(project.as_str(), worktree_hash.as_str()).file_stem();
+    let status = open_coordinator().ok()?.heavy_lease_status().ok()?;
+    lease_note_for_target(&target, &status)
+}
+
+fn lease_note_for_target(target: &str, status: &HeavyLeaseStatus) -> Option<String> {
+    if !status.held || status.target.as_deref() != Some(target) {
+        return None;
+    }
+    let lease_id = status.lease_id.as_deref().unwrap_or("unknown");
+    let pid = status
+        .owner
+        .as_ref()
+        .map(|owner| owner.pid.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    Some(format!(
+        "note: this pane's worktree holds canonical verification lease {lease_id} (holder pid \
+         {pid}). Closing the pane does not end that `verify.run`; it keeps the lease until its \
+         matrix finishes. If it is left with nothing to run, `verify.lease.status` reports \
+         `holder_state: orphaned`, and `verify.lease.release` with `params.lease_id` and \
+         `params.reason` reclaims it without waiting for the TTL.\n"
+    ))
 }
 
 fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
@@ -303,6 +530,20 @@ fn control_dir_for(lease_id: &str) -> Option<PathBuf> {
             })
         })
 }
+
+/// Issue #4561 AC-4: what a reader may do with `holder_state`.
+///
+/// It is a sampled reading of one process set, not a decision about the
+/// holder. `stalled` was acted on three times in one morning against holders
+/// that were working, so the licence has to travel with the value.
+const HOLDER_STATE_ADVICE: &str = "holder_state is one sampled reading, not a verdict — never \
+                                   interrupt or kill a holder on it alone. `stalled` means this \
+                                   reading saw no CPU and no process turnover; `unknown` means \
+                                   the work runs outside the holder's tree and was not found; \
+                                   `orphaned` means its parent exited with nothing of its own \
+                                   left running — `verify.lease.release` with a reason \
+                                   re-checks that and reclaims the lease. Confirm with \
+                                   `ps -eo pid,ppid,time,command` before acting.";
 
 /// Status rendering and the pre-upgrade detached holder wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -347,6 +588,11 @@ struct LeaseStatusSnapshot {
     holder_cpu_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     holder_state: Option<String>,
+    /// Issue #4561 AC-4: what the state was measured from. A bare
+    /// `holder_state` carries no basis, so a reader could only take it at
+    /// face value — which is how three live holders were reported stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_state_detail: Option<String>,
     /// Issue #4470 AC-3: whether the ticket's owner process still exists and
     /// what job status it last published, so a waiter can tell a working
     /// holder from residue without reading the coordinator's files.
@@ -360,14 +606,22 @@ struct LeaseStatusSnapshot {
 
 /// Fill in the holder's activity; only the status report pays for the
 /// process-table read.
-fn observe_holder_activity(status: &mut LeaseStatusSnapshot) {
+fn observe_holder_activity(status: &mut LeaseStatusSnapshot, worktree: &Path) {
     let Some(pid) = status.owner_pid.filter(|_| status.held) else {
         return;
     };
-    if let Some(activity) = holder_activity::observe(pid, status.acquired_at_ms) {
+    // Issue #4561: a `daemon` holder's work is not under `owner_pid`, so the
+    // working set has to reach into the daemons that launched it.
+    let workload = holder_workload(
+        status.holder_spawn_host.as_deref(),
+        status.target.as_deref(),
+        worktree,
+    );
+    if let Some(activity) = holder_activity::observe(pid, &workload, status.acquired_at_ms) {
         status.holder_held_ms = Some(activity.held_ms);
         status.holder_cpu_percent = Some(activity.cpu_percent);
         status.holder_state = Some(activity.state().to_string());
+        status.holder_state_detail = Some(activity.describe());
     }
 }
 
@@ -392,6 +646,7 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             holder_held_ms: None,
             holder_cpu_percent: None,
             holder_state: None,
+            holder_state_detail: None,
             holder_alive: status.holder_alive,
             holder_job_status: status.holder_job_status.map(|job| job.as_str().to_string()),
             holder_stale: status.holder_stale,
@@ -501,6 +756,13 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     }
     if let Some(state) = &status.holder_state {
         out.push_str(&format!("holder_state: {state}\n"));
+        if let Some(detail) = &status.holder_state_detail {
+            out.push_str(&format!("holder_state_detail: {detail}\n"));
+        }
+        // Issue #4561 AC-4: the value is one sampled reading, and the reader
+        // is usually deciding whether to interrupt someone. Say what it does
+        // and does not license, next to the value itself.
+        out.push_str(&format!("holder_state_advice: {HOLDER_STATE_ADVICE}\n"));
     }
     out.push_str(&format!("pending: {}\n", status.pending));
     // Issue #4169 AC-2: `pending` is a count, and a count cannot tell an agent
@@ -521,17 +783,27 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
+/// Issue #4633 AC-3: a live canonical holder keeps its lease. The wording
+/// predates #4633 and is kept, so the refusal reads the same as it always has.
+fn canonical_refusal(lease_id: &str, holder: Option<&str>) -> SpecOpsError {
+    let holder = holder
+        .map(|detail| format!(" Holder: {detail}."))
+        .unwrap_or_default();
+    unexpected(format!(
+        "verification lease {lease_id} is held without a legacy control channel. \
+         Canonical leases are owned by `verify.run` and release when the runner finishes; \
+         they cannot be released or extended through the manual API — only a holder whose \
+         parent exited with nothing left to run can be reclaimed.{holder} \
+         Check `verify.lease.status` for the current holder."
+    ))
+}
+
 fn missing_lease(lease_id: &str) -> SpecOpsError {
     let held = status()
         .ok()
         .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id));
     match held {
-        Some(_) => unexpected(format!(
-            "verification lease {lease_id} is held without a legacy control channel. \
-             Canonical leases are owned by `verify.run` and release when the runner finishes; \
-             they cannot be released or extended through the manual API. \
-             Check `verify.lease.status` for the current holder."
-        )),
+        Some(_) => canonical_refusal(lease_id, None),
         None => unexpected(format!(
             "no live verification lease {lease_id} — check `verify.lease.status`; \
              a holder that died has already released the lease"
@@ -715,6 +987,7 @@ mod tests {
                 holder_held_ms: None,
                 holder_cpu_percent: None,
                 holder_state: None,
+                holder_state_detail: None,
                 holder_alive: Some(true),
                 holder_job_status: Some("running".to_string()),
                 holder_stale: false,
@@ -746,6 +1019,39 @@ mod tests {
              queue[1]: target=repo--verification--late priority=manual-rebuild \
              queued_at_ms=900 waiting_ms=89600\n"
         );
+    }
+
+    /// Issue #4561 AC-4: `holder_state` on its own was read as a decision —
+    /// three live holders were reported stopped and one was asked to abort.
+    /// The value now travels with what it was measured from and with what it
+    /// does not license.
+    #[test]
+    fn holder_state_is_rendered_with_its_basis_and_its_limits() {
+        let mut out = String::new();
+        render(
+            &mut out,
+            "held",
+            "free",
+            &LeaseStatusSnapshot {
+                held: true,
+                owner_pid: Some(12121),
+                holder_spawn_host: Some("daemon".to_string()),
+                holder_held_ms: Some(499_762),
+                holder_cpu_percent: Some(0.0),
+                holder_state: Some("unknown".to_string()),
+                holder_state_detail: Some("holder state unknown: held 8m19s".to_string()),
+                ..LeaseStatusSnapshot::default()
+            },
+        );
+
+        assert!(out.contains("holder_state: unknown\n"), "{out}");
+        assert!(
+            out.contains("holder_state_detail: holder state unknown: held 8m19s\n"),
+            "{out}"
+        );
+        assert!(out.contains("holder_state_advice: "), "{out}");
+        assert!(out.contains("not a verdict"), "{out}");
+        assert!(out.contains("ps -eo pid,ppid,time,command"), "{out}");
     }
 
     /// Issue #4352 AC-2: the retired manual acquire never reserves a lease
@@ -786,5 +1092,283 @@ mod tests {
                 .expect("pre-upgrade holder outcome");
         assert!(parsed.granted);
         assert_eq!(parsed.status.lease_id.as_deref(), Some("legacy-lease"));
+    }
+
+    /// Issue #4633 AC-4: closing a pane whose worktree holds the lease tells
+    /// the caller, and names the way out; any other pane says nothing.
+    #[test]
+    fn closing_a_pane_names_the_lease_its_worktree_holds() {
+        let status = HeavyLeaseStatus {
+            held: true,
+            lease_id: Some("ff298133".to_string()),
+            target: Some("repo--verification--wt".to_string()),
+            owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                pid: 70012,
+                start_id: "start".to_string(),
+            }),
+            ..HeavyLeaseStatus::default()
+        };
+
+        let note = lease_note_for_target("repo--verification--wt", &status)
+            .expect("the closing pane's worktree holds the lease");
+        assert!(note.contains("ff298133"), "{note}");
+        assert!(note.contains("holder pid 70012"), "{note}");
+        assert!(note.contains("verify.lease.release"), "{note}");
+        assert!(note.contains("orphaned"), "{note}");
+
+        assert_eq!(
+            lease_note_for_target("repo--verification--other", &status),
+            None
+        );
+        let free = HeavyLeaseStatus {
+            held: false,
+            ..status
+        };
+        assert_eq!(lease_note_for_target("repo--verification--wt", &free), None);
+    }
+
+    mod orphan_reclaim {
+        use super::super::*;
+        use gwt_core::index_coordinator::{
+            HeavyLease, JobAdmission, JobPriority, LeaseEventKind, TargetKey,
+        };
+        use gwt_core::test_support::ScopedGwtHome;
+        use holder_activity::HolderActivity;
+
+        /// A canonical lease held by this test process, as `verify.run`
+        /// holds one, in a private GWT home.
+        struct HeldLease {
+            lease: Option<HeavyLease>,
+            lease_id: String,
+            _guard: gwt_core::index_coordinator::TargetJobGuard,
+            _home_guard: ScopedGwtHome,
+            _home: tempfile::TempDir,
+        }
+
+        fn hold_lease() -> HeldLease {
+            let home = tempfile::tempdir().unwrap();
+            let home_guard = ScopedGwtHome::set(home.path());
+            let coordinator = open_coordinator().unwrap();
+            let key = TargetKey::verification("99a8660247f5bc49", "8cf366e54f228831");
+            let JobAdmission::Owner(guard) = coordinator
+                .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+                .unwrap()
+            else {
+                panic!("a private lease root must admit the owner");
+            };
+            let lease = guard
+                .acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(2_700))
+                .unwrap();
+            let lease_id = lease.id().to_string();
+            HeldLease {
+                lease: Some(lease),
+                lease_id,
+                _guard: guard,
+                _home_guard: home_guard,
+                _home: home,
+            }
+        }
+
+        fn reading(parent_gone: bool, workload_processes: usize) -> HolderActivity {
+            HolderActivity {
+                held_ms: 1_480_094,
+                cpu_percent: 0.0,
+                cpu_gained_ms: 0,
+                turnover: false,
+                processes: 1,
+                window_ms: 1_200,
+                host_cpu_percent: Some(95.0),
+                delegated: true,
+                parent_gone,
+                workload_processes,
+            }
+        }
+
+        fn orphan() -> HolderActivity {
+            reading(true, 0)
+        }
+
+        /// Scripted readings; "ending" the holder drops the lease, the way
+        /// the kernel releases it when the holder process exits.
+        struct ScriptedReclaimer<'a> {
+            readings: Vec<Option<HolderActivity>>,
+            held: &'a mut HeldLease,
+            terminated: Vec<(u32, bool)>,
+        }
+
+        impl OrphanReclaimer for ScriptedReclaimer<'_> {
+            fn observe(
+                &mut self,
+                _pid: u32,
+                _status: &HeavyLeaseStatus,
+                _pause: Duration,
+            ) -> Option<HolderActivity> {
+                self.readings.remove(0)
+            }
+
+            fn terminate(&mut self, pid: u32, force: bool) -> Result<(), String> {
+                self.terminated.push((pid, force));
+                self.held.lease.take();
+                Ok(())
+            }
+        }
+
+        /// Reads the real process table but refuses to end anything: the
+        /// holder here is this test process.
+        struct NeverTerminates(SystemReclaimer);
+
+        impl OrphanReclaimer for NeverTerminates {
+            fn observe(
+                &mut self,
+                pid: u32,
+                status: &HeavyLeaseStatus,
+                pause: Duration,
+            ) -> Option<HolderActivity> {
+                self.0.observe(pid, status, pause)
+            }
+
+            fn terminate(&mut self, pid: u32, _force: bool) -> Result<(), String> {
+                panic!("a live holder (pid {pid}) must never be ended");
+            }
+        }
+
+        fn still_held(lease_id: &str) -> bool {
+            open_coordinator()
+                .unwrap()
+                .heavy_lease_status()
+                .unwrap()
+                .lease_id
+                .as_deref()
+                == Some(lease_id)
+        }
+
+        /// Issue #4633 AC-3 / AC-6 (a): a live `verify.run` holder — this
+        /// process, whose parent is alive — keeps its lease, and the refusal
+        /// is the one it has always been.
+        #[test]
+        fn a_live_canonical_holder_keeps_its_lease() {
+            let held = hold_lease();
+            let worktree = tempfile::tempdir().unwrap();
+            let mut reclaimer = NeverTerminates(SystemReclaimer::new(worktree.path()));
+            let mut out = String::new();
+
+            let err = release(
+                &held.lease_id,
+                Some("try to take a live lease"),
+                &mut reclaimer,
+                &mut out,
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(
+                err.contains("Canonical leases are owned by `verify.run`"),
+                "{err}"
+            );
+            assert!(still_held(&held.lease_id), "{err}");
+            assert!(out.is_empty(), "{out}");
+        }
+
+        /// Issue #4633 AC-2 / AC-6 (b): an orphan confirmed twice is ended,
+        /// the lease frees without waiting for its TTL, and the ledger says
+        /// who reclaimed it and why.
+        #[test]
+        fn a_confirmed_orphan_is_reclaimed_and_recorded() {
+            let mut held = hold_lease();
+            let lease_id = held.lease_id.clone();
+            let mut reclaimer = ScriptedReclaimer {
+                readings: vec![Some(orphan()), Some(orphan())],
+                held: &mut held,
+                terminated: Vec::new(),
+            };
+            let mut out = String::new();
+
+            release(
+                &lease_id,
+                Some("window closed after the provider limit"),
+                &mut reclaimer,
+                &mut out,
+            )
+            .unwrap();
+
+            assert_eq!(
+                reclaimer.terminated,
+                vec![(std::process::id(), false)],
+                "{out}"
+            );
+            assert!(out.contains("verification lease: reclaimed\n"), "{out}");
+            assert!(out.contains("reason: window closed"), "{out}");
+            assert!(!still_held(&lease_id), "{out}");
+            let events = open_coordinator().unwrap().lease_events().unwrap();
+            let event = events.last().expect("the reclaim is recorded");
+            assert_eq!(event.kind, LeaseEventKind::Reclaimed, "{events:?}");
+            assert_eq!(event.lease_id, lease_id);
+            let reason = event.reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("reclaimed by pid"), "{reason}");
+            assert!(reason.contains("window closed"), "{reason}");
+        }
+
+        /// Ending a process is recorded, so it cannot be done anonymously.
+        #[test]
+        fn reclaiming_an_orphan_needs_a_reason() {
+            let mut held = hold_lease();
+            let lease_id = held.lease_id.clone();
+            let mut reclaimer = ScriptedReclaimer {
+                readings: vec![Some(orphan())],
+                held: &mut held,
+                terminated: Vec::new(),
+            };
+
+            let err = release(&lease_id, Some("  "), &mut reclaimer, &mut String::new())
+                .unwrap_err()
+                .to_string();
+
+            assert!(err.contains("needs a reason"), "{err}");
+            assert!(reclaimer.terminated.is_empty(), "{err}");
+            assert!(still_held(&lease_id), "{err}");
+        }
+
+        /// One reading is not a verdict: a holder that shows work again
+        /// before the confirmation keeps its lease.
+        #[test]
+        fn an_orphan_the_confirmation_does_not_repeat_keeps_its_lease() {
+            let mut held = hold_lease();
+            let lease_id = held.lease_id.clone();
+            let mut reclaimer = ScriptedReclaimer {
+                readings: vec![Some(orphan()), Some(reading(true, 1))],
+                held: &mut held,
+                terminated: Vec::new(),
+            };
+
+            let err = release(
+                &lease_id,
+                Some("looked idle"),
+                &mut reclaimer,
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("did not confirm"), "{err}");
+            assert!(reclaimer.terminated.is_empty(), "{err}");
+            assert!(still_held(&lease_id), "{err}");
+        }
+
+        /// Issue #4633 AC-6 (c): a holder whose process is gone already
+        /// released the lease in the kernel; there is nothing to end.
+        #[test]
+        fn a_vanished_holder_has_nothing_to_reclaim() {
+            let mut held = hold_lease();
+            let lease_id = held.lease_id.clone();
+            held.lease.take();
+            let worktree = tempfile::tempdir().unwrap();
+            let mut reclaimer = NeverTerminates(SystemReclaimer::new(worktree.path()));
+
+            let err = release(&lease_id, Some("gone"), &mut reclaimer, &mut String::new())
+                .unwrap_err()
+                .to_string();
+
+            assert!(err.contains("no live verification lease"), "{err}");
+        }
     }
 }

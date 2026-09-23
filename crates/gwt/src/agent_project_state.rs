@@ -18,8 +18,19 @@ use serde::{Deserialize, Serialize};
 pub const AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_HOST_CONTRACT_SCHEMA_VERSION: u32 = 1;
+
+/// The execution-generation contract a Host must serve before a client may let
+/// it mint a generation (SPEC #3248 FR-242).
+///
+/// Separate from the wire `schema_version` above: the envelope shape and the
+/// authority semantics carried inside it move independently, and the whole
+/// value of the preflight is being able to say "this Host speaks the envelope
+/// but not the contract" instead of failing later at an opaque route.
+pub const EXECUTION_GENERATION_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +154,79 @@ pub struct AgentExecutionBindingProbeReceipt {
     pub capability_generation: u64,
 }
 
+/// One side-effect-free question for a running Host: "which execution
+/// contract do you serve?" (SPEC #3248 FR-242, AS-220).
+///
+/// The `operation_id` / `nonce` pair is echoed back verbatim so the caller can
+/// tell this Host's answer from a replayed or cross-wired one. It carries no
+/// owner, Session, or Work identity because the preflight runs *before* any of
+/// those exist — that is the whole point of the route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHostContractRequest {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub nonce: String,
+}
+
+/// The running Host's own statement of the contract it serves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHostContractReceipt {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub nonce: String,
+    /// Identifies the Host *process*, so a restart is visible as a different
+    /// authority rather than as the same one answering twice.
+    pub host_instance_id: String,
+    /// The Host binary's version, quoted back to the user in the update
+    /// instruction when the contract does not match.
+    pub host_version: String,
+    /// The execution-generation contract this Host implements.
+    pub execution_generation_contract_version: u32,
+    /// The Session the presented capability authenticates as. The caller
+    /// compares it against its own Session: a Host that names someone else is
+    /// not this caller's authority.
+    pub session_id: String,
+    pub capability_generation: u64,
+}
+
+/// Answer the Host contract question from constants and the authenticated
+/// principal alone (FR-242).
+///
+/// This reads no store and writes nothing: the preflight must be provably
+/// side-effect free, and the cheapest proof is a function with nothing to
+/// touch. Everything it returns is either a compile-time constant or a value
+/// the caller already presented.
+pub fn describe_authenticated_host_contract(
+    request: &AgentHostContractRequest,
+    session_id: &str,
+    host_instance_id: &str,
+    capability_generation: u64,
+) -> std::result::Result<AgentHostContractReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_HOST_CONTRACT_SCHEMA_VERSION
+        || request.operation_id.trim().is_empty()
+        || request.nonce.trim().is_empty()
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            format!(
+                "host contract preflight requires schema version {AGENT_HOST_CONTRACT_SCHEMA_VERSION} with a non-empty operation id and nonce"
+            ),
+        ));
+    }
+    Ok(AgentHostContractReceipt {
+        schema_version: AGENT_HOST_CONTRACT_SCHEMA_VERSION,
+        operation_id: request.operation_id.clone(),
+        nonce: request.nonce.clone(),
+        host_instance_id: host_instance_id.to_string(),
+        host_version: env!("CARGO_PKG_VERSION").to_string(),
+        execution_generation_contract_version: EXECUTION_GENERATION_CONTRACT_VERSION,
+        session_id: session_id.to_string(),
+        capability_generation,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRuntimeObservation {
@@ -234,6 +318,23 @@ pub enum AgentWorkTerminalizationOutcome {
 pub struct AgentWorkTerminalizationReceipt {
     pub schema_version: u32,
     pub outcome: AgentWorkTerminalizationOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkMaterializationProbeRequest {
+    pub schema_version: u32,
+    pub claimed_session_id: String,
+    pub owner_number: u64,
+    pub observation: AgentRuntimeObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkMaterializationProbeReceipt {
+    pub schema_version: u32,
+    pub owner_number: u64,
+    pub work_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1863,6 +1964,74 @@ pub fn apply_authenticated_work_terminalization(
     )
 }
 
+pub fn probe_bound_authenticated_work_materialization(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    request: AgentWorkMaterializationProbeRequest,
+) -> std::result::Result<AgentWorkMaterializationProbeReceipt, AgentWorkspaceUpdateError> {
+    probe_authenticated_work_materialization_with_binding(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+        request,
+    )
+}
+
+fn probe_authenticated_work_materialization_with_binding(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    request: AgentWorkMaterializationProbeRequest,
+) -> std::result::Result<AgentWorkMaterializationProbeReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "unsupported Work materialization probe schema version",
+        ));
+    }
+    validate_mutation_session_id(authenticated_session_id)?;
+    if request.claimed_session_id != authenticated_session_id {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::ProvenanceMismatch,
+            "Work materialization probe Session claim does not match the authenticated launch",
+        ));
+    }
+    let validated = validate_current_execution_binding_authority(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+    )?;
+    if request.owner_number == 0 || request.owner_number != validated.owner_number {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "Work materialization probe owner does not match the authenticated Execution",
+        ));
+    }
+
+    let target = resolve_authenticated_session_work_mutation_target(
+        authenticated_project_root,
+        authenticated_session_id,
+        &request.observation,
+        true,
+    )
+    .map_err(|error| {
+        if error.code == AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired {
+            AgentWorkspaceUpdateError::new(
+                error.code,
+                "Session-bound Work is not materialized; run workspace.ensure before build.start",
+            )
+        } else {
+            error
+        }
+    })?;
+    Ok(AgentWorkMaterializationProbeReceipt {
+        schema_version: AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+        owner_number: request.owner_number,
+        work_id: target.work_id,
+    })
+}
+
 pub fn apply_bound_authenticated_work_terminalization(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
@@ -2351,17 +2520,27 @@ fn validate_mutation_session_id(
 }
 
 fn classify_target_error(error: GwtError) -> AgentWorkspaceUpdateError {
-    let message = error.to_string().to_ascii_lowercase();
+    let reason = error.to_string();
+    let message = reason.to_ascii_lowercase();
+    // These shared producers currently return GwtError::Other for all three
+    // recovery categories. Keep their classification contract, but never
+    // discard the original diagnostic when translating to the bridge error.
     if message.contains("workspace.ensure") {
-        AgentWorkspaceUpdateError::new(
+        // The producer already names the Session, the reason, and the
+        // workspace.ensure recovery; prefixing the generic text would repeat
+        // that guidance.
+        return AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired,
-            "Session-bound Work target is missing or ambiguous; run workspace.ensure for this Session before retrying workspace.update",
-        )
-    } else if message.contains("relaunch") || message.contains("ledger") {
+            reason,
+        );
+    }
+    let mut classified = if message.contains("relaunch") || message.contains("ledger") {
         relaunch_required_error()
     } else {
         provenance_mismatch_error()
-    }
+    };
+    classified.message = format!("{}: {reason}", classified.message);
+    classified
 }
 
 fn provenance_mismatch_error() -> AgentWorkspaceUpdateError {
@@ -2413,6 +2592,15 @@ fn workspace_revalidation_error(code: AgentWorkspaceUpdateErrorCode) -> AgentWor
 }
 
 fn classify_workspace_transaction_error(error: &GwtError) -> AgentWorkspaceUpdateError {
+    // The refusal below tells the agent to inspect the Host gwt log, and the
+    // bridge withholds the message itself, so this is the only place the cause
+    // can be recovered from. It used to log nothing at all, which left a
+    // permanent `transaction_conflict` with no way to tell a lost race from a
+    // durable state defect (#4443).
+    tracing::warn!(
+        error = %error,
+        "Host workspace transaction failed without committing"
+    );
     if error
         .to_string()
         .to_ascii_lowercase()
@@ -2551,6 +2739,10 @@ pub(crate) struct BoundTerminalCompatibilityAuthority {
 }
 
 impl BoundTerminalCompatibilityAuthority {
+    pub(crate) fn owner_number(&self) -> u64 {
+        self.identity.execution_binding.owner_number
+    }
+
     pub(crate) fn requires_blocked_build_abort_bridge(&self) -> Result<bool> {
         if self.requested_terminal != AgentWorkTerminalKind::Discarded {
             return Ok(false);
@@ -2876,6 +3068,121 @@ fn apply_terminal_compatibility_under_lease(
         )
     };
     result.map_err(|error| format!("terminal compatibility continuation was refused: {error}"))
+}
+
+/// Prove that an active, exact-owner Host build has no canonical Work to abort.
+/// Ambiguous or foreign assignments never authorize local lifecycle recovery.
+pub(crate) fn bound_active_build_work_is_missing(
+    invocation_cwd: &Path,
+    session_id: &str,
+    owner_number: u64,
+) -> Result<bool> {
+    let Some(ValidatedWorkspaceEnsureSession::Host(recovery)) =
+        validated_workspace_recovery_session(invocation_cwd, session_id)?
+    else {
+        return Ok(false);
+    };
+    let binding = recovery
+        .session
+        .execution_binding
+        .as_ref()
+        .ok_or_else(|| mutation_error("build recovery requires a durable execution binding"))?;
+    if owner_number == 0 || binding.owner_number != owner_number {
+        return Err(mutation_error(
+            "build recovery owner does not match the active execution",
+        ));
+    }
+    let (_, agent_id) =
+        durable_session_work_authority(&recovery.session, recovery.branch_authority)?;
+    let projection_path =
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&recovery.project_state_root);
+    let projection = load_workspace_projection_from_path(&projection_path)?;
+    let assignments = projection
+        .as_ref()
+        .map(|projection| projection.agents.as_slice())
+        .unwrap_or_default();
+    let session_assignments = assignments
+        .iter()
+        .filter(|agent| agent.session_id == session_id)
+        .collect::<Vec<_>>();
+    if session_assignments.len() > 1 {
+        return Ok(false);
+    }
+    let assigned_work_id = if let Some(agent) = session_assignments.first() {
+        if !agent.is_assigned()
+            || agent.agent_id != agent_id
+            || agent
+                .branch
+                .as_deref()
+                .map(canonical_branch_identity)
+                .as_deref()
+                != Some(recovery.branch_identity.as_str())
+            || agent
+                .worktree_path
+                .as_deref()
+                .map(normalize_mutation_path)
+                .as_deref()
+                != Some(recovery.worktree_identity.as_path())
+        {
+            return Ok(false);
+        }
+        let Some(work_id) = agent
+            .workspace_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        else {
+            return Ok(false);
+        };
+        Some(work_id)
+    } else {
+        None
+    };
+    if assignments.iter().any(|agent| {
+        agent.session_id != session_id
+            && agent.is_assigned()
+            && (assigned_work_id.is_some_and(|id| agent.workspace_id.as_deref() == Some(id))
+                || (agent
+                    .branch
+                    .as_deref()
+                    .map(canonical_branch_identity)
+                    .as_deref()
+                    == Some(recovery.branch_identity.as_str())
+                    && agent
+                        .worktree_path
+                        .as_deref()
+                        .map(normalize_mutation_path)
+                        .as_deref()
+                        == Some(recovery.worktree_identity.as_path())))
+    }) {
+        return Ok(false);
+    }
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&recovery.project_state_root);
+    let work_items = load_workspace_work_items_from_path(&work_items_path)?;
+    let canonical_work_id = gwt_core::workspace_projection::canonical_work_id(
+        &recovery.project_state_root,
+        Some(&recovery.branch_identity),
+        Some(&recovery.worktree_identity),
+    );
+    Ok(!work_items.as_ref().is_some_and(|projection| {
+        projection.work_items.iter().any(|work| {
+            assigned_work_id == Some(work.id.as_str())
+                || canonical_work_id.as_deref() == Some(work.id.as_str())
+                || work
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session_id)
+                || work.execution_containers.iter().any(|container| {
+                    mutation_container_matches(
+                        container,
+                        &recovery.branch_identity,
+                        &recovery.worktree_identity,
+                        &recovery.work_event_root,
+                        false,
+                    )
+                })
+        })
+    }))
 }
 
 /// Load the exact durable Session identity used to recover a missing Work
@@ -4198,6 +4505,56 @@ fn fill_option_path(target: &mut Option<PathBuf>, source: Option<&Path>) -> bool
 mod tests {
     use super::*;
 
+    #[test]
+    fn classify_target_error_preserves_distinct_workspace_ensure_causes() {
+        let missing =
+            workspace_ensure_error("session-4607", "canonical Session assignment is missing");
+        let ambiguous =
+            workspace_ensure_error("session-4607", "assigned Work work-4607 is ambiguous");
+        let missing_reason = missing.to_string();
+        let ambiguous_reason = ambiguous.to_string();
+        let missing = classify_target_error(missing);
+        let ambiguous = classify_target_error(ambiguous);
+
+        assert_eq!(
+            missing.code,
+            AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+        );
+        assert_eq!(ambiguous.code, missing.code);
+        assert_ne!(missing.message, ambiguous.message);
+        assert!(missing.message.contains(&missing_reason));
+        assert!(ambiguous.message.contains(&ambiguous_reason));
+        for message in [&missing.message, &ambiguous.message] {
+            assert_eq!(
+                message.matches("run workspace.ensure").count(),
+                1,
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_target_error_preserves_other_causes_and_codes() {
+        for (reason, code) in [
+            (
+                "Session repo hash is missing; relaunch the Session",
+                AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+            ),
+            (
+                "Session ledger is missing for Session session-4607",
+                AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+            ),
+            (
+                "canonical repository mismatch: project_state_root is missing",
+                AgentWorkspaceUpdateErrorCode::ProvenanceMismatch,
+            ),
+        ] {
+            let error = classify_target_error(mutation_error(reason));
+            assert_eq!(error.code, code);
+            assert!(error.message.contains(reason), "{}", error.message);
+        }
+    }
+
     fn agent_summary(
         session_id: &str,
         title_summary: Option<&str>,
@@ -4391,6 +4748,7 @@ mod tests {
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
+                permission_decision: None,
             },
         )
         .expect("save completed execution fixture");
@@ -5316,6 +5674,22 @@ mod tests {
         }
     }
 
+    fn bound_work_materialization_probe_request(
+        session: &Session,
+    ) -> AgentWorkMaterializationProbeRequest {
+        AgentWorkMaterializationProbeRequest {
+            schema_version: AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+            claimed_session_id: session.id.clone(),
+            owner_number: session
+                .execution_binding
+                .as_ref()
+                .expect("bound Session")
+                .owner_number,
+            observation: observe_agent_runtime(&session.worktree_path)
+                .expect("runtime observation"),
+        }
+    }
+
     fn blocked_build_abort_request(
         session: &Session,
         owner_number: u64,
@@ -5344,6 +5718,7 @@ mod tests {
                 repo,
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
                     started_at: Utc::now(),
@@ -7584,7 +7959,42 @@ mod tests {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
             let work_id = "work-bound-current";
+            seed_work_mutation_surfaces(repo, repo);
             seed_unique_mutation_target(repo, repo, &session, work_id);
+
+            let before_probe = WorkMutationSnapshot::capture(repo, repo);
+            let probe = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect("current binding authorizes Work materialization probe");
+            assert_eq!(probe.work_id, work_id);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_probe,
+                "Work materialization probe must remain side-effect free"
+            );
+            let owner_error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &binding,
+                AgentWorkMaterializationProbeRequest {
+                    owner_number: binding.owner_number + 1,
+                    ..bound_work_materialization_probe_request(&session)
+                },
+            )
+            .expect_err("caller-selected owner must not bypass the authenticated Execution");
+            assert_eq!(
+                owner_error.code,
+                AgentWorkspaceUpdateErrorCode::InvalidRequest
+            );
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_probe,
+                "owner mismatch rejection must remain side-effect free"
+            );
 
             let update = apply_bound_authenticated_workspace_update(
                 repo,
@@ -7603,6 +8013,157 @@ mod tests {
             )
             .expect("current binding authorizes Work terminalization");
             assert_eq!(terminal.outcome, AgentWorkTerminalizationOutcome::Emitted);
+        });
+    }
+
+    #[test]
+    fn bound_active_build_work_missing_requires_exact_owner_and_absent_work() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-build-orphan");
+            assert!(
+                !bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .expect("existing Work is not orphaned")
+            );
+            save_project_assignments(repo, Vec::new());
+            assert!(
+                !bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .expect("missing assignment cannot hide canonical Work")
+            );
+            save_project_assignments(
+                repo,
+                vec![assigned_session_agent(
+                    &session,
+                    "work-build-orphan",
+                    Utc::now(),
+                )],
+            );
+            let empty = gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now());
+            save_mutation_work_items(repo, &empty);
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            assert!(
+                bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .expect("exact active owner has missing assigned Work")
+            );
+            assert!(bound_active_build_work_is_missing(
+                repo,
+                &session.id,
+                binding.owner_number + 1
+            )
+            .is_err());
+            assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            crate::cli::execution_state::settle(
+                repo,
+                &session.id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "verification is unavailable".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("block execution");
+            assert!(
+                bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn bound_active_build_work_missing_preserves_incomplete_canonical_work() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            save_project_assignments(repo, Vec::new());
+            let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+                repo,
+                Some(&session.branch),
+                Some(&session.worktree_path),
+            )
+            .expect("canonical Work id");
+            let mut items = mutation_work_items(repo, &session, &canonical_id);
+            items.work_items[0].agents.clear();
+            items.work_items[0].execution_containers.clear();
+            save_mutation_work_items(repo, &items);
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            assert!(
+                !bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .expect("incomplete canonical Work must not authorize orphan recovery")
+            );
+            assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+        });
+    }
+
+    #[test]
+    fn bound_active_build_work_missing_rejects_unsafe_assignment_and_corrupt_work() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            let assignment = assigned_session_agent(&session, "missing-work", Utc::now());
+            save_mutation_work_items(
+                repo,
+                &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+            );
+            let mut foreign = assignment.clone();
+            foreign.agent_id = "claude".to_string();
+            save_project_assignments(repo, vec![foreign]);
+            assert!(
+                !bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .expect("foreign assignment is not orphan authority")
+            );
+            save_project_assignments(repo, vec![assignment.clone(), assignment.clone()]);
+            assert!(
+                !bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .expect("ambiguous assignment is not orphan authority")
+            );
+            save_project_assignments(repo, vec![assignment]);
+            std::fs::write(
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo),
+                "corrupt WorkItems",
+            )
+            .expect("corrupt WorkItems fixture");
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            assert!(
+                bound_active_build_work_is_missing(repo, &session.id, binding.owner_number)
+                    .is_err()
+            );
+            assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+        });
+    }
+
+    #[test]
+    fn work_materialization_probe_reports_missing_assignment_without_mutation() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            save_project_assignments(
+                repo,
+                vec![assigned_session_agent(
+                    &session,
+                    "work-assigned-but-missing",
+                    Utc::now(),
+                )],
+            );
+            save_mutation_work_items(repo, &mutation_work_items(repo, &session, "work-different"));
+            let before = WorkMutationSnapshot::capture(repo, repo);
+
+            let error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect_err("assigned-but-missing Work must reject build.start preflight");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+            );
+            assert!(error.message.contains("workspace.ensure"));
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before,
+                "rejected materialization probe must preserve every Work mutation surface"
+            );
         });
     }
 
@@ -7669,6 +8230,19 @@ mod tests {
                 crate::cli::execution_state::SettleResult::Settled(_)
             ));
             let before_predecessor = WorkMutationSnapshot::capture(repo, repo);
+            let probe_error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &predecessor_binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect_err("pre-settlement binding must not authorize Work materialization probe");
+            assert_execution_binding_denial(&probe_error);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_predecessor,
+                "a stale materialization probe must not mutate Work"
+            );
             let error = apply_bound_authenticated_workspace_update(
                 repo,
                 &session.id,
@@ -7704,6 +8278,19 @@ mod tests {
             .expect("supersede Host capability generation");
 
             let before_superseded = WorkMutationSnapshot::capture(repo, repo);
+            let probe_error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &current_binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect_err("superseded capability must not authorize Work materialization probe");
+            assert_execution_binding_denial(&probe_error);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_superseded,
+                "a superseded materialization probe must not mutate Work"
+            );
             let error = apply_bound_authenticated_work_terminalization(
                 repo,
                 &session.id,
@@ -7765,6 +8352,7 @@ mod tests {
                         repo,
                         "build-spec",
                         &gwt_core::skill_state::SkillState {
+                            start_evidence: None,
                             active: true,
                             owner_spec: Some(terminal_binding.owner_number),
                             started_at: Utc::now(),
@@ -7830,6 +8418,7 @@ mod tests {
                 repo,
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
                     started_at: Utc::now(),
@@ -7909,6 +8498,7 @@ mod tests {
                         repo,
                         "build-spec",
                         &gwt_core::skill_state::SkillState {
+                            start_evidence: None,
                             active: true,
                             owner_spec: Some(if case == "owner-mismatch" {
                                 binding.owner_number + 1

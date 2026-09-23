@@ -754,6 +754,20 @@ async fn close_pane(
             window.id == resolved_id && window.session_id.as_deref() == Some(session_id)
         })
     });
+    // Issue #4633 AC-4: read before the close, while the pane's session and
+    // its lease are both still there to be matched.
+    let lease_note = scoped_windows
+        .iter()
+        .find(|window| window.id == resolved_id)
+        .and_then(|window| window.session_id.as_deref())
+        .and_then(|session_id| {
+            let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+            gwt_agent::Session::load(&path).ok()
+        })
+        .and_then(|session| {
+            crate::cli::verification_lease::closing_pane_lease_note(&session.worktree_path)
+        })
+        .unwrap_or_default();
     let close_request_id = closes_calling_session.then(|| uuid::Uuid::new_v4().to_string());
     let close_event = match &close_request_id {
         Some(request_id) => {
@@ -770,7 +784,7 @@ async fn close_pane(
             Duration::from_secs(2),
         )
         .await?;
-        return Ok(format!("close requested {requested_id}\n"));
+        return Ok(format!("close requested {requested_id}\n{lease_note}"));
     }
 
     // Issue #3629 AC-12: the backend answers a peer close with an explicit
@@ -780,13 +794,13 @@ async fn close_pane(
     if let Some(reply) =
         wait_for_pane_close_result(&mut socket, &resolved_id, PANE_CLOSE_RESULT_DEADLINE).await?
     {
-        return pane_close_verdict(requested_id, reply);
+        return pane_close_verdict(requested_id, reply).map(|closed| closed + &lease_note);
     }
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     let windows = next_workspace_windows(&mut socket, project_root, "pane close").await?;
     if resolve_window_id(&windows, &resolved_id).is_none() {
-        Ok(format!("closed {requested_id}\n"))
+        Ok(format!("closed {requested_id}\n{lease_note}"))
     } else {
         // Issue #3629 AC-6: report only the observed facts — the window is
         // still listed and no close result arrived. Never guess at session
@@ -2458,6 +2472,29 @@ mod tests {
         let rendered = render_pane_list(&windows);
 
         assert!(rendered.contains("tab-1::codex-1\tstarting\tcodex"));
+    }
+
+    #[test]
+    fn render_pane_list_keeps_error_panes_in_mixed_state_inventory() {
+        let windows = [
+            ("running", WindowState::Running),
+            ("idle", WindowState::Idle),
+            ("stopped", WindowState::Stopped),
+            ("error", WindowState::Error),
+        ]
+        .into_iter()
+        .map(|(id, state)| {
+            let mut pane = window(id, WindowPreset::Codex, Some("codex"));
+            pane.status = state;
+            pane
+        })
+        .collect::<Vec<_>>();
+        let temp = tempfile::tempdir().unwrap();
+        let rendered = render_pane_list_with_sessions(&windows, temp.path());
+        assert_eq!(rendered.lines().count(), 4);
+        for state in ["running", "idle", "stopped", "error"] {
+            assert!(rendered.contains(&format!("{state}\t{state}\tcodex\t")));
+        }
     }
 
     #[test]

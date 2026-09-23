@@ -71,14 +71,14 @@ const AGENT_OPTIONS_FEW = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
   { value: "agy", label: "Antigravity CLI" },
-  { value: "gemini", label: "Gemini CLI (legacy)" },
+  { value: "hermes", label: "Hermes Agent" },
 ];
 
 const AGENT_OPTIONS_MANY = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
   { value: "agy", label: "Antigravity CLI" },
-  { value: "gemini", label: "Gemini CLI (legacy)" },
+  { value: "hermes", label: "Hermes Agent" },
   { value: "copilot", label: "GitHub Copilot" },
   { value: "custom-a", label: "My Custom Agent" },
 ];
@@ -141,8 +141,8 @@ test("chooseLaunchControlKind picks segmented for few short options", () => {
   assert.equal(chooseLaunchControlKind(TARGET_OPTIONS), "segmented");
 });
 
-test("chooseLaunchControlKind falls back to select for current built-in agent labels", () => {
-  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "select");
+test("chooseLaunchControlKind uses segmented for four short built-in agent labels", () => {
+  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "segmented");
 });
 
 test("chooseLaunchControlKind falls back to select past the count threshold", () => {

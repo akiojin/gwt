@@ -26,11 +26,14 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
     /// `board.show` with optional audience filters and latest-entry limit.
+    /// `unresolved` keeps only `blocked` entries whose escalation is still open
+    /// (Issue #4609).
     Show {
         json: bool,
         workspace: Option<String>,
         all: bool,
         limit: Option<usize>,
+        unresolved: bool,
     },
     /// `board.post` with `params.kind`, `params.body`, and optional audience
     /// fields such as `params.targets`, `params.mentions`, and
@@ -78,10 +81,12 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
             let mut workspace: Option<String> = None;
             let mut all = false;
             let mut limit = None;
+            let mut unresolved = false;
             while let Some(arg) = it.next() {
                 match arg.as_str() {
                     "--json" => json = true,
                     "--all" => all = true,
+                    "--unresolved" => unresolved = true,
                     "--limit" => {
                         let value = it.next().ok_or(CliParseError::MissingFlag("--limit"))?;
                         limit = Some(
@@ -104,6 +109,7 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
                 workspace,
                 all,
                 limit,
+                unresolved,
             })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
@@ -127,6 +133,7 @@ pub(super) fn run<E: CliEnv>(
             workspace,
             all,
             limit,
+            unresolved,
         } => {
             let current_session = current_session_from_env().ok().flatten();
             let scope = if all {
@@ -151,6 +158,21 @@ pub(super) fn run<E: CliEnv>(
                 load_snapshot_for_scope(env.repo_path(), &scope)
                     .map_err(gwt_error_to_spec_ops_error)?
             };
+            // The unresolved filter cannot answer without the index; a plain
+            // read degrades to `indexed: false` rather than failing the page.
+            let escalations = match gwt_core::coordination::load_escalation_store(env.repo_path()) {
+                Ok(store) => store,
+                Err(error) if unresolved => return Err(gwt_error_to_spec_ops_error(error)),
+                Err(_) => Default::default(),
+            };
+            if unresolved {
+                snapshot.board.entries.retain(|entry| {
+                    entry.kind == gwt_core::coordination::BoardEntryKind::Blocked
+                        && escalations
+                            .open()
+                            .any(|escalation| escalation.entry_id == entry.id)
+                });
+            }
             let total_entries = snapshot.board.entries.len();
             let limit = limit.unwrap_or(if all { total_entries } else { 20 });
             let omitted = total_entries.saturating_sub(limit);
@@ -160,8 +182,11 @@ pub(super) fn run<E: CliEnv>(
             snapshot.board.newest_entry_id = snapshot.board.entries.last().map(|e| e.id.clone());
             let returned_entries = snapshot.board.entries.len();
             if json {
+                let mut board = serde_json::to_value(&snapshot.board)
+                    .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
+                annotate_escalations(&mut board, &snapshot.board.entries, &escalations);
                 let response = serde_json::json!({
-                    "board": snapshot.board,
+                    "board": board,
                     "page": {
                         "total_entries": total_entries,
                         "returned_entries": returned_entries,
@@ -437,6 +462,56 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
     );
 }
 
+/// File an escalation from operation-local refusal facts.
+///
+/// The display text is retained as evidence, but never participates in the
+/// disposition decision. Agent-recoverable refusals have no escalation kind
+/// and therefore stay on the caller's normal retry path.
+pub(super) fn auto_file_structured_operation_refusal<E: CliEnv>(
+    env: &mut E,
+    operation: &str,
+    display: &str,
+    refusal: &super::governance::OperationRefusal,
+) {
+    if operation.starts_with("board.") {
+        return;
+    }
+    if !gwt_core::board_escalation::structured_refusal_eligible_operation(operation) {
+        return;
+    }
+    let session = current_session_from_env().ok().flatten();
+    if crate::pm_registry::pane_is_pm(
+        env.repo_path(),
+        Some(
+            session
+                .as_ref()
+                .map_or(env.repo_path(), |session| session.worktree_path.as_path()),
+        ),
+        session.as_ref().map(|session| session.id.as_str()),
+    ) {
+        return;
+    }
+    let Some(kind) = refusal.escalation_kind() else {
+        return;
+    };
+    let Some(cause) = refusal.governance.cause else {
+        return;
+    };
+    file_escalation_for_owner(
+        env,
+        operation,
+        gwt_core::board_escalation::render_structured_operation_refusal_body(
+            operation,
+            display,
+            kind,
+            &refusal.reason_code,
+            cause.as_str(),
+            refusal.recovery_action.as_deref(),
+        ),
+        refusal.owner_number,
+    );
+}
+
 /// Escalate an agent's own `execution.blocked` declaration (Issue #3655 AC-1).
 ///
 /// `execution.blocked` is the exact moment an agent concludes it cannot
@@ -466,11 +541,27 @@ pub(super) fn auto_file_declared_block<E: CliEnv>(
 /// Issue-comment mirror, and the escalation index all stay on one code path, so
 /// a hand-written escalation and an auto-filed one cannot drift apart.
 fn file_escalation<E: CliEnv>(env: &mut E, operation: &str, body: String) {
+    file_escalation_for_owner(env, operation, body, None)
+}
+
+/// File an escalation, preferring an owner the refusal itself supplied.
+///
+/// The Session is the usual source of the owning Issue, but the refusals that
+/// most need an owner are the ones where the Session identity is missing or
+/// unreadable. Without a fallback those escalations land ownerless, which
+/// means no Issue comment and no `needs_human` — visible nowhere the PM looks.
+fn file_escalation_for_owner<E: CliEnv>(
+    env: &mut E,
+    operation: &str,
+    body: String,
+    fallback_owner: Option<u64>,
+) {
     let owner = current_session_from_env()
         .ok()
         .flatten()
         .as_ref()
-        .and_then(super::hook::coordination_event::linked_issue_number);
+        .and_then(super::hook::coordination_event::linked_issue_number)
+        .or(fallback_owner);
     if already_escalated(env.repo_path(), owner, operation) {
         tracing::debug!(
             operation,
@@ -524,6 +615,48 @@ fn already_escalated(repo_path: &std::path::Path, owner: Option<u64>, operation:
     }
 }
 
+/// Attach the durable escalation state to every `blocked` entry of a
+/// serialized Board projection (Issue #4609).
+///
+/// `BoardEntry.state` is the agent lifecycle label written by hook posts
+/// (`started` / `ready`) and is unrelated to escalations, so resolution lives
+/// in its own `escalation` object read from the escalation index. A blocked
+/// entry the index does not hold reports `indexed: false` and `resolved: null`
+/// rather than a guess.
+fn annotate_escalations(
+    board: &mut serde_json::Value,
+    entries: &[gwt_core::coordination::BoardEntry],
+    escalations: &gwt_core::board_escalation::BoardEscalationStore,
+) {
+    let Some(rendered) = board
+        .get_mut("entries")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for (entry, rendered) in entries.iter().zip(rendered.iter_mut()) {
+        if entry.kind != gwt_core::coordination::BoardEntryKind::Blocked {
+            continue;
+        }
+        let escalation = escalations
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == entry.id);
+        let value = match escalation {
+            Some(escalation) => serde_json::json!({
+                "indexed": true,
+                "resolved": !escalation.is_open(),
+                "resolved_at": escalation.resolved_at,
+                "resolved_by_entry_id": escalation.resolved_by_entry_id,
+            }),
+            None => serde_json::json!({ "indexed": false, "resolved": null }),
+        };
+        if let Some(object) = rendered.as_object_mut() {
+            object.insert("escalation".to_string(), value);
+        }
+    }
+}
+
 /// Say which of the named escalations this post actually closed.
 ///
 /// A mistyped or already-closed id is silent otherwise, and the poster walks
@@ -549,6 +682,7 @@ fn report_resolutions(
     let mut already_closed = Vec::new();
     let mut still_open = Vec::new();
     let mut in_history = Vec::new();
+    let mut not_escalations = Vec::new();
     let mut unknown = Vec::new();
     for id in requested {
         let id = id.trim();
@@ -565,13 +699,20 @@ fn report_resolutions(
             }
             Some(escalation) if !escalation.is_open() => already_closed.push(id),
             Some(_) => still_open.push(id),
-            None => {
-                if gwt_core::coordination::board_entry_exists(repo_path, id).unwrap_or(false) {
-                    in_history.push(id);
-                } else {
-                    unknown.push(id);
+            // Only a `blocked` post opens an escalation, so any other kind
+            // found in history can never be folded and closed by a retry
+            // (Issue #4626).
+            None => match gwt_core::coordination::load_board_entry(repo_path, id) {
+                Ok(Some(entry))
+                    if entry.kind == gwt_core::coordination::BoardEntryKind::Blocked =>
+                {
+                    in_history.push(id)
                 }
-            }
+                Ok(Some(entry)) => {
+                    not_escalations.push(format!("{id} (kind: {})", entry.kind.as_str()))
+                }
+                _ => unknown.push(id),
+            },
         }
     }
     if !resolved.is_empty() {
@@ -598,6 +739,14 @@ fn report_resolutions(
             "board escalations present in Board history but missing from the index (scrolled out of the 500-entry window): {}\n\
              Retry params.resolves; the index should fold the historical blocked post and close it.\n",
             in_history.join(", ")
+        ));
+    }
+    if !not_escalations.is_empty() {
+        out.push_str(&format!(
+            "board entries named for resolution are not escalations: {}\n\
+             Only a `blocked` post opens an escalation, and resolving any other kind never closes anything. \
+             Name the blocked post's id instead; copy it from the wake prompt or issue.monitor.status.\n",
+            not_escalations.join(", ")
         ));
     }
     if !unknown.is_empty() {
@@ -955,6 +1104,20 @@ mod tests {
         value.to_string()
     }
 
+    fn immutable_execution_refusal() -> crate::cli::governance::OperationRefusal {
+        crate::cli::governance::OperationRefusal::human_required(
+            "execution_record_terminal",
+            gwt_core::board_escalation::OperationRefusalKind::Immutability,
+            crate::cli::governance::GovernanceMetadata {
+                effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+                cause: Some(crate::cli::governance::GovernanceCause::DomainInvalid),
+                retryable: Some(false),
+                ..crate::cli::governance::GovernanceMetadata::default()
+            },
+            None,
+        )
+    }
+
     fn workspace_agent(
         session_id: &str,
         agent_id: &str,
@@ -1253,6 +1416,80 @@ mod tests {
     }
 
     #[test]
+    fn board_family_run_post_says_a_non_escalation_entry_cannot_be_resolved() {
+        // Issue #4626: a `decision` id exists in Board history but was never an
+        // escalation. Telling the PM to retry would never close anything.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("担当が自発的に投稿した判断"),
+                s("--owner"),
+                s("2338"),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        let decision_id = gwt_core::coordination::load_snapshot(tmp.path())
+            .unwrap()
+            .board
+            .entries
+            .last()
+            .unwrap()
+            .id
+            .clone();
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("解消したつもり"),
+                s("--owner"),
+                s("2338"),
+                s("--resolves"),
+                s(&decision_id),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains(&format!(
+                "board entries named for resolution are not escalations: {decision_id} (kind: decision)"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("blocked"),
+            "the PM must be told what a resolvable id is: {out}"
+        );
+        assert!(
+            !out.contains("Retry"),
+            "a non-escalation id never folds, so retry must not be suggested: {out}"
+        );
+        assert!(!out.contains("missing from the index"), "{out}");
+        assert!(!out.contains("board escalations not found:"), "{out}");
+        assert!(!out.contains("board escalations resolved:"), "{out}");
+    }
+
+    #[test]
     fn board_family_run_post_distinguishes_an_already_closed_escalation() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -1451,16 +1688,56 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
-        auto_file_operation_refusal(
+        auto_file_structured_operation_refusal(
             &mut env,
             "execution.reopen",
             "Completed issue #2338 is immutable; use a fresh launch for new work",
+            &immutable_execution_refusal(),
         );
 
         let open = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap();
         assert_eq!(open.len(), 1);
         assert!(open[0].body.contains("execution.reopen"), "{:?}", open[0]);
         assert!(open[0].body.contains("is immutable"), "{:?}", open[0]);
+    }
+
+    #[test]
+    fn a_typed_authority_refusal_escalates_independently_of_display_wording() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let refusal = crate::cli::governance::OperationRefusal::human_required(
+            "execution_owner_mismatch",
+            gwt_core::board_escalation::OperationRefusalKind::Authority,
+            crate::cli::governance::GovernanceMetadata {
+                effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+                cause: Some(crate::cli::governance::GovernanceCause::Authority),
+                retryable: Some(false),
+                ..crate::cli::governance::GovernanceMetadata::default()
+            },
+            None,
+        );
+
+        auto_file_structured_operation_refusal(
+            &mut env,
+            "execution.complete",
+            "display wording with no classifier keywords",
+            &refusal,
+        );
+
+        let open = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(open[0].body.contains("原因: authority"), "{:?}", open[0]);
+        assert!(
+            open[0]
+                .body
+                .contains("display wording with no classifier keywords"),
+            "the display still travels as evidence without deciding the cause: {:?}",
+            open[0]
+        );
     }
 
     #[test]
@@ -1476,10 +1753,11 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         for _ in 0..3 {
-            auto_file_operation_refusal(
+            auto_file_structured_operation_refusal(
                 &mut env,
                 "execution.reopen",
                 "Completed issue #2338 is immutable; use a fresh launch for new work",
+                &immutable_execution_refusal(),
             );
         }
 
@@ -1504,10 +1782,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
-        auto_file_operation_refusal(
+        auto_file_structured_operation_refusal(
             &mut env,
             "execution.reopen",
             "Completed issue #2338 is immutable",
+            &immutable_execution_refusal(),
         );
         auto_file_operation_refusal(
             &mut env,
@@ -1540,6 +1819,12 @@ mod tests {
             &mut env,
             "execution.blocked",
             "missing required flag: reason",
+        );
+        auto_file_structured_operation_refusal(
+            &mut env,
+            "issue.view",
+            "display wording is irrelevant",
+            &immutable_execution_refusal(),
         );
 
         assert!(gwt_core::coordination::load_open_escalations(tmp.path())
@@ -1596,6 +1881,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             }
         );
     }
@@ -1617,6 +1903,7 @@ mod tests {
                 workspace: Some("ws-1".into()),
                 all: true,
                 limit: None,
+                unresolved: false,
             }
         );
     }
@@ -1656,6 +1943,7 @@ mod tests {
                 workspace: Some("ws-1".into()),
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -1701,6 +1989,7 @@ mod tests {
                 workspace: Some("ws-1".into()),
                 all: true,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -1819,6 +2108,7 @@ mod tests {
                 workspace: Some("workspace-a".into()),
                 all: false,
                 limit: None,
+                unresolved: false,
             }
         );
 
@@ -1830,6 +2120,7 @@ mod tests {
                 workspace: None,
                 all: true,
                 limit: None,
+                unresolved: false,
             }
         );
     }
@@ -2755,6 +3046,7 @@ mod tests {
                 workspace: Some("workspace-a".into()),
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut workspace_out,
         )
@@ -2777,6 +3069,7 @@ mod tests {
                 workspace: None,
                 all: true,
                 limit: None,
+                unresolved: false,
             },
             &mut all_out,
         )
@@ -2846,6 +3139,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2888,6 +3182,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2928,6 +3223,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2968,6 +3264,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -3010,6 +3307,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )

@@ -8,6 +8,7 @@
 //! logic is deterministic under test. The GUI process owns the polling loop
 //! and converts [`UsageSnapshot`] into frontend protocol views.
 
+pub mod api_error;
 pub mod claude;
 pub mod codex;
 pub mod consumption;
@@ -17,6 +18,7 @@ pub mod model_context;
 pub mod state;
 pub mod types;
 
+pub use api_error::{describe_provider_api_error, detect_provider_api_error, ProviderApiError};
 pub use consumption::{ConsumptionBreakdown, DayConsumption, ProviderConsumption};
 pub use limit_notice::{
     describe_provider_limit_notice, detect_provider_limit_notice, ProviderLimitNotice,

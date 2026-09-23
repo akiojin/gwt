@@ -35,8 +35,8 @@ use super::{
     retain_live_workspace_agents, save_workspace_launch_projection,
     workspace_cleanup_candidate_for_projection, workspace_projection_owner_title,
     ActiveAgentSession, AppRuntime, BackendEvent, ClientId, IssueBranchLinkStore, OutboundEvent,
-    ProjectTabRuntime, UserEvent, WindowProcessStatus, WorkspaceLaunchProjectionKind,
-    WorkspaceResumeContext,
+    ProjectContext, ProjectTabRuntime, UserEvent, WindowProcessStatus,
+    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +68,7 @@ impl Default for ActiveWorkProjectionProfile {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedActiveWorkDispatch {
+    pub(crate) context: ProjectContext,
     pub(crate) payload: Arc<str>,
     pub(crate) profile: ActiveWorkProjectionProfile,
 }
@@ -80,6 +81,7 @@ pub(crate) struct PreparedActiveWorkProjection {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveWorkProjectionPrepared {
+    pub(crate) context: ProjectContext,
     pub(crate) project_root: PathBuf,
     pub(crate) tab_id: String,
     pub(crate) generation: u64,
@@ -101,6 +103,7 @@ struct RuntimeHookProjectionProfileContext {
 
 #[derive(Clone)]
 struct ActiveWorkProjectionPrepareInput {
+    pub(crate) context: ProjectContext,
     project_root: PathBuf,
     tab_id: String,
     tab: ProjectTabRuntime,
@@ -3017,6 +3020,7 @@ fn prepare_active_work_projection(
     Ok(Some(PreparedActiveWorkProjection {
         projection: view,
         dispatch: PreparedActiveWorkDispatch {
+            context: input.context.clone(),
             payload,
             profile: ActiveWorkProjectionProfile {
                 source_event: context.source_event,
@@ -3639,8 +3643,11 @@ impl AppRuntime {
         }
     }
 
-    pub(super) fn active_work_projection_reply(&self, client_id: &str) -> Option<OutboundEvent> {
-        let tab_id = self.active_tab_id.as_ref()?;
+    pub(super) fn active_work_projection_reply(
+        &self,
+        client_id: &str,
+        tab_id: &str,
+    ) -> Option<OutboundEvent> {
         let tab = self.tab(tab_id)?;
         if self.dispatch_cached_active_work_projection(
             tab_id,
@@ -3679,7 +3686,10 @@ impl AppRuntime {
         tab_id: &str,
         target: super::DispatchTarget,
     ) -> bool {
-        let payload = self
+        let Some(state) = self.project_state_for_tab(tab_id) else {
+            return false;
+        };
+        let payload = state
             .active_work_projection_payload_cache
             .borrow()
             .get(tab_id)
@@ -3687,7 +3697,11 @@ impl AppRuntime {
         let Some(payload) = payload else {
             return false;
         };
+        let Some(context) = self.project_context(tab_id) else {
+            return false;
+        };
         self.proxy.send(UserEvent::PreparedActiveWorkDispatch {
+            context,
             tab_id: tab_id.to_string(),
             target,
             payload,
@@ -3702,6 +3716,7 @@ impl AppRuntime {
     ) -> ActiveWorkProjectionPrepareInput {
         let project_root = tab.project_root.clone();
         ActiveWorkProjectionPrepareInput {
+            context: self.project_context(&tab.id).expect("open project context"),
             project_root: project_root.clone(),
             tab_id: tab.id.clone(),
             tab: tab.clone(),
@@ -3714,9 +3729,18 @@ impl AppRuntime {
             window_pty_statuses: self.window_pty_statuses.clone(),
             sessions_dir: self.sessions_dir.clone(),
             session_ledger_cache: self.active_work_session_ledger_cache.clone(),
-            work_items_cache: self.work_items_cache.clone(),
+            work_items_cache: self
+                .project_state_for_tab(&tab.id)
+                .expect("open project state")
+                .work_items_cache
+                .clone(),
             work_known_branch_refs: self.work_known_branch_refs.get(&project_root).cloned(),
-            work_merged_branches: self.work_merged_branches.get(&project_root).cloned(),
+            work_merged_branches: self
+                .project_state_for_tab(&tab.id)
+                .expect("open project state")
+                .work_merged_branches
+                .get(&project_root)
+                .cloned(),
             work_dirty_branches: self.work_dirty_branches.get(&project_root).cloned(),
             work_live_process_branches: self.work_live_process_branches.get(&project_root).cloned(),
             work_cleanup_ready_branches: self
@@ -3746,6 +3770,8 @@ impl AppRuntime {
         let task_proxy = proxy.clone();
         let task_project_root = project_root.clone();
         let task_tab_id = tab_id.clone();
+        let context = input.context.clone();
+        let task_context = context.clone();
         let fallback_profile = input
             .profile_context
             .map(|context| ActiveWorkProjectionProfile {
@@ -3765,6 +3791,7 @@ impl AppRuntime {
                 .map_or(fallback_profile, |prepared| prepared.dispatch.profile);
             task_proxy.send(UserEvent::ActiveWorkProjectionPrepared(Box::new(
                 ActiveWorkProjectionPrepared {
+                    context: task_context,
                     project_root: task_project_root,
                     tab_id: task_tab_id,
                     generation,
@@ -3775,6 +3802,7 @@ impl AppRuntime {
         }) {
             proxy.send(UserEvent::ActiveWorkProjectionPrepared(Box::new(
                 ActiveWorkProjectionPrepared {
+                    context,
                     project_root,
                     tab_id,
                     generation,
@@ -3869,6 +3897,7 @@ impl AppRuntime {
                 return commit;
             }
             let accept = project.latest_generation == prepared.generation
+                && self.project_context_is_current(&prepared.context)
                 && self.tabs.iter().any(|tab| {
                     tab.id == prepared.tab_id
                         && projection_worktree_paths_match(
@@ -3885,18 +3914,20 @@ impl AppRuntime {
         if accept {
             match prepared.result {
                 Ok(Some(prepared_projection)) => {
-                    self.active_work_projection_payload_cache
+                    self.project_state_for_tab(&prepared.tab_id)
+                        .expect("open project state")
+                        .active_work_projection_payload_cache
                         .borrow_mut()
                         .insert(
                             prepared.tab_id.clone(),
                             prepared_projection.dispatch.payload.clone(),
                         );
-                    self.active_work_projection_cache
+                    self.project_state_for_tab(&prepared.tab_id)
+                        .expect("open project state")
+                        .active_work_projection_cache
                         .borrow_mut()
                         .insert(prepared.tab_id.clone(), prepared_projection.projection);
-                    if self.active_tab_id.as_deref() == Some(prepared.tab_id.as_str()) {
-                        commit.prepared_dispatch = Some(prepared_projection.dispatch);
-                    }
+                    commit.prepared_dispatch = Some(prepared_projection.dispatch);
                 }
                 Ok(None) => {
                     tracing::debug!(
@@ -3931,10 +3962,14 @@ impl AppRuntime {
                 .ok()
                 .flatten()?;
         let view = prepared.projection;
-        self.active_work_projection_payload_cache
+        self.project_state_for_tab(&tab.id)
+            .expect("open project state")
+            .active_work_projection_payload_cache
             .borrow_mut()
             .insert(tab.id.clone(), prepared.dispatch.payload);
-        self.active_work_projection_cache
+        self.project_state_for_tab(&tab.id)
+            .expect("open project state")
+            .active_work_projection_cache
             .borrow_mut()
             .insert(tab.id.clone(), view.clone());
         Some(view)
@@ -3965,7 +4000,10 @@ impl AppRuntime {
             }
         }
 
-        let mut cache = self.active_work_projection_cache.borrow_mut();
+        let Some(state) = self.project_state_for_tab(tab_id) else {
+            return;
+        };
+        let mut cache = state.active_work_projection_cache.borrow_mut();
         let Some(projection) = cache.get_mut(tab_id) else {
             return;
         };
@@ -4075,7 +4113,8 @@ impl AppRuntime {
             };
         }
         drop(cache);
-        self.active_work_projection_payload_cache
+        state
+            .active_work_projection_payload_cache
             .borrow_mut()
             .remove(tab_id);
     }
@@ -4098,7 +4137,11 @@ impl AppRuntime {
         else {
             return;
         };
-        let mut cache = self.active_work_projection_cache.borrow_mut();
+        let mut cache = self
+            .project_state_for_tab(&tab_id)
+            .expect("open project state")
+            .active_work_projection_cache
+            .borrow_mut();
         if let Some(projection) = cache.get_mut(&tab_id) {
             merge_workspace_projection_membership_cache_only(projection, project_root, fresh);
         } else {
@@ -4125,7 +4168,9 @@ impl AppRuntime {
         // structured snapshot. Keep the two caches coherent: until the latest
         // background generation commits, FrontendReady/tab-change must use the
         // bounded structured fallback instead of replaying pre-patch bytes.
-        self.active_work_projection_payload_cache
+        self.project_state_for_tab(&tab_id)
+            .expect("open project state")
+            .active_work_projection_payload_cache
             .borrow_mut()
             .remove(&tab_id);
     }
@@ -4157,12 +4202,20 @@ impl AppRuntime {
         project_root: &Path,
         project_still_open: bool,
     ) {
-        self.active_work_projection_cache
-            .borrow_mut()
-            .remove(tab_id);
-        self.active_work_projection_payload_cache
-            .borrow_mut()
-            .remove(tab_id);
+        if let Some(state) = self
+            .project_states
+            .values()
+            .find(|state| state.context.tab_id == tab_id)
+        {
+            state
+                .active_work_projection_cache
+                .borrow_mut()
+                .remove(tab_id);
+            state
+                .active_work_projection_payload_cache
+                .borrow_mut()
+                .remove(tab_id);
+        }
 
         let mut broker = self.active_work_projection_refresh.borrow_mut();
         if project_still_open {
@@ -4195,18 +4248,23 @@ impl AppRuntime {
     fn drain_pending_work_items_cache_evictions(&self) {
         use std::sync::TryLockError;
 
-        let mut cache = match self.work_items_cache.try_lock() {
-            Ok(cache) => cache,
-            Err(TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(TryLockError::WouldBlock) => return,
-        };
-        let pending = {
-            let mut broker = self.active_work_projection_refresh.borrow_mut();
-            std::mem::take(&mut broker.pending_cache_evictions)
-        };
-        for project_root in pending {
-            cache.evict(&project_root);
-        }
+        let mut broker = self.active_work_projection_refresh.borrow_mut();
+        broker.pending_cache_evictions.retain(|root| {
+            let Some(state) = self
+                .project_states
+                .values()
+                .find(|state| projection_worktree_paths_match(&state.context.project_root, root))
+            else {
+                return false;
+            };
+            let mut cache = match state.work_items_cache.try_lock() {
+                Ok(cache) => cache,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => return true,
+            };
+            cache.evict(root);
+            false
+        });
     }
 
     /// Issue #4406: ask the event loop to rebuild `project_root`'s Active Work
@@ -4233,22 +4291,27 @@ impl AppRuntime {
     }
 
     /// Issue #4406: install a projection rebuilt off the GUI event loop and
-    /// broadcast it when it belongs to the active tab. Pure bookkeeping — the
+    /// dispatch it to the owning project if its captured generation is still open. Pure bookkeeping — the
     /// disk work already happened in [`run_active_work_projection_refresh`].
     pub(crate) fn apply_active_work_projection_refresh(
         &mut self,
         refreshed: ActiveWorkProjectionRefreshed,
     ) -> Vec<OutboundEvent> {
         let ActiveWorkProjectionRefreshed {
+            context,
             tab_id,
             view,
             completed,
         } = refreshed;
-        if !completed {
+        if !completed || !self.project_context_is_current(&context) {
             return Vec::new();
         }
         {
-            let mut cache = self.active_work_projection_cache.borrow_mut();
+            let mut cache = self
+                .project_state_for_tab(&tab_id)
+                .expect("open project state")
+                .active_work_projection_cache
+                .borrow_mut();
             match view.as_ref() {
                 Some(view) => {
                     cache.insert(tab_id.clone(), view.clone());
@@ -4258,11 +4321,9 @@ impl AppRuntime {
                 }
             }
         }
-        if self.active_tab_id.as_deref() != Some(tab_id.as_str()) {
-            return Vec::new();
-        }
         view.map(|view| {
-            vec![OutboundEvent::broadcast(
+            vec![OutboundEvent::project(
+                context.project_key,
                 BackendEvent::ActiveWorkProjection {
                     projection: Box::new(view),
                 },
@@ -4271,8 +4332,11 @@ impl AppRuntime {
         .unwrap_or_default()
     }
 
-    pub(crate) fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
-        let project_root = self.active_project_root()?.to_path_buf();
+    pub(crate) fn active_work_projection_broadcast_for_tab(
+        &self,
+        tab_id: &str,
+    ) -> Option<OutboundEvent> {
+        let project_root = self.tab(tab_id)?.project_root.clone();
         self.schedule_active_work_projection_refresh(&project_root, None);
         None
     }
@@ -4281,30 +4345,35 @@ impl AppRuntime {
     /// projection builder. The authoritative Work/Session files are updated by
     /// the close finalizer and their normal background refresh replaces this
     /// cache snapshot after the acknowledgement is already on the wire.
-    pub(crate) fn cached_active_work_projection_broadcast_for_active_tab(
+    pub(crate) fn cached_active_work_projection_broadcast_for_tab(
         &self,
+        tab_id: &str,
     ) -> Option<OutboundEvent> {
-        let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        let has_cached_projection = self
-            .active_work_projection_cache
-            .borrow()
-            .contains_key(tab_id);
+        let has_cached_projection = self.project_state_for_tab(tab_id).is_some_and(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .contains_key(tab_id)
+        });
         let has_live_session = self
             .active_agent_sessions
             .values()
-            .any(|session| session.tab_id == *tab_id);
+            .any(|session| session.tab_id == tab_id);
         if !has_cached_projection && !has_live_session {
             return None;
         }
-        let cached_projection = self
-            .active_work_projection_cache
-            .borrow()
-            .get(tab_id)
-            .map(bounded_active_work_projection_snapshot);
+        let cached_projection = self.project_state_for_tab(tab_id).and_then(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .get(tab_id)
+                .map(bounded_active_work_projection_snapshot)
+        });
         let projection = cached_projection
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
-        Some(OutboundEvent::broadcast(
+        Some(OutboundEvent::project(
+            self.project_key_for_tab(tab_id)?.clone(),
             BackendEvent::ActiveWorkProjectionPatch {
                 projection: Box::new(projection),
             },
@@ -4317,17 +4386,20 @@ impl AppRuntime {
     /// serializes unbounded Work/Session vectors here.
     pub(crate) fn cached_active_work_projection_broadcast_for_workspace_watcher(
         &self,
+        tab_id: &str,
     ) -> Option<OutboundEvent> {
-        let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        let cached_projection = self
-            .active_work_projection_cache
-            .borrow()
-            .get(tab_id)
-            .map(bounded_active_work_projection_snapshot);
+        let cached_projection = self.project_state_for_tab(tab_id).and_then(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .get(tab_id)
+                .map(bounded_active_work_projection_snapshot)
+        });
         let projection = cached_projection
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
-        Some(OutboundEvent::broadcast(
+        Some(OutboundEvent::project(
+            self.project_key_for_tab(tab_id)?.clone(),
             BackendEvent::ActiveWorkProjectionPatch {
                 projection: Box::new(projection),
             },
@@ -4337,31 +4409,36 @@ impl AppRuntime {
     /// Materialize a bounded projection from process-local state only. This is
     /// used by auto-close paths that must emit an authoritative empty/updated
     /// Work surface even when no prior projection cache exists.
-    pub(crate) fn in_memory_active_work_projection_broadcast_for_active_tab(
+    pub(crate) fn in_memory_active_work_projection_broadcast_for_tab(
         &self,
+        tab_id: &str,
     ) -> Option<OutboundEvent> {
-        let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        Some(OutboundEvent::broadcast(
+        Some(OutboundEvent::project(
+            self.project_key_for_tab(tab_id)?.clone(),
             BackendEvent::ActiveWorkProjectionPatch {
                 projection: Box::new(self.in_memory_active_work_projection_for_tab(tab_id, tab)),
             },
         ))
     }
 
-    /// Like `active_work_projection_broadcast_for_active_tab`, but always emits an event
-    /// when an active tab exists — falling back to an empty projection so that frontends
-    /// clear stale per-project data when the tab focus moves to a project without
-    /// any saved projection or live agent sessions.
-    pub(super) fn active_work_projection_broadcast_on_tab_change(&self) -> Option<OutboundEvent> {
-        let tab_id = self.active_tab_id.as_ref()?;
+    /// Hydrate the explicitly selected project, including an empty projection
+    /// when it has neither saved state nor live agent sessions.
+    pub(super) fn active_work_projection_broadcast_on_tab_change(
+        &self,
+        tab_id: &str,
+    ) -> Option<OutboundEvent> {
         let tab = self.tab(tab_id)?;
-        if self.dispatch_cached_active_work_projection(tab_id, super::DispatchTarget::Broadcast) {
+        if self.dispatch_cached_active_work_projection(
+            tab_id,
+            super::DispatchTarget::Project(self.project_key_for_tab(tab_id)?.clone()),
+        ) {
             return None;
         }
         self.schedule_active_work_projection_refresh(&tab.project_root, None);
         let projection = self.in_memory_active_work_projection_for_tab(tab_id, tab);
-        Some(OutboundEvent::broadcast(
+        Some(OutboundEvent::project(
+            self.project_key_for_tab(tab_id)?.clone(),
             BackendEvent::ActiveWorkProjection {
                 projection: Box::new(projection),
             },
@@ -4392,6 +4469,7 @@ impl AppRuntime {
         tab: &ProjectTabRuntime,
     ) -> ActiveWorkProjectionJob {
         ActiveWorkProjectionJob {
+            context: self.project_context(tab_id).expect("open project context"),
             tab_id: tab_id.to_string(),
             tab_title: tab.title.clone(),
             project_root: tab.project_root.clone(),
@@ -4409,7 +4487,12 @@ impl AppRuntime {
                 .collect(),
             sessions_dir: self.sessions_dir.clone(),
             known_branch_refs: self.work_known_branch_refs.get(&tab.project_root).cloned(),
-            merged_branches: self.work_merged_branches.get(&tab.project_root).cloned(),
+            merged_branches: self
+                .project_state_for_tab(tab_id)
+                .expect("open project state")
+                .work_merged_branches
+                .get(&tab.project_root)
+                .cloned(),
             cleanup_ready_branches: self
                 .work_cleanup_ready_branches
                 .get(&tab.project_root)
@@ -4427,7 +4510,12 @@ impl AppRuntime {
                 .borrow()
                 .get(&tab.project_root)
                 .cloned(),
-            work_items_cache: Arc::clone(&self.work_items_cache),
+            work_items_cache: Arc::clone(
+                &self
+                    .project_state_for_tab(tab_id)
+                    .expect("open project state")
+                    .work_items_cache,
+            ),
             session_ledger_cache: Arc::clone(&self.session_ledger_cache),
         }
     }
@@ -4444,6 +4532,7 @@ impl AppRuntime {
 /// Issue #4406: a GUI-runtime snapshot the Active Work projection is rebuilt
 /// from, off the event loop.
 pub(crate) struct ActiveWorkProjectionJob {
+    pub(crate) context: ProjectContext,
     pub(crate) tab_id: String,
     pub(crate) project_root: PathBuf,
     tab_title: String,
@@ -4469,6 +4558,7 @@ pub(crate) struct ActiveWorkProjectionJob {
 /// event loop by [`AppRuntime::apply_active_work_projection_refresh`].
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveWorkProjectionRefreshed {
+    pub(crate) context: ProjectContext,
     pub(crate) tab_id: String,
     pub(crate) view: Option<gwt::ActiveWorkProjectionView>,
     /// False when the rebuild never finished (it panicked off-thread). The
@@ -4481,6 +4571,7 @@ pub(crate) fn run_active_work_projection_refresh(
     job: ActiveWorkProjectionJob,
 ) -> ActiveWorkProjectionRefreshed {
     ActiveWorkProjectionRefreshed {
+        context: job.context.clone(),
         tab_id: job.tab_id.clone(),
         view: build_active_work_projection(&job),
         completed: true,

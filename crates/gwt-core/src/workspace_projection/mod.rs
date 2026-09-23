@@ -27,7 +27,8 @@ mod work_items;
 
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
 pub use identity::{
-    can_upgrade_work_owner, canonical_work_id, successor_work_id, workspace_group_key_for_item,
+    can_upgrade_work_owner, canonical_work_id, successor_work_id, work_owner_for_branch,
+    workspace_group_key_for_item,
 };
 pub use lifecycle::{
     decide_work_close, derive_merged_done_equivalent, recompute_lifecycle_stage,
@@ -74,7 +75,8 @@ pub use persistence::{
     resolve_workspace_state_external_commit, resolve_workspace_state_external_commit_at,
     resolve_workspace_work_event_from_board_entry, retroactive_auto_done_scan,
     retroactive_auto_done_scan_paths, save_workspace_projection, save_workspace_projection_to_path,
-    save_workspace_work_items_projection_to_path, transact_workspace_state,
+    save_workspace_work_items_projection_to_path,
+    transact_workspace_close_state_for_work_event_root, transact_workspace_state,
     transact_workspace_state_at, transact_workspace_state_at_with_commit,
     transact_workspace_state_for_work_event_root,
     transact_workspace_state_for_work_event_root_with_commit,

@@ -10,7 +10,21 @@ import {
   presetSupportsWaitingStatus,
   selectNextAgentFocusWindowId,
   windowRuntimeLabel,
+  windowRuntimeDescription,
 } from "../window-runtime-state.js";
+
+test("turn completion is described separately from waiting for a model response", () => {
+  assert.equal(windowRuntimeDescription("idle", "agent"), "Turn ended; ready for input");
+  assert.equal(windowRuntimeDescription("running", "codex"), "Turn in progress, including waiting for a model response");
+  assert.equal(windowRuntimeDescription("waiting", "claude"), "Waiting for approval or an external condition");
+  assert.equal(windowRuntimeDescription("error", "agent"), "Error");
+  assert.equal(windowRuntimeDescription("stopped", "agent"), "Stopped");
+});
+
+test("shell runtime descriptions do not claim an agent turn or model response", () => {
+  assert.equal(windowRuntimeDescription("running", "shell"), "Running");
+  assert.equal(windowRuntimeDescription("idle", "shell"), "Idle");
+});
 
 test("label table covers exactly the generated wire states", () => {
   assert.deepEqual(

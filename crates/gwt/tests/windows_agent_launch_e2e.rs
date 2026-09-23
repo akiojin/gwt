@@ -343,6 +343,60 @@ fn assert_public_ws_agent_route_boundary(
     }
 }
 
+/// Issue #4644: since #4537 the bootstrap `/ws` connection is Hub-only. It
+/// answers `frontend_ready` with the lightweight `hub_state` catalog (the
+/// browser's `receiveHubState`); project `workspace_state` is sent only on a
+/// connection bound to a project key.
+#[derive(Debug, PartialEq, Eq)]
+enum HubBootstrapReply {
+    Synced,
+    Pending,
+}
+
+fn classify_hub_bootstrap_reply(kind: &str) -> Result<HubBootstrapReply, String> {
+    match kind {
+        "hub_state" => Ok(HubBootstrapReply::Synced),
+        "workspace_state" => Err(
+            "Hub bootstrap connection received project-scoped workspace_state; \
+             the Hub contract (#4537) syncs with hub_state only"
+                .to_string(),
+        ),
+        _ => Ok(HubBootstrapReply::Pending),
+    }
+}
+
+fn hub_project_keys(hub_state: &serde_json::Value) -> Vec<String> {
+    hub_state["hub"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project["project_key"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn hub_bootstrap_reply_names_the_scope_violation_instead_of_timing_out() {
+    assert_eq!(
+        classify_hub_bootstrap_reply("hub_state"),
+        Ok(HubBootstrapReply::Synced)
+    );
+    for pending in ["runtime_health", "provider_usage", "update_state"] {
+        assert_eq!(
+            classify_hub_bootstrap_reply(pending),
+            Ok(HubBootstrapReply::Pending)
+        );
+    }
+    let error = classify_hub_bootstrap_reply("workspace_state").unwrap_err();
+    assert!(error.contains("hub_state"), "{error}");
+    assert_eq!(
+        hub_project_keys(&serde_json::json!({
+            "kind": "hub_state",
+            "hub": {"projects": [{"project_key": "0123456789abcdef"}]},
+        })),
+        vec!["0123456789abcdef".to_string()]
+    );
+}
+
 struct PublicRouteExpectation {
     ws_url: String,
     workspace: String,
@@ -376,8 +430,8 @@ async fn assert_public_ws_conpty_boundary_async(
     // consuming frontend events instead of racing one pre-run send.
     let handshake_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut observed_kinds = Vec::new();
-    let mut frontend_ready = false;
-    while !frontend_ready && tokio::time::Instant::now() < handshake_deadline {
+    let mut known_project_keys = None;
+    while known_project_keys.is_none() && tokio::time::Instant::now() < handshake_deadline {
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 r#"{"kind":"frontend_ready"}"#.into(),
@@ -404,18 +458,19 @@ async fn assert_public_ws_conpty_boundary_async(
             };
             if let Some(kind) = value["kind"].as_str() {
                 observed_kinds.push(kind.to_string());
-                frontend_ready = kind == "workspace_state";
-            }
-            if frontend_ready {
-                break;
+                if classify_hub_bootstrap_reply(kind)? == HubBootstrapReply::Synced {
+                    known_project_keys = Some(hub_project_keys(&value));
+                    break;
+                }
             }
         }
     }
-    if !frontend_ready {
+    let Some(known_project_keys) = known_project_keys else {
         return Err(format!(
-            "timed out waiting for frontend sync; observed={observed_kinds:?}"
+            "Hub bootstrap connection never answered frontend_ready with hub_state; \
+             observed={observed_kinds:?}"
         ));
-    }
+    };
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
             serde_json::json!({
@@ -430,41 +485,60 @@ async fn assert_public_ws_conpty_boundary_async(
     let project_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let canonical_workspace = std::fs::canonicalize(&workspace)
         .map_err(|error| format!("canonicalize public workspace: {error}"))?;
-    let mut project_open = false;
+    let mut project_key = None;
     let mut project_event_kinds = Vec::new();
-    while !project_open && tokio::time::Instant::now() < project_deadline {
+    while project_key.is_none() && tokio::time::Instant::now() < project_deadline {
         let remaining = project_deadline.saturating_duration_since(tokio::time::Instant::now());
         let message = tokio::time::timeout(remaining, socket.next())
             .await
             .map_err(|_| {
                 format!(
-                    "timed out waiting for project workspace_state; observed={project_event_kinds:?}"
+                    "timed out waiting for the opened project in hub_state; observed={project_event_kinds:?}"
                 )
             })?
             .ok_or_else(|| "public websocket closed before project open".to_string())?
-            .map_err(|error| format!("read project workspace_state: {error}"))?;
+            .map_err(|error| format!("read project hub_state: {error}"))?;
         let Some(payload) = message.to_text().ok() else {
             continue;
         };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             continue;
         };
-        if let Some(kind) = value["kind"].as_str() {
-            project_event_kinds.push(kind.to_string());
+        let Some(kind) = value["kind"].as_str() else {
+            continue;
+        };
+        project_event_kinds.push(kind.to_string());
+        if kind == "project_open_error" {
+            return Err(format!("reopen_recent_project failed: {value}"));
         }
-        project_open = value["kind"] == "workspace_state"
-            && value["workspace"]["tabs"].as_array().is_some_and(|tabs| {
-                tabs.iter().any(|tab| {
-                    tab["project_root"]
-                        .as_str()
-                        .and_then(|path| std::fs::canonicalize(Path::new(path)).ok())
-                        .is_some_and(|path| path == canonical_workspace)
-                })
-            });
+        if classify_hub_bootstrap_reply(kind)? == HubBootstrapReply::Synced {
+            project_key = hub_project_keys(&value)
+                .into_iter()
+                .find(|key| !known_project_keys.contains(key));
+        }
     }
-    if !project_open {
-        return Err("project tab was not materialized".to_string());
-    }
+    let project_key =
+        project_key.ok_or_else(|| "project tab key was not materialized".to_string())?;
+    // Match the browser: the bootstrap connection is Hub-only; project
+    // mutations require a new connection bound to the materialized key.
+    socket
+        .close(None)
+        .await
+        .map_err(|error| format!("close Hub websocket: {error}"))?;
+    let mut project_ws_url = reqwest::Url::parse(&ws_url)
+        .map_err(|error| format!("parse public websocket URL: {error}"))?;
+    project_ws_url
+        .query_pairs_mut()
+        .append_pair("repo_hash", &project_key);
+    let (mut socket, _) = tokio_tungstenite::connect_async(project_ws_url.as_str())
+        .await
+        .map_err(|error| format!("connect project websocket: {error}"))?;
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"kind":"frontend_ready"}"#.into(),
+        ))
+        .await
+        .map_err(|error| format!("send project frontend_ready: {error}"))?;
 
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -489,6 +563,18 @@ async fn assert_public_ws_conpty_boundary_async(
         };
         if value["kind"] != "workspace_state" {
             continue;
+        }
+        let tab = &value["workspace"]["tabs"][0];
+        let tab_root = tab["project_root"]
+            .as_str()
+            .and_then(|path| std::fs::canonicalize(Path::new(path)).ok());
+        if tab["project_key"].as_str() != Some(project_key.as_str())
+            || tab_root.as_deref() != Some(canonical_workspace.as_path())
+        {
+            return Err(format!(
+                "project connection {project_key} served another project: {}",
+                value["workspace"]["tabs"]
+            ));
         }
         board_id = value["workspace"]["tabs"]
             .as_array()

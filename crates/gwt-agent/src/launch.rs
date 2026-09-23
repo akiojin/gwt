@@ -10,6 +10,7 @@ use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
+    permission_mode::{PermissionLaunchSource, PermissionModeDecision, PermissionModeInputs},
     session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{
         AgentColor, AgentId, DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode,
@@ -179,6 +180,10 @@ pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
             // launches. Use the tolerant config form so pre-0.106 Codex keeps
             // starting instead of rejecting an unknown `--enable` feature.
             "--config=features.default_mode_request_user_input=true".to_string(),
+            // Suppress startup warnings for the unstable feature enabled above,
+            // including with Backend Override's isolated CODEX_HOME. Codex only
+            // supports global suppression, so user-enabled feature warnings also disappear.
+            "--config=suppress_unstable_features_warning=true".to_string(),
         ],
         // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
         // scrollback instead of redraw-only fullscreen frames. Matches the
@@ -186,7 +191,6 @@ pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
         AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
         | AgentId::Antigravity
-        | AgentId::Gemini
         | AgentId::OpenCode
         | AgentId::OpenClaw
         | AgentId::Hermes
@@ -1160,11 +1164,29 @@ pub struct LaunchConfig {
     /// feedback wiring but must not take over (or be gated by) the
     /// implementing session's execution lifecycle.
     pub suppress_execution_control: bool,
+    /// SPEC-3248 FR-240: this launch explicitly asks to start follow-up work
+    /// on its linked owner.
+    ///
+    /// It is the only thing that creates a fresh producing generation for a
+    /// *delivered* owner — one that is closed and whose source state the
+    /// configured base already contains. Without it such an owner opens for
+    /// Inspection: readable, but materializing no execution, Work, or
+    /// obligation, so an already shipped Issue cannot become terminally
+    /// Blocked merely because it has no new PR to show. It never reopens the
+    /// GitHub Issue; materially different scope belongs to a new owner.
+    pub explicit_follow_up: bool,
     pub execution_intent: ExecutionLaunchIntent,
     /// Issue #4217 FR-002: who started this launch. Only the launcher knows,
     /// so it is stamped here and persisted onto the Session rather than being
     /// re-derived later from the agent's environment.
     pub launch_route: LaunchRoute,
+    /// Issue #4543: the Permission Mode Decision this launch was materialized
+    /// under, already checked against the argv and environment above.
+    ///
+    /// Every launch entry point reaches `build()`, so this is the one place
+    /// the forced-skip contract is decided and the one place the per-provider
+    /// mapping is verified to have survived materialization.
+    pub permission_decision: PermissionModeDecision,
 }
 
 /// Permission mode for agent launch.
@@ -1191,6 +1213,13 @@ pub struct AgentLaunchBuilder {
     tool_runtime_source_session_id: Option<String>,
     fast_mode: bool,
     skip_permissions: bool,
+    /// Issue #4543: the permission preference the launch *source* carried, as
+    /// a tri-state. `None` means the source stored nothing at all, which the
+    /// bare `skip_permissions` bool above cannot distinguish from an explicit
+    /// "interactive, please".
+    requested_skip_permissions: Option<bool>,
+    /// Issue #4543 AC-3: which launch surface supplied that preference.
+    permission_launch_source: PermissionLaunchSource,
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
@@ -1227,6 +1256,7 @@ pub struct AgentLaunchBuilder {
     is_ephemeral: bool,
     ephemeral_base_ref: Option<String>,
     suppress_execution_control: bool,
+    explicit_follow_up: bool,
     execution_intent: ExecutionLaunchIntent,
     launch_route: LaunchRoute,
 }
@@ -1245,6 +1275,8 @@ impl AgentLaunchBuilder {
             tool_runtime_source_session_id: None,
             fast_mode: false,
             skip_permissions: false,
+            requested_skip_permissions: None,
+            permission_launch_source: PermissionLaunchSource::Unspecified,
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
@@ -1268,6 +1300,7 @@ impl AgentLaunchBuilder {
             is_ephemeral: false,
             ephemeral_base_ref: None,
             suppress_execution_control: false,
+            explicit_follow_up: false,
             execution_intent: ExecutionLaunchIntent::Automatic,
             launch_route: LaunchRoute::Manual,
         }
@@ -1286,6 +1319,13 @@ impl AgentLaunchBuilder {
     /// Execution Control Record is materialized for it.
     pub fn suppress_execution_control(mut self) -> Self {
         self.suppress_execution_control = true;
+        self
+    }
+
+    /// SPEC-3248 FR-240: ask this launch to start follow-up work on its linked
+    /// owner even when that owner is already delivered.
+    pub fn explicit_follow_up(mut self) -> Self {
+        self.explicit_follow_up = true;
         self
     }
 
@@ -1359,6 +1399,17 @@ impl AgentLaunchBuilder {
 
     pub fn skip_permissions(mut self, enabled: bool) -> Self {
         self.skip_permissions = enabled;
+        // Issue #4543: setting the toggle at all is itself the signal that the
+        // source carried a preference. An unset source stays `None` so the
+        // recorded decision can say which one the forced skip overrode.
+        self.requested_skip_permissions = Some(enabled);
+        self
+    }
+
+    /// Issue #4543 AC-3: tag which launch surface supplied the permission
+    /// preference, so the recorded decision names the setting it overrode.
+    pub fn permission_launch_source(mut self, source: PermissionLaunchSource) -> Self {
+        self.permission_launch_source = source;
         self
     }
 
@@ -1506,11 +1557,44 @@ impl AgentLaunchBuilder {
             .as_ref()
             .map(|dir| gwt_core::paths::normalize_windows_child_process_path(dir));
         let mut env_vars = HashMap::new();
-        let skip_permissions = self.skip_permissions
-            || matches!(
-                self.permission_mode,
-                Some(PermissionMode::BypassPermissions)
-            );
+        // Issue #4543: every launch entry point reaches this builder, so the
+        // forced-skip contract is decided here once instead of being
+        // re-derived (and forgotten) per surface.
+        //
+        // A launch produces work when it carries a linked owner whose
+        // execution it owns. That is exactly the case where an agent is
+        // expected to land a change and therefore cannot stop at a permission
+        // prompt, whatever a saved profile / last settings / resumed session
+        // stored. `suppress_execution_control` launches are subordinate to
+        // another session's execution and keep their own preference.
+        let producing_work = self.linked_issue_number.is_some() && !self.suppress_execution_control;
+        let requested_skip_permissions = if matches!(
+            self.permission_mode,
+            Some(PermissionMode::BypassPermissions)
+        ) {
+            Some(true)
+        } else {
+            self.requested_skip_permissions
+        };
+        let entrypoint = crate::permission_mode::entrypoint_from_launch_args(
+            &self.extra_args,
+            self.session_mode == SessionMode::Resume,
+        );
+        let permission_decision = crate::permission_mode::decide(&PermissionModeInputs {
+            agent_id: &self.agent_id,
+            custom_agent: self.custom_agent.as_ref(),
+            source: self.permission_launch_source,
+            entrypoint: &entrypoint,
+            launch_route: self.launch_route,
+            requested_skip_permissions,
+            producing_work,
+        });
+        let skip_permissions = permission_decision.skip_permissions_requested();
+        // The per-provider argument builders below read `self.skip_permissions`
+        // directly, so the decision has to land on the builder — not just on
+        // the resulting config — or a forced skip would be recorded without
+        // ever reaching the CLI flag it stands for.
+        self.skip_permissions = skip_permissions;
 
         // Common env vars
         env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
@@ -1577,9 +1661,6 @@ impl AgentLaunchBuilder {
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
             }
-            AgentId::Gemini => {
-                self.build_gemini_args(&mut args);
-            }
             AgentId::OpenCode => {
                 self.build_opencode_args(&mut args, &mut env_vars);
             }
@@ -1633,6 +1714,15 @@ impl AgentLaunchBuilder {
         let predecessor_session_id = self.predecessor_session_id.clone();
         let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
+        // Issue #4543 AC-6: the shared validator runs on the materialized argv
+        // and environment, so a provider builder that silently stopped
+        // emitting its skip flag is caught here rather than at a prompt nobody
+        // is watching.
+        let permission_decision = crate::permission_mode::validate_materialized_launch(
+            permission_decision,
+            &args,
+            &env_vars,
+        );
 
         LaunchConfig {
             agent_id,
@@ -1664,8 +1754,10 @@ impl AgentLaunchBuilder {
             is_ephemeral: self.is_ephemeral,
             ephemeral_base_ref: self.ephemeral_base_ref,
             suppress_execution_control: self.suppress_execution_control,
+            explicit_follow_up: self.explicit_follow_up,
             execution_intent: self.execution_intent,
             launch_route: self.launch_route,
+            permission_decision,
         }
     }
 
@@ -1946,17 +2038,6 @@ impl AgentLaunchBuilder {
             .map(|dir| dir.to_string_lossy().into_owned())
     }
 
-    fn build_gemini_args(&self, args: &mut Vec<String>) {
-        if let Some(ref model) = self.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-
-        if self.skip_permissions {
-            args.push("--yolo".to_string());
-        }
-    }
-
     fn build_grok_build_args(&self, args: &mut Vec<String>) {
         args.extend(canonical_launch_args(&AgentId::GrokBuild));
 
@@ -2189,6 +2270,7 @@ mod tests {
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
             ],
             "Codex canonical args must cover inline scrollback and Default-mode questions"
         );
@@ -2204,12 +2286,11 @@ mod tests {
 
     #[test]
     fn canonical_launch_args_for_agents_without_defaults_is_empty() {
-        // Claude/Gemini/OpenCode/Copilot/Custom have no agent-neutral positional
+        // Claude/OpenCode/Copilot/Custom have no agent-neutral positional
         // defaults today. Agent-specific env vars and conditional args belong in
         // the agent-specific builder, not the canonical default list.
         assert!(canonical_launch_args(&AgentId::ClaudeCode).is_empty());
         assert!(canonical_launch_args(&AgentId::Antigravity).is_empty());
-        assert!(canonical_launch_args(&AgentId::Gemini).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenCode).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenClaw).is_empty());
         assert!(canonical_launch_args(&AgentId::Hermes).is_empty());
@@ -2677,16 +2758,6 @@ mod tests {
     }
 
     #[test]
-    fn build_gemini_skip_permissions_adds_yolo() {
-        let config = AgentLaunchBuilder::new(AgentId::Gemini)
-            .skip_permissions(true)
-            .build();
-
-        assert!(config.args.contains(&"--yolo".to_string()));
-        assert!(config.skip_permissions);
-    }
-
-    #[test]
     fn build_antigravity_maps_model_skip_permissions_and_resume_id() {
         let agent_id = crate::types::resolve_agent_id("agy").expect("Antigravity must resolve");
         let config = AgentLaunchBuilder::new(agent_id)
@@ -2882,6 +2953,9 @@ mod tests {
         ];
 
         for config in configs {
+            assert!(config
+                .args
+                .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
             assert_eq!(
                 config
                     .args
@@ -2902,7 +2976,6 @@ mod tests {
         for agent in [
             AgentId::ClaudeCode,
             AgentId::GrokBuild,
-            AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,
@@ -2931,6 +3004,7 @@ mod tests {
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
             ]
         );
         assert!(!args
@@ -2967,6 +3041,7 @@ mod tests {
                 "@openai/codex@latest".to_string(),
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
                 "resume".to_string(),
                 "sess-123".to_string(),
             ]
@@ -2995,12 +3070,13 @@ mod tests {
             "canonical normalization must be idempotent"
         );
         assert_eq!(
-            &args[..4],
+            &args[..5],
             [
                 "--yes",
                 "@openai/codex@latest",
                 "--no-alt-screen",
                 "--config=features.default_mode_request_user_input=true",
+                "--config=suppress_unstable_features_warning=true",
             ],
             "canonical defaults must follow the package runner in stable order"
         );
@@ -3071,17 +3147,6 @@ mod tests {
         let config = AgentLaunchBuilder::new(AgentId::Copilot).build();
         assert_eq!(config.command, "gh");
         assert_eq!(config.args.first(), Some(&"copilot".to_string()));
-    }
-
-    #[test]
-    fn build_gemini_with_model() {
-        let config = AgentLaunchBuilder::new(AgentId::Gemini)
-            .model("gemini-3-flash-preview")
-            .build();
-
-        assert_eq!(config.command, "gemini");
-        assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"gemini-3-flash-preview".to_string()));
     }
 
     #[test]
@@ -3204,17 +3269,6 @@ mod tests {
         assert!(spec_arg
             .unwrap()
             .contains("@anthropic-ai/claude-code@latest"));
-    }
-
-    #[test]
-    fn resolve_runner_latest_uses_official_gemini_package() {
-        let runner = resolve_runner(&AgentId::Gemini, "latest");
-        assert!(!runner.executable.is_empty());
-        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
-        assert_eq!(
-            spec_arg.map(String::as_str),
-            Some("@google/gemini-cli@latest")
-        );
     }
 
     #[test]
@@ -5038,6 +5092,10 @@ mod tests {
                 .map(String::as_str),
             Some("sk-codex")
         );
+
+        assert!(config
+            .args
+            .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
 
         // Generated config.toml exists and contains the expected provider id.
         let body =

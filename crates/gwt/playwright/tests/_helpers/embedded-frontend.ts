@@ -11,14 +11,25 @@ import path from "node:path";
 
 const WEB_ROOT = path.resolve(process.cwd(), "crates/gwt/web");
 
-export const APP_URL = "http://gwt-playwright.local/";
+// Issue #4538: `/` is the Hub; the Project workspace lives at
+// `/p/<repo-hash>`. Behaviour specs drive the Project app, so APP_URL is a
+// fixed Project route and HUB_URL is the root picker.
+export const ORIGIN_URL = "http://gwt-playwright.local/";
+export const APP_PROJECT_KEY = "0123456789abcdef";
+export const APP_URL = `${ORIGIN_URL}p/${APP_PROJECT_KEY}`;
+export const HUB_URL = ORIGIN_URL;
 
 const ROOT_MODULES = new Set([
   "app.js",
+  // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
+  "frontend-bootstrap.js",
+  "frontend-route.js",
+  "hub-app.js",
   // SPEC-2008 Phase 38 — Agent Kanban window surface.
   "agent-kanban-surface.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
+  "project-page-metadata.js",
   // SPEC #3206 — shared floating-toast primitive (alerts + notification history).
   "toast-host.js",
   // SPEC #3206 v2 — notification center (bell + unread badge + drawer).
@@ -39,7 +50,7 @@ const ROOT_MODULES = new Set([
   "camera-framing.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
-  "close-project-tab-confirm-modal.js",
+  "close-project-confirm-modal.js",
   "window-close-confirm-modal.js",
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
@@ -75,8 +86,6 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface.
   "project-shell-surface.js",
   // SPEC-2013 2026-06-16 amendment — internal Project Switcher popover.
-  "project-switcher.js",
-  "project-tabs-renderer.js",
   // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface.
   "provider-usage-surface.js",
   "window-tabs-renderer.js",
@@ -120,7 +129,7 @@ const ROOT_MODULES = new Set([
 ]);
 
 export async function installEmbeddedRoutes(page: any): Promise<void> {
-  await page.route(`${APP_URL}**`, async (route: any) => {
+  await page.route(`${ORIGIN_URL}**`, async (route: any) => {
     const url = new URL(route.request().url());
     const assetPath = resolveAssetPath(url.pathname);
     if (!assetPath) {
@@ -139,7 +148,7 @@ export async function installEmbeddedRoutes(page: any): Promise<void> {
 }
 
 function resolveAssetPath(pathname: string): string | null {
-  if (pathname === "/" || pathname === "/index.html") {
+  if (pathname === "/" || pathname === "/index.html" || /^\/p\/[0-9a-f]{16}$/.test(pathname)) {
     return path.join(WEB_ROOT, "index.html");
   }
   if (pathname === "/assets/xterm/xterm.css") {

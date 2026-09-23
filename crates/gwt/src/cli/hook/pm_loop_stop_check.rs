@@ -396,7 +396,7 @@ mod tests {
     }
 
     fn pm_refresh_fixture() -> (
-        std::sync::MutexGuard<'static, ()>,
+        gwt_core::test_support::EnvLockGuard,
         tempfile::TempDir,
         std::path::PathBuf,
         std::path::PathBuf,
@@ -460,7 +460,7 @@ mod tests {
     }
 
     fn pm_fixture() -> (
-        std::sync::MutexGuard<'static, ()>,
+        gwt_core::test_support::EnvLockGuard,
         tempfile::TempDir,
         std::path::PathBuf,
         std::path::PathBuf,

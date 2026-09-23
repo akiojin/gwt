@@ -7,8 +7,8 @@
 //! surfaces and derives the verification matrix from them, instead of
 //! trusting the agent to hand-pick commands:
 //!
-//! - **rust** (`crates/<name>/…`, workspace manifests): CI's fmt and clippy
-//!   gates verbatim, plus the CI Rust test gate scoped to each changed
+//! - **rust** (`crates/<name>/…`, workspace manifests): CI's fmt, clippy, and
+//!   rustdoc gates verbatim, plus the CI Rust test gate scoped to each changed
 //!   crate (the whole workspace gate when a workspace manifest changed).
 //! - **skills / guidance** (`.claude/skills/`, `.codex/skills/`): the
 //!   `gwt-skills` test suite (managed-asset parity lives there).
@@ -22,7 +22,8 @@
 //! # Package narrowing, never target narrowing
 //!
 //! The commands are CI's own gates ([`CI_RUST_TEST_GATE`], [`CI_FMT_GATE`],
-//! [`CI_CLIPPY_GATE`]) narrowed to the changed packages, and nothing else.
+//! [`CI_CLIPPY_GATE`], [`CI_RUSTDOC_GATE`]) narrowed to the changed packages,
+//! and nothing else.
 //! Narrowing by *target* instead is what made this derivation unsound: the
 //! `gwt` crate's matrix used to be `cargo test -p gwt --lib`, which never
 //! ran the ~1300 unit tests living in its binary targets (`app_runtime` and
@@ -32,29 +33,37 @@
 //! (#3640). Tests in this module pin the derived commands against the
 //! workflow files so CI cannot drift away from them unnoticed.
 //!
-//! # The one exception: the `gwt` crate's binary targets on Windows
+//! # The one exception: the rest of the `gwt` crate's targets on Windows
 //!
-//! A Windows host cannot run those, and no amount of waiting changes that.
-//! Four `app_runtime` tests take `env_test_lock` and never release it
-//! (#4014), so the run wedges with the test binary's CPU flat, a pile of
-//! orphaned `cmd /d /s /c "exit /b 0"` children, and — because the wedged
-//! process keeps holding it — the host-wide verification lease. One such run
-//! starved every other worktree on the machine for hours, and since
+//! This narrowing used to cover `--bin gwt` as well. A Windows run wedged
+//! with the test binary's CPU flat and a pile of orphaned
+//! `cmd /d /s /c "exit /b 0"` children, and — because the wedged process
+//! kept holding it — the host-wide verification lease. One such run starved
+//! every other worktree on the machine for hours, and since
 //! `execution.reopen` and the Ready PR gate both consume a passing derived
 //! record, finished work could not ship while it sat there (#4182).
-//! Serializing with `--test-threads=1` only moves the wedge later; linking
-//! those targets also fails outright with `os error 5`, because Windows
-//! cannot replace the very `gwtd.exe` that is running the verification
-//! (#3808, #4172).
 //!
-//! So on Windows the `gwt` package — and the workspace gate, which contains
-//! it — narrows to `--lib`, and every derived `cargo test` is serialized.
-//! This follows CI rather than departing from it: the nightly
-//! `test-windows-default-parallel` job runs exactly
-//! [`CI_WINDOWS_RUST_TEST_GATE`] and documents the same
-//! deadlock as its reason for excluding the target. Every other package
-//! keeps CI's full gate, because only these targets have ever been observed
-//! to wedge — narrowing further would buy nothing and cost real coverage.
+//! #4014 found the cause and removed it: the window close finalizer joined
+//! the PTY reader thread while the pane still held the pseudoconsole open,
+//! and Windows ConPTY does not signal EOF on the output pipe until the
+//! pseudoconsole is closed, so that join could never return. It ran under
+//! `env_test_lock`, which is why one hung teardown looked like four wedged
+//! tests — the other three were only queued behind the lock. `--bin gwt` is
+//! back in the nightly Windows gate as a result.
+//!
+//! **It is not back in this derivation, and the reason is unrelated to the
+//! deadlock.** Building any binary target of the `gwt` crate on Windows
+//! relinks `target/debug/gwtd.exe`, and a local verification run is itself a
+//! live `gwtd.exe`; Windows cannot replace a file that is open, so the build
+//! fails with `os error 5` every time (#3808, #4172). CI has no such process,
+//! which is why the two gates legitimately differ. That difference is pinned
+//! by `windows_derived_rust_matrix_tracks_the_ci_windows_gate` so neither
+//! side can drift on its own. Every derived `cargo test` stays serialized
+//! there.
+//!
+//! Every other package keeps CI's full gate, because only these targets have
+//! ever been observed to wedge — narrowing further would buy nothing and
+//! cost real coverage.
 //! Windows verification is weaker than Linux's as a result, and CI stays the
 //! gate that decides; a local run that cannot finish decides nothing at all.
 //!
@@ -75,16 +84,28 @@ const CI_RUST_TEST_GATE: &str = "cargo test --workspace --all-features";
 const CI_FMT_GATE: &str = "cargo fmt --all -- --check";
 /// CI's clippy gate (`.github/workflows/lint.yml`, job `lint`).
 const CI_CLIPPY_GATE: &str = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
+/// CI's rustdoc gate (`.github/workflows/lint.yml`, job `lint`). The step's
+/// `env: RUSTDOCFLAGS` is written as a leading assignment because `cargo doc`
+/// has no `-- -D warnings`; `verify.run` applies such a prefix as process
+/// environment (#3698).
+const CI_RUSTDOC_GATE: &str =
+    r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items"#;
 
-/// The broad Rust test gate CI runs on Windows (`.github/workflows/
-/// nightly.yml`, job `test-windows-default-parallel`): the same gate restricted
-/// to library targets, because the `gwt` crate's binary targets deadlock
-/// there. Derivation applies the identical restriction — see the module
-/// header.
+/// The Rust test gate derivation uses on Windows: CI's gate restricted to
+/// library targets. Derivation cannot go wider there — see the module header
+/// — because a local verification run *is* a live `gwtd.exe` and Windows
+/// cannot relink a file that is open.
+///
+/// The nightly `test-windows-default-parallel` job runs this gate plus
+/// `--bin gwt`, which #4014 returned to it. Nothing is running there, so the
+/// relink restriction does not apply to CI. The test
+/// `windows_derived_rust_matrix_tracks_the_ci_windows_gate` pins that exact
+/// relationship so neither side can drift alone.
 const CI_WINDOWS_RUST_TEST_GATE: &str = "cargo test --workspace --lib --all-features";
 
-/// The only package whose binary targets are known to wedge a Windows host,
-/// and the only one derivation narrows there (#4014, #4182).
+/// The only package whose targets derivation narrows on Windows, and the
+/// only one whose binary targets can relink the running `gwtd` (#4014,
+/// #4182).
 const WINDOWS_DEADLOCKING_PACKAGE: &str = "gwt";
 
 /// Which host the derived matrix has to be runnable on.
@@ -92,7 +113,7 @@ const WINDOWS_DEADLOCKING_PACKAGE: &str = "gwt";
 /// Derivation is host-sensitive because CI's own Rust matrix is (#4182).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationHost {
-    /// Windows, where the `gwt` crate's binary targets deadlock.
+    /// Windows, where the `gwt` crate's remaining targets are unrunnable.
     Windows,
     /// Every other host, where CI's full gate runs as written.
     Other,
@@ -253,10 +274,17 @@ fn changed_paths(worktree: &Path) -> Result<Vec<String>, TrivialReason> {
         return Err(TrivialReason::IntegrationBranch);
     }
     let base = integration_merge_base(worktree).ok_or(TrivialReason::MergeBaseUnavailable)?;
-    changed_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
+    changed_source_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
 }
 
-fn changed_paths_since(worktree: &Path, base: &str) -> Result<Vec<String>, String> {
+/// The source paths `worktree` holds that `base` does not: the committed span,
+/// uncommitted changes against HEAD, and untracked files, with `.gwt/` and
+/// `tasks/` bookkeeping excluded. Shared with the delivered-owner classifier so
+/// "nothing to deliver" means exactly what the verification matrix means by it.
+pub(crate) fn changed_source_paths_since(
+    worktree: &Path,
+    base: &str,
+) -> Result<Vec<String>, String> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
     paths.extend(checked_git_lines(
         worktree,
@@ -307,14 +335,28 @@ fn is_frontend_path(path: &str) -> bool {
 fn is_frontend_test_path(path: &str) -> bool {
     path.starts_with("crates/gwt/playwright/tests/")
         || path.contains("/__tests__/")
-        || [".spec.ts", ".spec.js", ".test.ts", ".test.js"]
-            .iter()
-            .any(|suffix| path.ends_with(suffix))
+        || [
+            ".spec.ts",
+            ".spec.js",
+            ".test.ts",
+            ".test.js",
+            ".test.mjs",
+            ".test.cjs",
+        ]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
 }
 
 /// Whether a changed path renders UI a human could be asked to look at.
+///
+/// Issue #4637: outside `crates/gwt/web/` a script extension alone proves
+/// nothing is rendered (`scripts/*.mjs` is tooling), so only markup and
+/// stylesheets keep the doubt-means-UI default there.
 fn is_ui_surface_path(path: &str) -> bool {
-    is_frontend_path(path) && !is_frontend_test_path(path)
+    is_frontend_path(path)
+        && !is_frontend_test_path(path)
+        && (path.starts_with("crates/gwt/web/")
+            || [".css", ".html"].iter().any(|ext| path.ends_with(ext)))
 }
 
 /// Inspect frontend changes even when plan derivation is trivial on an
@@ -323,7 +365,7 @@ fn is_ui_surface_path(path: &str) -> bool {
 pub fn has_frontend_changes(worktree: &Path) -> Result<bool, String> {
     let base = integration_merge_base(worktree)
         .ok_or_else(|| "frontend classification requires a readable git merge-base".to_string())?;
-    Ok(changed_paths_since(worktree, &base)?
+    Ok(changed_source_paths_since(worktree, &base)?
         .iter()
         .any(|path| is_ui_surface_path(path)))
 }
@@ -398,6 +440,7 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
     if code_changed {
         push_unique(&mut commands, CI_FMT_GATE.to_string());
         push_unique(&mut commands, CI_CLIPPY_GATE.to_string());
+        push_unique(&mut commands, CI_RUSTDOC_GATE.to_string());
     }
     // Which packages the changed surfaces put under test. Narrowing stops
     // here: every package runs CI's whole gate, never a target subset.
@@ -521,6 +564,7 @@ mod tests {
             vec![
                 CI_FMT_GATE.to_string(),
                 CI_CLIPPY_GATE.to_string(),
+                CI_RUSTDOC_GATE.to_string(),
                 "cargo test -p gwt --all-features".to_string(),
                 "cargo test -p gwt-core --all-features".to_string(),
                 "cargo test -p gwt-skills --all-features".to_string(),
@@ -713,6 +757,36 @@ mod tests {
         );
     }
 
+    /// Issue #4637: a script outside `crates/gwt/web/` renders nothing, so
+    /// its extension alone must not raise the visual gate — while any change
+    /// under `crates/gwt/web/` still does, alone or mixed with such a script.
+    #[test]
+    fn scripts_outside_the_web_tree_are_not_a_ui_surface() {
+        let cases: [(&[&str], bool); 5] = [
+            (&["scripts/foo.mjs"], false),
+            (&["scripts/foo.test.mjs"], false),
+            (&["scripts/foo.test.cjs"], false),
+            (&["crates/gwt/web/app.js"], true),
+            (&["crates/gwt/web/app.js", "scripts/foo.mjs"], true),
+        ];
+        for (changed, ui) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            fixture(dir.path());
+            for rel in changed {
+                write(dir.path(), rel, "export const x = 1;\n");
+            }
+            assert_eq!(has_frontend_changes(dir.path()).unwrap(), ui, "{changed:?}");
+            let surfaces = derive_for_host(dir.path(), VerificationHost::Other)
+                .unwrap()
+                .surfaces;
+            assert_eq!(
+                surfaces.contains(&"frontend".to_string()),
+                ui,
+                "{changed:?}: {surfaces:?}"
+            );
+        }
+    }
+
     #[test]
     fn frontend_detection_refuses_unknown_git_or_base() {
         let dir = tempfile::tempdir().unwrap();
@@ -755,8 +829,8 @@ mod tests {
         assert!(err.contains("git worktree"), "{err}");
     }
 
-    /// Every `run:` script the named job executes, in step order.
-    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+    /// The parsed workflow document.
+    fn workflow_doc(workflow: &str) -> serde_yaml::Value {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -765,22 +839,88 @@ mod tests {
             .join(workflow);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-        let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("workflow is valid YAML");
+        serde_yaml::from_str(&text).expect("workflow is valid YAML")
+    }
+
+    /// Every step of the named job, in step order.
+    fn workflow_job_steps(workflow: &str, job: &str) -> Vec<serde_yaml::Value> {
+        let doc = workflow_doc(workflow);
         doc["jobs"][job]["steps"]
             .as_sequence()
             .unwrap_or_else(|| panic!("{workflow} job `{job}` has steps"))
+            .clone()
+    }
+
+    /// Every `run:` script the named job executes, in step order.
+    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+        workflow_job_steps(workflow, job)
             .iter()
             .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
             .collect()
     }
 
-    /// Every cargo test invocation the job runs, one per script line.
+    /// The named job's single-line `run:` script rewritten with its `env:`
+    /// mapping as leading `KEY=value` assignments — the shape derivation
+    /// stores and `verify.run` executes (#3698). A step whose environment
+    /// CI supplies out-of-band is otherwise invisible to
+    /// [`workflow_job_runs`], which is how the rustdoc gate's `-D warnings`
+    /// stayed out of the derived matrix.
+    fn workflow_env_prefixed_run(step: &serde_yaml::Value) -> Option<String> {
+        let run = step.get("run")?.as_str()?.trim();
+        assert!(
+            !run.contains('\n'),
+            "env-prefixed reconstruction only models single-command steps: {run}"
+        );
+        let mut parts: Vec<String> = step
+            .get("env")
+            .and_then(|env| env.as_mapping())
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| {
+                let value = value.as_str()?;
+                let quoted = if value.is_empty() || value.contains(char::is_whitespace) {
+                    format!("\"{value}\"")
+                } else {
+                    value.to_string()
+                };
+                Some(format!("{}={quoted}", key.as_str()?))
+            })
+            .collect();
+        parts.push(run.to_string());
+        Some(parts.join(" "))
+    }
+
+    /// Every `run:` script declared by any job in `workflow` whose runner
+    /// image starts with `os` — the jobs that actually compile that platform's
+    /// `#[cfg(target_os = ...)]` code.
+    fn workflow_runs_on_os(workflow: &str, os: &str) -> Vec<String> {
+        let doc = workflow_doc(workflow);
+        doc["jobs"]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("{workflow} declares jobs"))
+            .values()
+            .filter(|job| {
+                job.get("runs-on")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|runner| runner.starts_with(os))
+            })
+            .flat_map(|job| {
+                job.get("steps")
+                    .and_then(serde_yaml::Value::as_sequence)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
+            .collect()
+    }
+
+    /// Every Rust test invocation the job runs, one per script line.
     fn workflow_cargo_tests(workflow: &str, job: &str) -> Vec<String> {
         workflow_job_runs(workflow, job)
             .iter()
             .flat_map(|script| script.lines().collect::<Vec<_>>())
             .map(str::trim)
-            .filter(|line| line.contains("cargo test"))
+            .filter(|line| line.contains("cargo test") || line.contains("cargo nextest run"))
             .map(str::to_string)
             .collect()
     }
@@ -904,9 +1044,15 @@ mod tests {
         // twice: once with `--no-run`, once for real. The job left PR CI for
         // the nightly schedule (#4134 AC-1) without changing its gate.
         let gwt_gate = CI_WINDOWS_RUST_TEST_GATE.replace("--workspace", "-p gwt");
+        // The nightly job runs one target this derivation cannot: `--bin gwt`
+        // returned there with #4014, but building it locally would relink the
+        // `gwtd.exe` running the verification (#3808, #4172). Deriving the
+        // nightly gate from the local one here is what keeps that the *only*
+        // difference — any other drift on either side fails this assertion.
+        let nightly_gate = gwt_gate.replace("--lib", "--lib --bin gwt");
         assert_eq!(
             workflow_cargo_tests("nightly.yml", "test-windows-default-parallel"),
-            vec![format!("{gwt_gate} --no-run"), gwt_gate.clone()],
+            vec![format!("{nightly_gate} --no-run"), nightly_gate.clone()],
             "CI's Windows Rust gate changed — update verify.plan derivation with it (#4182)"
         );
         assert_eq!(
@@ -1033,22 +1179,24 @@ mod tests {
         }
     }
 
-    // #3640 AC-3 / AC-4: the derived matrix is defined as the CI gate
-    // narrowed by package, so this test fails the moment CI's Rust job
-    // changes shape and the derivation is not updated with it.
+    // #3640 AC-3 / AC-4: preserve the same package/target/feature coverage.
+    // #3845 splits this repository's CI gate into isolated nextest tests and
+    // rustdoc tests. Its AGENTS.md registers that explicit plan; the portable
+    // default still uses cargo test, which includes both families.
     #[test]
     fn derived_rust_matrix_tracks_the_ci_rust_gate() {
         assert_eq!(
             workflow_cargo_tests("test.yml", "test"),
             vec![
-                CI_RUST_TEST_GATE.to_string(),
+                "cargo nextest run --workspace --all-features --test-threads=1".to_string(),
+                "cargo test --workspace --all-features --doc".to_string(),
                 // The xvfb `--ignored` real-binary family stays CI-owned:
                 // it needs a display server, so it is deliberately outside
                 // the locally derived matrix.
-                "dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port -- --ignored --test-threads=1 --nocapture"
+                "dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"
                     .to_string(),
             ],
-            "CI's Rust gate changed — update verify.plan derivation with it (#3640)"
+            "CI's Rust test coverage changed — reconcile its explicit plan and the default (#3640, #3845)"
         );
         assert_eq!(
             package_test_command_for("gwt-core", VerificationHost::Other),
@@ -1081,6 +1229,49 @@ mod tests {
         assert!(
             plan.commands.contains(&CI_CLIPPY_GATE.to_string()),
             "{plan:?}"
+        );
+    }
+
+    // #3698 AC-2: the rustdoc gate carries `-D warnings` in the step's
+    // `env:` mapping, so the #3640 drift check — which only reads `run:` —
+    // could not see it, and derivation shipped without a rustdoc gate at
+    // all. Pin the reconstructed env-prefixed command so neither half can
+    // drift away unnoticed.
+    #[test]
+    fn derived_rustdoc_gate_tracks_the_ci_rustdoc_gate() {
+        let ci_gate = workflow_job_steps("lint.yml", "lint")
+            .iter()
+            .filter_map(workflow_env_prefixed_run)
+            .find(|run| run.contains("cargo doc"))
+            .expect("CI's lint gate no longer runs `cargo doc` — update derivation (#3698)");
+        assert_eq!(
+            ci_gate, CI_RUSTDOC_GATE,
+            "CI's rustdoc gate changed — update verify.plan derivation with it (#3698)"
+        );
+        let plan = derive_for(&["crates/gwt-core/src/lib.rs"]);
+        assert!(
+            plan.commands.contains(&CI_RUSTDOC_GATE.to_string()),
+            "a Rust change must derive CI's rustdoc gate (#3698): {plan:?}"
+        );
+    }
+
+    // #4522: the gate above is the command every macOS agent has to pass
+    // before it can deliver, but the ubuntu and windows clippy jobs never
+    // compile `#[cfg(target_os = "macos")]` code, so they cannot report a
+    // lint violation hiding behind it. `fsevent-sys` 5.2.0 deprecated its
+    // whole C API, CI stayed green through the bump, and `gwt-core` stopped
+    // compiling under `-D warnings` on every macOS host at once (#4396 and
+    // #3752 each lost hours to it). CI's green has to mean what the local
+    // gate means, on the platform the work is done on.
+    #[test]
+    fn ci_runs_the_clippy_gate_on_macos() {
+        let runs = workflow_runs_on_os("lint.yml", "macos");
+        assert!(
+            runs.iter().any(|run| run.trim() == CI_CLIPPY_GATE),
+            "no macOS job in lint.yml runs `{CI_CLIPPY_GATE}`, so a clippy \
+             violation behind `#[cfg(target_os = \"macos\")]` passes CI and \
+             stops every macOS agent instead (#4522). macOS steps found: \
+             {runs:?}"
         );
     }
 

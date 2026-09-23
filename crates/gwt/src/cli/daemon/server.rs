@@ -10746,9 +10746,15 @@ exit 0
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() + Duration::from_secs(20),
-        );
+        // Issue #4625: the contract here is the number of open-PR reads, not
+        // how fast the scan finishes, so no ambient scan deadline is installed.
+        // Under a saturated runner a wall-clock deadline expired in
+        // CandidateLoad and reported a load spike as a read-count regression.
+        // Deadline behavior keeps its own tests:
+        // `daemon_scan_continues_to_launch_when_open_pr_readback_exceeds_its_budget`,
+        // `issue_monitor_worker::tests::a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window`,
+        // `issue_monitor_worker::tests::the_readback_fan_out_stops_while_the_launch_stage_still_has_budget`
+        // and `issue_monitor_worker::tests::proposal_return_deadline_expiry_is_stage_typed`.
         let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
             .expect("a queue-scale readback must not abort the scan");
 
@@ -16168,6 +16174,99 @@ exit 1
             persisted.pending_launch_deliveries[0].claim_owner,
             "host/session"
         );
+    }
+
+    /// Issue #4213 AC-6: a remote claim may finish after another admission
+    /// fills the last slot on disk. Commit must use the current capacity.
+    #[test]
+    fn acquired_claim_commit_compensates_when_latest_prefs_have_no_capacity() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let now = "2026-09-22T00:00:00Z";
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1
+        );
+        let key = monitor.pending_effects()[0].attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        let attempting = monitor.pending_effects()[0].clone();
+        let crate::IssueMonitorEffectPayload::AcquireClaim {
+            claim_id,
+            owner,
+            expires_at,
+            launched_work_id,
+            ..
+        } = attempting.payload.clone()
+        else {
+            panic!("expected claim proposal");
+        };
+
+        let mut latest = monitor.clone();
+        latest.record_candidate(sample_issue_monitor_issue(43));
+        latest.complete_active_launch(43, "tab-1::agent-43");
+        crate::save_issue_monitor_prefs(&prefs_path, &latest.prefs())
+            .expect("persist occupied slot");
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "executor still has the old snapshot"
+        );
+
+        assert!(commit_effect_result_for_test(
+            &prefs_path,
+            &mut monitor,
+            super::CompletedIssueMonitorEffect {
+                effect: attempting,
+                outcome: super::IssueMonitorEffectOutcome::Claim(Ok(
+                    gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(
+                        gwt_github::issue_auto_claim::ClaimComment {
+                            comment_id: Some(gwt_github::CommentId(99)),
+                            claim_id: claim_id.clone(),
+                            owner: owner.clone(),
+                            issue_number: 42,
+                            status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                            heartbeat_at: now.to_string(),
+                            expires_at,
+                            launched_work_id,
+                        },
+                    ),
+                )),
+                completed_at: "2026-09-22T00:00:01Z".to_string(),
+            },
+        ));
+
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert_eq!(
+            monitor.inbox_item(42).expect("candidate retained").state,
+            crate::MonitorInboxState::Queued
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            persisted.clone(),
+        );
+        assert_eq!(restored.active_issue_numbers(), vec![43]);
+        // Candidate rows are refreshed by the next scan, not stored in prefs.
+        restored.record_candidate(sample_issue_monitor_issue(42));
+        assert_eq!(restored.queued_issue_numbers(), vec![42]);
+        assert!(persisted.launching_issues.is_empty());
+        assert!(persisted.pending_launch_deliveries.is_empty());
+        assert_eq!(persisted.pending_effects.len(), 1);
+        assert!(matches!(
+            &persisted.pending_effects[0].payload,
+            crate::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id: released_claim,
+                owner: released_owner,
+            } if released_claim == &claim_id && released_owner == &owner
+        ));
     }
 
     /// Issue #3757 / SPEC #3165 FR-134: a claim already Attempting when the

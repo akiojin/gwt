@@ -39,29 +39,20 @@
     <div id="app">
       <div class="project-shell">
         <div class="project-bar">
-          <div class="project-tabs" id="project-tabs"></div>
+          <!-- Issue #4538 AC-3: the Hub opens in its own browser tab so this
+               Project tab is never navigated away. -->
+          <a
+            class="project-home-link"
+            id="project-home-link"
+            href="/"
+            target="_blank"
+            rel="noopener"
+            aria-label="Open the gwt Hub in a new tab"
+            title="Open the gwt Hub in a new tab"
+          ><span aria-hidden="true">⌂</span> Hub</a>
+
           <div class="project-actions">
-            <div class="project-switcher-shell">
-              <button
-                class="arrange-button project-switcher-button"
-                id="project-switcher-button"
-                type="button"
-                aria-label="Switch projects"
-                aria-keyshortcuts="Meta+Shift+ArrowUp Meta+Shift+ArrowDown Meta+Shift+P"
-                aria-haspopup="listbox"
-                aria-expanded="false"
-                aria-controls="project-switcher-panel"
-                title="Switch projects"
-              >Projects</button>
-              <div
-                class="project-switcher-panel"
-                id="project-switcher-panel"
-                role="listbox"
-                aria-label="Projects"
-                aria-hidden="true"
-                hidden
-              ></div>
-            </div>
+            <button class="arrange-button" id="close-project-button" type="button">Close Project</button>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
             <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
                  retired. Open Folder / Clone from GitHub now live inside the
@@ -403,14 +394,14 @@
             id="op-strip-runtime-health"
             tabindex="0"
             data-state="warming"
-            aria-label="Runtime performance"
-            title="Runtime performance warming"
+            aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
+            title="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
           >
             <span class="op-status-strip__label">PERF</span>
             <span
               class="op-status-strip__value"
               id="op-strip-runtime-health-value"
-              aria-label="Runtime performance"
+              aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             >CPU -- MEM --</span>
           </div>
           <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
@@ -706,23 +697,6 @@
           tabindex="-1"
         ></div>
       </div>
-      <!-- SPEC-2013 FR-012: confirm modal shown when the project tab
-           close (`×`) is invoked while one or more agent panes are still
-           running. Renderer lives in /close-project-tab-confirm-modal.js
-           and the wiring lives in /app.js. -->
-      <div
-        class="modal-backdrop"
-        id="close-project-tab-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell close-project-tab-modal-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Close project tab"
-          tabindex="-1"
-        ></div>
-      </div>
       <!-- SPEC-3038 US-3: Close Guard — every window close (titlebar × and
            tab ×) confirms through this modal regardless of agent state.
            Renderer lives in /window-close-confirm-modal.js; wiring in
@@ -926,6 +900,8 @@
          mount as sibling lanes so neither fixed surface can cover the other. -->
     <div id="operator-notice-stack" class="operator-notice-stack"></div>
 
-    <script type="module" src="/app.js"></script>
+    <!-- Issue #4538: route bootstrap. `/` loads the Hub, `/p/<repo-hash>`
+         loads the Project app (/app.js); nothing else runs first. -->
+    <script type="module" src="/frontend-bootstrap.js"></script>
   </body>
 </html>
