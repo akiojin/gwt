@@ -2048,8 +2048,15 @@ impl AppRuntime {
                 let selection = gwt::select_launch_profile(
                     &pool,
                     // Issue #4366 AC-4: a held provider due its
-                    // re-verification is selectable for that one launch.
-                    &prefs.launch_admission_provider_quota_holds(&now),
+                    // re-verification is selectable for that one launch —
+                    // over a free candidate only while the poller reads it
+                    // as usable (Issue #4636 AC-1).
+                    &prefs.launch_admission_provider_quota_holds(&now, |provider| {
+                        gwt::issue_monitor::provider_reports_healthy_for_agent(
+                            provider,
+                            &self.provider_usage_accounts,
+                        )
+                    }),
                     &[],
                     prefs.launch_usage_threshold_percent,
                     &[],
