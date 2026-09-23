@@ -2525,12 +2525,16 @@ fn classify_target_error(error: GwtError) -> AgentWorkspaceUpdateError {
     // These shared producers currently return GwtError::Other for all three
     // recovery categories. Keep their classification contract, but never
     // discard the original diagnostic when translating to the bridge error.
-    let mut classified = if message.contains("workspace.ensure") {
-        AgentWorkspaceUpdateError::new(
+    if message.contains("workspace.ensure") {
+        // The producer already names the Session, the reason, and the
+        // workspace.ensure recovery; prefixing the generic text would repeat
+        // that guidance.
+        return AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired,
-            "Session-bound Work target is missing or ambiguous; run workspace.ensure for this Session before retrying workspace.update",
-        )
-    } else if message.contains("relaunch") || message.contains("ledger") {
+            reason,
+        );
+    }
+    let mut classified = if message.contains("relaunch") || message.contains("ledger") {
         relaunch_required_error()
     } else {
         provenance_mismatch_error()
@@ -4520,6 +4524,13 @@ mod tests {
         assert_ne!(missing.message, ambiguous.message);
         assert!(missing.message.contains(&missing_reason));
         assert!(ambiguous.message.contains(&ambiguous_reason));
+        for message in [&missing.message, &ambiguous.message] {
+            assert_eq!(
+                message.matches("run workspace.ensure").count(),
+                1,
+                "{message}"
+            );
+        }
     }
 
     #[test]
