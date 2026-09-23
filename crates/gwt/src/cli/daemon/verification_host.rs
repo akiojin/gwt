@@ -284,9 +284,10 @@ fn live_daemon_pids_in(scope: &RuntimeScope) -> Vec<u32> {
 }
 
 /// Run one verification command on the daemon and wait for it to finish.
-pub(crate) fn run(
+pub(crate) fn run<G>(
     endpoint: &DaemonEndpoint,
     request: &VerificationSpawnRequest,
+    on_started: impl FnOnce(u32) -> G,
 ) -> Result<DelegatedRun, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -305,6 +306,9 @@ pub(crate) fn run(
             }
             other => return Err(format!("expected VerificationAccepted, got: {other:?}")),
         };
+        // Keep the caller's command scope alive until completion or error.
+        // The PID is already part of the existing protocol response.
+        let _command_scope = on_started(accepted.pid);
 
         // No timeout: a verification matrix legitimately runs for an hour, and
         // the daemon already bounds the child by this connection's lifetime.

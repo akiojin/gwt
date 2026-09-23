@@ -30,6 +30,9 @@ pub enum ErrorKind {
     /// `tracing::warn` line so `errors.list` can tell the PM why Issues
     /// created on GitHub stopped arriving.
     CacheRefreshFailure,
+    /// Issue #4666: sustained verification contention, for PM observation
+    /// only. This does not interrupt the holder or fail its verification.
+    VerificationCongestion,
 }
 
 /// Optional locators so a ledger row can be triaged back to a launch.
