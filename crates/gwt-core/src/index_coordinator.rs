@@ -306,6 +306,10 @@ pub enum LeaseEventKind {
     Extended,
     Released,
     Expired,
+    /// Issue #4633: someone other than the holder ended an orphaned holder
+    /// to free the lease. Older readers skip the line; the ledger is parsed
+    /// line by line.
+    Reclaimed,
 }
 
 impl LeaseEventKind {
@@ -315,6 +319,7 @@ impl LeaseEventKind {
             LeaseEventKind::Extended => "extended",
             LeaseEventKind::Released => "released",
             LeaseEventKind::Expired => "expired",
+            LeaseEventKind::Reclaimed => "reclaimed",
         }
     }
 }
@@ -1072,6 +1077,31 @@ impl IndexCoordinator {
 
     pub fn lease_event_log_path(&self) -> PathBuf {
         self.root.join(LEASE_EVENT_LOG_NAME)
+    }
+
+    /// Record that the lease `lease_id`, held by `owner` for `target`, was
+    /// reclaimed from outside its holder (Issue #4633 AC-2). `reason` says
+    /// who reclaimed it and why; a holder cannot record its own end when it
+    /// is terminated, so the reclaimer writes the line.
+    pub fn record_lease_reclaimed(
+        &self,
+        lease_id: &str,
+        target: &str,
+        owner: OwnerIdentity,
+        reason: &str,
+    ) {
+        append_lease_event(
+            &self.root,
+            &LeaseEvent {
+                schema_version: COORDINATOR_SCHEMA_VERSION,
+                at_ms: now_ms(),
+                lease_id: lease_id.to_string(),
+                kind: LeaseEventKind::Reclaimed,
+                target: target.to_string(),
+                owner,
+                reason: Some(reason.to_string()),
+            },
+        );
     }
 }
 
