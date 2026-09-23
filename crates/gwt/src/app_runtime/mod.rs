@@ -603,6 +603,7 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::All,
             event: BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: level.into(),
                 message: message.into(),
                 issue_number: None,
@@ -4476,6 +4477,7 @@ impl AppRuntime {
                 .issue_monitor_project_notification(
                     Some(&project_root),
                     BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
                         level: "error".to_string(),
                         message: format!(
                             "Issue Monitor could not deliver the human answer to live window \
@@ -4504,6 +4506,7 @@ impl AppRuntime {
             self.issue_monitor_project_notification(
                 Some(&project_root),
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "info".to_string(),
                     message:
                         "Issue Monitor submitted the human answer; waiting for the provider receipt"
@@ -4838,6 +4841,7 @@ impl AppRuntime {
             events.extend(self.issue_monitor_project_notification(
                 project_root,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: message.to_string(),
                     issue_number: Some(issue_number),
@@ -5488,6 +5492,7 @@ impl AppRuntime {
         events.extend(self.issue_monitor_project_notification(
             Some(project_root),
             BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: "error".to_string(),
                 message: message.to_string(),
                 issue_number,
@@ -5868,6 +5873,7 @@ impl AppRuntime {
                     events.push(OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: error.to_string(),
                             issue_number: None,
@@ -6241,6 +6247,7 @@ impl AppRuntime {
         // Keep the last authoritative snapshot; an empty reconstructed monitor
         // would overwrite live queue/active counts with zeros (Issue #4273).
         let toast = BackendEvent::IssueMonitorToast {
+            notification_transition: None,
             level: "error".to_string(),
             message,
             issue_number,
@@ -6281,6 +6288,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: "Issue title is required".to_string(),
                     issue_number: None,
@@ -6296,6 +6304,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: format!("GitHub origin remote is unavailable: {error}"),
                             issue_number: None,
@@ -6310,6 +6319,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
                         level: "error".to_string(),
                         message: issue_registration_failure_message(&error),
                         issue_number: None,
@@ -6326,6 +6336,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
                         level: "error".to_string(),
                         message: issue_registration_failure_message(&error),
                         issue_number: None,
@@ -6342,6 +6353,7 @@ impl AppRuntime {
             Err(error) => events.push(OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: format!(
                         "Issue #{} registered, but local cache update failed: {error}",
@@ -6355,6 +6367,7 @@ impl AppRuntime {
         events.push(OutboundEvent::reply(
             client_id,
             BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: "info".to_string(),
                 message: "Issue registered".to_string(),
                 issue_number: Some(snapshot.number.0),
@@ -6815,6 +6828,7 @@ impl AppRuntime {
                     events.extend(self.issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: format!(
                                 "Issue Monitor scheduled worker could not start: {error}"
@@ -7159,6 +7173,7 @@ impl AppRuntime {
                     .issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: error,
                             issue_number: None,
@@ -7179,6 +7194,7 @@ impl AppRuntime {
                     .issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: format!("Issue Monitor scheduled completion failed: {error}"),
                             issue_number: None,

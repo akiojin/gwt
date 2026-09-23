@@ -26,7 +26,8 @@ function fixture({ routeProjectKey = null } = {}) {
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
     socketReceiveDispatcher: null, recoveryCenterController: null,
-    closeResetCount: 0,
+    closeResetCount: 0, notificationResetCount: 0,
+    agentCompletionNotifier: { reset() { context.notificationResetCount += 1; } },
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
@@ -155,6 +156,7 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.connectSocket();
+  assert.equal(context.notificationResetCount, 2, "reconnect discards observed Running duration");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");

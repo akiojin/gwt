@@ -28056,7 +28056,8 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             BackendEvent::IssueMonitorToast {
                 level,
                 message,
-                issue_number
+                issue_number,
+                ..
             } if level == "error" && message == "binary missing" && *issue_number == Some(42)
         )
     }));
@@ -28583,6 +28584,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
                 level,
                 message,
                 issue_number,
+                ..
             } if level == "error"
                 && message == "Stop-block hit an error"
                 && *issue_number == Some(42)
@@ -46709,7 +46711,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
     assert!(!runtime.window_lookup.contains_key(window_id));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::IssueMonitorToast { level, message, issue_number }
+        BackendEvent::IssueMonitorToast { level, message, issue_number, .. }
             if level == "error" && message == "agent failed" && *issue_number == Some(42)
     )));
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
@@ -47025,7 +47027,7 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
         .all(|event| !matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::IssueMonitorToast { level, message, issue_number }
+        BackendEvent::IssueMonitorToast { level, message, issue_number, .. }
             if level == "error"
                 && message.contains("local fallback control commit failed")
                 && *issue_number == Some(42)
@@ -50372,6 +50374,7 @@ fn app_runtime_quick_register_issue_permission_error_includes_reason_and_fallbac
                 level,
                 message,
                 issue_number: None,
+                ..
             } if level == "error" => Some(message.as_str()),
             _ => None,
         })
@@ -54379,6 +54382,7 @@ fn app_runtime_issue_monitor_auto_launch_skips_a_held_candidate_and_reports_why(
                 level,
                 message,
                 issue_number: Some(3914),
+                ..
             } if message.contains("Held codex") => Some((level.clone(), message.clone())),
             _ => None,
         })
@@ -54443,6 +54447,7 @@ fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
                 level,
                 message,
                 issue_number: Some(3165),
+                ..
             } if message.contains("Held claude") => Some((level.clone(), message.clone())),
             _ => None,
         })
@@ -68893,6 +68898,7 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
         .pm_sessions
         .insert(repo.clone(), "pm-successor".to_string());
     let stale_status = BackendEvent::IssueMonitorToast {
+        notification_transition: None,
         level: "error".to_string(),
         message: "stale predecessor PM status".to_string(),
         issue_number: None,

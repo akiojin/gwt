@@ -1385,6 +1385,9 @@ fn issue_monitor_daemon_user_event(
         }
         "toast" => {
             let toast = BackendEvent::IssueMonitorToast {
+                notification_transition: payload
+                    .get("notification_transition")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
                 level: payload
                     .get("level")
                     .and_then(serde_json::Value::as_str)
@@ -2565,6 +2568,19 @@ mod tests {
             [OutboundEvent { target: crate::app_runtime::DispatchTarget::Project(key), event: BackendEvent::IssueMonitorToast { .. }, .. }]
                 if key == &gwt_core::paths::resolve_project_scope(project_root).hash
         )));
+        let typed = super::issue_monitor_daemon_user_event(
+            serde_json::json!({"event": "toast", "payload": {
+                "message": "decision required", "issue_number": 42,
+                "notification_transition": "needs_human"
+            }}),
+            project_root,
+        )
+        .expect("typed toast event");
+        let UserEvent::Dispatch(events) = typed else {
+            panic!("toast dispatch")
+        };
+        let wire = serde_json::to_value(&events[0].event).expect("toast wire");
+        assert_eq!(wire["notification_transition"], "needs_human");
         let status = gwt::IssueMonitorStatusView {
             auto_apply_updates: false,
             enabled: true,
@@ -10323,6 +10339,7 @@ fn main() -> std::io::Result<()> {
                             return None;
                         };
                         Some(OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message,
                             issue_number: None,

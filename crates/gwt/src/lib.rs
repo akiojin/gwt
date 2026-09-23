@@ -40,6 +40,7 @@ pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;
 pub mod native_app;
+pub mod native_notification_permission;
 pub(crate) mod path_filter;
 #[doc(hidden)]
 pub mod perf;

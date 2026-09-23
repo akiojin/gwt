@@ -80,7 +80,9 @@ test("issue_monitor_toast records into the notification center with the Issue Mo
   const call = calls[0];
   assert.match(call, /kind:\s*"issue-monitor"/);
   assert.match(call, /level:\s*event\?\.level/);
-  assert.match(call, /title:\s*"Issue Monitor"/, "backend sends no title; the literal is the only source");
+  assert.match(call, /title:\s*monitorNotice\?\.title \|\| "Issue Monitor"/, "typed Monitor transitions use state wording");
+  assert.match(block, /notification_transition/);
+  assert.match(block, /source: "monitor"/);
   assert.match(call, /message:\s*event\?\.message/);
   assert.match(call, /issueNumber:\s*event\?\.issue_number/);
   assert.doesNotMatch(call, /event\?\.title/, "do not copy the dead `event?.title` read");
