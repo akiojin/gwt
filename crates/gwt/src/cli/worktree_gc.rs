@@ -59,7 +59,7 @@ pub(crate) struct WorktreeProbe {
     pub has_build_artifacts: bool,
     /// Processes whose cwd or executable lies under `root` (`name (pid N)`).
     pub active_processes: Vec<String>,
-    /// gwt session ids whose launch is still live under `root`.
+    /// Launches still live under `root`: `<session id> (<evidence>)`.
     pub tracked_sessions: Vec<String>,
     /// Whether HEAD is an ancestor of `origin/<base>`; `Err` when the check
     /// itself failed.
@@ -530,11 +530,13 @@ fn scan_processes(system: &System, roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<S
     found
 }
 
-/// Session ids with a live launch, keyed by the worktree their Session
-/// record names. A launch is live while the gwt Host process that wrote its
-/// runtime sidecar is still that Host, the sidecar is not terminal, and the
-/// PTY child it names (when it names one) is alive. Session status alone is
-/// not evidence: hundreds of `Running` records outlive their panes.
+/// Live launches, keyed by the worktree their Session record names, each
+/// described as `<session id> (<the evidence that kept it>)` (Issue #4643
+/// AC-5). A launch is live while the gwt Host process that wrote its runtime
+/// sidecar is still that Host, the sidecar is not terminal, and the PTY child
+/// it names is alive. Session status alone is not evidence: hundreds of
+/// `Running` records outlive their panes, and a live Host alone is not either
+/// — it outlives every pane it closes (Issue #4643).
 fn scan_tracked_launches(
     sessions_dir: &Path,
     hosts: &BTreeMap<u32, u64>,
@@ -583,12 +585,9 @@ fn scan_tracked_launches(
             ) {
                 continue;
             }
-            if state
-                .child_pid
-                .is_some_and(|child| !crate::process::is_process_alive(child))
-            {
+            let Some(child_pid) = pty_child_is_alive(&state) else {
                 continue;
-            }
+            };
             let Ok(session) = gwt_agent::Session::load_and_migrate(
                 &sessions_dir.join(format!("{session_id}.toml")),
             ) else {
@@ -596,7 +595,10 @@ fn scan_tracked_launches(
             };
             let root = dunce::canonicalize(&session.worktree_path)
                 .unwrap_or_else(|_| session.worktree_path.clone());
-            found.entry(root).or_default().push(session_id.to_string());
+            found.entry(root).or_default().push(format!(
+                "{session_id} (gwt Host pid {host_pid}, PTY child pid {child_pid} alive, status {:?})",
+                state.status
+            ));
         }
     }
     for ids in found.values_mut() {
@@ -604,6 +606,23 @@ fn scan_tracked_launches(
         ids.dedup();
     }
     found
+}
+
+/// The PTY child the sidecar names, when it is still that process.
+///
+/// A sidecar that names no child is not a live launch (Issue #4643 AC-3): a
+/// closed pane's sidecar stays `Running` or `Idle` whenever the close could
+/// not prove the child exited, and without a child there is nothing left to
+/// tell it from a live one. A running agent is still kept by the process
+/// scan, whose cwd attribution sees it in its worktree. When the start time
+/// was recorded it must match too, so a recycled PID keeps nothing.
+fn pty_child_is_alive(state: &gwt_agent::session::SessionRuntimeState) -> Option<u32> {
+    let child_pid = state.child_pid.filter(|pid| *pid > 0)?;
+    let alive = match state.child_started_at.filter(|started| *started > 0) {
+        Some(started_at) => crate::process::exact_pty_process_tree_is_alive(child_pid, started_at),
+        None => crate::process::is_process_alive(child_pid),
+    };
+    alive.then_some(child_pid)
 }
 
 /// Sum of file sizes under `dir`, following no symlinks. Unreadable entries
@@ -827,11 +846,11 @@ mod tests {
         let hosts = BTreeMap::from([(4242u32, 1000u64)]);
         let tracked = scan_tracked_launches(&sessions, &hosts);
 
-        assert_eq!(
-            tracked.get(&canonical(&live_worktree)).map(Vec::as_slice),
-            Some([live].as_slice()),
-            "{tracked:?}"
-        );
+        let evidence = tracked
+            .get(&canonical(&live_worktree))
+            .unwrap_or_else(|| panic!("live launch not tracked: {tracked:?}"));
+        assert_eq!(evidence.len(), 1, "{tracked:?}");
+        assert!(evidence[0].starts_with(&live), "{evidence:?}");
         assert_eq!(
             tracked.get(&canonical(&dead_worktree)),
             None,
@@ -839,9 +858,14 @@ mod tests {
         );
     }
 
-    /// Write one `Running` sidecar under `runtime/<host_pid>/` plus the
+    /// Write `runtime` as the sidecar under `runtime/<host_pid>/` plus the
     /// Session it names, and return the session id.
-    fn write_tracked_launch(sessions: &Path, host_pid: u32, worktree: &Path) -> String {
+    fn write_tracked_launch_with(
+        sessions: &Path,
+        host_pid: u32,
+        worktree: &Path,
+        runtime: gwt_agent::SessionRuntimeState,
+    ) -> String {
         std::fs::create_dir_all(worktree).expect("worktree");
         let session = gwt_agent::Session::new(
             worktree.to_path_buf(),
@@ -850,12 +874,116 @@ mod tests {
         );
         std::fs::create_dir_all(sessions).expect("sessions dir");
         session.save(sessions).expect("session");
-        let runtime = gwt_agent::runtime_state_path_for_pid(sessions, host_pid, &session.id);
-        std::fs::create_dir_all(runtime.parent().expect("namespace")).expect("namespace dir");
-        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
-            .save(&runtime)
-            .expect("sidecar");
+        let path = gwt_agent::runtime_state_path_for_pid(sessions, host_pid, &session.id);
+        std::fs::create_dir_all(path.parent().expect("namespace")).expect("namespace dir");
+        runtime.save(&path).expect("sidecar");
         session.id
+    }
+
+    /// A launch whose PTY child is this very test process: alive for as long
+    /// as the assertion runs.
+    fn write_tracked_launch(sessions: &Path, host_pid: u32, worktree: &Path) -> String {
+        write_tracked_launch_with(
+            sessions,
+            host_pid,
+            worktree,
+            runtime_with_child(gwt_agent::AgentStatus::Running, Some(live_child())),
+        )
+    }
+
+    fn runtime_with_child(
+        status: gwt_agent::AgentStatus,
+        child: Option<(u32, u64)>,
+    ) -> gwt_agent::SessionRuntimeState {
+        let mut runtime = gwt_agent::SessionRuntimeState::new(status);
+        runtime.child_pid = child.map(|(pid, _)| pid);
+        runtime.child_started_at = child.map(|(_, started_at)| started_at);
+        runtime
+    }
+
+    fn live_child() -> (u32, u64) {
+        let pid = std::process::id();
+        let started_at = crate::process::host_process_start_time(pid).expect("own start time");
+        (pid, started_at)
+    }
+
+    /// A PTY child that has exited: a PID no process on the host holds, with
+    /// a start time nothing can match.
+    fn exited_child() -> (u32, u64) {
+        (i32::MAX as u32, 1)
+    }
+
+    /// Issue #4643 AC-6: the four sidecar shapes under one live gwt Host.
+    /// Only the launch whose exact PTY child is alive keeps its worktree;
+    /// a surviving Host alone never does.
+    #[test]
+    fn scan_tracked_launches_keeps_only_launches_whose_pty_child_is_alive() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sessions = tmp.path().join("sessions");
+        let worktree = |name: &str| tmp.path().join("work").join(name);
+        let canonical = |path: &Path| dunce::canonicalize(path).expect("canonicalize");
+        let running = gwt_agent::AgentStatus::Running;
+
+        // (a) live pane
+        let live = write_tracked_launch(&sessions, 4242, &worktree("live"));
+        // (b) closed pane: the hook left it Idle, its PTY child is gone
+        write_tracked_launch_with(
+            &sessions,
+            4242,
+            &worktree("closed"),
+            runtime_with_child(gwt_agent::AgentStatus::Idle, Some(exited_child())),
+        );
+        // (c) no child evidence at all
+        write_tracked_launch_with(
+            &sessions,
+            4242,
+            &worktree("no-child"),
+            runtime_with_child(running, None),
+        );
+        // (d) terminal status, even with a live child recorded
+        write_tracked_launch_with(
+            &sessions,
+            4242,
+            &worktree("stopped"),
+            runtime_with_child(gwt_agent::AgentStatus::Stopped, Some(live_child())),
+        );
+
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+        let tracked = scan_tracked_launches(&sessions, &hosts);
+
+        let evidence = tracked
+            .get(&canonical(&worktree("live")))
+            .unwrap_or_else(|| panic!("live launch not tracked: {tracked:?}"));
+        assert_eq!(evidence.len(), 1, "{tracked:?}");
+        assert!(evidence[0].starts_with(&live), "{evidence:?}");
+        for name in ["closed", "no-child", "stopped"] {
+            assert_eq!(
+                tracked.get(&canonical(&worktree(name))),
+                None,
+                "{name}: {tracked:?}"
+            );
+        }
+    }
+
+    /// Issue #4643 AC-5: the kept reason names the evidence that kept it, so
+    /// an operator no longer has to read the sidecar by hand.
+    #[test]
+    fn tracked_launch_evidence_names_the_host_the_child_and_the_status() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sessions = tmp.path().join("sessions");
+        let worktree = tmp.path().join("work").join("live");
+        write_tracked_launch(&sessions, 4242, &worktree);
+
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+        let tracked = scan_tracked_launches(&sessions, &hosts);
+        let evidence = &tracked[&dunce::canonicalize(&worktree).expect("canonicalize")][0];
+
+        assert!(evidence.contains("gwt Host pid 4242"), "{evidence}");
+        assert!(
+            evidence.contains(&format!("PTY child pid {} alive", std::process::id())),
+            "{evidence}"
+        );
+        assert!(evidence.contains("status Running"), "{evidence}");
     }
 
     /// The shared `develop` workspace is merged into the base by definition,
