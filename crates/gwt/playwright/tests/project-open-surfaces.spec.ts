@@ -98,12 +98,11 @@ test.describe("Project open entry surfaces", () => {
   });
 
   test("an active-project clone modal wins the dialog hit test", async ({ page }) => {
-    await bootProjectOpenFixture(page, [fixtureTab("git")]);
+    await bootProjectOpenFixture(page, []);
 
     // This isolates the modal's own reachability contract. Issue #3753 adds
     // the stronger picker/onboarding overlap case after the z-index fix.
-    await page.locator("#project-switcher-button").click();
-    await page.locator("[data-action='clone-from-github']").click();
+    await page.locator("#picker-clone-project").click();
     await expect(page.locator("#clone-project-modal")).toHaveClass(/open/);
     await expect(page.locator("#clone-project-url-input")).toBeVisible();
 
@@ -128,7 +127,8 @@ async function bootProjectOpenFixture(
   if (tabs.length === 0) {
     await expect(page.locator("#project-picker")).toHaveClass(/visible/);
   } else {
-    await expect(page.locator(".project-tab")).toHaveCount(tabs.length);
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    await expect(page.locator("#project-tabs")).toHaveCount(0);
   }
 }
 
