@@ -239,6 +239,11 @@ Unknown parameter keys are rejected with the accepted keys listed.
 The existing `board` field is preserved; `page.total_entries` counts the visible
 provider snapshot before the CLI limit, `page.returned_entries` counts returned
 entries, and `page.truncated` indicates clipping by that limit.
+Every `blocked` entry carries an `escalation` object: `resolved` (boolean),
+`resolved_at`, and `resolved_by_entry_id`. A blocked entry missing from the
+escalation index reports `indexed: false` and `resolved: null`. Set
+`params.unresolved: true` (default `false`) to return only blocked entries whose
+escalation is still open; the filter applies before `limit`.
 
 Response cost is roughly the entry count times serialized entry size, plus
 metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte cap;

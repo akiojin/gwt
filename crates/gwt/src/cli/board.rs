@@ -26,11 +26,14 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
     /// `board.show` with optional audience filters and latest-entry limit.
+    /// `unresolved` keeps only `blocked` entries whose escalation is still open
+    /// (Issue #4609).
     Show {
         json: bool,
         workspace: Option<String>,
         all: bool,
         limit: Option<usize>,
+        unresolved: bool,
     },
     /// `board.post` with `params.kind`, `params.body`, and optional audience
     /// fields such as `params.targets`, `params.mentions`, and
@@ -78,10 +81,12 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
             let mut workspace: Option<String> = None;
             let mut all = false;
             let mut limit = None;
+            let mut unresolved = false;
             while let Some(arg) = it.next() {
                 match arg.as_str() {
                     "--json" => json = true,
                     "--all" => all = true,
+                    "--unresolved" => unresolved = true,
                     "--limit" => {
                         let value = it.next().ok_or(CliParseError::MissingFlag("--limit"))?;
                         limit = Some(
@@ -104,6 +109,7 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
                 workspace,
                 all,
                 limit,
+                unresolved,
             })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
@@ -127,6 +133,7 @@ pub(super) fn run<E: CliEnv>(
             workspace,
             all,
             limit,
+            unresolved,
         } => {
             let current_session = current_session_from_env().ok().flatten();
             let scope = if all {
@@ -151,6 +158,21 @@ pub(super) fn run<E: CliEnv>(
                 load_snapshot_for_scope(env.repo_path(), &scope)
                     .map_err(gwt_error_to_spec_ops_error)?
             };
+            // The unresolved filter cannot answer without the index; a plain
+            // read degrades to `indexed: false` rather than failing the page.
+            let escalations = match gwt_core::coordination::load_escalation_store(env.repo_path()) {
+                Ok(store) => store,
+                Err(error) if unresolved => return Err(gwt_error_to_spec_ops_error(error)),
+                Err(_) => Default::default(),
+            };
+            if unresolved {
+                snapshot.board.entries.retain(|entry| {
+                    entry.kind == gwt_core::coordination::BoardEntryKind::Blocked
+                        && escalations
+                            .open()
+                            .any(|escalation| escalation.entry_id == entry.id)
+                });
+            }
             let total_entries = snapshot.board.entries.len();
             let limit = limit.unwrap_or(if all { total_entries } else { 20 });
             let omitted = total_entries.saturating_sub(limit);
@@ -160,8 +182,11 @@ pub(super) fn run<E: CliEnv>(
             snapshot.board.newest_entry_id = snapshot.board.entries.last().map(|e| e.id.clone());
             let returned_entries = snapshot.board.entries.len();
             if json {
+                let mut board = serde_json::to_value(&snapshot.board)
+                    .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
+                annotate_escalations(&mut board, &snapshot.board.entries, &escalations);
                 let response = serde_json::json!({
-                    "board": snapshot.board,
+                    "board": board,
                     "page": {
                         "total_entries": total_entries,
                         "returned_entries": returned_entries,
@@ -587,6 +612,48 @@ fn already_escalated(repo_path: &std::path::Path, owner: Option<u64>, operation:
         None => store
             .open()
             .any(|escalation| escalation.body.contains(&needle)),
+    }
+}
+
+/// Attach the durable escalation state to every `blocked` entry of a
+/// serialized Board projection (Issue #4609).
+///
+/// `BoardEntry.state` is the agent lifecycle label written by hook posts
+/// (`started` / `ready`) and is unrelated to escalations, so resolution lives
+/// in its own `escalation` object read from the escalation index. A blocked
+/// entry the index does not hold reports `indexed: false` and `resolved: null`
+/// rather than a guess.
+fn annotate_escalations(
+    board: &mut serde_json::Value,
+    entries: &[gwt_core::coordination::BoardEntry],
+    escalations: &gwt_core::board_escalation::BoardEscalationStore,
+) {
+    let Some(rendered) = board
+        .get_mut("entries")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for (entry, rendered) in entries.iter().zip(rendered.iter_mut()) {
+        if entry.kind != gwt_core::coordination::BoardEntryKind::Blocked {
+            continue;
+        }
+        let escalation = escalations
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == entry.id);
+        let value = match escalation {
+            Some(escalation) => serde_json::json!({
+                "indexed": true,
+                "resolved": !escalation.is_open(),
+                "resolved_at": escalation.resolved_at,
+                "resolved_by_entry_id": escalation.resolved_by_entry_id,
+            }),
+            None => serde_json::json!({ "indexed": false, "resolved": null }),
+        };
+        if let Some(object) = rendered.as_object_mut() {
+            object.insert("escalation".to_string(), value);
+        }
     }
 }
 
@@ -1814,6 +1881,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             }
         );
     }
@@ -1835,6 +1903,7 @@ mod tests {
                 workspace: Some("ws-1".into()),
                 all: true,
                 limit: None,
+                unresolved: false,
             }
         );
     }
@@ -1874,6 +1943,7 @@ mod tests {
                 workspace: Some("ws-1".into()),
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -1919,6 +1989,7 @@ mod tests {
                 workspace: Some("ws-1".into()),
                 all: true,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2037,6 +2108,7 @@ mod tests {
                 workspace: Some("workspace-a".into()),
                 all: false,
                 limit: None,
+                unresolved: false,
             }
         );
 
@@ -2048,6 +2120,7 @@ mod tests {
                 workspace: None,
                 all: true,
                 limit: None,
+                unresolved: false,
             }
         );
     }
@@ -2973,6 +3046,7 @@ mod tests {
                 workspace: Some("workspace-a".into()),
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut workspace_out,
         )
@@ -2995,6 +3069,7 @@ mod tests {
                 workspace: None,
                 all: true,
                 limit: None,
+                unresolved: false,
             },
             &mut all_out,
         )
@@ -3064,6 +3139,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -3106,6 +3182,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -3146,6 +3223,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -3186,6 +3264,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -3228,6 +3307,7 @@ mod tests {
                 workspace: None,
                 all: false,
                 limit: None,
+                unresolved: false,
             },
             &mut out,
         )

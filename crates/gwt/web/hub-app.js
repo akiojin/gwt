@@ -1,3 +1,4 @@
+import { createCloseProjectController } from "./close-project-confirm-modal.js";
 // Issue #4538 AC-3: the Hub served at `/`. It is a picker only — Open Folder,
 // Clone, Recent, and the open Projects — and never a workspace, dashboard, or
 // tab strip. Every Project entry is a real, path-free link that opens the
@@ -121,12 +122,26 @@ export function createHubApp({ document: doc, window: win }) {
     }
   }
 
+  const closeController = createCloseProjectController({
+    document: doc, send, onError: showError,
+    onClosed: (projectKey) => {
+      catalog.projects = catalog.projects.filter((project) => project.project_key !== projectKey);
+      render();
+    },
+  });
+
   function render() {
     version.hidden = !catalog.app_version;
     version.textContent = catalog.app_version ? `v${catalog.app_version}` : "";
-    renderList(openSection.list, catalog.projects, "No open projects", (project) =>
-      projectLink(project),
-    );
+    renderList(openSection.list, catalog.projects, "No open projects", (project) => {
+      const row = node("div", "gwt-hub__project-actions");
+      const close = node("button", "text-button", "Close Project");
+      close.type = "button";
+      close.dataset.closeProject = project.project_key;
+      close.addEventListener("click", () => closeController.request(project.project_key));
+      row.append(projectLink(project), close);
+      return row;
+    });
     renderList(recentSection.list, catalog.recent_projects, "No recent projects", (project) => {
       if (project.project_key) return projectLink(project);
       // The runtime resolves the key off-thread; until then the entry is
@@ -259,6 +274,7 @@ export function createHubApp({ document: doc, window: win }) {
   }
 
   function receive(event) {
+    if (event && closeController.receive(event)) return;
     if (!event || !HUB_RESULT_KINDS.has(event.kind)) return;
     if (event.kind === "hub_state") {
       receiveCatalog(event.hub);
@@ -299,6 +315,7 @@ export function createHubApp({ document: doc, window: win }) {
     });
     connection.addEventListener("close", () => {
       if (socket !== connection) return;
+      closeController.connectionLost();
       reconnectTimer = win.setTimeout(connect, 1000);
     });
   }
@@ -323,14 +340,14 @@ export function createHubApp({ document: doc, window: win }) {
   }
 
   render();
-  return { root, cloneModal, connect, receive, send, installTestBridge, homeUrl: HUB_URL_PATH };
+  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, homeUrl: HUB_URL_PATH };
 }
 
 export function mountHubApp({ window: win, document: doc }) {
   doc.title = "gwt — Hub";
   const app = createHubApp({ window: win, document: doc });
   doc.body.className = "route-body";
-  doc.body.replaceChildren(app.root, app.cloneModal);
+  doc.body.replaceChildren(app.root, app.cloneModal, app.closeModal);
   app.installTestBridge();
   app.connect();
   return app;
