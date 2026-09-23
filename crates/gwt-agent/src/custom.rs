@@ -228,20 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_external_only_rejects_gemini_package_impersonation() {
-        for command in ["@google/gemini-cli", "@google/gemini-cli@latest"] {
-            let mut a = sample_agent();
-            a.command = command.to_string();
-            let err = a.validate_external_only().unwrap_err();
-            match err {
-                ExternalAgentValidationError::BuiltInImpersonation {
-                    builtin_display_name,
-                    ..
-                } => {
-                    assert_eq!(builtin_display_name, "Gemini CLI (legacy)");
-                }
-                other => panic!("unexpected variant: {other:?}"),
-            }
+    fn validate_external_only_allows_removed_gemini_commands() {
+        for command in ["gemini", "@google/gemini-cli", "@google/gemini-cli@latest"] {
+            let mut agent = sample_agent();
+            agent.command = command.to_string();
+            assert!(agent.validate_external_only().is_ok(), "{command}");
         }
     }
 

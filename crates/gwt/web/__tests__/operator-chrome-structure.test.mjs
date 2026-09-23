@@ -678,6 +678,7 @@ test("old lane identity vocabulary is absent from production presentation wiring
 });
 
 test("Agent title role badges resolve runtime identity instead of generic presets", () => {
+  assert.doesNotMatch(appSource.match(/const AGENT_ROLE_LABELS = Object.freeze\(\{[\s\S]*?\}\)/)?.[0] || "", /gemini/i);
   assert.match(
     appSource,
     /const\s+AGENT_ROLE_LABELS\s*=\s*Object\.freeze\(\{[\s\S]*claude:\s*"Claude Code"[\s\S]*codex:\s*"Codex"[\s\S]*grok:\s*"Grok Build"/,

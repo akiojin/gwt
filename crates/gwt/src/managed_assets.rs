@@ -1787,7 +1787,7 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
         AgentId::OpenClaw => Some(ManagedAssetTarget::OpenClaw),
         AgentId::Hermes => Some(ManagedAssetTarget::Hermes),
         AgentId::GrokBuild => Some(ManagedAssetTarget::ClaudeCode),
-        AgentId::Antigravity | AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
+        AgentId::Antigravity | AgentId::Copilot | AgentId::Custom(_) => None,
     }
 }
 
@@ -1797,7 +1797,7 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
 /// at whatever the previous build materialized, so a bundle asset added since
 /// then appeared on one side only and broke `.claude` / `.codex` parity.
 fn refresh_targets_for_agent(worktree: &Path, agent_id: &AgentId) -> Vec<ManagedAssetTarget> {
-    // An agent with no managed surface of its own (Gemini, Copilot, …) still
+    // An agent with no managed surface of its own (Copilot, custom agents, …) still
     // launches inside a worktree whose existing `.claude` / `.codex` surfaces
     // must not be left frozen, so start from the optional primary instead of
     // returning early.

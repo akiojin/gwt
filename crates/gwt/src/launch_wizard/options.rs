@@ -174,37 +174,6 @@ const CODEX_MODEL_OPTIONS: [ModelDisplayOption; CODEX_MODEL_CAPABILITIES.len()] 
     options
 };
 
-const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
-    ModelDisplayOption {
-        label: "Default (Auto)",
-        description: "Use Gemini default model",
-    },
-    ModelDisplayOption {
-        label: "gemini-3-flash-preview",
-        description: "Preview flash model",
-    },
-    ModelDisplayOption {
-        label: "gemini-3.1-flash-lite-preview",
-        description: "Preview flash-lite model",
-    },
-    ModelDisplayOption {
-        label: "gemini-2.5-flash",
-        description: "Stable flash model",
-    },
-    ModelDisplayOption {
-        label: "gemini-2.5-flash-lite",
-        description: "Stable flash-lite model",
-    },
-    ModelDisplayOption {
-        label: "gemma-4-31b-it",
-        description: "Gemma 4 31B instruction model",
-    },
-    ModelDisplayOption {
-        label: "gemma-4-26b-a4b-it",
-        description: "Gemma 4 26B A4B instruction model",
-    },
-];
-
 // Auto is the default: gwt skips the CLAUDE_CODE_EFFORT_LEVEL export so
 // Claude Code applies its own per-model default effort (`high` on
 // Fable 5 / Opus 4.8, `xhigh` on Opus 4.7). Hardcoding a level here goes
@@ -867,10 +836,6 @@ pub(super) fn current_model_options(agent_id: &str) -> Vec<&'static str> {
             .iter()
             .map(|option| option.label)
             .collect(),
-        "gemini" => GEMINI_MODEL_OPTIONS
-            .iter()
-            .map(|option| option.label)
-            .collect(),
         _ => Vec::new(),
     }
 }
@@ -879,7 +844,6 @@ pub(super) fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOpt
     match agent_id {
         "claude" => &CLAUDE_MODEL_OPTIONS,
         "codex" => &CODEX_MODEL_OPTIONS,
-        "gemini" => &GEMINI_MODEL_OPTIONS,
         _ => &[],
     }
 }
@@ -1303,7 +1267,7 @@ mod tests {
         );
         assert_eq!(
             agent_option_color("gemini"),
-            Some(gwt_agent::AgentColor::Magenta)
+            Some(gwt_agent::AgentColor::Gray)
         );
         assert_eq!(
             agent_option_color("opencode"),
@@ -1575,17 +1539,13 @@ mod tests {
 
         assert_eq!(
             ids,
-            vec![
-                "claude", "codex", "grok", "agy", "gemini", "opencode", "openclaw", "hermes", "gh"
-            ]
+            vec!["claude", "codex", "grok", "agy", "opencode", "openclaw", "hermes", "gh"]
         );
         assert!(options.iter().any(|option| option.name == "Grok Build"));
         assert!(options
             .iter()
             .any(|option| option.name == "Antigravity CLI"));
-        assert!(options
-            .iter()
-            .any(|option| option.name == "Gemini CLI (legacy)"));
+        assert!(options.iter().all(|option| !option.id.contains("gemini")));
         assert!(options.iter().any(|option| option.name == "OpenCode"));
         assert!(options.iter().any(|option| option.name == "OpenClaw"));
         assert!(options.iter().any(|option| option.name == "Hermes Agent"));
@@ -1627,14 +1587,14 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
-        state.agent_id = "gemini".to_string();
+        state.agent_id = "opencode".to_string();
 
         let view = state.view();
         assert!(
             view.execution_mode_options
                 .iter()
                 .all(|option| option.value != "resume"),
-            "Gemini must not advertise the picker option: {:?}",
+            "OpenCode must not advertise the picker option: {:?}",
             view.execution_mode_options
         );
 
@@ -1840,18 +1800,8 @@ mod tests {
                 "gpt-5.3-codex-spark",
             ]
         );
-        assert_eq!(
-            current_model_options("gemini"),
-            vec![
-                "Default (Auto)",
-                "gemini-3-flash-preview",
-                "gemini-3.1-flash-lite-preview",
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite",
-                "gemma-4-31b-it",
-                "gemma-4-26b-a4b-it",
-            ]
-        );
+        assert!(current_model_options("gemini").is_empty());
+        assert!(model_display_options("gemini").is_empty());
         assert!(current_model_options("agy").is_empty());
         assert!(model_display_options("agy").is_empty());
         assert!(current_model_options("custom").is_empty());

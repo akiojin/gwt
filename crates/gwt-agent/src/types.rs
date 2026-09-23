@@ -10,7 +10,6 @@ pub enum AgentId {
     Codex,
     GrokBuild,
     Antigravity,
-    Gemini,
     OpenCode,
     OpenClaw,
     Hermes,
@@ -271,20 +270,6 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         color: AgentColor::Green,
         aliases: &["agy", "antigravity", "antigravity cli", "antigravity-cli"],
         cache_key: "antigravity",
-        version_flag: "--version",
-        version_prefix_args: &[],
-    },
-    BuiltinAgentDescriptor {
-        id: AgentId::Gemini,
-        command: "gemini",
-        display_name: "Gemini CLI (legacy)",
-        distribution: DistributionRoute::Npm {
-            package: "@google/gemini-cli",
-        },
-        setup_args: &[],
-        color: AgentColor::Magenta,
-        aliases: &["gemini", "gemini cli", "gemini-cli", "gemini cli legacy"],
-        cache_key: "gemini",
         version_flag: "--version",
         version_prefix_args: &[],
     },
@@ -550,7 +535,6 @@ mod tests {
         assert_eq!(AgentId::Codex.command(), "codex");
         assert_eq!(AgentId::GrokBuild.command(), "grok");
         assert_eq!(AgentId::Antigravity.command(), "agy");
-        assert_eq!(AgentId::Gemini.command(), "gemini");
         assert_eq!(AgentId::OpenCode.command(), "opencode");
         assert_eq!(AgentId::OpenClaw.command(), "openclaw");
         assert_eq!(AgentId::Hermes.command(), "hermes");
@@ -563,7 +547,6 @@ mod tests {
         assert_eq!(AgentId::ClaudeCode.display_name(), "Claude Code");
         assert_eq!(AgentId::GrokBuild.display_name(), "Grok Build");
         assert_eq!(AgentId::Antigravity.display_name(), "Antigravity CLI");
-        assert_eq!(AgentId::Gemini.display_name(), "Gemini CLI (legacy)");
         assert_eq!(AgentId::OpenCode.display_name(), "OpenCode");
         assert_eq!(AgentId::OpenClaw.display_name(), "OpenClaw");
         assert_eq!(AgentId::Hermes.display_name(), "Hermes Agent");
@@ -579,7 +562,6 @@ mod tests {
         );
         assert_eq!(AgentId::Antigravity.npm_package(), None);
         assert_eq!(AgentId::GrokBuild.npm_package(), Some("@xai-official/grok"));
-        assert_eq!(AgentId::Gemini.npm_package(), Some("@google/gemini-cli"));
         assert_eq!(AgentId::OpenCode.npm_package(), Some("opencode-ai"));
         assert_eq!(AgentId::OpenClaw.npm_package(), Some("openclaw"));
         assert_eq!(AgentId::Hermes.npm_package(), None);
@@ -592,7 +574,6 @@ mod tests {
         assert_eq!(AgentId::Codex.default_color(), AgentColor::Cyan);
         assert_eq!(AgentId::GrokBuild.default_color(), AgentColor::Gray);
         assert_eq!(AgentId::Antigravity.default_color(), AgentColor::Green);
-        assert_eq!(AgentId::Gemini.default_color(), AgentColor::Magenta);
         assert_eq!(AgentId::OpenCode.default_color(), AgentColor::Green);
         assert_eq!(AgentId::OpenClaw.default_color(), AgentColor::Blue);
         assert_eq!(AgentId::Hermes.default_color(), AgentColor::Magenta);
@@ -614,7 +595,7 @@ mod tests {
     #[test]
     fn builtin_agent_descriptors_drive_agent_info_contract() {
         let descriptors = builtin_agent_descriptors();
-        assert_eq!(descriptors.len(), 9);
+        assert_eq!(descriptors.len(), 8);
 
         for descriptor in descriptors {
             let info = AgentInfo::from_id(descriptor.id.clone());
@@ -757,12 +738,6 @@ mod tests {
                 },
             ),
             (
-                AgentId::Gemini,
-                DistributionRoute::Npm {
-                    package: "@google/gemini-cli",
-                },
-            ),
-            (
                 AgentId::OpenCode,
                 DistributionRoute::Npm {
                     package: "opencode-ai",
@@ -882,7 +857,6 @@ mod tests {
         for non_picker in [
             AgentId::Antigravity,
             AgentId::GrokBuild,
-            AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,
@@ -912,7 +886,6 @@ mod tests {
             );
         }
         for unsupported in [
-            AgentId::Gemini,
             AgentId::OpenClaw,
             AgentId::Copilot,
             AgentId::Custom("aider".into()),
@@ -940,11 +913,7 @@ mod tests {
                 "{supported:?} should support explicit session resume"
             );
         }
-        for unsupported in [
-            AgentId::Gemini,
-            AgentId::Copilot,
-            AgentId::Custom("aider".into()),
-        ] {
+        for unsupported in [AgentId::Copilot, AgentId::Custom("aider".into())] {
             assert!(
                 !unsupported.supports_resume_session_id(),
                 "{unsupported:?} should not advertise explicit session resume"
@@ -959,7 +928,6 @@ mod tests {
         for unsupported in [
             AgentId::Antigravity,
             AgentId::GrokBuild,
-            AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,
@@ -990,7 +958,7 @@ mod tests {
         assert!(AgentId::OpenCode.supports_freetext_model());
         assert!(!AgentId::OpenCode.supports_provider_selection());
         assert!(!AgentId::OpenCode.supports_profile_selection());
-        for other in [AgentId::ClaudeCode, AgentId::Codex, AgentId::Gemini] {
+        for other in [AgentId::ClaudeCode, AgentId::Codex] {
             assert!(!other.supports_provider_selection());
             assert!(!other.supports_profile_selection());
             assert!(!other.supports_freetext_model());
@@ -1014,11 +982,13 @@ mod tests {
         for raw in ["grok", "Grok Build", "grok-build"] {
             assert_eq!(resolve_agent_id(raw), Some(AgentId::GrokBuild), "{raw}");
         }
-        assert_eq!(resolve_agent_id("gemini"), Some(AgentId::Gemini));
-        assert_eq!(
-            resolve_agent_id("Gemini CLI (legacy)"),
-            Some(AgentId::Gemini)
-        );
+        for raw in ["gemini", "Gemini CLI (legacy)", "gemini-cli"] {
+            assert_eq!(
+                resolve_agent_id(raw),
+                Some(AgentId::Custom(raw.into())),
+                "{raw}"
+            );
+        }
         assert_eq!(
             resolve_agent_id("agy").map(|id| id.command().to_string()),
             Some("agy".into())
@@ -1097,7 +1067,7 @@ mod tests {
             ("grok", AgentColor::Gray),
             ("agy", AgentColor::Green),
             ("antigravity", AgentColor::Green),
-            ("gemini", AgentColor::Magenta),
+            ("gemini", AgentColor::Gray),
             ("opencode", AgentColor::Green),
             ("openclaw", AgentColor::Blue),
             ("hermes", AgentColor::Magenta),
@@ -1119,7 +1089,6 @@ mod tests {
             AgentId::Codex,
             AgentId::GrokBuild,
             AgentId::Antigravity,
-            AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,
