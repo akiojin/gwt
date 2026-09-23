@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseHTML } from "linkedom";
+import * as notifications from "../agent-completion-notifications.js";
 
 import {
   createAgentCompletionNotifier,
@@ -37,7 +38,7 @@ function makeProject(overrides = {}) {
   };
 }
 
-test("notifier emits a quiet turn-complete notice only after a long hidden run returns idle", () => {
+test("Idle after a long run never implies completion", () => {
   let now = 1_000;
   const toasts = [];
   const desktop = [];
@@ -70,15 +71,10 @@ test("notifier emits a quiet turn-complete notice only after a long hidden run r
     projectTab: makeProject(),
   });
 
-  assert.equal(notice.kind, "turn_complete");
-  assert.equal(notice.projectId, "tab-1");
-  assert.equal(notice.windowId, "agent-1");
-  assert.match(notice.title, /Turn complete/);
-  assert.match(notice.body, /Codex/);
-  assert.match(notice.body, /Repo One/);
-  assert.deepEqual(toasts, [notice]);
-  assert.deepEqual(desktop, [notice]);
-  assert.deepEqual(unread, ["tab-1"]);
+  assert.equal(notice, null);
+  assert.deepEqual(toasts, []);
+  assert.deepEqual(desktop, []);
+  assert.deepEqual(unread, []);
 });
 
 test("T-603: notifier does not treat sustained running -> waiting as turn completion", () => {
@@ -117,7 +113,7 @@ test("T-603: notifier does not treat sustained running -> waiting as turn comple
   assert.deepEqual(unread, []);
 });
 
-test("notifier suppresses short runs, focused windows, and default desktop permission", () => {
+test("notifier suppresses short runs and focused windows", () => {
   let now = 10_000;
   const toasts = [];
   const desktop = [];
@@ -141,7 +137,7 @@ test("notifier suppresses short runs, focused windows, and default desktop permi
   assert.equal(
     notifier.handleRuntimeState({
       windowId: "agent-1",
-      runtimeState: "idle",
+      runtimeState: "stopped",
       windowData: makeWindow(),
       projectTab: makeProject(),
     }),
@@ -159,7 +155,7 @@ test("notifier suppresses short runs, focused windows, and default desktop permi
   assert.equal(
     notifier.handleRuntimeState({
       windowId: "agent-1",
-      runtimeState: "idle",
+      runtimeState: "stopped",
       windowData: makeWindow(),
       projectTab: makeProject(),
     }),
@@ -346,4 +342,48 @@ test("FR-040: missing windowId yields no toast", () => {
   const notice = toaster.handleRuntimeState({ windowId: "", runtimeState: "waiting" });
   assert.equal(notice, null);
   assert.equal(toasts.length, 0);
+});
+
+
+test("typed inputs retain source authority and never infer NeedsHuman from Waiting", () => {
+  const {notificationForTransition} = notifications;
+  assert.equal(typeof notificationForTransition, "function");
+  assert.equal(notificationForTransition({source: "runtime", state: "waiting"}), null);
+  assert.equal(notificationForTransition({source: "runtime", state: "needs_human"}), null);
+  assert.equal(notificationForTransition({source: "monitor", state: "stopped"}), null);
+  const notice = notificationForTransition({source: "monitor", state: "needs_human", issueNumber: 4665});
+  assert.equal(notice.title, "Needs human");
+  assert.match(notice.body, /#4665/);
+  assert.doesNotMatch(notice.title, /complete|finish/i);
+});
+
+test("five minutes means consecutive Running; duplicates preserve time and resets discard it", () => {
+  let now = 0;
+  const notices = [];
+  const desktop = [];
+  let permission = "default";
+  const notifier = createAgentCompletionNotifier({now: () => now, isAttentionAway: () => true,
+    getDesktopNotificationPermission: () => permission, showToast: n => notices.push(n),
+    showDesktopNotification: n => desktop.push(n)});
+  const send = runtimeState => notifier.handleRuntimeState({windowId: "one", runtimeState});
+  send("running"); now = 299999; send("running"); assert.equal(send("stopped"), null);
+  send("running"); now += 300000; send("running");
+  assert.equal(send("stopped").kind, "agent_stopped");
+  assert.equal(send("stopped"), null);
+  send("running"); now += 300000; send("starting"); send("running");
+  assert.equal(send("error"), null);
+  send("running"); now += 300000; notifier.reset();
+  assert.equal(send("stopped"), null);
+  assert.equal(notices.length, 1);
+  assert.deepEqual(desktop, []);
+  permission = "granted"; send("running"); now += 300000;
+  const grantedNotice = send("stopped");
+  assert.deepEqual(desktop, [grantedNotice]);
+});
+
+test("Stopped attention says stopped, without claiming work finished", () => {
+  const {toaster} = collectAttentionToaster();
+  const notice = toaster.handleRuntimeState({windowId: "one", runtimeState: "stopped"});
+  assert.equal(notice.title, "Agent stopped");
+  assert.doesNotMatch(notice.title, /finish|complete/i);
 });

@@ -2295,6 +2295,7 @@ impl AppRuntime {
         vec![OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: "error".to_string(),
                 message: format!(
                     "PM worktree preparation failed for {}: {error}",

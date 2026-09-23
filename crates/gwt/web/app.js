@@ -64,6 +64,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       import {
         createAgentCompletionNotifier,
         createAgentAttentionToaster,
+        notificationForTransition,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
@@ -1436,6 +1437,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           && socketProjectKey === projectKey) {
           return;
         }
+        agentCompletionNotifier.reset();
         const previousSocket = socket;
         socket = null;
         socketReceiveDispatcherGeneration += 1;
@@ -6321,21 +6323,27 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           case "issue_monitor_launch_failed":
             scheduleIssueMonitorProjectionRefresh();
             break;
-          case "issue_monitor_toast":
+          case "issue_monitor_toast": {
+            const monitorNotice = notificationForTransition({
+              source: "monitor",
+              state: event?.notification_transition,
+              issueNumber: event?.issue_number,
+            });
             // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
             // into the notification center history FIRST and independently of
             // any display path, so events that fire while no Issue window is
             // open (or while the operator is away) are never lost. The backend
-            // IssueMonitorToast carries {level, message, issue_number} only —
-            // the title is a literal.
+            // The optional typed transition changes wording on this one surface;
+            // inbox snapshots never generate a second notification.
             notificationCenter.record({
               kind: "issue-monitor",
               level: event?.level,
-              title: "Issue Monitor",
+              title: monitorNotice?.title || "Issue Monitor",
               message: event?.message,
               issueNumber: event?.issue_number,
             });
             break;
+          }
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
             break;

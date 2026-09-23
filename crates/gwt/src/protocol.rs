@@ -11,7 +11,7 @@ use crate::{
     daemon_runtime::RuntimeHookEvent,
     file_content::{Encoding, Newline},
     file_tree::FileTreeEntry,
-    issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView},
+    issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView, MonitorNotificationTransition},
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
@@ -2029,6 +2029,8 @@ pub enum BackendEvent {
         message: String,
     },
     IssueMonitorToast {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notification_transition: Option<MonitorNotificationTransition>,
         level: String,
         message: String,
         issue_number: Option<u64>,

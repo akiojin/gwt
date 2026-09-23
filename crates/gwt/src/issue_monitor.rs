@@ -5015,11 +5015,20 @@ pub struct AutonomousReviewDispatchHold {
 /// and stops counting it against `max_active`.
 pub const REVIEW_WINDOW_SPAWN_GRACE_SECS: i64 = 300;
 
+/// Authoritative Monitor transitions carried by the existing state-notice stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorNotificationTransition {
+    NeedsHuman,
+}
+
 /// SPEC #3200 FR-034 (T-111): one operator notice for an unattended autonomous
 /// lifecycle transition. Surfaced to the GUI as an `issue_monitor_toast`
 /// (transient surface toast + persistent scrollable notification stack).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousNotice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_transition: Option<MonitorNotificationTransition>,
     /// Toast level: `info` | `warn` | `error` | `done`.
     pub level: String,
     pub issue_number: u64,
@@ -7988,15 +7997,22 @@ impl IssueMonitorState {
             return;
         }
         let reason = reason.into();
-        // FR-034: an unattended escalation is exactly what the operator must see.
-        self.push_autonomous_notice(
-            "error",
-            issue_number,
-            format!(
-                "Issue #{issue_number} needs human [{}]: {reason}",
-                kind.as_str()
-            ),
-        );
+        // Re-observing a parked issue updates its reason without emitting a
+        // second transition notice. A later departure and re-entry notifies again.
+        if self
+            .autonomous_record(issue_number)
+            .is_none_or(|record| record.phase != AutonomousPhase::NeedsHuman)
+        {
+            self.push_autonomous_notice_with_transition(
+                "error",
+                issue_number,
+                format!(
+                    "Issue #{issue_number} needs human [{}]: {reason}",
+                    kind.as_str()
+                ),
+                Some(MonitorNotificationTransition::NeedsHuman),
+            );
+        }
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
@@ -12964,6 +12980,16 @@ impl IssueMonitorState {
         issue_number: u64,
         message: impl Into<String>,
     ) {
+        self.push_autonomous_notice_with_transition(level, issue_number, message, None);
+    }
+
+    fn push_autonomous_notice_with_transition(
+        &mut self,
+        level: &str,
+        issue_number: u64,
+        message: impl Into<String>,
+        notification_transition: Option<MonitorNotificationTransition>,
+    ) {
         if !self.autonomous_mode {
             return;
         }
@@ -12971,6 +12997,7 @@ impl IssueMonitorState {
             self.pending_autonomous_notices.pop_front();
         }
         self.pending_autonomous_notices.push_back(AutonomousNotice {
+            notification_transition,
             level: level.to_string(),
             issue_number,
             message: message.into(),
@@ -12995,6 +13022,7 @@ impl IssueMonitorState {
             self.pending_autonomous_notices.pop_front();
         }
         self.pending_autonomous_notices.push_back(AutonomousNotice {
+            notification_transition: None,
             level: level.to_string(),
             issue_number,
             message,
