@@ -868,10 +868,10 @@ fn queue_scope_rebuilds(
                     rebuild_scope,
                     worktree.as_deref(),
                 ) {
-                    let _ = error;
                     tracing::debug!(
                         target: "gwt::index",
                         scope = %job_label,
+                        error = %error,
                         "search-triggered index repair failed"
                     );
                 }
@@ -2915,6 +2915,65 @@ mod tests {
     }
 
     #[test]
+    fn queued_repair_failure_log_preserves_the_runner_error() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        const CHILD: &str = "GWT_TEST_REPAIR_LOG_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Keep the global subscriber confined to this test's process.
+            let output =
+                gwt_core::process::hidden_command(std::env::current_exe().expect("test binary"))
+                    .args([
+                        "--exact",
+                        "index_search::tests::queued_repair_failure_log_preserves_the_runner_error",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .output()
+                    .expect("repair log fixture");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = tempfile::NamedTempFile::new().expect("repair log");
+        // Repairs run on another thread, so a thread-local subscriber cannot
+        // observe this event. Other log-capture tests use scoped subscribers.
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(output.reopen().expect("repair log writer"))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).expect("repair log subscriber");
+
+        queue_scope_rebuilds(
+            temp.path(),
+            &[("specs".to_string(), "missing".to_string())],
+            None,
+        );
+        assert!(wait_for_index_search_repairs(Duration::from_secs(10)));
+        let log = std::fs::read_to_string(output.path()).expect("read repair log");
+        let event = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|event| event["fields"]["message"] == "search-triggered index repair failed")
+            .expect("repair failure event");
+        assert_eq!(event["fields"]["scope"], "specs");
+        assert!(
+            event["fields"]["error"]
+                .as_str()
+                .is_some_and(|error| error
+                    .contains("could not resolve project index repo hash from git origin")),
+            "repair failure lost its cause: {event}"
+        );
+    }
+
+    #[test]
     fn repair_spawn_failure_rolls_back_admission_and_notifies_waiters() {
         let _lock = crate::env_test_lock()
             .lock()
@@ -3093,13 +3152,19 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
+        // Unlike ScopedGwtHome, process environment reaches the repair worker
+        // thread. Give this fixture its own coordinator, even within one suite.
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let expected_coordinator = temp.path().join(".gwt/runtime/index-coordinator");
+        assert_eq!(
+            gwt_core::index_coordinator::coordinator_root(),
+            expected_coordinator
+        );
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo directory");
         run_git_at(&repo, &["init", "-q", "-b", "develop"]);
-        // The production coordinator is host-wide and keys repo-shared jobs
-        // by the origin-derived repo hash. Give every fixture invocation its
-        // own identity so an earlier run or another checkout cannot coalesce
-        // this repair before the runner closure reaches the marker.
+        // Repo-shared jobs are keyed by the origin-derived repo hash.
         let remote_suffix = temp
             .path()
             .file_name()
@@ -3124,7 +3189,7 @@ mod tests {
 
         let marker_wait_started = Instant::now();
         while !marker.exists() && marker_wait_started.elapsed() < repair_budget {
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(100));
         }
         let settled = wait_for_index_search_repairs(repair_budget + Duration::from_secs(4));
         if !settled {
