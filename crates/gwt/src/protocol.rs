@@ -326,6 +326,11 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    ProjectAggregateAck {
+        revision: u64,
+        visible: bool,
+        focused: bool,
+    },
     /// Explicit, client-scoped Recovery Center refresh. Durable identities are
     /// discovered from the active project and never accepted from the client.
     LoadRecoveryCenter {
@@ -1840,6 +1845,16 @@ pub enum UpdateAutoApplyPhase {
     Applying,
 }
 
+/// Server-owned project attention summary. It describes runtime state, not Work completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAgentAggregate {
+    pub running_count: usize,
+    pub block_count: usize,
+    pub error_count: usize,
+    pub unread: bool,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -1854,6 +1869,9 @@ pub enum BackendEvent {
     },
     ProjectClosed {
         project_key: String,
+    },
+    ProjectAgentAggregate {
+        aggregate: ProjectAgentAggregate,
     },
     HubState {
         hub: HubStateView,
@@ -2710,6 +2728,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "project_agent_aggregate",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "hub_state",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3238,6 +3261,7 @@ impl BackendEvent {
             BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
             BackendEvent::CloseProjectError { .. } => "close_project_error",
             BackendEvent::ProjectClosed { .. } => "project_closed",
+            BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",

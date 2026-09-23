@@ -86,6 +86,7 @@ root_js_modules! {
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
     // notification controller.
     "agent-completion-notifications.js" => "createAgentCompletionNotifier",
+    "project-page-metadata.js" => "createProjectPageMetadata",
     // SPEC-3038 US-3: Close Guard — window close confirm modal renderer.
     "window-close-confirm-modal.js" => "renderWindowCloseConfirmModal",
     "migration-modal.js" => "renderMigrationModal",

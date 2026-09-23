@@ -19,7 +19,7 @@ test.describe("Launch entry points", () => {
     await installOpenProjectBackend(page);
     await page.goto(APP_URL);
 
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('.op-rail [data-cmd="intake-session"]')).toHaveCount(0);
     await expect(page.locator("#canvas-empty-intake")).toHaveCount(0);
     await expect(page.locator("#op-workspace-overview-entry")).toBeVisible();
@@ -35,7 +35,7 @@ test.describe("Launch entry points", () => {
     await installEmbeddedRoutes(page);
     await installOpenProjectBackend(page);
     await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
     await page.evaluate(async () => {
       document.dispatchEvent(

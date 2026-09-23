@@ -125,9 +125,17 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 - **Open in browser**: 既定ブラウザで埋込サーバー (`http://127.0.0.1:<port>/`)
   を開きます。同じ URL は他のブラウザでも開けます。
 - **Copy URL**: 起動中の tray プロセスの URL を OS clipboard にコピーします。
+- **Projects**: 開いているプロジェクト、Recent の順に表示し、選んだプロジェクトの
+  URL を開きます。実行中・エラー件数を表示し、開いているプロジェクトに
+  エージェントのエラーがある間はトレイアイコンにエラーバッジが付きます。
 - **About GWT**: 起動中の tray プロセスのブラウザ版 About / Version 画面を
   開きます。
 - **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
+
+プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
+表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
+未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
+Hub のタイトルと favicon は固定です。
 
 ルート URL `http://127.0.0.1:<port>/` は **Hub** です。Open Folder、Clone from
 GitHub、Recent projects、開いているプロジェクトの一覧を表示します。各プロジェクトは
@@ -961,8 +969,12 @@ cargo bundle -p gwt --format osx
 ### テスト
 
 ```bash
-cargo test -p gwt-core -p gwt --all-features
+cargo install cargo-nextest --locked --version 0.9.146
+cargo nextest run -p gwt-core -p gwt --all-features --test-threads=1
+cargo test -p gwt-core -p gwt --all-features --doc
 ```
+
+nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
 ### 重量級検証の直列化
 

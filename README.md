@@ -129,10 +129,18 @@ the tray menu:
   `http://127.0.0.1:<port>/`. The same URL can be opened in any other
   browser too.
 - **Copy URL** — copies the running tray process URL to the OS clipboard.
+- **Projects** — opens a project URL from the open projects followed by Recent,
+  with running and error counts. The tray icon shows an error badge while an
+  open project has an agent error.
 - **About GWT** — opens the browser About / Version surface for the
   running tray process.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
   PTY children down in order.
+
+Project browser tabs show agent RUN / BLOCK counts in their titles and a
+status favicon. BLOCK includes waiting, stopped, and error states; shell
+windows are excluded. An unread marker clears when the project tab is visible
+and focused. Hub metadata stays fixed.
 
 The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
 from GitHub, Recent projects, and the currently open projects. Every project
@@ -1013,8 +1021,12 @@ cargo bundle -p gwt --format osx
 ### Test
 
 ```bash
-cargo test -p gwt-core -p gwt --all-features
+cargo install cargo-nextest --locked --version 0.9.146
+cargo nextest run -p gwt-core -p gwt --all-features --test-threads=1
+cargo test -p gwt-core -p gwt --all-features --doc
 ```
+
+Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
 ### Serializing heavy verification
 

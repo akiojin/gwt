@@ -38,7 +38,7 @@ test("Logs Project and Global isolate snapshots and live events", async ({ page 
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
-    await expect(page.locator(".project-tab[aria-current='page']")).toBeVisible();
+    await expect(page.locator("#close-project-button")).toBeVisible();
     const theme = testInfo.project.use.colorScheme === "light" ? "light" : "dark";
     await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
