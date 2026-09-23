@@ -1270,8 +1270,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             });
           },
         });
-        setConnectionState(true);
         projectPageMetadata.resetConnection();
+        setConnectionState(true);
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
         for (let index = 0; index < pendingMessages.length;) {
