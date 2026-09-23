@@ -9,6 +9,7 @@
 //! diagnostics, and Board notice. A deferred invocation writes no run record.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
@@ -43,7 +44,9 @@ const BOARD_NOTICE_AFTER: Duration = POLL;
 /// the target job, in the reverse of the acquisition order.
 pub(crate) struct Admission {
     guard: Option<TargetJobGuard>,
-    lease: Option<HeavyLease>,
+    lease: Option<Arc<Mutex<HeavyLease>>>,
+    renewal: Option<super::renewal::Renewal>,
+    commands: Arc<super::CommandProgress>,
     lease_id: String,
     waited: Duration,
 }
@@ -58,10 +61,13 @@ impl std::fmt::Debug for Admission {
 }
 
 impl Admission {
+    pub(crate) fn command_progress(&self) -> &super::CommandProgress {
+        &self.commands
+    }
+
     fn settle(&mut self, outcome: JobOutcome) {
-        if let Some(lease) = self.lease.take() {
-            let _ = lease.release();
-        }
+        drop(self.renewal.take());
+        drop(self.lease.take());
         if let Some(guard) = self.guard.take() {
             let _ = guard.complete(outcome);
         }
@@ -90,6 +96,9 @@ impl Admission {
     /// effort, because progress is a diagnostic and never gates the run.
     pub(crate) fn publish_progress(&self, done: usize, total: usize, elapsed: Duration) {
         let Some(lease) = &self.lease else {
+            return;
+        };
+        let Ok(lease) = lease.lock() else {
             return;
         };
         let unit_ms = match done {
@@ -148,9 +157,8 @@ pub(crate) fn attribute_worktree<'a>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HolderNotice {
     detail: String,
-    /// How long until the holder hands the lease back. `None` when the holder
-    /// publishes neither a TTL nor batch progress, so no honest estimate
-    /// exists.
+    /// A retry hint from batch progress or TTL, never a completion promise:
+    /// a working holder can renew its deadline.
     retry_after: Option<Duration>,
 }
 
@@ -308,13 +316,13 @@ fn deferred(
     retry_after: Option<Duration>,
 ) -> SpecOpsError {
     let next = match retry_after {
-        // Issue #4470: nothing is going to lapse — the lease has no live
-        // holder, so the next attempt is the remedy, not a later one.
+        // A stale holder and a live holder past its TTL both yield zero.
+        // Only admission can establish whether the lock is now available.
         Some(Duration::ZERO) => {
-            "rerun `verify.run` now — the lease it waited for has no live holder".to_string()
+            "rerun `verify.run` now to recheck admission — TTL expiry does not release a live holder".to_string()
         }
         Some(retry_after) => format!(
-            "rerun `verify.run` in about {}s, when the current holder's lease lapses",
+            "rerun `verify.run` in about {}s (timing hint only; a progressing holder renews its TTL)",
             retry_after.as_secs()
         ),
         None => "rerun `verify.run` after the current lease holder finishes".to_string(),
@@ -477,10 +485,26 @@ pub(crate) fn admit<E: CliEnv>(
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
     let (spawn_host, _) = crate::cli::daemon::verification_host::describe_for_lease(&worktree);
     lease.record_spawn_host(spawn_host);
+    let lease_id = lease.id().to_string();
+    let lease = Arc::new(Mutex::new(lease));
+    let commands = Arc::new(super::CommandProgress::default());
+    let renewal = super::renewal::Renewal::start(
+        Arc::clone(&lease),
+        coordinator,
+        worktree,
+        Arc::clone(&commands),
+    )
+    .map_err(|error| {
+        unexpected(format!(
+            "verification renewal monitor failed to start: {error}"
+        ))
+    })?;
     let admission = Admission {
         guard: Some(guard),
-        lease_id: lease.id().to_string(),
+        lease_id,
         lease: Some(lease),
+        renewal: Some(renewal),
+        commands,
         waited: started.elapsed(),
     };
 
@@ -770,6 +794,17 @@ mod tests {
         assert!(with_eta.contains("deferred"), "{with_eta}");
         assert!(with_eta.contains("about 320s"), "{with_eta}");
         assert!(with_eta.contains("verify.run"), "{with_eta}");
+        assert!(with_eta.contains("timing hint only"), "{with_eta}");
+
+        let expired = deferred(
+            Instant::now(),
+            Duration::from_secs(300),
+            "verification lease held by a live holder",
+            Some(Duration::ZERO),
+        )
+        .to_string();
+        assert!(expired.contains("TTL expiry does not release"), "{expired}");
+        assert!(!expired.contains("no live holder"), "{expired}");
 
         let without_eta = deferred(
             Instant::now(),
