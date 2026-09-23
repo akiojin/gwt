@@ -119,7 +119,7 @@ fn write_state_with_status(
         // event. Dropping it left the sweep with nothing but a live Host to
         // judge by, so closed panes kept their worktrees forever.
         for (key, value) in [
-            ("host_started_at", previous.host_started_at.map(u64::from)),
+            ("host_started_at", previous.host_started_at),
             ("child_pid", previous.child_pid.map(u64::from)),
             ("child_started_at", previous.child_started_at),
         ] {

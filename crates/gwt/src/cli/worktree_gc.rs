@@ -907,20 +907,10 @@ mod tests {
         (pid, started_at)
     }
 
-    /// A PTY child that has exited: a reaped process whose recorded start
-    /// time no process on the host can match.
+    /// A PTY child that has exited: a PID no process on the host holds, with
+    /// a start time nothing can match.
     fn exited_child() -> (u32, u64) {
-        let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
-            .args(if cfg!(windows) {
-                &["/C", "exit"][..]
-            } else {
-                &[][..]
-            })
-            .spawn()
-            .expect("spawn");
-        let pid = child.id();
-        child.wait().expect("wait");
-        (pid, 1)
+        (i32::MAX as u32, 1)
     }
 
     /// Issue #4643 AC-6: the four sidecar shapes under one live gwt Host.
