@@ -15583,6 +15583,18 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
     )
     .expect("compensate split-root Work");
 
+    // Issue #4674: a fresh intake must retain the machine-local close even
+    // though shared lifecycle sources deliberately exclude close events.
+    let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+        &project_root,
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+        &gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(&project_root),
+    );
+    assert!(
+        intake.projection_rebuilt,
+        "fresh intake must rebuild: {intake:?}"
+    );
+
     let current = gwt_core::workspace_projection::load_workspace_projection(&project_root)
         .expect("read current")
         .expect("current");
@@ -15600,6 +15612,19 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
     assert!(load_tracked_work_events(&worktree)
         .iter()
         .any(|event| event.agent_session_id.as_deref() == Some(session_id)));
+    assert!(!load_tracked_work_events(&worktree)
+        .iter()
+        .any(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Discard));
+    let closes = fs::read_to_string(
+        gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&project_root),
+    )
+    .expect("read machine-local genesis close log");
+    assert!(closes.lines().any(|line| {
+        let event: gwt_core::workspace_projection::WorkEvent =
+            serde_json::from_str(line).expect("decode close event");
+        event.kind == gwt_core::workspace_projection::WorkEventKind::Discard
+            && event.agent_session_id.as_deref() == Some(session_id)
+    }));
 }
 
 #[test]
@@ -15750,6 +15775,16 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
     )
     .expect("retry after Pause and exact agent cleanup");
 
+    let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+        &repo,
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+        &gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(&repo),
+    );
+    assert!(
+        intake.projection_rebuilt,
+        "fresh intake must rebuild: {intake:?}"
+    );
+
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
         .expect("read compensated Workspace")
         .expect("compensated Workspace");
@@ -15775,6 +15810,19 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
             && event.agent_session_id.as_deref() == Some(failed_session_id)
     }));
     assert!(retained.events.iter().any(|event| {
+        event.kind == gwt_core::workspace_projection::WorkEventKind::Pause
+            && event.agent_session_id.as_deref() == Some(failed_session_id)
+    }));
+    assert!(!load_tracked_work_events(&repo)
+        .iter()
+        .any(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Pause));
+    let closes = fs::read_to_string(
+        gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&repo),
+    )
+    .expect("read machine-local resume close log");
+    assert!(closes.lines().any(|line| {
+        let event: gwt_core::workspace_projection::WorkEvent =
+            serde_json::from_str(line).expect("decode close event");
         event.kind == gwt_core::workspace_projection::WorkEventKind::Pause
             && event.agent_session_id.as_deref() == Some(failed_session_id)
     }));

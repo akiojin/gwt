@@ -233,7 +233,12 @@ mod tests {
             }
             let kept = root.join("kept.rs");
             std::fs::write(&kept, "source").unwrap();
-            tokio::time::timeout(Duration::from_secs(8), async {
+            // Issue #4676: after atomic-file write bursts, a native FSEvents
+            // probe took 12.189s (source event at 12.086s, no drops), even
+            // in a separate process. FlushSync returned before delivery,
+            // so it cannot synchronize this wait. Allow ~2.5x that observed
+            // latency; receipt still ends the wait immediately.
+            tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     let batch = watcher.recv_batch().await.expect("watcher closed");
                     if batch.changed_paths.contains(&kept) {
