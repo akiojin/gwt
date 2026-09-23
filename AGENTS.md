@@ -302,6 +302,7 @@
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`
 - テスト: `cargo test -p gwt-core -p gwt --all-features`
+- カバレッジ: `node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features` の後に `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"` と `... 80 --scope-exclude "crates/(gwt-core|gwt)/"`（CI の coverage.yml と同一）。`cargo llvm-cov` を直接呼ぶと、raw profile の切り詰めがテスト失敗と区別できない FAIL になる（Issue #4628）
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
 - GUI のユーザー確認が必要な実装では、ビルド済みなら `target/debug/gwt`、未ビルドなら `cargo run -p gwt --bin gwt` で起動し、標準出力の `gwt browser URL: http://127.0.0.1:<port>/` をユーザーに共有する。共有前に `curl -fsS -I <URL>` などで HTTP 200 を確認し、ユーザーが同じ URL で手動確認できる状態にする。

@@ -421,6 +421,11 @@ jobs:
       - name: Build the deterministic Windows agent launch E2E
         run: cargo test -p gwt --test windows_agent_launch_e2e --no-run
         timeout-minutes: 30
+      # Issue #4644 AC-5: the non-ignored contract tests in this cfg(windows)
+      # target (e.g. the Hub bootstrap reply classifier) are compiled nowhere
+      # else, so run them once before the provider combinations.
+      - name: Run Windows agent launch E2E contract tests
+        run: cargo test -p gwt --test windows_agent_launch_e2e
       # The matrix used fail-fast: false so one broken provider could not hide
       # the others. The loop keeps that: every combination runs, each one is a
       # collapsible log group, a failing one emits an ::error:: annotation, and
@@ -459,7 +464,7 @@ jobs:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
       - name: Run verification reporter regressions
-        run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs
+        run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
       - name: Run frontend unit tests
         run: bash scripts/run-frontend-unit-tests.sh
         timeout-minutes: 10
