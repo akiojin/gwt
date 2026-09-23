@@ -280,7 +280,9 @@ run("release flow helper checks the shared frontend bundle and release assets", 
   const releaseFlow = fs.readFileSync(path.join(__dirname, "check-release-flow.sh"), "utf8");
   assert.match(releaseFlow, /scripts\/test_release_assets\.cjs/);
   assert.match(releaseFlow, /scripts\/check-frontend-bundle\.sh/);
-  assert.match(releaseFlow, /script type=\"module\" src=\"\/app\.js\"/);
+  // Issue #4538: index.html boots the route bootstrap, which loads /app.js.
+  assert.match(releaseFlow, /script type=\"module\" src=\"\/frontend-bootstrap\.js\"/);
+  assert.match(releaseFlow, /"\/app\.js"/);
 });
 
 run("CI workflows call direct verification scripts and skip npm publish", () => {

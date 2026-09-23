@@ -13912,3 +13912,70 @@ fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
     save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
     assert!(write("Issue #42", "delivery-session").is_err());
 }
+
+#[test]
+fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3403".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4605),
+        pr_url: Some("https://github.com/example/repo/pull/4605".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut original = container.clone();
+    original.pr_number = None;
+    original.pr_url = None;
+    original.pr_state = None;
+    let mut start = WorkEvent::new(WorkEventKind::Start, "live-work", now);
+    start.owner = Some("Issue #3403".into());
+    start.agent_session_id = Some("live-session".into());
+    start.execution_container = Some(original.clone());
+    projection.apply_event(start);
+    let live = projection.work_items[0].clone();
+    for n in 0..2 {
+        let mut discarded = live.clone();
+        discarded.id = format!("discarded-work-{n}");
+        discarded.owner = None;
+        discarded.discarded = true;
+        projection.work_items.push(discarded);
+    }
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let write = || {
+        record_workspace_pr_metadata_for_execution_at(
+            &works,
+            &events,
+            "Issue #3403",
+            "live-session",
+            &container,
+        )
+    };
+
+    write().expect("discarded rows must not make the live row ambiguous");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = |id: &str| saved.work_items.iter().find(|item| item.id == id).unwrap();
+    assert_eq!(
+        item("live-work").execution_containers,
+        vec![container.clone()]
+    );
+    assert_eq!(
+        item("discarded-work-0").execution_containers,
+        vec![original.clone()]
+    );
+
+    let mut two_live = saved.clone();
+    let mut duplicate = item("live-work").clone();
+    duplicate.id = "second-live-work".into();
+    two_live.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &two_live).unwrap();
+    assert!(
+        write().is_err(),
+        "two live rows stay ambiguous even when discarded rows are excluded"
+    );
+}
