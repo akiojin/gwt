@@ -4748,7 +4748,7 @@ impl AppRuntime {
         let (mut env, remove_env) = effective_env.into_parts();
 
         // SPEC-2809 (revised) — Surface the launch pipeline for AI
-        // agent presets (Codex / Claude / Gemini / Agent) so the Console
+        // agent presets (Codex / Claude / Agent) so the Console
         // window's `agent` tab shows what gwt is doing leading up to the
         // PTY spawn. Plain `Shell` panes do not emit launch banners
         // because nothing distinguishes them from arbitrary terminals.

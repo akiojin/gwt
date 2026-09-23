@@ -1,6 +1,6 @@
 //! Session format conversion between AI agent formats.
 //!
-//! Each agent (Claude, Codex, Gemini, OpenCode) stores sessions in its own
+//! Each agent (Claude, Codex, OpenCode) stores sessions in its own
 //! format. This module provides a trait-based encoder system and a top-level
 //! `convert_session` function to translate a generic session history from
 //! one format to another.
@@ -14,7 +14,6 @@ use crate::error::AIError;
 pub enum SessionFormat {
     Claude,
     Codex,
-    Gemini,
     OpenCode,
 }
 
@@ -23,7 +22,6 @@ impl SessionFormat {
         match name.to_lowercase().as_str() {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
-            "gemini" => Some(Self::Gemini),
             "opencode" => Some(Self::OpenCode),
             _ => None,
         }
@@ -33,7 +31,6 @@ impl SessionFormat {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
         }
     }
@@ -115,36 +112,6 @@ impl SessionEncoder for CodexEncoder {
     }
 }
 
-/// Encoder for Gemini CLI session format.
-pub struct GeminiEncoder;
-
-impl SessionEncoder for GeminiEncoder {
-    fn name(&self) -> &str {
-        "Gemini"
-    }
-
-    fn encode(&self, history: &[SessionMessage]) -> Result<String, AIError> {
-        if history.is_empty() {
-            return Err(AIError::ParseError("Empty session history".into()));
-        }
-        let contents: Vec<serde_json::Value> = history
-            .iter()
-            .map(|m| {
-                let gemini_role = match m.role {
-                    Role::System | Role::User => "user",
-                    Role::Assistant => "model",
-                };
-                serde_json::json!({
-                    "role": gemini_role,
-                    "parts": [{"text": m.content}]
-                })
-            })
-            .collect();
-        serde_json::to_string_pretty(&serde_json::json!({ "contents": contents }))
-            .map_err(|e| AIError::ParseError(format!("JSON encode error: {e}")))
-    }
-}
-
 /// Encoder for OpenCode session format.
 pub struct OpenCodeEncoder;
 
@@ -176,7 +143,6 @@ pub fn get_encoder(name: &str) -> Result<Box<dyn SessionEncoder>, AIError> {
     match SessionFormat::parse(name) {
         Some(SessionFormat::Claude) => Ok(Box::new(ClaudeEncoder)),
         Some(SessionFormat::Codex) => Ok(Box::new(CodexEncoder)),
-        Some(SessionFormat::Gemini) => Ok(Box::new(GeminiEncoder)),
         Some(SessionFormat::OpenCode) => Ok(Box::new(OpenCodeEncoder)),
         None => Err(AIError::ConfigError(format!(
             "Unknown target format: {name}"
@@ -186,7 +152,7 @@ pub fn get_encoder(name: &str) -> Result<Box<dyn SessionEncoder>, AIError> {
 
 /// Return the supported format names in stable order.
 pub fn supported_formats() -> &'static [&'static str] {
-    &["claude", "codex", "gemini", "opencode"]
+    &["claude", "codex", "opencode"]
 }
 
 /// Convert a session history from one format to another.
@@ -271,25 +237,6 @@ mod tests {
         assert!(CodexEncoder.encode(&[]).is_err());
     }
 
-    // ── GeminiEncoder ──────────────────────────────────────────────────
-
-    #[test]
-    fn gemini_encoder_maps_roles() {
-        let enc = GeminiEncoder;
-        let result = enc.encode(&sample_history()).unwrap();
-        let val: serde_json::Value = serde_json::from_str(&result).unwrap();
-        let contents = val["contents"].as_array().unwrap();
-        // system -> user, user -> user, assistant -> model
-        assert_eq!(contents[0]["role"], "user");
-        assert_eq!(contents[1]["role"], "user");
-        assert_eq!(contents[2]["role"], "model");
-    }
-
-    #[test]
-    fn gemini_encoder_rejects_empty() {
-        assert!(GeminiEncoder.encode(&[]).is_err());
-    }
-
     // ── OpenCodeEncoder ────────────────────────────────────────────────
 
     #[test]
@@ -311,7 +258,7 @@ mod tests {
     fn get_encoder_case_insensitive() {
         assert_eq!(get_encoder("Claude").unwrap().name(), "Claude");
         assert_eq!(get_encoder("CODEX").unwrap().name(), "Codex");
-        assert_eq!(get_encoder("gemini").unwrap().name(), "Gemini");
+        assert!(get_encoder("gemini").is_err());
         assert_eq!(get_encoder("OpenCode").unwrap().name(), "OpenCode");
     }
 
@@ -360,6 +307,6 @@ mod tests {
     #[test]
     fn supported_formats_are_stable_and_non_empty() {
         let formats = supported_formats();
-        assert_eq!(formats, &["claude", "codex", "gemini", "opencode"]);
+        assert_eq!(formats, &["claude", "codex", "opencode"]);
     }
 }

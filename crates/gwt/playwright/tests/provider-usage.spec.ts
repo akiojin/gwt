@@ -269,7 +269,7 @@ test.describe("Provider usage status summary", () => {
         state: { kind: "ok" },
       },
       {
-        provider: "gemini",
+        provider: "custom_provider",
         windows: [
           {
             kind: "weekly",
@@ -281,11 +281,11 @@ test.describe("Provider usage status summary", () => {
       },
     ]);
     await expect(strip.locator(".op-usage-sum")).toHaveCount(1);
-    await expect(strip.locator('[data-provider="gemini"]')).toHaveText("GE 95%");
+    await expect(strip.locator('[data-provider="custom_provider"]')).toHaveText("CU 95%");
     await expect(strip.locator(".op-usage-more")).toHaveText("+2");
     await expect(strip).toHaveAttribute(
       "aria-label",
-      "Provider usage: Codex 40% normal, Claude Code 70% normal, GE 95% danger",
+      "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
     );
     expect((await strip.boundingBox())!.width).toBeCloseTo(initialWidth, 1);
 
@@ -294,7 +294,7 @@ test.describe("Provider usage status summary", () => {
     await expect(popover).toBeVisible();
     await expect(popover).toContainText("Codex");
     await expect(popover).toContainText("Claude Code");
-    await expect(popover).toContainText("gemini");
+    await expect(popover).toContainText("custom_provider");
     await expect(popover).toContainText(/Weekly\s*40%/);
     await expect(popover).toContainText(/Weekly\s*70%/);
     await expect(popover).toContainText(/Weekly\s*95%/);

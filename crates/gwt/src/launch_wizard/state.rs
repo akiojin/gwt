@@ -1890,8 +1890,7 @@ impl LaunchWizardState {
     }
 
     pub(super) fn agent_has_models(&self) -> bool {
-        self.launch_target_is_agent()
-            && matches!(self.effective_agent_id(), "claude" | "codex" | "gemini")
+        self.launch_target_is_agent() && matches!(self.effective_agent_id(), "claude" | "codex")
     }
 
     pub(super) fn agent_uses_reasoning_step(&self) -> bool {
@@ -2092,7 +2091,7 @@ impl LaunchWizardState {
         }
         // SPEC-2014 2026-05-18 amendment FR-E:
         // Downgrade Resume → Continue when the current agent does not support
-        // an interactive picker (e.g. Gemini / OpenCode / OpenClaw / Hermes /
+        // an interactive picker (e.g. OpenCode / OpenClaw / Hermes /
         // Copilot / custom agents without opt-in capability).
         if self.mode == "resume" && !self.current_agent_supports_resume_picker() {
             self.mode = "continue".to_string();
@@ -3018,7 +3017,7 @@ mod tests {
     // Switching to a picker-unsupported agent while Resume is selected must
     // downgrade to Continue and clear any stale resume_session_id.
     #[test]
-    fn normalize_execution_mode_downgrades_resume_when_switching_to_gemini() {
+    fn normalize_execution_mode_downgrades_resume_when_switching_to_opencode() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -3032,8 +3031,8 @@ mod tests {
         state.normalize_execution_mode();
         assert_eq!(state.mode, "resume");
 
-        // Switch to Gemini → Resume downgrades to Continue.
-        state.agent_id = "gemini".to_string();
+        // Switch to OpenCode → Resume downgrades to Continue.
+        state.agent_id = "opencode".to_string();
         state.normalize_execution_mode();
         assert_eq!(state.mode, "continue");
         assert!(state.resume_session_id.is_none());
@@ -3939,8 +3938,8 @@ mod tests {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/current"), "feature/current"),
             vec![AgentOption {
-                id: "gemini".to_string(),
-                name: "Gemini CLI".to_string(),
+                id: "openclaw".to_string(),
+                name: "OpenClaw".to_string(),
                 available: true,
                 installed_version: Some("1.0.0".to_string()),
                 versions: vec!["1.0.0".to_string()],
@@ -3948,7 +3947,7 @@ mod tests {
             }],
             vec![quick_start_entry(
                 "session-1",
-                "gemini",
+                "openclaw",
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,

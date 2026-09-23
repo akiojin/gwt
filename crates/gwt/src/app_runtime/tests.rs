@@ -35795,7 +35795,7 @@ fn app_runtime_resume_workspace_agent_metadata_only_nonpicker_never_starts_new_w
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let mut session =
-        gwt_agent::Session::new(&repo, "work/metadata-only", gwt_agent::AgentId::Gemini);
+        gwt_agent::Session::new(&repo, "work/metadata-only", gwt_agent::AgentId::Copilot);
     session.id = "session-metadata-only".to_string();
     session.agent_session_id = None;
     session.save(&runtime.sessions_dir).expect("save session");
