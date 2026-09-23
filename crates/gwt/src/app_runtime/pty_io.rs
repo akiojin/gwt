@@ -911,7 +911,14 @@ impl AppRuntime {
         });
         let pty_writers = Arc::clone(&self.pty_writers);
         let sessions_dir = self.sessions_dir.clone();
-        let proxy = self.proxy.clone();
+        // Durable cleanup belongs to the captured pane even after its project
+        // closes. Its in-memory completion, however, must not mutate a reopened
+        // project's PM close fence or monitor snapshot.
+        let proxy = project_root
+            .as_deref()
+            .and_then(|root| self.project_context_for_root(root))
+            .map(|context| self.proxy.for_project(context))
+            .unwrap_or_else(|| self.proxy.clone());
         let window_lifecycle_generations = Arc::clone(&self.window_lifecycle_generations);
         let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let window_id = window_id.to_string();
@@ -1588,7 +1595,9 @@ impl AppRuntime {
                 Some((identity, runtime.incarnation))
             });
         self.remove_window_state_tracking(window_id);
-        self.pending_pm_wakes.remove(window_id);
+        for state in self.project_states.values_mut() {
+            state.pending_pm_wakes.remove(window_id);
+        }
         self.deregister_pty_writer(window_id);
         let mut threads = RuntimeStopThreads {
             output_thread: None,
