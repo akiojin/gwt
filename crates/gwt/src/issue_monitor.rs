@@ -2634,6 +2634,25 @@ enum StopIdentityMatch {
 }
 
 impl StopIdentityMatch {
+    /// SPEC #3590 FR-005 / Issue #3578: the window is never grounds for
+    /// refusing an operator. The PM supervises from its own window and quotes
+    /// none, and the pane a stalled launch held may already be gone — refusing
+    /// either left the slot with no way back. The claim and delivery still
+    /// name the launch; the answer reports the window the monitor holds.
+    ///
+    /// Runtime callers settle the exact window they observed, so a `Launching`
+    /// issue (no window yet) must agree that there is none.
+    fn windows_agree(self, requested: Option<&str>, live: Option<&str>) -> bool {
+        match self {
+            Self::Exact => match (requested, live) {
+                (Some(requested), Some(live)) => issue_monitor_window_ids_match(live, requested),
+                (None, None) => true,
+                _ => false,
+            },
+            Self::Operator => true,
+        }
+    }
+
     fn claims_agree(self, requested: Option<&str>, live: Option<&str>) -> bool {
         match self {
             Self::Exact => requested == live,
@@ -2678,6 +2697,9 @@ pub enum IssueMonitorStopMismatch {
     NotRunning,
     ClaimMismatch,
     DeliveryMismatch,
+    /// Runtime exact settlement only: the observed window is not the one the
+    /// launch holds. Operator stop / failover never refuse over the window
+    /// (SPEC #3590 FR-005).
     WindowMismatch,
 }
 
@@ -14675,12 +14697,8 @@ impl IssueMonitorState {
             return Err(IssueMonitorStopMismatch::DeliveryMismatch);
         }
         let live_window = self.launched_window_id(issue_number);
-        match (target.window_id.as_deref(), live_window.as_deref()) {
-            (Some(requested), Some(live)) if issue_monitor_window_ids_match(live, requested) => {}
-            // A `Launching` issue has no window yet, so both sides must agree
-            // that there is none.
-            (None, None) => {}
-            _ => return Err(IssueMonitorStopMismatch::WindowMismatch),
+        if !identity_match.windows_agree(target.window_id.as_deref(), live_window.as_deref()) {
+            return Err(IssueMonitorStopMismatch::WindowMismatch);
         }
         Ok(live_window)
     }
@@ -21694,20 +21712,6 @@ mod tests {
             ),
             (
                 IssueMonitorStopTarget {
-                    window_id: Some("tab-1::agent-2".to_string()),
-                    ..good.clone()
-                },
-                IssueMonitorStopMismatch::WindowMismatch,
-            ),
-            (
-                IssueMonitorStopTarget {
-                    window_id: None,
-                    ..good.clone()
-                },
-                IssueMonitorStopMismatch::WindowMismatch,
-            ),
-            (
-                IssueMonitorStopTarget {
                     delivery_id: Some("stale-delivery".to_string()),
                     ..good.clone()
                 },
@@ -21737,6 +21741,42 @@ mod tests {
                 Some("tab-1::agent-1"),
                 "a rejected stop must not detach the window"
             );
+        }
+    }
+
+    /// SPEC #3590 FR-005 / Issue #3578: an operator stop is not refused over the
+    /// window. The PM supervises from its own window and usually quotes none;
+    /// the pane it would name may already be gone. Omitting the window or
+    /// naming another one releases the live launch and returns the window the
+    /// monitor actually holds, so the caller closes the right pane.
+    #[test]
+    fn operator_stop_and_failover_release_the_launch_whatever_window_is_named() {
+        for requested in [None, Some("tab-1::agent-gone".to_string())] {
+            let base = launched_monitor(42, "tab-1::agent-1");
+            let target = IssueMonitorStopTarget {
+                window_id: requested.clone(),
+                ..stop_target(&base, 42)
+            };
+
+            let mut stopped = base.clone();
+            assert_eq!(
+                stopped.stop_only(&target, "stalled", "2026-09-23T00:00:00Z"),
+                IssueMonitorStopOutcome::Stopped {
+                    window_id: "tab-1::agent-1".to_string()
+                },
+                "stop naming {requested:?} must release the launch"
+            );
+            assert_eq!(stopped.active_count(), 0);
+
+            let mut failed_over = base.clone();
+            assert_eq!(
+                failed_over.failover_restart(&target, "stalled", "2026-09-23T00:00:00Z"),
+                IssueMonitorFailoverOutcome::Restarting {
+                    stopped_window_id: Some("tab-1::agent-1".to_string())
+                },
+                "failover naming {requested:?} must release the launch"
+            );
+            assert_eq!(failed_over.active_count(), 0);
         }
     }
 
@@ -22136,22 +22176,6 @@ mod tests {
             Some("rate limit"),
             "the stop must be durable and diagnosable after a reload"
         );
-
-        // And a mismatch must still fail closed with no inbox to lean on.
-        let mut fresh =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launched.prefs());
-        assert_eq!(
-            fresh.stop_only(
-                &IssueMonitorStopTarget {
-                    window_id: Some("tab-1::agent-2".to_string()),
-                    ..target.clone()
-                },
-                "rate limit",
-                "2026-08-07T00:00:00Z"
-            ),
-            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::WindowMismatch)
-        );
-        assert_eq!(fresh.active_count(), 1);
     }
 
     /// SPEC-3431 FR-033 / T-087c: the running daemon must converge on a stop
@@ -22728,13 +22752,6 @@ mod tests {
         };
 
         for (target, expected) in [
-            (
-                IssueMonitorStopTarget {
-                    window_id: Some("tab-1::agent-2".to_string()),
-                    ..good.clone()
-                },
-                IssueMonitorStopMismatch::WindowMismatch,
-            ),
             (
                 IssueMonitorStopTarget {
                     claim_id: Some("foreign".to_string()),
