@@ -3609,13 +3609,14 @@ impl AppRuntime {
         wizard_id: String,
         candidates: Vec<String>,
     ) -> Vec<OutboundEvent> {
-        if let Some(session) = self.launch_wizard.as_mut() {
-            if session.wizard_id == wizard_id {
-                session.wizard.open_branch_candidates = candidates;
-                return vec![self.launch_wizard_state_outbound()];
-            }
-        }
-        Vec::new()
+        let Some(context) = self.project_context_for_wizard(&wizard_id) else {
+            return Vec::new();
+        };
+        let Some(session) = self.launch_wizard_for_mut(&context) else {
+            return Vec::new();
+        };
+        session.wizard.open_branch_candidates = candidates;
+        vec![self.launch_wizard_state_outbound(&context)]
     }
 
     pub(crate) fn live_sessions_for_branch(
@@ -3668,6 +3669,114 @@ impl AppRuntime {
             .filter(|session| session.tab_id == tab_id)
             .map(|session| session.branch_name.clone())
             .collect()
+    }
+
+    /// Release only the exact durable launch carried by a stale worker. The
+    /// reopened project's window and pending-operation maps are never touched.
+    pub(crate) fn cleanup_stale_project_completion(&self, event: &UserEvent) {
+        let completion = match event {
+            UserEvent::LaunchComplete { result, .. } => match result.as_ref() {
+                Ok(completion) => completion,
+                Err(_) => return, // The worker already rolls back failed preparation.
+            },
+            UserEvent::ProjectCompletion { event, .. } => {
+                self.cleanup_stale_project_completion(event);
+                return;
+            }
+            _ => return,
+        };
+        let (launch, session_id, branch, _, worktree, agent, issue, _, _, mode, prepared, runtime) =
+            completion;
+        self.revoke_unbound_agent_capability(
+            launch
+                .env
+                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                .map(String::as_str),
+        );
+        let cleanup = (|| -> Result<(), String> {
+            if let Some(handshake) = &runtime.active_launch_handshake {
+                if !gwt::cli::execution_state::finish_active_session_launch_handshake(
+                    &self.sessions_dir,
+                    handshake,
+                )
+                .map_err(|error| error.to_string())?
+                {
+                    return Ok(()); // A newer launch owns this Session's handshake.
+                }
+            }
+            if self
+                .active_agent_sessions
+                .values()
+                .any(|active| &active.session_id == session_id)
+            {
+                return Ok(());
+            }
+            let Some(expected) = runtime.expected_execution_identity.as_ref() else {
+                return Ok(());
+            };
+            let current =
+                gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+                    .ok()
+                    .and_then(|session| {
+                        gwt_agent::SessionExecutionIdentity::from_session(&session).ok()
+                    })
+                    .flatten();
+            if current.as_ref() != Some(expected) {
+                return Ok(());
+            }
+            let reason = "project generation closed before launch PTY handoff";
+            if let Some(pending) = self.pending_continue_work.values().find(|pending| {
+                pending.binding.session_id == *session_id
+                    && super::continuation::pending_continue_work_session_identity(pending)
+                        .as_ref()
+                        .ok()
+                        == Some(expected)
+            }) {
+                super::continuation::abort_prepared_execution_and_remove_exact_session(
+                    &pending.worktree_path,
+                    pending.owner,
+                    &pending.execution,
+                    reason,
+                    &self.sessions_dir,
+                    expected,
+                    || Ok(()),
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            if launch
+                .env
+                .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+            {
+                return rollback_materialized_fresh_execution_launch(
+                    &self.sessions_dir,
+                    session_id,
+                    worktree,
+                    reason,
+                    agent,
+                );
+            }
+            if *prepared || *mode == gwt_agent::SessionMode::Normal {
+                let genesis = materialized_genesis_launch_from_session(
+                    &self.sessions_dir,
+                    session_id,
+                    worktree,
+                    expected.project_state_root.as_deref().unwrap_or(worktree),
+                    branch,
+                    *issue,
+                    agent,
+                )?;
+                terminalize_materialized_genesis_launch(
+                    &self.sessions_dir,
+                    genesis.as_ref(),
+                    reason,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = cleanup {
+            tracing::warn!(%session_id, %error, "stale project launch retained exact recovery evidence");
+        }
     }
 
     pub(crate) fn handle_launch_complete(
@@ -4292,20 +4401,24 @@ impl AppRuntime {
                         }
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
-                        let mut events = vec![self.workspace_state_broadcast()];
+                        let mut events = self
+                            .project_context(&tab_id)
+                            .map(|context| self.workspace_state_broadcast(&context))
+                            .into_iter()
+                            .collect::<Vec<_>>();
                         if pm_launch_registered {
-                            events.extend(self.pm_status_broadcast_events());
+                            if let Some(context) = self.project_context(&tab_id) {
+                                events.extend(self.pm_status_broadcast_events(&context));
+                            }
                         }
-                        if workspace_projection_updated
-                            && self.active_tab_id.as_deref() == Some(tab_id.as_str())
-                        {
+                        if workspace_projection_updated {
                             // Issue #4406 AC-5: acknowledge the launch from the
                             // cached rail and rebuild off the event loop.
                             // Rebuilding here made `LaunchComplete` the second
                             // heaviest dispatch of the 20 minute window
                             // (436,894ms over 71 launches).
                             if let Some(event) =
-                                self.cached_active_work_projection_broadcast_for_active_tab()
+                                self.cached_active_work_projection_broadcast_for_tab(&tab_id)
                             {
                                 events.push(event);
                             }
@@ -4318,12 +4431,15 @@ impl AppRuntime {
                         let composed_status = self
                             .window_status(&window_id)
                             .unwrap_or(WindowProcessStatus::Running);
-                        events.extend(Self::status_events(
-                            window_id.clone(),
-                            composed_status,
-                            is_fresh_execution_launch
-                                .then(|| "Waiting for authenticated SessionStart...".to_string()),
-                        ));
+                        events.extend(
+                            self.status_events(
+                                window_id.clone(),
+                                composed_status,
+                                is_fresh_execution_launch.then(|| {
+                                    "Waiting for authenticated SessionStart...".to_string()
+                                }),
+                            ),
+                        );
                         let autonomous_handoff_delivery =
                             launch_feedback_context.as_ref().and_then(|context| {
                                 context
@@ -4549,11 +4665,15 @@ impl AppRuntime {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         self.launch_error_terminal_details.remove(&window_id);
-                        let mut events = vec![self.workspace_state_broadcast()];
+                        let mut events = self
+                            .project_context(&address.tab_id)
+                            .map(|context| self.workspace_state_broadcast(&context))
+                            .into_iter()
+                            .collect::<Vec<_>>();
                         let composed_status = self
                             .window_status(&window_id)
                             .unwrap_or(WindowProcessStatus::Running);
-                        events.extend(Self::status_events(window_id, composed_status, None));
+                        events.extend(self.status_events(window_id, composed_status, None));
                         events
                     }
                     Err(error) => {
@@ -4577,7 +4697,7 @@ impl AppRuntime {
         let window_id = combined_window_id(tab_id, raw_id);
         if !preset.requires_process() {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
-            return Self::status_events(window_id, WindowProcessStatus::Running, None);
+            return self.status_events(window_id, WindowProcessStatus::Running, None);
         }
         // Issue #4145 AC-1: a process pane is created synchronously here —
         // shell resolution, env, resource policy and the PTY spawn all happen
@@ -4598,7 +4718,7 @@ impl AppRuntime {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
                     .insert(window_id.clone(), detail.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
         };
 
@@ -4609,7 +4729,7 @@ impl AppRuntime {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
                     .insert(window_id.clone(), detail.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
         };
 
@@ -4618,7 +4738,7 @@ impl AppRuntime {
             Err(error) => {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
             }
         }
         .with_project_root(&project_root);
@@ -4643,7 +4763,7 @@ impl AppRuntime {
                 Err(error) => {
                     self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                     self.window_details.insert(window_id.clone(), error.clone());
-                    return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+                    return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
                 }
             }
         } else {
@@ -4688,7 +4808,7 @@ impl AppRuntime {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
                     .insert(window_id.clone(), detail.clone());
-                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
             if let Some(tab) = self.tab_mut(tab_id) {
                 let _ = tab
@@ -4731,7 +4851,7 @@ impl AppRuntime {
                 let composed_status = self
                     .window_status(&window_id)
                     .unwrap_or(WindowProcessStatus::Running);
-                Self::status_events(window_id, composed_status, None)
+                self.status_events(window_id, composed_status, None)
             }
             Err(error) => {
                 if let Some(id) = stage_id {
@@ -4742,7 +4862,7 @@ impl AppRuntime {
                 }
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
-                Self::status_events(window_id, WindowProcessStatus::Error, Some(error))
+                self.status_events(window_id, WindowProcessStatus::Error, Some(error))
             }
         }
     }
@@ -5193,7 +5313,12 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let events = self.focus_window_events(window_id, bounds);
         if events.is_empty() {
-            vec![self.workspace_state_broadcast()]
+            self.window_lookup
+                .get(window_id)
+                .and_then(|address| self.project_context(&address.tab_id))
+                .map(|context| self.workspace_state_broadcast(&context))
+                .into_iter()
+                .collect()
         } else {
             events
         }
@@ -5205,6 +5330,9 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
+        let context = self
+            .project_context(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
             placement,
             workspace_resume_context,
@@ -5371,15 +5499,15 @@ impl AppRuntime {
                 .insert(key, (window_id.clone(), std::time::Instant::now()));
         }
 
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = vec![self.workspace_state_broadcast(&context)];
         let composed_status = self.window_status(&window_id).unwrap_or(initial_status);
-        events.extend(Self::status_events(
+        events.extend(self.status_events(
             window_id.clone(),
             composed_status,
             Some("Launching...".to_string()),
         ));
 
-        let proxy = self.proxy.clone();
+        let proxy = self.proxy.for_project(context);
         let sessions_dir = self.sessions_dir.clone();
         let agent_capability_issuer = self.agent_capability_issuer.clone();
         if let Some(context) = workspace_resume_context {
@@ -6103,8 +6231,10 @@ impl AppRuntime {
                         runtime_context,
                     ),
                     |proxy, project_index_root| {
-                        crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
-                            .spawn(proxy, project_index_root);
+                        crate::project_index_bootstrap::request_project_index_refresh(
+                            &proxy,
+                            project_index_root,
+                        );
                     },
                 );
             }
@@ -6141,7 +6271,12 @@ impl AppRuntime {
     ///   worktree deletion remains an independent vetted cleanup operation. A
     ///   `done` close records a Done event and `discarded` records a Discard
     ///   event. Re-closing an already-closed Work is a noop.
-    pub(crate) fn close_work(&mut self, work_id: &str, close_kind: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn close_work(
+        &mut self,
+        context: &super::ProjectContext,
+        work_id: &str,
+        close_kind: &str,
+    ) -> Vec<OutboundEvent> {
         let work_id = work_id.trim();
         if work_id.is_empty() {
             return Vec::new();
@@ -6159,10 +6294,10 @@ impl AppRuntime {
             }
         };
 
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            tracing::warn!(work_id = %work_id, "Work close has no active project tab");
+        if !self.project_context_is_current(context) {
             return Vec::new();
-        };
+        }
+        let project_root = context.project_root.clone();
 
         // The session id of an agent-session Work is encoded in the Work id
         // (`work-session-<session_id>`). A live agent owns the Work when any
@@ -6224,7 +6359,7 @@ impl AppRuntime {
 
         // Broadcast the refreshed projection so the Work leaves the active
         // surface for every connected client.
-        self.active_work_projection_broadcast_for_active_tab()
+        self.active_work_projection_broadcast_for_tab(&context.tab_id)
             .into_iter()
             .collect()
     }

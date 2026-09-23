@@ -32,6 +32,7 @@ export const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set([]));
 // kind not in this set preserves original order and every occurrence.
 export const DEFAULT_COALESCE_KINDS = Object.freeze(
   new Set([
+    "hub_state",
     "workspace_state",
     "active_work_projection",
     "active_work_projection_patch",

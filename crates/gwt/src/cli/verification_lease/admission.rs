@@ -662,6 +662,8 @@ mod tests {
             window_ms: 1_200,
             host_cpu_percent: Some(95.0),
             delegated: false,
+            parent_gone: false,
+            workload_processes: 1,
         };
         let notice = holder_notice(&status, Some(&starved));
         assert!(notice.detail.contains("pid 21468"), "{}", notice.detail);
@@ -677,6 +679,8 @@ mod tests {
             window_ms: 1_200,
             host_cpu_percent: Some(95.0),
             delegated: false,
+            parent_gone: false,
+            workload_processes: 1,
         };
         let notice = holder_notice(&status, Some(&progressing));
         assert!(notice.detail.contains("progressing"), "{}", notice.detail);

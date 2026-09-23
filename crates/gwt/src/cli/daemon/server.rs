@@ -10746,9 +10746,15 @@ exit 0
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() + Duration::from_secs(20),
-        );
+        // Issue #4625: the contract here is the number of open-PR reads, not
+        // how fast the scan finishes, so no ambient scan deadline is installed.
+        // Under a saturated runner a wall-clock deadline expired in
+        // CandidateLoad and reported a load spike as a read-count regression.
+        // Deadline behavior keeps its own tests:
+        // `daemon_scan_continues_to_launch_when_open_pr_readback_exceeds_its_budget`,
+        // `issue_monitor_worker::tests::a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window`,
+        // `issue_monitor_worker::tests::the_readback_fan_out_stops_while_the_launch_stage_still_has_budget`
+        // and `issue_monitor_worker::tests::proposal_return_deadline_expiry_is_stage_typed`.
         let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
             .expect("a queue-scale readback must not abort the scan");
 

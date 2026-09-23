@@ -31,6 +31,13 @@
 //! "may be hung" is now reserved for the one measurement that supports it —
 //! the tree gained no CPU at all and nothing started or exited. The #4426
 //! holder, wedged on `git-credential-manager` prompts, is that case.
+//!
+//! Issue #4633 adds the case none of those verdicts covers: a holder whose
+//! requester is gone. Closing an agent window left its `gwtd verify.run`
+//! alive under `ppid 1` with nothing left to run, and it kept the host-wide
+//! lease until the TTL. That verdict rests on process *structure* — the parent
+//! exited, and no command of the holder's is left in either tree — not on a
+//! CPU rate, because a rate cannot tell a dead holder from a slow one.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
@@ -47,6 +54,12 @@ pub(crate) const HOST_SATURATED_CPU_PERCENT: f64 = 80.0;
 /// one. Long enough that a leaf at a single percent of one core still shows
 /// a gain under Linux's 10 ms clock tick.
 pub(crate) const PROGRESS_WINDOW: Duration = Duration::from_millis(1_200);
+/// Below this share of one core, CPU a working set gained is scheduler noise
+/// — timer and socket wakeups of processes that only wait — rather than a
+/// workload moving (Issue #4633 AC-5). An idle `gwtd` wakes for well under
+/// 0.1% of a core; the slowest real workload measured, the I/O-bound ChromaDB
+/// matrix, reads 1.7% (Issue #4409 AC-9). Half a percent sits between them.
+pub(crate) const PROGRESS_FLOOR_CPU_PERCENT: f64 = 0.5;
 
 /// Where the work this lease protects actually runs (Issue #4561).
 ///
@@ -62,9 +75,9 @@ pub(crate) enum HolderWorkload {
     /// Inside the holder's own tree, which `owner_pid`'s descendants measure.
     Owned,
     /// Launched from other process trees. `hosts` are the launchers — the
-    /// project's live daemons — whose descendants may carry the work. The
-    /// launchers themselves are excluded from the working set: a daemon burns
-    /// CPU on scans and hooks of its own, and that is not this lease's work.
+    /// project's live daemons — whose verification children carry the work.
+    /// Only those children count: a daemon runs scans and hook children of
+    /// its own, and that is not this lease's work (Issue #4633 AC-5).
     Delegated { hosts: Vec<u32> },
 }
 
@@ -87,6 +100,10 @@ pub(crate) struct ProcessSample {
     pub pid: u32,
     pub parent: Option<u32>,
     pub cpu_ms: u64,
+    /// The process leads its own session. The daemon `setsid`s every
+    /// verification child it spawns (Issue #4409), and nothing else it runs,
+    /// so this is what separates a delegated workload from its housekeeping.
+    pub session_leader: bool,
 }
 
 /// How the lease holder's process tree is doing.
@@ -114,6 +131,12 @@ pub(crate) struct HolderActivity {
     /// work is wedged, or this reading never found it — so the verdict may
     /// not claim the first one.
     pub delegated: bool,
+    /// The holder's parent exited: it was reparented to `init`, or its parent
+    /// pid no longer names a live process (Issue #4633 AC-1).
+    pub parent_gone: bool,
+    /// Processes in the working set besides the holder itself, at the later
+    /// reading: its own descendants plus any delegated verification child.
+    pub workload_processes: usize,
 }
 
 impl HolderActivity {
@@ -121,9 +144,23 @@ impl HolderActivity {
         u128::from(self.held_ms) >= STARVED_AFTER.as_millis()
     }
 
-    /// The tree moved: it gained CPU, or a process started or exited.
+    /// The tree moved: it gained more CPU than scheduler noise, or a
+    /// process started or exited.
     fn advancing(&self) -> bool {
-        self.cpu_gained_ms > 0 || self.turnover
+        self.cpu_percent >= PROGRESS_FLOOR_CPU_PERCENT || self.turnover
+    }
+
+    /// The requester is gone and the holder has nothing left to finish
+    /// (Issue #4633 AC-1): its parent exited, no command of its own is alive
+    /// in its tree or under the daemon, and it gained no more than noise.
+    ///
+    /// A live holder cannot meet this. Its parent is the agent, or the daemon
+    /// for a daemon-spawned holder; a holder that lost its parent mid-run
+    /// still has the command it is waiting on. Host load cannot produce it
+    /// either — saturation slows a process, it does not reparent it — so a
+    /// starved holder is never read as an orphan.
+    pub(crate) fn orphaned(&self) -> bool {
+        self.parent_gone && self.workload_processes == 0 && !self.advancing()
     }
 
     /// Barely scheduled on a saturated host: runnable, just not getting a
@@ -152,7 +189,9 @@ impl HolderActivity {
     }
 
     pub(crate) fn state(&self) -> &'static str {
-        if self.undecidable() {
+        if self.orphaned() {
+            "orphaned"
+        } else if self.undecidable() {
             "unknown"
         } else if self.starved() {
             "starved"
@@ -168,6 +207,14 @@ impl HolderActivity {
         let cpu = self.cpu_percent;
         let processes = self.processes;
         let window = self.window_ms as f64 / 1000.0;
+        if self.orphaned() {
+            return format!(
+                "holder orphaned: held {held}, its parent process exited and no command of its \
+                 own is left running — in its tree or under the daemon — over the last \
+                 {window:.1}s. Nobody is waiting for this run and it will not release the lease \
+                 before the TTL; reclaim it with `verify.lease.release` and a reason"
+            );
+        }
         if self.undecidable() {
             return format!(
                 "holder state unknown: held {held}, it launched its commands outside its own \
@@ -187,9 +234,10 @@ impl HolderActivity {
         }
         if self.wedged() {
             return format!(
-                "holder stalled: held {held}, its {processes} processes gained no CPU time over \
-                 the last {window:.1}s and none started or exited — it is blocked waiting (I/O, a \
-                 lock or a prompt) and may be hung"
+                "holder stalled: held {held}, its {processes} processes gained no CPU time beyond \
+                 scheduler noise (< {PROGRESS_FLOOR_CPU_PERCENT}% of one core) over the last \
+                 {window:.1}s and none started or exited — it is blocked waiting (I/O, a lock or \
+                 a prompt) and may be hung"
             );
         }
         let gained = self.cpu_gained_ms;
@@ -256,6 +304,11 @@ pub(crate) fn activity_from_samples(
     }
     let turnover = tree != earlier_tree;
     let cpu_percent = cpu_gained_ms as f64 / window_ms.max(1) as f64 * 100.0;
+    let parent_gone = second
+        .iter()
+        .find(|sample| sample.pid == owner_pid)
+        .and_then(|owner| owner.parent)
+        .is_none_or(|parent| parent <= 1 || !second.iter().any(|sample| sample.pid == parent));
     Some(HolderActivity {
         held_ms,
         cpu_percent,
@@ -265,19 +318,28 @@ pub(crate) fn activity_from_samples(
         window_ms,
         host_cpu_percent,
         delegated: workload.is_delegated(),
+        parent_gone,
+        workload_processes: tree.len().saturating_sub(1),
     })
 }
 
-/// A launcher's descendants without the launcher itself (Issue #4561).
+/// The verification children a launcher spawned, and their descendants
+/// (Issue #4561).
 ///
 /// The daemon is where the work was started from, not the work: it runs
 /// Issue Monitor scans and hook children of its own, and counting its CPU as
 /// this lease's progress would answer "progressing" for a holder whose
-/// commands died.
+/// commands died. Issue #4633 measured exactly that — a dead holder reported
+/// progressing on its daemon's hook children — so only the children that lead
+/// their own session, which the daemon makes of verification commands alone,
+/// are followed.
 fn delegated_descendants(host_pid: u32, samples: &[ProcessSample]) -> BTreeSet<u32> {
-    let mut tree = descendants(host_pid, samples).unwrap_or_default();
-    tree.remove(&host_pid);
-    tree
+    samples
+        .iter()
+        .filter(|sample| sample.parent == Some(host_pid) && sample.session_leader)
+        .filter_map(|child| descendants(child.pid, samples))
+        .flatten()
+        .collect()
 }
 
 /// `owner_pid` and every live descendant of it in `samples`, or `None` when
@@ -418,6 +480,7 @@ fn collect(system: &sysinfo::System) -> Vec<ProcessSample> {
             pid: process.pid().as_u32(),
             parent: process.parent().map(sysinfo::Pid::as_u32),
             cpu_ms: process.accumulated_cpu_time(),
+            session_leader: cfg!(unix) && process.session_id() == Some(process.pid()),
         })
         .collect()
 }
@@ -428,12 +491,30 @@ mod tests {
 
     const WINDOW_MS: u64 = 1_000;
 
+    /// The agent that launched `gwtd`. Every holder in these fixtures is
+    /// still attached to it unless a test says otherwise.
+    const AGENT_PID: u32 = 700;
+
     fn sample(pid: u32, parent: Option<u32>, cpu_ms: u64) -> ProcessSample {
         ProcessSample {
             pid,
             parent,
             cpu_ms,
+            session_leader: false,
         }
+    }
+
+    /// A daemon-spawned verification child: `setsid` makes it lead its own
+    /// session, which is what tells it apart from the daemon's own work.
+    fn leader(pid: u32, parent: Option<u32>, cpu_ms: u64) -> ProcessSample {
+        ProcessSample {
+            session_leader: true,
+            ..sample(pid, parent, cpu_ms)
+        }
+    }
+
+    fn agent() -> ProcessSample {
+        sample(AGENT_PID, Some(1), 50_000)
     }
 
     fn activity(
@@ -456,9 +537,10 @@ mod tests {
 
     /// `gwtd` waits on `cargo`, which waits on the binary that does the work.
     /// Only the last one is asked whether the tree is moving.
-    fn tree(leaf_cpu_ms: u64) -> [ProcessSample; 4] {
+    fn tree(leaf_cpu_ms: u64) -> [ProcessSample; 5] {
         [
-            sample(21468, Some(1), 11_120),
+            agent(),
+            sample(21468, Some(AGENT_PID), 11_120),
             sample(86652, Some(21468), 2_430),
             sample(16492, Some(86652), leaf_cpu_ms),
             // An unrelated busy process must not lend the holder its CPU.
@@ -502,7 +584,8 @@ mod tests {
     #[test]
     fn a_tree_turning_over_short_lived_children_is_progressing() {
         let first = [
-            sample(95217, Some(1), 80),
+            agent(),
+            sample(95217, Some(AGENT_PID), 80),
             sample(96677, Some(95217), 560),
             sample(98114, Some(96677), 3_920),
             sample(98275, Some(96677), 830),
@@ -511,7 +594,8 @@ mod tests {
         // The three `rustc` processes finished and a fresh one took over; it
         // has barely any CPU of its own yet.
         let second = [
-            sample(95217, Some(1), 80),
+            agent(),
+            sample(95217, Some(AGENT_PID), 80),
             sample(96677, Some(95217), 560),
             sample(98503, Some(96677), 30),
         ];
@@ -573,12 +657,14 @@ mod tests {
     #[test]
     fn a_tree_using_its_cores_is_progressing() {
         let first = [
-            sample(21468, Some(1), 1_000),
+            agent(),
+            sample(21468, Some(AGENT_PID), 1_000),
             sample(86652, Some(21468), 2_000),
             sample(16492, Some(86652), 90_000),
         ];
         let second = [
-            sample(21468, Some(1), 1_000),
+            agent(),
+            sample(21468, Some(AGENT_PID), 1_000),
             sample(86652, Some(21468), 2_000),
             sample(16492, Some(86652), 92_800),
         ];
@@ -592,7 +678,7 @@ mod tests {
     /// A young holder has not had time to show a trend.
     #[test]
     fn a_young_holder_is_never_stuck() {
-        let first = [sample(21468, Some(1), 10)];
+        let first = [agent(), sample(21468, Some(AGENT_PID), 10)];
         let activity = activity(&first, &first, 60_000, Some(95.0));
 
         assert!(activity.cpu_percent < STARVED_BELOW_CPU_PERCENT);
@@ -622,11 +708,12 @@ mod tests {
     /// waits on a socket with no children at all, while the verification it
     /// launched runs under the daemon — `cargo test` (`94966`) driving a test
     /// binary (`6491`) at a third of a core.
-    fn daemon_hosted(leaf_cpu_ms: u64) -> [ProcessSample; 4] {
+    fn daemon_hosted(leaf_cpu_ms: u64) -> [ProcessSample; 5] {
         [
-            sample(12121, Some(1), 4_100),
+            agent(),
+            sample(12121, Some(AGENT_PID), 4_100),
             sample(DAEMON_PID, Some(1), 900_000),
-            sample(94966, Some(DAEMON_PID), 2_430),
+            leader(94966, Some(DAEMON_PID), 2_430),
             sample(6491, Some(94966), leaf_cpu_ms),
         ]
     }
@@ -691,11 +778,13 @@ mod tests {
     #[test]
     fn the_daemons_own_cpu_is_not_the_holders_progress() {
         let idle = [
-            sample(12121, Some(1), 4_100),
+            agent(),
+            sample(12121, Some(AGENT_PID), 4_100),
             sample(DAEMON_PID, Some(1), 900_000),
         ];
         let busy = [
-            sample(12121, Some(1), 4_100),
+            agent(),
+            sample(12121, Some(AGENT_PID), 4_100),
             sample(DAEMON_PID, Some(1), 903_000),
         ];
         let activity = daemon_activity(&idle, &busy, 499_762);
@@ -712,6 +801,151 @@ mod tests {
 
         assert!(!activity.delegated, "{activity:?}");
         assert_eq!(activity.state(), "stalled");
+    }
+
+    /// Issue #4633 AC-5: the reading behind the "progressing" report for a
+    /// dead holder. Hook children the daemon runs for itself come and go and
+    /// burn a few milliseconds each; they are not a verification this lease
+    /// launched, so they must not count as its progress.
+    #[test]
+    fn the_daemons_housekeeping_children_are_not_the_holders_progress() {
+        let first = [
+            agent(),
+            sample(12121, Some(AGENT_PID), 4_100),
+            sample(DAEMON_PID, Some(1), 900_000),
+            sample(95001, Some(DAEMON_PID), 10),
+        ];
+        let second = [
+            agent(),
+            sample(12121, Some(AGENT_PID), 4_100),
+            sample(DAEMON_PID, Some(1), 900_400),
+            sample(95001, Some(DAEMON_PID), 42),
+            sample(95002, Some(DAEMON_PID), 50),
+        ];
+        let activity = daemon_activity(&first, &second, 1_480_094);
+
+        assert_eq!(activity.cpu_gained_ms, 0, "{activity:?}");
+        assert!(!activity.turnover, "{activity:?}");
+        assert_eq!(activity.state(), "unknown", "{activity:?}");
+    }
+
+    /// Issue #4633 AC-5: a few milliseconds over a window is scheduler noise
+    /// — timers and socket wakeups of a process that is only waiting — not a
+    /// workload moving. Counting it reported a dead holder as progressing.
+    #[test]
+    fn scheduler_noise_is_not_progress() {
+        let activity = activity(&tree(3_600), &tree(3_603), 7_260_000, Some(30.0));
+
+        assert!(
+            activity.cpu_percent < PROGRESS_FLOOR_CPU_PERCENT,
+            "{activity:?}"
+        );
+        assert_eq!(activity.state(), "stalled", "{activity:?}");
+    }
+
+    /// Issue #4633 AC-1/AC-6 (b): the 2026-09-22 reading. The window that
+    /// ran `verify.run` was closed; its `gwtd` survived with `ppid 1`, no
+    /// children, and no verification child left under the daemon. It holds
+    /// the lease for a requester that no longer exists.
+    #[test]
+    fn a_holder_whose_parent_exited_with_no_work_left_is_orphaned() {
+        let first = [
+            sample(70012, Some(1), 4_100),
+            sample(DAEMON_PID, Some(1), 900_000),
+            sample(95001, Some(DAEMON_PID), 10),
+        ];
+        let second = [
+            sample(70012, Some(1), 4_100),
+            sample(DAEMON_PID, Some(1), 900_220),
+            sample(95001, Some(DAEMON_PID), 42),
+        ];
+        let activity = activity_from_samples(
+            70012,
+            &delegated(),
+            1_480_094,
+            &first,
+            &second,
+            WINDOW_MS,
+            Some(95.0),
+        )
+        .expect("the owner is sampled");
+
+        assert!(activity.parent_gone, "{activity:?}");
+        assert_eq!(activity.state(), "orphaned", "{activity:?}");
+        let described = activity.describe();
+        assert!(described.contains("orphaned"), "{described}");
+        assert!(described.contains("verify.lease.release"), "{described}");
+        assert!(!described.contains("progressing"), "{described}");
+    }
+
+    /// A parent that is no longer in the process table is gone too — the
+    /// Windows shape, where a child keeps its dead parent's pid.
+    #[test]
+    fn a_holder_whose_parent_left_the_process_table_is_orphaned() {
+        let alone = [sample(21468, Some(AGENT_PID), 11_120)];
+        let activity = activity(&alone, &alone, 60_000, Some(30.0));
+
+        assert!(activity.parent_gone, "{activity:?}");
+        assert_eq!(activity.state(), "orphaned", "{activity:?}");
+    }
+
+    /// Losing the parent alone is not enough: a holder still running its
+    /// commands finishes them and releases the lease on its own.
+    #[test]
+    fn an_orphan_still_running_its_commands_is_not_orphaned() {
+        let first = [
+            sample(21468, Some(1), 11_120),
+            sample(86652, Some(21468), 2_430),
+            sample(16492, Some(86652), 3_600),
+        ];
+        let second = [
+            sample(21468, Some(1), 11_120),
+            sample(86652, Some(21468), 2_430),
+            sample(16492, Some(86652), 3_600),
+        ];
+        let activity = activity(&first, &second, 7_260_000, Some(30.0));
+
+        assert!(activity.parent_gone, "{activity:?}");
+        assert_ne!(activity.state(), "orphaned", "{activity:?}");
+    }
+
+    /// The same for a daemon-hosted holder: while its verification child is
+    /// alive under the daemon — even idle, waiting on the network — the
+    /// holder may still get an answer, so it is not reclaimable.
+    #[test]
+    fn a_daemon_hosted_orphan_with_a_live_verification_child_is_not_orphaned() {
+        let samples = [
+            sample(12121, Some(1), 4_100),
+            sample(DAEMON_PID, Some(1), 900_000),
+            leader(94966, Some(DAEMON_PID), 2_430),
+        ];
+        let activity = daemon_activity(&samples, &samples, 499_762);
+
+        assert!(activity.parent_gone, "{activity:?}");
+        assert_eq!(activity.state(), "unknown", "{activity:?}");
+    }
+
+    /// Issue #4633 AC-1/AC-6 (a): a live holder is never orphaned, however
+    /// quiet it is — the silent daemon-hosted reading stays `unknown`.
+    #[test]
+    fn a_quiet_holder_whose_parent_lives_is_not_orphaned() {
+        let activity = daemon_activity(&daemon_hosted(15_750), &daemon_hosted(15_750), 499_762);
+
+        assert!(!activity.parent_gone, "{activity:?}");
+        assert_ne!(activity.state(), "orphaned", "{activity:?}");
+    }
+
+    /// Issue #4633 AC-5: a starved holder is runnable and attached; the host
+    /// being busy cannot reparent it, so it stays `starved`. A real orphan on
+    /// the same saturated host is still called an orphan.
+    #[test]
+    fn saturation_never_turns_a_starved_holder_into_an_orphan() {
+        let starved = activity(&tree(3_600), &tree(3_614), 7_260_000, Some(95.0));
+        assert_eq!(starved.state(), "starved", "{starved:?}");
+
+        let alone = [sample(21468, Some(1), 11_120)];
+        let orphan = activity(&alone, &alone, 7_260_000, Some(95.0));
+        assert_eq!(orphan.state(), "orphaned", "{orphan:?}");
     }
 
     #[test]
