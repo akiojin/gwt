@@ -3061,17 +3061,36 @@ fn with_pm_worktree_refresh_lock<T>(
     project_dir: &Path,
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
+    with_pm_worktree_refresh_lock_policy(project_dir, false, operation)
+}
+
+/// Only acquisition contention, never an error from the protected operation.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct PmRefreshDeferred(String);
+
+fn with_pm_worktree_refresh_lock_policy<T>(
+    project_dir: &Path,
+    nonblocking: bool,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     let project_state = project_dir.join("project-state");
     ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(project_state.join("pm-refresh.lock"))?;
-    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    let path = project_state.join("pm-refresh.lock");
+    let lock = if nonblocking {
+        gwt_core::operation_deadline::NamedFileLock::try_acquire(&path, "pm.refresh.prompt")
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    io::Error::new(error.kind(), PmRefreshDeferred(error.to_string()))
+                } else {
+                    error
+                }
+            })?
+    } else {
+        gwt_core::operation_deadline::NamedFileLock::acquire(&path, "pm.refresh")?
+    };
     let result = operation();
-    let unlock = FileExt::unlock(&lock);
+    let unlock = lock.unlock();
     match (result, unlock) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
@@ -4198,6 +4217,21 @@ where
 pub fn refresh_pm_worktree_at_safe_boundary(
     worktree: &Path,
 ) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
+    refresh_pm_worktree_at_safe_boundary_with_policy(worktree, false)
+}
+
+/// The prompt may defer freshness work when another refresh already owns it.
+/// Ownership validation and failures after acquisition are unchanged.
+pub(crate) fn try_refresh_pm_worktree_at_safe_boundary(
+    worktree: &Path,
+) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
+    refresh_pm_worktree_at_safe_boundary_with_policy(worktree, true)
+}
+
+fn refresh_pm_worktree_at_safe_boundary_with_policy(
+    worktree: &Path,
+    nonblocking: bool,
+) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
     if !is_pm_worktree(worktree) {
         return Ok(None);
     }
@@ -4212,7 +4246,7 @@ pub fn refresh_pm_worktree_at_safe_boundary(
     };
     require_real_pm_scratch_directory(project_dir, "project directory")?;
     require_real_pm_scratch_directory(worktree, "PM worktree")?;
-    with_pm_worktree_refresh_lock(project_dir, || {
+    with_pm_worktree_refresh_lock_policy(project_dir, nonblocking, || {
         let git_root = match gwt_git::worktree::main_worktree_root(worktree) {
             Ok(git_root) => git_root,
             Err(error) => {
