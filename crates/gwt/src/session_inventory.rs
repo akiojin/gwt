@@ -43,10 +43,31 @@ pub struct WorktreeSessionCount {
 }
 
 pub fn observe_sessions(project_root: &Path, sessions_dir: &Path) -> SessionInventory {
+    observe_sessions_filtered(project_root, sessions_dir, None)
+}
+
+/// Observe one Session before cross-Session process deduplication. Recovery
+/// callers hold its Session lease and must also check every uncertainty.
+pub(crate) fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
+    observe_sessions_filtered(
+        session
+            .project_state_root
+            .as_deref()
+            .unwrap_or(&session.worktree_path),
+        sessions_dir,
+        Some(&session.id),
+    )
+}
+
+fn observe_sessions_filtered(
+    project_root: &Path,
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+) -> SessionInventory {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
     let mut inventory = SessionInventory::default();
-    let candidates = read_candidates(project_root, sessions_dir, &mut inventory);
+    let candidates = read_candidates(project_root, sessions_dir, session_id, &mut inventory);
     if candidates.is_empty() {
         return inventory;
     }
@@ -119,7 +140,7 @@ fn observe_with_processes(
     group_alive: impl Fn(u32) -> bool,
 ) -> SessionInventory {
     let mut inventory = SessionInventory::default();
-    let candidates = read_candidates(project_root, sessions_dir, &mut inventory);
+    let candidates = read_candidates(project_root, sessions_dir, None, &mut inventory);
     observe_candidates(candidates, processes, group_alive, &mut inventory, &[]);
     inventory
 }
@@ -146,6 +167,7 @@ fn normalized(path: &Path) -> PathBuf {
 fn read_candidates(
     project_root: &Path,
     sessions_dir: &Path,
+    session_id: Option<&str>,
     inventory: &mut SessionInventory,
 ) -> Vec<RuntimeCandidate> {
     let project_root = normalized(project_root);
@@ -168,6 +190,9 @@ fn read_candidates(
             let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
                 continue;
             };
+            if session_id.is_some_and(|expected| expected != id) {
+                continue;
+            }
             let session = match Session::load(&sessions_dir.join(format!("{id}.toml"))) {
                 Ok(session) => session,
                 Err(error) => {
@@ -569,7 +594,7 @@ mod tests {
         ]);
         let observe = |processes: &BTreeMap<u32, u64>| {
             let mut inventory = SessionInventory::default();
-            let candidates = read_candidates(temp.path(), &sessions, &mut inventory);
+            let candidates = read_candidates(temp.path(), &sessions, None, &mut inventory);
             observe_candidates(
                 candidates,
                 processes,

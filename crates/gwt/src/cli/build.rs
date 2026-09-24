@@ -180,8 +180,8 @@ fn managed_build_start_preflight<E: CliEnv>(
             push_start_preflight_refusal(
                 out,
                 "build_state_session_mismatch",
-                "an active build lifecycle belongs to another Session",
-                "execution.status",
+                "an active build lifecycle belongs to another Session; build.abort can close it after confirming that Session is gone",
+                "build.abort",
             );
             return false;
         }
@@ -455,6 +455,16 @@ fn run_after_quarantine_precheck<E: CliEnv>(
     completion_verification_hash: Option<&str>,
     held_trusted_dir: Option<&std::path::Path>,
 ) -> Result<i32, SpecOpsError> {
+    match abort_abandoned_build(env, &action, out) {
+        Ok(Some(code)) => return Ok(code),
+        Ok(None) => {}
+        Err(error) => {
+            out.push_str(&format!(
+                "{VERB}: abandoned lifecycle recovery failed: {error}\n"
+            ));
+            return Ok(1);
+        }
+    }
     let recovered_orphan = missing_build_work_recovery_identity(env, &action);
     if let Err(error) = if recovered_orphan.is_some() {
         Ok(())
@@ -573,6 +583,75 @@ fn run_after_quarantine_precheck<E: CliEnv>(
         }
     }
     Ok(code)
+}
+
+/// An old build is bookkeeping, not the new Session's Work. Abort only that
+/// lifecycle, under the old Session lease, once its runtime is known to be gone.
+fn abort_abandoned_build<E: CliEnv>(
+    env: &mut E,
+    action: &SkillStateAction,
+    out: &mut String,
+) -> Result<Option<i32>, String> {
+    let SkillStateAction::Abort { spec, .. } = action else {
+        return Ok(None);
+    };
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+    let Some(state) = gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if !state.active
+        || state.owner_spec != Some(*spec)
+        || state.session_id.trim().is_empty()
+        || session_id.trim().is_empty()
+        || state.session_id.trim() == session_id.trim()
+    {
+        return Ok(None);
+    }
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    gwt_agent::with_session_path_lease(&sessions_dir, &state.session_id, |holder| {
+        use crate::cli::execution_state::{
+            classify_exact_session_runtime, ExactSessionRuntimeDisposition,
+        };
+        let abandoned = match holder {
+            gwt_agent::SessionPathState::Missing => true,
+            gwt_agent::SessionPathState::Error(error) => return Err(error),
+            gwt_agent::SessionPathState::Present(holder) => {
+                match gwt_agent::SessionExecutionIdentity::from_session(&holder)
+                    .map_err(std::io::Error::other)?
+                {
+                    Some(identity) => matches!(
+                        classify_exact_session_runtime(&sessions_dir, &identity)?,
+                        ExactSessionRuntimeDisposition::Absent
+                            | ExactSessionRuntimeDisposition::Terminal(_)
+                            | ExactSessionRuntimeDisposition::Defunct(_)
+                            | ExactSessionRuntimeDisposition::HostDead
+                            | ExactSessionRuntimeDisposition::ChildExited
+                    ),
+                    None => {
+                        let observed =
+                            crate::session_inventory::observe_session(&holder, &sessions_dir);
+                        observed.sessions.is_empty() && observed.uncertainties.is_empty()
+                    }
+                }
+            }
+        };
+        if !abandoned {
+            return Ok(None);
+        }
+        if gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)?.as_ref() != Some(&state) {
+            return Err(std::io::Error::other(
+                "build lifecycle changed during recovery; retry build.abort",
+            ));
+        }
+        // Preserve the old Session identity and the reason via the ordinary
+        // finalizer. No Work terminalization or Execution settlement is sent.
+        skill_state_runtime::run(env, action.clone(), SKILL_NAME, SKILL_DISPLAY, VERB, out)
+            .map(Some)
+            .map_err(std::io::Error::other)
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// Recovery only abandons an orphaned lifecycle. Existing Work, denied Host
@@ -3870,6 +3949,169 @@ mod tests {
                 "{label}: invalid receipt must not create lifecycle state"
             );
             server.receive();
+        }
+    }
+
+    #[test]
+    fn abandoned_build_can_be_aborted_before_fresh_session_start() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            serde_json::json!({"schema_version": 1, "owner_number": 4687, "work_id": "fresh-work"}),
+        );
+        let (code, output, fixture) = run_active_action_with_identity(
+            SkillStateAction::Start { spec: 4687 },
+            Some(&server.forward_url),
+            Some("terminal-secret"),
+            true,
+            Some(4687),
+            "missing-owner",
+            Some("fresh-session"),
+        );
+        assert_eq!(code, 2, "{output}");
+        let refusal: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(refusal["recovery_operation"], "build.abort", "{output}");
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "fresh-session");
+        let _url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &server.forward_url);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "terminal-secret");
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            fixture.repo.join("managed-runtime.json"),
+        );
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let mut output = String::new();
+        let code = run(
+            &mut env,
+            SkillStateAction::Abort {
+                spec: 4687,
+                reason: Some("old Session no longer exists".to_string()),
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let closed = gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+            .unwrap()
+            .unwrap();
+        assert!(!closed.active);
+        assert_eq!(closed.session_id, "missing-owner");
+        server.assert_no_request();
+        assert_eq!(
+            run(
+                &mut env,
+                SkillStateAction::Start { spec: 4687 },
+                &mut output
+            )
+            .unwrap(),
+            0,
+            "{output}"
+        );
+        let restarted = gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+            .unwrap()
+            .unwrap();
+        assert!(restarted.active);
+        assert_eq!(restarted.session_id, "fresh-session");
+        server.receive();
+    }
+
+    #[test]
+    fn abandoned_build_abort_checks_runtime_and_preserves_execution_and_work() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for runtime in [
+            "absent",
+            "live",
+            "unknown",
+            "unbound-absent",
+            "unbound-live",
+            "unbound-unknown",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let mut fixture = BoundTerminalFixture::new();
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "fresh-session");
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let path = gwt_agent::runtime_state_path(&sessions, &fixture.session.id);
+            if !runtime.ends_with("absent") {
+                let identity = gwt_agent::SessionExecutionIdentity::from_session(&fixture.session)
+                    .unwrap()
+                    .unwrap();
+                let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+                let mut state = if runtime.ends_with("live") {
+                    gwt_agent::SessionRuntimeState::for_execution_process(
+                        gwt_agent::AgentStatus::Running,
+                        &identity,
+                        1,
+                        started,
+                        std::process::id(),
+                        started,
+                    )
+                } else {
+                    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+                };
+                if runtime.starts_with("unbound") {
+                    state.execution_identity = None;
+                }
+                state.save(&path).unwrap();
+            }
+            if runtime.starts_with("unbound") {
+                fixture.session.set_execution_binding(None).unwrap();
+                fixture.session.repo_hash = None;
+                fixture.session.worktree_path = fixture.git.repo.join("legacy-worktree");
+                std::fs::create_dir_all(&fixture.session.worktree_path).unwrap();
+                fixture.session.save(&sessions).unwrap();
+                if runtime == "unbound-live" {
+                    // Another Session's stale attribution must not deduplicate
+                    // away this exact owner's live process evidence.
+                    let mut other = fixture.session.clone();
+                    other.id = "aaa-other-session".to_string();
+                    other.save(&sessions).unwrap();
+                    std::fs::copy(&path, gwt_agent::runtime_state_path(&sessions, &other.id))
+                        .unwrap();
+                }
+            }
+            let execution = crate::cli::execution_state::load(&fixture.git.repo).unwrap();
+            let works_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+            let works = std::fs::read(&works_path).unwrap();
+            let before = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap();
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("recover old build".to_string()),
+                },
+                &mut output,
+            )
+            .unwrap();
+            let after = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap();
+            if runtime.ends_with("absent") {
+                assert_eq!(code, 0, "{runtime}: {output}");
+                assert!(!after.active);
+                assert_eq!(after.session_id, before.session_id);
+            } else {
+                assert_ne!(code, 0, "{runtime}: {output}");
+                assert_eq!(after, before);
+            }
+            assert_eq!(
+                crate::cli::execution_state::load(&fixture.git.repo).unwrap(),
+                execution
+            );
+            assert_eq!(std::fs::read(&works_path).unwrap(), works);
         }
     }
 
