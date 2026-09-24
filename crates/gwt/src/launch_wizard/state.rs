@@ -2566,7 +2566,7 @@ mod tests {
     }
 
     // SPEC-1921 US-20 / FR-123: before any explicit choice the reasoning stop
-    // follows the selected model's default (Sol=Low, Spark=High, others=Medium).
+    // follows the selected model's default (gpt-5.6-sol=Low, others=Medium).
     #[test]
     fn codex_initial_reasoning_follows_model_default() {
         let mut state = codex_manual_state();
@@ -2575,8 +2575,10 @@ mod tests {
 
         state.set_model("gpt-5.6-sol");
         assert_eq!(state.reasoning, "low");
-        state.set_model("gpt-5.3-codex-spark");
-        assert_eq!(state.reasoning, "high");
+        state.set_model("gpt-6-sol");
+        assert_eq!(state.reasoning, "medium");
+        state.set_model("gpt-6-luna");
+        assert_eq!(state.reasoning, "medium");
         state.set_model("gpt-5.6-terra");
         assert_eq!(state.reasoning, "medium");
     }
@@ -2604,61 +2606,63 @@ mod tests {
         );
     }
 
-    // Issue #3962 AC-5: a saved Codex profile pinned to the retired `gpt-5.4`
+    // Issue #3962 AC-5 / #4677 AC-4: saved profiles pinned to retired models
     // must not break the launch. The wizard falls back to the current default
     // model and surfaces a visible notice, so the swap is never silent, and an
     // explicit pick clears it again.
     #[test]
     fn previous_codex_profile_with_retired_model_falls_back_with_visible_notice() {
-        let previous = LaunchWizardPreviousProfile {
-            agent_id: "codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
-            reasoning: None,
-            version: Some("0.110.0".to_string()),
-            session_mode: gwt_agent::SessionMode::Normal,
-            skip_permissions: false,
-            fast_mode: false,
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            docker_service: None,
-            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
-            windows_shell: None,
-            hermes: Default::default(),
-        };
-        let mut state = LaunchWizardState::open_with_previous_profile(
-            context(branch("feature/gui"), "feature/gui"),
-            sample_agent_options(),
-            Vec::new(),
-            Some(previous),
-        );
+        for retired in ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"] {
+            let previous = LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some(retired.to_string()),
+                reasoning: None,
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: false,
+                fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                windows_shell: None,
+                hermes: Default::default(),
+            };
+            let mut state = LaunchWizardState::open_with_previous_profile(
+                context(branch("feature/gui"), "feature/gui"),
+                sample_agent_options(),
+                Vec::new(),
+                Some(previous),
+            );
 
-        let view = state.view();
-        assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(
-            view.selected_model, "gpt-6-astra",
-            "a retired saved model falls back to the current default"
-        );
-        assert_eq!(
-            view.selected_reasoning, "medium",
-            "the effort follows the fallback model's own default"
-        );
-        let notice = view
-            .model_fallback_notice
-            .as_deref()
-            .expect("the fallback must be visible to the user");
-        assert!(
-            notice.contains("gpt-5.4") && notice.contains("gpt-6-astra"),
-            "the notice must name both the dropped and the replacement model: {notice}"
-        );
+            let view = state.view();
+            assert_eq!(view.selected_agent_id, "codex");
+            assert_eq!(
+                view.selected_model, "gpt-6-astra",
+                "a retired saved model falls back to the current default"
+            );
+            assert_eq!(
+                view.selected_reasoning, "medium",
+                "the effort follows the fallback model's own default"
+            );
+            let notice = view
+                .model_fallback_notice
+                .as_deref()
+                .expect("the fallback must be visible to the user");
+            assert!(
+                notice.contains(retired) && notice.contains("gpt-6-astra"),
+                "the notice must name both the dropped and the replacement model: {notice}"
+            );
 
-        // The launch still proceeds, carrying the fallback model.
-        let config = state.build_launch_config().expect("launch config");
-        assert_eq!(config.model.as_deref(), Some("gpt-6-astra"));
+            // The launch still proceeds, carrying the fallback model.
+            let config = state.build_launch_config().expect("launch config");
+            assert_eq!(config.model.as_deref(), Some("gpt-6-astra"));
 
-        state.set_model("gpt-5.6-sol");
-        assert!(
-            state.view().model_fallback_notice.is_none(),
-            "an explicit pick answers the hint"
-        );
+            state.set_model("gpt-5.6-sol");
+            assert!(
+                state.view().model_fallback_notice.is_none(),
+                "an explicit pick answers the hint"
+            );
+        }
     }
 
     // SPEC-1921 US-20 / FR-123: an explicit choice survives model changes when
@@ -2690,7 +2694,7 @@ mod tests {
         assert_eq!(state.model, "gpt-5.6-sol");
         assert_eq!(state.reasoning, "ultra");
 
-        state.set_model("gpt-5.4-mini");
+        state.set_model("gpt-5.5");
         assert_eq!(state.reasoning, "xhigh");
     }
 

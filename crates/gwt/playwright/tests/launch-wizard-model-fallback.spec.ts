@@ -1,5 +1,5 @@
-/* Issue #3962 AC-5 — a saved launch profile pinned to a model that left the
- * agent's catalog (`gpt-5.4` after the 2026-09-05 Codex picker snapshot) falls
+/* Issue #4677 AC-4 — a saved launch profile pinned to a model that left the
+ * agent's catalog (`gpt-5.4-mini` / `gpt-5.3-codex-spark` in the 2026-09-23 snapshot) falls
  * back to the current default model, and the wizard says so beside the Model
  * field instead of swapping the selection silently.
  *
@@ -10,14 +10,23 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import {
+  acquireLiveGwtBackendLock, clearLiveLaunchWizard, gotoLiveGwt,
+  openLiveLaunchWizardForBranch, openLiveGwtProject, sendLiveGwtEvent,
+} from "./_helpers/live-gwt";
+
 
 const CODEX_MODEL_OPTIONS = [
-  { value: "gpt-6-astra", label: "gpt-6-astra", description: "Our most capable model for complex, demanding work" },
-  { value: "gpt-5.6-sol", label: "gpt-5.6-sol", description: "Reliable agentic workhorse for everyday tasks" },
-  { value: "gpt-5.5", label: "gpt-5.5", description: "Proven previous-generation model for coding and general work" },
+  { value: "gpt-6-astra", label: "gpt-6-astra", description: "Frontier intelligence for the most demanding work." },
+  { value: "gpt-6-sol", label: "gpt-6-sol", description: "Workhorse model for coding and everyday work." },
+  { value: "gpt-6-luna", label: "gpt-6-luna", description: "Fast and affordable model for easier tasks." },
+  { value: "gpt-5.6-sol", label: "gpt-5.6-sol", description: "Older coding model for complex work." },
+  { value: "gpt-5.6-terra", label: "gpt-5.6-terra", description: "Older balanced model for straightforward work." },
+  { value: "gpt-5.6-luna", label: "gpt-5.6-luna", description: "Older fast and efficient model." },
+  { value: "gpt-5.5", label: "gpt-5.5", description: "Legacy coding model." },
 ];
 
-const FALLBACK_NOTICE = "Codex no longer offers gpt-5.4; using gpt-6-astra instead.";
+const FALLBACK_NOTICE = "Codex no longer offers gpt-5.4-mini; using gpt-6-astra instead.";
 
 const CODEX_WIZARD = {
   title: "Launch Agent",
@@ -51,45 +60,49 @@ const CODEX_WIZARD = {
 test.describe("Launch Wizard — retired model fallback notice", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("names the dropped and the replacement model without blocking the launch", async ({
-    page,
-  }, testInfo) => {
-    const browserErrors = collectBrowserErrors(page);
-    await installEmbeddedRoutes(page);
-    await installWorkspaceFixture(page);
-    await page.goto(APP_URL);
-    await keepLaunchWizardModalVisible(page);
-    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
+  for (const retired of ["gpt-5.4-mini", "gpt-5.3-codex-spark"]) {
+    test(`names ${retired} and the replacement without blocking the launch`, async ({
+      page,
+    }, testInfo) => {
+      const browserErrors = collectBrowserErrors(page);
+      await installEmbeddedRoutes(page);
+      await installWorkspaceFixture(page);
+      await page.goto(APP_URL);
+      await keepLaunchWizardModalVisible(page);
+      await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
-    await injectWizard(page, CODEX_WIZARD);
-    const modal = page.locator("#wizard-modal");
-    await expect(modal).toHaveClass(/open/);
+      const notice = `Codex no longer offers ${retired}; using gpt-6-astra instead.`;
+      await injectWizard(page, { ...CODEX_WIZARD, model_fallback_notice: notice });
+      const modal = page.locator("#wizard-modal");
+      await expect(modal).toHaveClass(/open/);
 
-    // The Model select already shows the fallback row.
-    const model = modal.getByRole("combobox", { name: "Model", exact: true });
-    await expect(model).toHaveValue("gpt-6-astra");
+      // The Model select already shows the fallback row.
+      const model = modal.getByRole("combobox", { name: "Model", exact: true });
+      await expect(model).toHaveValue("gpt-6-astra");
 
-    // AC-5: the swap is visible, and it is a hint — not the error banner, which
-    // would read as a failed launch.
-    await expect(modal.getByText(FALLBACK_NOTICE)).toBeVisible();
-    await expect(page.locator("#wizard-error")).toBeHidden();
-    await expect(modal.locator(".launch-note", { hasText: FALLBACK_NOTICE })).toHaveCount(1);
+      // AC-4: the swap is visible, and it is a hint — not the error banner, which
+      // would read as a failed launch.
+      await expect(modal.getByText(notice)).toBeVisible();
+      await expect(page.locator("#wizard-error")).toBeHidden();
+      await expect(modal.locator(".launch-note", { hasText: notice })).toHaveCount(1);
 
-    // The launch stays available with the fallback model.
-    await expect(modal.getByRole("button", { name: "Launch" })).toBeEnabled();
+      // The launch stays available with the fallback model.
+      await expect(modal.getByRole("button", { name: "Launch" })).toBeEnabled();
 
-    // Choosing a model still dispatches normally; the backend clears the hint.
-    await model.selectOption("gpt-5.6-sol");
-    await expect
-      .poll(() => page.evaluate(() => sentWizardActions()))
-      .toContainEqual({ kind: "set_model", model: "gpt-5.6-sol" });
+      // Choosing a model still dispatches normally; the backend clears the hint.
+      await model.selectOption("gpt-6-sol");
+      await expect
+        .poll(() => page.evaluate(() => sentWizardActions()))
+        .toContainEqual({ kind: "set_model", model: "gpt-6-sol" });
 
-    await testInfo.attach(`model-fallback-${testInfo.project.name}`, {
-      body: await modal.screenshot(),
-      contentType: "image/png",
+      await testInfo.attach(`model-fallback-${testInfo.project.name}`, {
+        body: await modal.screenshot(),
+        contentType: "image/png",
+      });
+      expect(browserErrors).toEqual([]);
     });
-    expect(browserErrors).toEqual([]);
-  });
+
+  }
 
   test("renders nothing extra when no model was dropped", async ({ page }) => {
     const browserErrors = collectBrowserErrors(page);
@@ -227,3 +240,41 @@ async function installWorkspaceFixture(page: any): Promise<void> {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
   });
 }
+
+// AC-1/2: verify the checkout backend's actual catalog, in addition to the
+// deterministic retired-profile notice fixtures above.
+test("live Codex picker exposes the current visible snapshot", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+  test.skip(!base, "isolated live backend required");
+  test.setTimeout(120_000);
+  const errors = collectBrowserErrors(page);
+  const release = await acquireLiveGwtBackendLock(base, testInfo);
+  let cleanup: (() => Promise<void>) | undefined;
+  try {
+    await gotoLiveGwt(page, base, { enableTestBridge: true });
+    await keepLaunchWizardModalVisible(page);
+    await openLiveGwtProject(page);
+    await clearLiveLaunchWizard(page);
+    cleanup = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    await sendLiveGwtEvent(page, {
+      kind: "launch_wizard_action",
+      action: { kind: "set_launch_path", path: "manual_setup" }, bounds: null,
+    });
+    await sendLiveGwtEvent(page, {
+      kind: "launch_wizard_action",
+      action: { kind: "set_agent", agent_id: "codex" }, bounds: null,
+    });
+    const model = page.locator("#wizard-modal").getByRole("combobox", { name: "Model", exact: true });
+    await expect(model.locator("option")).toHaveText(CODEX_MODEL_OPTIONS.map(row => row.label));
+    await expect(model).toHaveValue("gpt-6-astra");
+    await model.selectOption("gpt-6-sol");
+    await expect(model).toHaveValue("gpt-6-sol");
+    await testInfo.attach(`codex-snapshot-${testInfo.project.name}`, {
+      body: await page.locator("#wizard-modal").screenshot(), contentType: "image/png",
+    });
+    expect(errors).toEqual([]);
+  } finally {
+    try { await clearLiveLaunchWizard(page); }
+    finally { try { await cleanup?.(); } finally { await release(); } }
+  }
+});

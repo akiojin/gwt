@@ -448,7 +448,7 @@ mod tests {
             None,
         );
         newer.tool_version = Some("0.111.0".to_string());
-        newer.model = Some("gpt-5.4-mini".to_string());
+        newer.model = Some("gpt-6-luna".to_string());
         newer.reasoning_level = Some("low".to_string());
         newer.skip_permissions = false;
         newer.codex_fast_mode = false;
