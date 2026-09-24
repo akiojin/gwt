@@ -50,7 +50,8 @@ pub fn record_survey(worktree_root: &Path) {
     }
 }
 
-/// Whether a survey recorded within [`SURVEY_FRESHNESS`] is on file.
+/// Whether a survey recorded within the freshness window (one hour) is on
+/// file.
 ///
 /// An unreadable or absent record answers `false`, which is the safe side for
 /// a gate whose remedy is one read-only operation.
