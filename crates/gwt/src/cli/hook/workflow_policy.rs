@@ -391,9 +391,7 @@ If no spec owns it, register exactly as you intended. This gate asks whether you
 
 /// The two operations that put a new Issue into the backlog.
 fn is_issue_registration_event(event: &HookEvent) -> bool {
-    event
-        .command()
-        .is_some_and(|command| is_issue_registration_command(command))
+    event.command().is_some_and(is_issue_registration_command)
 }
 
 fn is_issue_registration_command(command: &str) -> bool {
