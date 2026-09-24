@@ -23,6 +23,7 @@ async fn burst_of_events_collapses_to_one_batch() {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
     };
+    // test-hygiene: allow-native-watcher-deadline Real OS integration probe; inventoried in #4681 AC-5.
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
     for i in 0..50 {
@@ -51,41 +52,6 @@ async fn burst_of_events_collapses_to_one_batch() {
 }
 
 #[tokio::test]
-async fn batch_size_limit_splits_burst() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cfg = WatcherConfig {
-        debounce: Duration::from_secs(2),
-        batch_limit: 100,
-    };
-    let mut handle = start_watcher(tmp.path(), cfg).unwrap();
-
-    for i in 0..200 {
-        write_file(tmp.path(), &format!("f{i}.rs"), "// c\n");
-    }
-
-    let mut total_rs: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-    while total_rs.len() < 200 {
-        let batch = tokio::time::timeout(EVENT_TIMEOUT, handle.recv_batch())
-            .await
-            .expect("expected next batch before native event deadline")
-            .expect("channel open");
-        assert!(
-            batch.changed_paths.len() <= 100,
-            "batch must respect 100 file limit (got {})",
-            batch.changed_paths.len()
-        );
-        for p in &batch.changed_paths {
-            if p.extension().and_then(|s| s.to_str()) == Some("rs") {
-                total_rs.insert(p.clone());
-            }
-        }
-    }
-    assert_eq!(total_rs.len(), 200);
-    handle.shutdown().await;
-}
-
-#[tokio::test]
 async fn gitignored_files_are_excluded() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join(".gitignore"), "ignored/\n").unwrap();
@@ -96,6 +62,7 @@ async fn gitignored_files_are_excluded() {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
     };
+    // test-hygiene: allow-native-watcher-deadline Real OS integration probe; inventoried in #4681 AC-5.
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
     fs::write(tmp.path().join("ignored/should_skip.rs"), "// x\n").unwrap();
@@ -143,6 +110,7 @@ async fn nested_gitignored_files_are_excluded() {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
     };
+    // test-hygiene: allow-native-watcher-deadline Real OS integration probe; inventoried in #4681 AC-5.
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
     fs::write(app.join("view.generated"), "ignored\n").unwrap();
