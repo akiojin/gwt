@@ -9452,10 +9452,16 @@ mod tests {
     // routing, never a new direct transport broadcast.
     #[test]
     fn transport_direct_dispatch_inventory_stays_explicit() {
-        let server = include_str!("embedded_server.rs")
-            .split("#[cfg(test)]\npub fn broadcast_runtime_hook_event")
-            .next()
-            .unwrap();
+        let source = include_str!("embedded_server.rs").replace("\r\n", "\n");
+        assert_transport_direct_dispatch_inventory(&source);
+        assert_transport_direct_dispatch_inventory(&source.replace('\n', "\r\n"));
+    }
+
+    fn assert_transport_direct_dispatch_inventory(source: &str) {
+        let server = source
+            .split_once("pub fn broadcast_runtime_hook_event(")
+            .expect("test-only hook helper marks the end of production server code")
+            .0;
         assert_eq!(
             server.matches(".dispatch(").count(),
             1,
