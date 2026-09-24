@@ -133,6 +133,8 @@ pub fn status_json(outcome: &ReleasePrEnsure, generation: &RuntimeGeneration) ->
         "state": check.state.as_str(),
         "stalled": check.is_stalled(),
         "version": check.version,
+        "pending_version": check.pending_version,
+        "version_source": "github_remote_tags",
         "release_pr": check.release_pr,
         "release_branch": check.release_branch,
         "base_branch": check.base_branch,
@@ -176,6 +178,12 @@ mod tests {
         ReleaseCheck {
             state,
             version: version.map(str::to_string),
+            pending_version: matches!(
+                state,
+                ReleaseCheckState::Stalled | ReleaseCheckState::PrOpen
+            )
+            .then(|| version.map(str::to_string))
+            .flatten(),
             release_pr: pr,
             release_branch: "develop".to_string(),
             base_branch: "main".to_string(),
@@ -224,6 +232,21 @@ mod tests {
         assert!(out.contains("\"stalled\": true"), "{out}");
         assert!(out.contains("\"version\": \"v9.91.0\""), "{out}");
         assert!(out.contains("ensure_release_pr:true"), "{out}");
+    }
+
+    #[test]
+    fn released_payload_identifies_the_remote_version_source() {
+        let outcome = ensure(
+            check(ReleaseCheckState::Released, Some("v9.102.0"), None),
+            false,
+            None,
+        );
+        let payload = status_json(&outcome, &RuntimeGeneration::unknown("develop"));
+        assert_eq!(payload["version_source"], "github_remote_tags");
+        assert_eq!(
+            payload.get("pending_version"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]

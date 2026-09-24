@@ -10,9 +10,8 @@
 //! read every cycle, plus an idempotent reconcile that opens the missing
 //! Release PR.
 //!
-//! The check is deliberately ordered cheapest-first: the release-branch
-//! subjects and the tag lookup are local git reads, so a repository with no
-//! pending bump — the common case — never spends GitHub budget.
+//! Release observations are fetched from GitHub on every check. Local branch
+//! refs and tags can lag behind remote releases and are never a fallback.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -89,8 +88,10 @@ pub struct ReleaseCheckInput {
 pub struct ReleaseCheck {
     /// Classified state.
     pub state: ReleaseCheckState,
-    /// Version carried by the newest bump commit, if any (`vX.Y.Z`).
+    /// Highest semantic version tag observed on the remote.
     pub version: Option<String>,
+    /// Newest bump that has not been tagged yet.
+    pub pending_version: Option<String>,
     /// Open Release PR number, when one was found.
     pub release_pr: Option<u64>,
     /// Branch the bump was looked for on.
@@ -177,10 +178,26 @@ pub fn newest_bump_version(subjects: &[String]) -> Option<String> {
 /// PR-less bump is the only state that asks for action, and both "already
 /// tagged" and "PR already open" mean the reconcile does nothing.
 pub fn classify_release_check(input: &ReleaseCheckInput) -> ReleaseCheck {
-    let version = newest_bump_version(&input.recent_subjects);
-    let state = match version.as_deref() {
+    let bump = newest_bump_version(&input.recent_subjects);
+    let version = input
+        .existing_tags
+        .iter()
+        .filter_map(|tag| {
+            semver::Version::parse(tag.trim_start_matches('v'))
+                .ok()
+                .map(|v| (v, tag))
+        })
+        .max()
+        .map(|(_, tag)| tag.clone());
+    let pending_version = bump.clone().filter(|bump| {
+        !input
+            .existing_tags
+            .iter()
+            .any(|tag| tag.trim_start_matches('v') == bump.trim_start_matches('v'))
+    });
+    let state = match bump.as_deref() {
         None => ReleaseCheckState::NoBump,
-        Some(version) if input.existing_tags.contains(version) => ReleaseCheckState::Released,
+        Some(_) if pending_version.is_none() => ReleaseCheckState::Released,
         Some(_) if input.open_release_pr.is_some() => ReleaseCheckState::PrOpen,
         Some(_) => ReleaseCheckState::Stalled,
     };
@@ -191,6 +208,7 @@ pub fn classify_release_check(input: &ReleaseCheckInput) -> ReleaseCheck {
     ReleaseCheck {
         state,
         version,
+        pending_version,
         release_pr,
         release_branch: input.release_branch.clone(),
         base_branch: input.base_branch.clone(),
@@ -249,7 +267,107 @@ fn is_version_heading(line: &str, bare: &str) -> bool {
         .is_none_or(|next| !next.is_ascii_digit() && next != '.')
 }
 
-/// Run the standing check against a repository.
+/// Fetch every tag on every call, without a local-ref or cached fallback.
+fn fetch_remote_tags(repo_path: &Path) -> Result<HashSet<String>> {
+    fetch_remote_tags_with(repo_path, run_gh_command)
+}
+
+fn fetch_remote_tags_with<G>(repo_path: &Path, mut run_gh: G) -> Result<HashSet<String>>
+where
+    G: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    #[derive(Deserialize)]
+    struct Tag {
+        name: String,
+    }
+    let output = run_gh(
+        repo_path,
+        &[
+            "api",
+            "repos/{owner}/{repo}/tags?per_page=100",
+            "--paginate",
+            "--slurp",
+        ],
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "release remote tags unavailable: {}",
+            output.stderr.trim()
+        )));
+    }
+    let pages: Vec<Vec<Tag>> = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Git(format!("release remote tags JSON: {error}")))?;
+    Ok(pages.into_iter().flatten().map(|tag| tag.name).collect())
+}
+
+fn fetch_remote_subjects(repo_path: &Path, branch: &str, count: usize) -> Result<Vec<String>> {
+    fetch_remote_subjects_with(repo_path, branch, count, run_gh_command)
+}
+
+/// Read the requested number of non-merge subjects from the remote branch.
+/// Pagination preserves scan_commits without trusting a stale local branch.
+fn fetch_remote_subjects_with<G>(
+    repo_path: &Path,
+    branch: &str,
+    count: usize,
+    mut run_gh: G,
+) -> Result<Vec<String>>
+where
+    G: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    #[derive(Deserialize)]
+    struct Commit {
+        commit: Message,
+        parents: Vec<serde_json::Value>,
+    }
+    #[derive(Deserialize)]
+    struct Message {
+        message: String,
+    }
+    let mut subjects = Vec::new();
+    let mut page = 1;
+    let per_page = count.min(100);
+    while subjects.len() < count {
+        let output = run_gh(
+            repo_path,
+            &[
+                "api",
+                "repos/{owner}/{repo}/commits",
+                "--method",
+                "GET",
+                "-f",
+                &format!("sha={branch}"),
+                "-f",
+                &format!("per_page={per_page}"),
+                "-f",
+                &format!("page={page}"),
+            ],
+        )?;
+        if !output.success {
+            return Err(GwtError::Git(format!(
+                "release remote branch unavailable: {}",
+                output.stderr.trim()
+            )));
+        }
+        let commits: Vec<Commit> = serde_json::from_str(&output.stdout)
+            .map_err(|error| GwtError::Git(format!("release remote commits JSON: {error}")))?;
+        let last_page = commits.len() < per_page;
+        subjects.extend(
+            commits
+                .into_iter()
+                .filter(|commit| commit.parents.len() < 2)
+                .filter_map(|commit| commit.commit.message.lines().next().map(str::to_string)),
+        );
+        if last_page {
+            break;
+        }
+        page += 1;
+    }
+    subjects.truncate(count);
+    Ok(subjects)
+}
+
+/// Run the standing check against fresh remote observations.
 pub fn fetch_release_check(
     repo_path: &Path,
     options: &ReleaseCheckOptions,
@@ -257,8 +375,8 @@ pub fn fetch_release_check(
     fetch_release_check_with(
         repo_path,
         options,
-        crate::commit::branch_recent_subjects,
-        crate::refs::list_existing_refs,
+        fetch_remote_subjects,
+        fetch_remote_tags,
         run_gh_command,
     )
 }
@@ -273,7 +391,7 @@ fn fetch_release_check_with<S, T, G>(
 ) -> Result<ReleaseCheck>
 where
     S: FnMut(&Path, &str, usize) -> Result<Vec<String>>,
-    T: FnMut(&Path, &[&str]) -> Result<HashSet<String>>,
+    T: FnMut(&Path) -> Result<HashSet<String>>,
     G: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let recent_subjects = subjects(repo_path, &options.release_branch, options.scan_commits)?;
@@ -281,19 +399,13 @@ where
         release_branch: options.release_branch.clone(),
         base_branch: options.base_branch.clone(),
         recent_subjects,
-        existing_tags: HashSet::new(),
+        existing_tags: tags(repo_path)?,
         open_release_pr: None,
     };
 
-    let Some(version) = newest_bump_version(&input.recent_subjects) else {
-        return Ok(classify_release_check(&input));
-    };
-
-    let tag_ref = format!("refs/tags/{version}");
-    let existing = tags(repo_path, &[tag_ref.as_str()])?;
-    if existing.contains(&tag_ref) || existing.contains(&version) {
-        input.existing_tags.insert(version);
-        return Ok(classify_release_check(&input));
+    let check = classify_release_check(&input);
+    if check.pending_version.is_none() {
+        return Ok(check);
     }
 
     input.open_release_pr = fetch_open_release_pr(
@@ -554,8 +666,8 @@ pub fn ensure_release_pr(
     ensure_release_pr_with(
         repo_path,
         options,
-        crate::commit::branch_recent_subjects,
-        crate::refs::list_existing_refs,
+        fetch_remote_subjects,
+        fetch_remote_tags,
         run_gh_command,
         |root| std::fs::read_to_string(root.join("CHANGELOG.md")).ok(),
     )
@@ -572,7 +684,7 @@ fn ensure_release_pr_with<S, T, G, C>(
 ) -> Result<ReleasePrEnsure>
 where
     S: FnMut(&Path, &str, usize) -> Result<Vec<String>>,
-    T: FnMut(&Path, &[&str]) -> Result<HashSet<String>>,
+    T: FnMut(&Path) -> Result<HashSet<String>>,
     G: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
     C: FnMut(&Path) -> Option<String>,
 {
@@ -586,7 +698,7 @@ where
     }
 
     let version = check
-        .version
+        .pending_version
         .clone()
         .ok_or_else(|| GwtError::Other("stalled release without a version".to_string()))?;
     let title = format!("{BUMP_SUBJECT_PREFIX} {version}");
@@ -826,7 +938,8 @@ mod tests {
             None,
         ));
         assert_eq!(check.state, ReleaseCheckState::Stalled);
-        assert_eq!(check.version.as_deref(), Some("v9.91.0"));
+        assert_eq!(check.pending_version.as_deref(), Some("v9.91.0"));
+        assert_eq!(check.version.as_deref(), Some("v9.90.0"));
         assert_eq!(check.release_pr, None);
         assert!(check.is_stalled());
     }
@@ -838,6 +951,71 @@ mod tests {
             classify_release_check(&input(&["chore(release): v9.91.0"], &["v9.91.0"], None));
         assert_eq!(check.state, ReleaseCheckState::Released);
         assert!(!check.is_stalled());
+    }
+
+    #[test]
+    fn version_follows_tags_even_when_the_bump_history_is_older() {
+        let mut observation = input(
+            &["chore(release): v9.79.0"],
+            &["v9.79.0", "v9.99.0", "v9.101.1"],
+            None,
+        );
+        let check = classify_release_check(&observation);
+        assert_eq!(check.version.as_deref(), Some("v9.101.1"));
+        assert_eq!(check.state, ReleaseCheckState::Released);
+        observation.existing_tags.insert("v9.102.0".into());
+        assert_eq!(
+            classify_release_check(&observation).version.as_deref(),
+            Some("v9.102.0")
+        );
+        observation.recent_subjects = subjects(&["chore(release): v9.103.0"]);
+        assert_eq!(
+            classify_release_check(&observation)
+                .pending_version
+                .as_deref(),
+            Some("v9.103.0")
+        );
+        observation.existing_tags.insert("v9.103.0".into());
+        let released = classify_release_check(&observation);
+        assert_eq!(released.version.as_deref(), Some("v9.103.0"));
+        assert_eq!(released.pending_version, None);
+        assert_eq!(released.state, ReleaseCheckState::Released);
+    }
+
+    #[test]
+    fn latest_tag_is_reported_without_a_bump_in_the_scan_window() {
+        let check = classify_release_check(&input(&["fix: tidy"], &["v9.102.0"], None));
+        assert_eq!(check.version.as_deref(), Some("v9.102.0"));
+    }
+
+    #[test]
+    fn remote_tags_are_read_without_cache_and_fail_explicitly() {
+        let tags = fetch_remote_tags_with(Path::new("/repo"), |_, args| {
+            assert!(args.contains(&"--paginate"));
+            assert!(!args.contains(&"--cache"));
+            ok_gh("[[{\"name\":\"v9.79.0\"}],[{\"name\":\"v9.102.0\"}]]")
+        })
+        .unwrap();
+        assert!(tags.contains("v9.102.0"));
+        let error = fetch_remote_tags_with(Path::new("/repo"), |_, _| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "offline".into(),
+            })
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("offline"));
+    }
+
+    #[test]
+    fn remote_bump_history_uses_the_requested_branch() {
+        let subjects = fetch_remote_subjects_with(Path::new("/repo"), "develop", 30, |_, args| {
+            assert!(args.contains(&"sha=develop"));
+            ok_gh(r#"[{"commit":{"message":"chore(release): v9.103.0\n\nnotes"},"parents":[{}]}]"#)
+        })
+        .unwrap();
+        assert_eq!(newest_bump_version(&subjects).as_deref(), Some("v9.103.0"));
     }
 
     #[test]
@@ -902,17 +1080,17 @@ mod tests {
                 assert_eq!(branch, "develop");
                 Ok(subjects(&["chore(release): v9.91.0"]))
             },
-            |_, _| Ok(HashSet::new()),
+            |_| Ok(HashSet::new()),
             |_, _| ok_gh("[]"),
         )
         .unwrap();
         assert_eq!(check.state, ReleaseCheckState::Stalled);
-        assert_eq!(check.version.as_deref(), Some("v9.91.0"));
+        assert_eq!(check.pending_version.as_deref(), Some("v9.91.0"));
     }
 
-    // Budget guard: no bump means no tag read and no GitHub call.
+    // Even without a bump, refresh tags; no open-PR lookup is needed.
     #[test]
-    fn fetch_skips_the_tag_and_github_reads_when_no_bump_is_present() {
+    fn fetch_refreshes_tags_but_skips_pr_lookup_when_no_bump_is_present() {
         let repo = PathBuf::from("/repo");
         let mut tag_reads = 0_u32;
         let mut gh_calls = 0_u32;
@@ -920,7 +1098,7 @@ mod tests {
             &repo,
             &ReleaseCheckOptions::default(),
             |_, _, _| Ok(subjects(&["fix(gui): tidy"])),
-            |_, _| {
+            |_| {
                 tag_reads += 1;
                 Ok(HashSet::new())
             },
@@ -931,7 +1109,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(check.state, ReleaseCheckState::NoBump);
-        assert_eq!(tag_reads, 0);
+        assert_eq!(tag_reads, 1);
         assert_eq!(gh_calls, 0);
     }
 
@@ -943,10 +1121,7 @@ mod tests {
             &repo,
             &ReleaseCheckOptions::default(),
             |_, _, _| Ok(subjects(&["chore(release): v9.91.0"])),
-            |_, candidates| {
-                assert_eq!(candidates, ["refs/tags/v9.91.0"]);
-                Ok(HashSet::from(["refs/tags/v9.91.0".to_string()]))
-            },
+            |_| Ok(HashSet::from(["v9.91.0".to_string()])),
             |_, _| {
                 gh_calls += 1;
                 ok_gh("[]")
@@ -966,7 +1141,7 @@ mod tests {
             &repo,
             &ReleaseCheckOptions::default(),
             |_, _, _| Ok(subjects(&["chore(release): v9.91.0"])),
-            |_, _| Ok(HashSet::new()),
+            |_| Ok(HashSet::new()),
             |_, args| {
                 if args.first() == Some(&"pr") && args.get(1) == Some(&"create") {
                     created_args = args.iter().map(|arg| (*arg).to_string()).collect();
@@ -1002,7 +1177,7 @@ mod tests {
             &repo,
             &ReleaseCheckOptions::default(),
             |_, _, _| Ok(subjects(&["chore(release): v9.91.0"])),
-            |_, _| Ok(HashSet::new()),
+            |_| Ok(HashSet::new()),
             |_, args| {
                 if args.get(1) == Some(&"create") {
                     create_calls += 1;
@@ -1028,7 +1203,7 @@ mod tests {
             &repo,
             &ReleaseCheckOptions::default(),
             |_, _, _| Ok(subjects(&["chore(release): v9.91.0"])),
-            |_, _| Ok(HashSet::from(["refs/tags/v9.91.0".to_string()])),
+            |_| Ok(HashSet::from(["v9.91.0".to_string()])),
             |_, args| {
                 if args.get(1) == Some(&"create") {
                     create_calls += 1;
@@ -1051,7 +1226,7 @@ mod tests {
             &repo,
             &ReleaseCheckOptions::default(),
             |_, _, _| Ok(subjects(&["chore(release): v9.91.0"])),
-            |_, _| Ok(HashSet::new()),
+            |_| Ok(HashSet::new()),
             |_, args| {
                 if args.get(1) == Some(&"create") {
                     return Ok(GhCliOutput {

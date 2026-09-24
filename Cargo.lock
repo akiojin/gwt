@@ -1486,6 +1486,7 @@ dependencies = [
  "dirs 7.0.0",
  "gwt-core",
  "libc",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
