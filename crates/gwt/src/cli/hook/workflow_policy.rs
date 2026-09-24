@@ -39,6 +39,12 @@ pub struct WorkflowContext {
     /// satisfy the identity gate. Decided by
     /// [`crate::pm_registry::pm_identity_exempt_session`].
     pub pm_session: bool,
+    /// Issue #4680 (AC-3): this PM has run `issue.spec.list` recently enough
+    /// for the registration it is about to make. Only meaningful together
+    /// with `pm_session`; every other session registers unconditionally,
+    /// because agents do not call `issue.create` at all (they post Issue
+    /// proposals to the Board and the PM registers them).
+    pub pm_spec_survey_fresh: bool,
 }
 
 impl WorkflowContext {
@@ -66,6 +72,11 @@ impl WorkflowContext {
 
     pub fn with_pm_session(mut self, pm_session: bool) -> Self {
         self.pm_session = pm_session;
+        self
+    }
+
+    pub fn with_pm_spec_survey_fresh(mut self, fresh: bool) -> Self {
+        self.pm_spec_survey_fresh = fresh;
         self
     }
 }
@@ -108,6 +119,11 @@ pub fn evaluate_with_context(
     if pending_goal != HookOutput::Silent {
         return Ok(pending_goal);
     }
+    let spec_survey =
+        evaluate_pm_spec_survey_guard(event, context.pm_session && !context.pm_spec_survey_fresh)?;
+    if spec_survey != HookOutput::Silent {
+        return Ok(spec_survey);
+    }
     Ok(HookOutput::Silent)
 }
 
@@ -121,6 +137,16 @@ pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, H
         )
         .with_review_dispatch_session(crate::issue_monitor_review::review_dispatch_session_active())
         .with_pm_session(pm_identity_exempt_session_for_worktree(worktree_root));
+    // Issue #4680: the survey and the registration it covers arrive in two
+    // separate hook processes, so the observation has to be written here, on
+    // the way past, before the context is read. Recording first also means a
+    // PM that runs `issue.spec.list` and `issue.create` back to back is never
+    // denied by its own in-flight survey.
+    if event.command().is_some_and(is_spec_survey_command) {
+        super::pm_spec_survey::record_survey(worktree_root);
+    }
+    let context =
+        context.with_pm_spec_survey_fresh(super::pm_spec_survey::survey_is_fresh(worktree_root));
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -328,6 +354,55 @@ Failure path: run JSON operation `discuss.goal_failed` with `params.proposal:\"{
         ));
     }
     Ok(HookOutput::Silent)
+}
+
+/// Issue #4680 (AC-3 / AC-4): the PM registers a new Issue only after it has
+/// established which `gwt-spec` owns the area.
+///
+/// The gate asks whether the PM looked, never what it found. An Issue that
+/// belongs to no spec registers exactly as before — the remedy for a denial
+/// is one read-only `issue.spec.list`, whose answer may well be "none owns
+/// this". That is why this is a gate and not a classifier: classifying the
+/// area would have to be right, and a wrong classification would block real
+/// work (the failure mode SPEC #3245 removed the owner guard for).
+///
+/// Only PM sessions are gated. Implementation agents never call
+/// `issue.create`: they post Issue proposals to the Board and the PM registers
+/// them, so gating them would deny an operation they do not perform.
+fn evaluate_pm_spec_survey_guard(
+    event: &HookEvent,
+    survey_required: bool,
+) -> Result<HookOutput, HookError> {
+    if !survey_required {
+        return Ok(HookOutput::Silent);
+    }
+    if !is_issue_registration_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+    Ok(HookOutput::pre_tool_use_permission(
+        "establish the owning gwt-spec before registering",
+        "Run JSON operation `issue.spec.list` first, then register.\n\n\
+It returns every open `gwt-spec` with its scope in one call, so it cannot miss the owner the way a keyword phrasing can. `gwt-search` is the supporting step: an empty search result does not establish that no spec owns the area, because the result turns on the words you chose.\n\n\
+If a `gwt-spec` owns the area, register this as that spec's implementation Issue — name the parent spec in the body and make registering the change in its `spec` / `plan` / `tasks` sections one of the acceptance criteria.\n\n\
+If no spec owns it, register exactly as you intended. This gate asks whether you looked, not what you found."
+            .to_string(),
+    ))
+}
+
+/// The two operations that put a new Issue into the backlog.
+fn is_issue_registration_event(event: &HookEvent) -> bool {
+    event
+        .command()
+        .is_some_and(|command| is_issue_registration_command(command))
+}
+
+fn is_issue_registration_command(command: &str) -> bool {
+    is_json_envelope_operation(command, &["issue.create", "issue.spec.create"])
+}
+
+/// The read-only survey whose execution the gate above is waiting for.
+fn is_spec_survey_command(command: &str) -> bool {
+    is_json_envelope_operation(command, &["issue.spec.list"])
 }
 
 /// SPEC-3248 P9a (T-120): the execution/evidence state files are written
