@@ -11,6 +11,9 @@
 //!   code. Scheduling jitter on a saturated runner is measured in tens of
 //!   milliseconds, so an assertion that assumes ordering inside that window
 //!   cannot be made deterministic.
+//!   Native index watcher delivery also has no clock bound, even at 30 seconds
+//!   (Issue #4681). Direct start_watcher/recv_batch/timeout combinations are
+//!   gated separately; retained real-OS integration probes need a reason.
 //! * **(B) unlocked process-wide state** — `env::set_var` / `remove_var` /
 //!   `set_current_dir` without holding the shared env lock. Those are
 //!   process-global and stomp on sibling tests in the same binary.
@@ -24,6 +27,7 @@
 //! ```text
 //! // test-hygiene: allow-short-duration polling interval, not an assertion deadline
 //! // test-hygiene: allow-unlocked-env the whole binary is single-threaded
+//! // test-hygiene: allow-native-watcher-deadline retained real-OS integration probe
 //! ```
 //!
 //! The reason text is mandatory; a bare marker does not silence the gate.
@@ -147,6 +151,43 @@ fn scan_fixture(text: &str) -> Vec<hygiene::Finding> {
     )
 }
 
+#[test]
+fn native_watcher_delivery_deadlines_are_reported_regardless_of_duration() {
+    let findings = scan_fixture(
+        r#"
+async fn waits_for_native_delivery() {
+    let mut watcher = start_watcher(root, config).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), watcher.recv_batch()).await.unwrap();
+}
+
+"#,
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "native delivery is not bounded by a clock"
+    );
+    assert_eq!(findings[0].rule.id(), "native-watcher-deadline");
+    assert_eq!(findings[0].context, "waits_for_native_delivery");
+}
+
+#[test]
+fn native_watcher_startup_and_declared_os_probes_are_allowed() {
+    let findings = scan_fixture(
+        r#"
+async fn startup_only() {
+    let watcher = start_watcher(root, config).unwrap();
+    watcher.shutdown().await;
+}
+async fn explicit_os_probe() {
+    // test-hygiene: allow-native-watcher-deadline Real OS integration probe.
+    let mut watcher = start_watcher(root, config).unwrap();
+    tokio::time::timeout(EVENT_TIMEOUT, watcher.recv_batch()).await.unwrap();
+}
+"#,
+    );
+    assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+}
 #[test]
 fn short_wall_clock_durations_are_reported_with_their_enclosing_function() {
     let findings = scan_fixture(
@@ -436,6 +477,11 @@ fn no_new_unlocked_process_env_mutations_in_test_code() {
 }
 
 #[test]
+fn no_undeclared_native_watcher_delivery_deadlines() {
+    assert_no_new_violations(Rule::NativeWatcherDeadline);
+}
+
+#[test]
 fn the_baseline_only_shrinks() {
     let baseline = read_baseline();
     let live: BTreeSet<String> = scan_workspace()
@@ -556,6 +602,7 @@ mod hygiene {
     pub enum Rule {
         ShortWallClock,
         UnlockedProcessEnv,
+        NativeWatcherDeadline,
     }
 
     impl Rule {
@@ -563,6 +610,7 @@ mod hygiene {
             match self {
                 Rule::ShortWallClock => "short-wall-clock",
                 Rule::UnlockedProcessEnv => "unlocked-process-env",
+                Rule::NativeWatcherDeadline => "native-watcher-deadline",
             }
         }
 
@@ -570,6 +618,7 @@ mod hygiene {
             match id {
                 "short-wall-clock" => Some(Rule::ShortWallClock),
                 "unlocked-process-env" => Some(Rule::UnlockedProcessEnv),
+                "native-watcher-deadline" => Some(Rule::NativeWatcherDeadline),
                 _ => None,
             }
         }
@@ -578,6 +627,7 @@ mod hygiene {
             match self {
                 Rule::ShortWallClock => "test-hygiene: allow-short-duration",
                 Rule::UnlockedProcessEnv => "test-hygiene: allow-unlocked-env",
+                Rule::NativeWatcherDeadline => "test-hygiene: allow-native-watcher-deadline",
             }
         }
 
@@ -600,6 +650,12 @@ mod hygiene {
                     "or scope the change with gwt_core::test_support::ScopedEnvVar.\n",
                     "If the mutation genuinely cannot race, declare it:\n",
                     "    // test-hygiene: allow-unlocked-env <reason>"
+                ),
+                Rule::NativeWatcherDeadline => concat!(
+                    "Native filesystem delivery has no deterministic wall-clock bound.\n",
+                    "Test the subscription/delivery contract without waiting for the OS.\n",
+                    "A retained real-OS integration probe requires an explicit reason:\n",
+                    "    // test-hygiene: allow-native-watcher-deadline <reason>"
                 ),
             }
         }
@@ -768,11 +824,23 @@ mod hygiene {
                 continue;
             }
             let enclosing = enclosing_function(&functions, index);
-            for rule in [Rule::ShortWallClock, Rule::UnlockedProcessEnv] {
+            for rule in [
+                Rule::ShortWallClock,
+                Rule::UnlockedProcessEnv,
+                Rule::NativeWatcherDeadline,
+            ] {
                 if !line_violates(rule, line) {
                     continue;
                 }
                 if declared_allowed(rule, &raw, index) {
+                    continue;
+                }
+                if rule == Rule::NativeWatcherDeadline
+                    && !enclosing.is_some_and(|range| {
+                        let body = code[range.start..=range.end].join(" ");
+                        body.contains("recv_batch") && body.contains("timeout")
+                    })
+                {
                     continue;
                 }
                 if rule == Rule::UnlockedProcessEnv
@@ -816,6 +884,7 @@ mod hygiene {
                 })
             }
             Rule::UnlockedProcessEnv => env_mutation_regex().is_match(code),
+            Rule::NativeWatcherDeadline => native_watcher_regex().is_match(code),
         }
     }
 
@@ -1058,6 +1127,11 @@ mod hygiene {
         RE.get_or_init(|| {
             Regex::new(r"\bDuration::from_millis\(\s*([0-9_]+)\s*\)").expect("valid regex")
         })
+    }
+
+    fn native_watcher_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"\bstart_watcher\s*\(").expect("valid regex"))
     }
 
     fn sub_millisecond_regex() -> &'static Regex {
