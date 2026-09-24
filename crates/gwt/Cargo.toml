@@ -86,6 +86,7 @@ libc = { workspace = true }
 # the `auto-launch` LaunchAgent path. `NSError` is enabled so register /
 # unregister failures surface a real message instead of a silent fallback.
 [target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications = "0.3.1"
 objc2-foundation = { version = "0.3", features = ["NSError"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
 
@@ -93,6 +94,7 @@ objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2
 winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = ["UI_Notifications"] }
 windows-registry = "0.100"
 windows-result = "0.100"
 

@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 use toml_edit::{value, DocumentMut, Item, Table};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     agent_config::AgentConfig,
@@ -241,12 +241,22 @@ impl Settings {
             }
         })?;
 
-        toml::from_str(&content).map_err(|e| {
+        let settings: Self = toml::from_str(&content).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to parse config");
             ConfigError::ParseError {
                 reason: e.to_string(),
             }
-        })
+        })?;
+        // Legacy agent fields have no runtime consumer. Report the retired
+        // built-in without discarding unrelated settings or touching custom
+        // agent definitions, which live in their own configuration file.
+        if settings.agent.default_agent.as_deref() == Some("gemini") {
+            warn!(path = %path.display(), "agent.default_agent: unknown built-in agent 'gemini'; setting ignored");
+        }
+        if settings.agent.agent_paths.contains_key("gemini") {
+            warn!(path = %path.display(), "agent.agent_paths.gemini: unknown built-in agent 'gemini'; setting ignored");
+        }
+        Ok(settings)
     }
 
     /// Save settings to the given path using atomic write.
@@ -467,6 +477,39 @@ gwtd_mutation_p95_ms = 350.0
         let loaded = Settings::load_from_path(&path).unwrap();
         assert!(loaded.debug);
         assert_eq!(loaded.default_base_branch, "develop");
+    }
+
+    #[test]
+    fn retired_gemini_settings_warn_without_discarding_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let content = "debug = true\ndefault_base_branch = \"develop\"\n\
+            [agent]\ndefault_agent = \"gemini\"\n\
+            [agent.agent_paths]\ngemini = \"/usr/bin/gemini\"\ncodex = \"/usr/bin/codex\"\n";
+        std::fs::write(&path, content).unwrap();
+        let log_path = dir.path().join("warnings.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || log.try_clone().unwrap())
+            .finish();
+        let loaded = tracing::subscriber::with_default(subscriber, || {
+            Settings::load_from_path(&path).unwrap()
+        });
+        assert!(loaded.debug);
+        assert_eq!(loaded.default_base_branch, "develop");
+        // These legacy fields have no runtime consumer. Keep their data intact;
+        // warn instead of substituting another agent or rewriting the file.
+        assert_eq!(loaded.agent.default_agent.as_deref(), Some("gemini"));
+        assert_eq!(loaded.agent.agent_paths.len(), 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        let warnings = std::fs::read_to_string(log_path).unwrap();
+        assert!(warnings.contains("WARN"), "{warnings}");
+        assert!(warnings.contains("agent.default_agent"), "{warnings}");
+        assert!(warnings.contains("agent.agent_paths.gemini"), "{warnings}");
+        assert!(warnings.contains("gemini"), "{warnings}");
+        assert!(warnings.contains("ignored"), "{warnings}");
     }
 
     #[test]

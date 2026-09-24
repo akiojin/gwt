@@ -603,6 +603,7 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::All,
             event: BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: level.into(),
                 message: message.into(),
                 issue_number: None,
@@ -1408,6 +1409,8 @@ pub(crate) enum WindowCloseMonitorResult {
 
 pub struct AppRuntime {
     pub(crate) project_states: HashMap<gwt_core::repo_hash::ProjectKey, ProjectRuntimeState>,
+    pub(crate) project_aggregates: HashMap<gwt_core::repo_hash::ProjectKey, ProjectAggregateState>,
+    pub(crate) next_project_aggregate_revision: u64,
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     #[cfg(test)]
     pub(crate) active_tab_id: Option<String>,
@@ -3368,6 +3371,8 @@ impl AppRuntime {
             #[cfg(test)]
             active_tab_id,
             project_states: initial_project_states(&project_tab_incarnations),
+            project_aggregates: HashMap::new(),
+            next_project_aggregate_revision: 0,
             project_tab_incarnations,
             next_project_incarnation,
             project_navigation_request: 0,
@@ -4476,6 +4481,7 @@ impl AppRuntime {
                 .issue_monitor_project_notification(
                     Some(&project_root),
                     BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
                         level: "error".to_string(),
                         message: format!(
                             "Issue Monitor could not deliver the human answer to live window \
@@ -4504,6 +4510,7 @@ impl AppRuntime {
             self.issue_monitor_project_notification(
                 Some(&project_root),
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "info".to_string(),
                     message:
                         "Issue Monitor submitted the human answer; waiting for the provider receipt"
@@ -4838,6 +4845,7 @@ impl AppRuntime {
             events.extend(self.issue_monitor_project_notification(
                 project_root,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: message.to_string(),
                     issue_number: Some(issue_number),
@@ -5488,6 +5496,7 @@ impl AppRuntime {
         events.extend(self.issue_monitor_project_notification(
             Some(project_root),
             BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: "error".to_string(),
                 message: message.to_string(),
                 issue_number,
@@ -5868,6 +5877,7 @@ impl AppRuntime {
                     events.push(OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: error.to_string(),
                             issue_number: None,
@@ -6241,6 +6251,7 @@ impl AppRuntime {
         // Keep the last authoritative snapshot; an empty reconstructed monitor
         // would overwrite live queue/active counts with zeros (Issue #4273).
         let toast = BackendEvent::IssueMonitorToast {
+            notification_transition: None,
             level: "error".to_string(),
             message,
             issue_number,
@@ -6281,6 +6292,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: "Issue title is required".to_string(),
                     issue_number: None,
@@ -6296,6 +6308,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: format!("GitHub origin remote is unavailable: {error}"),
                             issue_number: None,
@@ -6310,6 +6323,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
                         level: "error".to_string(),
                         message: issue_registration_failure_message(&error),
                         issue_number: None,
@@ -6326,6 +6340,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
                         level: "error".to_string(),
                         message: issue_registration_failure_message(&error),
                         issue_number: None,
@@ -6342,6 +6357,7 @@ impl AppRuntime {
             Err(error) => events.push(OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
                     level: "error".to_string(),
                     message: format!(
                         "Issue #{} registered, but local cache update failed: {error}",
@@ -6355,6 +6371,7 @@ impl AppRuntime {
         events.push(OutboundEvent::reply(
             client_id,
             BackendEvent::IssueMonitorToast {
+                notification_transition: None,
                 level: "info".to_string(),
                 message: "Issue registered".to_string(),
                 issue_number: Some(snapshot.number.0),
@@ -6815,6 +6832,7 @@ impl AppRuntime {
                     events.extend(self.issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: format!(
                                 "Issue Monitor scheduled worker could not start: {error}"
@@ -7159,6 +7177,7 @@ impl AppRuntime {
                     .issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: error,
                             issue_number: None,
@@ -7179,6 +7198,7 @@ impl AppRuntime {
                     .issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
                             level: "error".to_string(),
                             message: format!("Issue Monitor scheduled completion failed: {error}"),
                             issue_number: None,
@@ -8412,6 +8432,11 @@ impl AppRuntime {
         });
         log_frontend_user_action(&client_id, &event);
         match event {
+            FrontendEvent::ProjectAggregateAck {
+                revision,
+                visible,
+                focused,
+            } => self.acknowledge_project_aggregate(context, revision, visible, focused),
             FrontendEvent::FrontendReady => {
                 // SPEC-2970: kick an immediate usage poll on connect so the
                 // status-bar pill populates right away instead of waiting for
@@ -10090,6 +10115,16 @@ impl AppRuntime {
         if !self.project_context_is_current(context) {
             return Vec::new();
         }
+        // Hydration replies only to its requesting client. Establish the first
+        // baseline, but leave subsequent changes for the event-loop refresh so
+        // other bound clients receive their project-scoped update as well.
+        if self
+            .project_aggregates
+            .get(&context.project_key)
+            .is_none_or(|state| state.generation != context.generation)
+        {
+            let _ = self.refresh_project_aggregate(context);
+        }
 
         let terminal_statuses = self
             .window_details
@@ -10155,6 +10190,14 @@ impl AppRuntime {
             client_id.to_string(),
             self.pm_status_event(context),
         ));
+        if let Some(state) = self.project_aggregates.get(&context.project_key) {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectAgentAggregate {
+                    aggregate: state.aggregate.clone(),
+                },
+            ));
+        }
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting
         // for another roundtrip.
@@ -10178,7 +10221,178 @@ impl AppRuntime {
     }
 }
 
+/// Process-local attention history, fenced by the open Project incarnation.
+pub(crate) struct ProjectAggregateState {
+    generation: u64,
+    statuses: HashMap<String, WindowProcessStatus>,
+    aggregate: gwt::protocol::ProjectAgentAggregate,
+}
+
 impl AppRuntime {
+    fn project_agent_statuses(
+        &self,
+        context: &ProjectContext,
+    ) -> HashMap<String, WindowProcessStatus> {
+        self.tab(&context.tab_id)
+            .into_iter()
+            .flat_map(|tab| tab.workspace.persisted().windows.iter())
+            .filter(|window| window.preset.is_agent_terminal())
+            .filter_map(|window| {
+                let id = combined_window_id(&context.tab_id, &window.id);
+                self.window_status(&id).map(|status| (id, status))
+            })
+            .collect()
+    }
+
+    fn aggregate_counts(
+        statuses: &HashMap<String, WindowProcessStatus>,
+    ) -> gwt::protocol::ProjectAgentAggregate {
+        let mut aggregate = gwt::protocol::ProjectAgentAggregate::default();
+        for status in statuses.values() {
+            match status {
+                WindowProcessStatus::Running => aggregate.running_count += 1,
+                WindowProcessStatus::Waiting | WindowProcessStatus::Stopped => {
+                    aggregate.block_count += 1
+                }
+                WindowProcessStatus::Error => {
+                    aggregate.block_count += 1;
+                    aggregate.error_count += 1;
+                }
+                WindowProcessStatus::Idle | WindowProcessStatus::Starting => {}
+            }
+        }
+        aggregate
+    }
+
+    pub(crate) fn refresh_project_aggregates(&mut self) -> Vec<OutboundEvent> {
+        let contexts = self.project_contexts();
+        self.project_aggregates.retain(|key, state| {
+            contexts.iter().any(|context| {
+                &context.project_key == key && context.generation == state.generation
+            })
+        });
+        contexts
+            .iter()
+            .filter_map(|context| self.refresh_project_aggregate(context))
+            .collect()
+    }
+
+    fn refresh_project_aggregate(&mut self, context: &ProjectContext) -> Option<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return None;
+        }
+        let statuses = self.project_agent_statuses(context);
+        let previous = self
+            .project_aggregates
+            .get(&context.project_key)
+            .filter(|previous| previous.generation == context.generation);
+        if previous.is_some_and(|previous| previous.statuses == statuses) {
+            return None;
+        }
+        let mut aggregate = Self::aggregate_counts(&statuses);
+        // A restored stopped pane is baseline state, not a newly arrived event.
+        // Provider Idle is never interpreted as completion or new attention.
+        aggregate.unread = previous.is_some_and(|previous| {
+            previous.aggregate.unread
+                || statuses.iter().any(|(id, status)| {
+                    previous.statuses.get(id) != Some(status)
+                        && matches!(
+                            status,
+                            WindowProcessStatus::Waiting
+                                | WindowProcessStatus::Stopped
+                                | WindowProcessStatus::Error
+                        )
+                })
+        });
+        self.next_project_aggregate_revision = self
+            .next_project_aggregate_revision
+            .checked_add(1)
+            .expect("project aggregate revision exhausted");
+        aggregate.revision = self.next_project_aggregate_revision;
+        self.project_aggregates.insert(
+            context.project_key.clone(),
+            ProjectAggregateState {
+                generation: context.generation,
+                statuses,
+                aggregate: aggregate.clone(),
+            },
+        );
+        Some(OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::ProjectAgentAggregate { aggregate },
+        ))
+    }
+
+    fn acknowledge_project_aggregate(
+        &mut self,
+        context: &ProjectContext,
+        revision: u64,
+        visible: bool,
+        focused: bool,
+    ) -> Vec<OutboundEvent> {
+        let mut events: Vec<_> = self
+            .refresh_project_aggregate(context)
+            .into_iter()
+            .collect();
+        if !visible || !focused || !self.project_context_is_current(context) {
+            return events;
+        }
+        let Some(state) = self.project_aggregates.get_mut(&context.project_key) else {
+            return events;
+        };
+        // Only the exact server-issued revision was observed for this Project.
+        // A future number can belong to another Project, so it is not an ack.
+        if !state.aggregate.unread || revision != state.aggregate.revision {
+            return events;
+        }
+        self.next_project_aggregate_revision = self
+            .next_project_aggregate_revision
+            .checked_add(1)
+            .expect("project aggregate revision exhausted");
+        state.aggregate.unread = false;
+        state.aggregate.revision = self.next_project_aggregate_revision;
+        events.push(OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::ProjectAgentAggregate {
+                aggregate: state.aggregate.clone(),
+            },
+        ));
+        events
+    }
+
+    pub(crate) fn tray_snapshot(&self) -> gwt::cli::tray::menu::TraySnapshot {
+        use gwt::cli::tray::menu::{TrayProjectEntry, TraySnapshot};
+        let open = self
+            .project_contexts()
+            .into_iter()
+            .filter_map(|context| {
+                let tab = self.tab(&context.tab_id)?;
+                let aggregate = Self::aggregate_counts(&self.project_agent_statuses(&context));
+                Some(TrayProjectEntry {
+                    project_key: context.project_key,
+                    title: tab.title.clone(),
+                    open: true,
+                    running_count: aggregate.running_count,
+                    error_count: aggregate.error_count,
+                })
+            })
+            .collect();
+        let recent = self
+            .recent_projects
+            .iter()
+            .filter_map(|project| {
+                Some(TrayProjectEntry {
+                    project_key: self.recent_project_key(&project.path)?.clone(),
+                    title: project.title.clone(),
+                    open: false,
+                    running_count: 0,
+                    error_count: 0,
+                })
+            })
+            .collect();
+        TraySnapshot::new(open, recent)
+    }
+
     pub(crate) fn hub_state_view(&self) -> gwt::HubStateView {
         gwt::HubStateView {
             app_version: crate::runtime_support::current_app_version().to_string(),

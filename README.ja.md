@@ -12,7 +12,7 @@ Agent workspace を materialize するために worktree を使いますが、�
 ## gwt の特徴
 
 - **Agent workspace** — `Claude Code` / `Codex` / `Grok Build` /
-  `Antigravity CLI` / `Gemini CLI (legacy)` / `OpenCode` / `Copilot` /
+  `Antigravity CLI` / `OpenCode` / `Copilot` /
   custom agent を共有 canvas から起動・再開・状態確認できます。
 - **Shared Board** — user と agent の communication を repo-scoped timeline に集約し、
   `status` / `claim` / `next` / `blocked` / `handoff` / `decision` /
@@ -98,8 +98,9 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
   curl -fsSL https://antigravity.google/cli/install.sh | bash
   ```
 
-  Gemini CLI は、対象となる Standard / Enterprise または API-key workflow
-  向けの legacy option として gwt 内に残ります。
+  Gemini CLI は組み込みエージェントから削除されました。旧 Gemini 設定と保存済み
+  セッションは対象を名指しする警告を出して無視し、元ファイルは変更しません。
+  カスタムエージェントによる独自コマンドの利用は引き続き可能です。
 
   Grok Build は xAI 公式の `grok` command で提供されます。
   `npm install -g @xai-official/grok` でインストールし、初回起動時に認証するか、
@@ -124,9 +125,17 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 - **Open in browser**: 既定ブラウザで埋込サーバー (`http://127.0.0.1:<port>/`)
   を開きます。同じ URL は他のブラウザでも開けます。
 - **Copy URL**: 起動中の tray プロセスの URL を OS clipboard にコピーします。
+- **Projects**: 開いているプロジェクト、Recent の順に表示し、選んだプロジェクトの
+  URL を開きます。実行中・エラー件数を表示し、開いているプロジェクトに
+  エージェントのエラーがある間はトレイアイコンにエラーバッジが付きます。
 - **About GWT**: 起動中の tray プロセスのブラウザ版 About / Version 画面を
   開きます。
 - **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
+
+プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
+表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
+未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
+Hub のタイトルと favicon は固定です。
 
 ルート URL `http://127.0.0.1:<port>/` は **Hub** です。Open Folder、Clone from
 GitHub、Recent projects、開いているプロジェクトの一覧を表示します。各プロジェクトは
@@ -413,6 +422,20 @@ merge で再度 close することはありません。
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
 通知スタックに蓄積されるため、離席中のイベントも失われません。
+
+Agent の状態通知は **停止**・**エラー**・**人間の対応待ち**を伝えます。
+Idle を Work 完了とは扱いません。runtime のデスクトップ通知は、ページで連続した
+Running を5分以上観測し、ページが非表示またはフォーカス外の場合に限ります。
+別状態への遷移や再接続で計測をリセットします。Monitor の NeedsHuman は窓のない
+Issue も既存の通知ストリームで即時に伝え、inbox snapshot から二重に通知しません。
+Session Interrupted は再開候補の過去 snapshot としてしか公開されていないため対象外です。
+
+ネイティブ権限の adapter は macOS の認可設定、Windows の通知設定、Linux の
+認可照会不可を区別します。不明・未設定・拒否・照会失敗では配送を許可せず、権限を
+自動要求しません。Linux の GetCapabilities はサーバー機能であり、ユーザーの許可では
+ありません。この adapter 自体はタブなしのネイティブ配送を追加せず、その配送機構は
+SPEC #3287 の別の実装範囲です。debug binary では判定とブラウザ挙動を検証でき、
+署名済み macOS bundle の権限・配送と Windows/Linux のネイティブ操作は実機での別検証が必要です。
 
 調整可能な上限（試行回数・stuck/idle タイムアウト・再試行バックオフ・レビュー
 モデル）はプロジェクト単位で永続化されます。human-gated の基礎は SPEC

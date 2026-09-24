@@ -146,7 +146,7 @@ impl HolderActivity {
 
     /// The tree moved: it gained more CPU than scheduler noise, or a
     /// process started or exited.
-    fn advancing(&self) -> bool {
+    pub(crate) fn advancing(&self) -> bool {
         self.cpu_percent >= PROGRESS_FLOOR_CPU_PERCENT || self.turnover
     }
 

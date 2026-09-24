@@ -4268,6 +4268,8 @@ fn sample_runtime_with_events(
         tabs,
         active_tab_id: active_tab_id.map(str::to_owned),
         project_states: super::initial_project_states(&project_tab_incarnations),
+        project_aggregates: HashMap::new(),
+        next_project_aggregate_revision: 0,
         project_tab_incarnations,
         next_project_incarnation,
         project_navigation_request: 0,
@@ -15581,6 +15583,18 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
     )
     .expect("compensate split-root Work");
 
+    // Issue #4674: a fresh intake must retain the machine-local close even
+    // though shared lifecycle sources deliberately exclude close events.
+    let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+        &project_root,
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+        &gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(&project_root),
+    );
+    assert!(
+        intake.projection_rebuilt,
+        "fresh intake must rebuild: {intake:?}"
+    );
+
     let current = gwt_core::workspace_projection::load_workspace_projection(&project_root)
         .expect("read current")
         .expect("current");
@@ -15598,6 +15612,19 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
     assert!(load_tracked_work_events(&worktree)
         .iter()
         .any(|event| event.agent_session_id.as_deref() == Some(session_id)));
+    assert!(!load_tracked_work_events(&worktree)
+        .iter()
+        .any(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Discard));
+    let closes = fs::read_to_string(
+        gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&project_root),
+    )
+    .expect("read machine-local genesis close log");
+    assert!(closes.lines().any(|line| {
+        let event: gwt_core::workspace_projection::WorkEvent =
+            serde_json::from_str(line).expect("decode close event");
+        event.kind == gwt_core::workspace_projection::WorkEventKind::Discard
+            && event.agent_session_id.as_deref() == Some(session_id)
+    }));
 }
 
 #[test]
@@ -15748,6 +15775,16 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
     )
     .expect("retry after Pause and exact agent cleanup");
 
+    let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+        &repo,
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+        &gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(&repo),
+    );
+    assert!(
+        intake.projection_rebuilt,
+        "fresh intake must rebuild: {intake:?}"
+    );
+
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
         .expect("read compensated Workspace")
         .expect("compensated Workspace");
@@ -15773,6 +15810,19 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
             && event.agent_session_id.as_deref() == Some(failed_session_id)
     }));
     assert!(retained.events.iter().any(|event| {
+        event.kind == gwt_core::workspace_projection::WorkEventKind::Pause
+            && event.agent_session_id.as_deref() == Some(failed_session_id)
+    }));
+    assert!(!load_tracked_work_events(&repo)
+        .iter()
+        .any(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Pause));
+    let closes = fs::read_to_string(
+        gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&repo),
+    )
+    .expect("read machine-local resume close log");
+    assert!(closes.lines().any(|line| {
+        let event: gwt_core::workspace_projection::WorkEvent =
+            serde_json::from_str(line).expect("decode close event");
         event.kind == gwt_core::workspace_projection::WorkEventKind::Pause
             && event.agent_session_id.as_deref() == Some(failed_session_id)
     }));
@@ -28056,7 +28106,8 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             BackendEvent::IssueMonitorToast {
                 level,
                 message,
-                issue_number
+                issue_number,
+                ..
             } if level == "error" && message == "binary missing" && *issue_number == Some(42)
         )
     }));
@@ -28583,6 +28634,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
                 level,
                 message,
                 issue_number,
+                ..
             } if level == "error"
                 && message == "Stop-block hit an error"
                 && *issue_number == Some(42)
@@ -35793,7 +35845,7 @@ fn app_runtime_resume_workspace_agent_metadata_only_nonpicker_never_starts_new_w
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let mut session =
-        gwt_agent::Session::new(&repo, "work/metadata-only", gwt_agent::AgentId::Gemini);
+        gwt_agent::Session::new(&repo, "work/metadata-only", gwt_agent::AgentId::Copilot);
     session.id = "session-metadata-only".to_string();
     session.agent_session_id = None;
     session.save(&runtime.sessions_dir).expect("save session");
@@ -46709,7 +46761,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
     assert!(!runtime.window_lookup.contains_key(window_id));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::IssueMonitorToast { level, message, issue_number }
+        BackendEvent::IssueMonitorToast { level, message, issue_number, .. }
             if level == "error" && message == "agent failed" && *issue_number == Some(42)
     )));
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
@@ -47025,7 +47077,7 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
         .all(|event| !matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::IssueMonitorToast { level, message, issue_number }
+        BackendEvent::IssueMonitorToast { level, message, issue_number, .. }
             if level == "error"
                 && message.contains("local fallback control commit failed")
                 && *issue_number == Some(42)
@@ -50372,6 +50424,7 @@ fn app_runtime_quick_register_issue_permission_error_includes_reason_and_fallbac
                 level,
                 message,
                 issue_number: None,
+                ..
             } if level == "error" => Some(message.as_str()),
             _ => None,
         })
@@ -54379,6 +54432,7 @@ fn app_runtime_issue_monitor_auto_launch_skips_a_held_candidate_and_reports_why(
                 level,
                 message,
                 issue_number: Some(3914),
+                ..
             } if message.contains("Held codex") => Some((level.clone(), message.clone())),
             _ => None,
         })
@@ -54443,6 +54497,7 @@ fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
                 level,
                 message,
                 issue_number: Some(3165),
+                ..
             } if message.contains("Held claude") => Some((level.clone(), message.clone())),
             _ => None,
         })
@@ -68893,6 +68948,7 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
         .pm_sessions
         .insert(repo.clone(), "pm-successor".to_string());
     let stale_status = BackendEvent::IssueMonitorToast {
+        notification_transition: None,
         level: "error".to_string(),
         message: "stale predecessor PM status".to_string(),
         issue_number: None,
@@ -78167,3 +78223,5 @@ fn reopened_project_releases_old_pm_and_scan_worker_gates() {
 include!("pm_project_state_tests.rs");
 
 include!("project_owned_state_tests.rs");
+
+include!("project_aggregate_tests.rs");

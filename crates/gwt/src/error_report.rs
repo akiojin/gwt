@@ -71,6 +71,7 @@ pub fn record_backend_event(event: &BackendEvent) {
             level,
             message,
             issue_number,
+            ..
         } if level.eq_ignore_ascii_case("error") => {
             report_error_and_publish(
                 ErrorKind::LaunchFailure,
@@ -137,6 +138,7 @@ mod tests {
     fn error_toast_backend_event_is_written_to_the_ledger() {
         let (_dir, _home) = isolated_home();
         record_backend_event(&BackendEvent::IssueMonitorToast {
+            notification_transition: None,
             level: "error".into(),
             message: "stale generation launch failed".into(),
             issue_number: Some(3778),
@@ -153,6 +155,7 @@ mod tests {
     fn info_toasts_are_not_recorded() {
         let (_dir, _home) = isolated_home();
         record_backend_event(&BackendEvent::IssueMonitorToast {
+            notification_transition: None,
             level: "info".into(),
             message: "scan complete".into(),
             issue_number: None,
@@ -166,6 +169,7 @@ mod tests {
     fn duplicate_error_toasts_within_five_seconds_are_not_repeated() {
         let (_dir, _home) = isolated_home();
         let event = BackendEvent::IssueMonitorToast {
+            notification_transition: None,
             level: "error".into(),
             message: "same failure".into(),
             issue_number: Some(1),

@@ -1568,7 +1568,7 @@ fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
     assert!(
         html.contains("--agent-claude")
             && html.contains("--agent-codex")
-            && html.contains("--agent-gemini")
+            && html.contains("--agent-hermes")
             && html.contains("--agent-opencode")
             && html.contains("--agent-copilot")
             && html.contains("--agent-custom"),

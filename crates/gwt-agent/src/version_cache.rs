@@ -405,7 +405,6 @@ mod tests {
             VersionCache::agent_key(&AgentId::Antigravity),
             "antigravity"
         );
-        assert_eq!(VersionCache::agent_key(&AgentId::Gemini), "gemini");
         assert_eq!(VersionCache::agent_key(&AgentId::OpenCode), "opencode");
         assert_eq!(VersionCache::agent_key(&AgentId::OpenClaw), "openclaw");
         assert_eq!(VersionCache::agent_key(&AgentId::Hermes), "hermes");

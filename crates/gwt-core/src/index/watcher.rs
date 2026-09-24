@@ -65,8 +65,6 @@ pub struct WatcherHandle {
     _debouncer: Debouncer<NativeWatcher>,
     _shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     forwarder: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(all(test, target_os = "macos"))]
-    observed_paths: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 
 impl WatcherHandle {
@@ -110,17 +108,11 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
 
     // Bridge sync notify callback → tokio mpsc.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    #[cfg(all(test, target_os = "macos"))]
-    let observed_paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    #[cfg(all(test, target_os = "macos"))]
-    let callback_paths = observed_paths.clone();
     let mut debouncer: Debouncer<NativeWatcher> = new_debouncer_opt(
         DebouncerConfig::default().with_timeout(cfg.debounce),
         move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
-                #[cfg(all(test, target_os = "macos"))]
-                callback_paths.lock().unwrap().extend(paths.iter().cloned());
                 if !paths.is_empty() {
                     let _ = raw_tx.send(paths);
                 }
@@ -166,10 +158,7 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
             }
 
             // Split into ≤batch_limit chunks and emit each as its own batch.
-            for chunk in filtered.chunks(batch_limit) {
-                let batch = WatcherBatch {
-                    changed_paths: chunk.to_vec(),
-                };
+            for batch in split_batches(&filtered, batch_limit) {
                 if tx.send(batch).await.is_err() {
                     return;
                 }
@@ -182,8 +171,12 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
         _debouncer: debouncer,
         _shutdown_tx: Some(shutdown_tx),
         forwarder: Some(forwarder),
-        #[cfg(all(test, target_os = "macos"))]
-        observed_paths,
+    })
+}
+
+fn split_batches(paths: &[PathBuf], batch_limit: usize) -> impl Iterator<Item = WatcherBatch> + '_ {
+    paths.chunks(batch_limit).map(|chunk| WatcherBatch {
+        changed_paths: chunk.to_vec(),
     })
 }
 
@@ -210,8 +203,10 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn target_descendants_are_excluded_before_path_filtering() {
+    #[test]
+    fn target_descendants_are_excluded_before_path_filtering() {
+        use notify::Watcher;
+
         for target_exists in [true, false] {
             let temp = tempfile::tempdir().unwrap();
             let root = dunce::canonicalize(temp.path()).unwrap();
@@ -219,39 +214,38 @@ mod tests {
             if target_exists {
                 std::fs::create_dir(&target).unwrap();
             }
-            let mut watcher = start_watcher(
-                &root,
-                WatcherConfig {
-                    debounce: Duration::from_millis(100),
-                    batch_limit: 100,
-                },
-            )
-            .unwrap();
-            std::fs::create_dir_all(&target).unwrap();
-            for n in 0..50 {
-                std::fs::write(target.join(format!("artifact-{n}.rs")), "generated").unwrap();
-            }
-            let kept = root.join("kept.rs");
-            std::fs::write(&kept, "source").unwrap();
-            tokio::time::timeout(Duration::from_secs(8), async {
-                loop {
-                    let batch = watcher.recv_batch().await.expect("watcher closed");
-                    if batch.changed_paths.contains(&kept) {
-                        break;
-                    }
-                }
-            })
-            .await
-            .expect("source change should still be delivered");
-            let observed = watcher.observed_paths.lock().unwrap().clone();
-            watcher.shutdown().await;
-            // The parent can report the target directory entry itself. Its
-            // descendants must never reach the debounce callback, before policy filtering.
-            assert!(
-                observed.iter().all(|path| path == &target || !path.starts_with(&target)),
-                "native subscription leaked target descendants (pre-existing={target_exists}): {observed:?}"
+            let mut watcher = NativeWatcher::new(|_| {}, notify::Config::default()).unwrap();
+            watcher.watch(&root, RecursiveMode::Recursive).unwrap();
+            // Observe the actual native subscription, not a fake that implements
+            // exclusion itself. Successful registration before Start excludes
+            // descendants before any debounce callback or path-policy filter.
+            assert_eq!(
+                watcher.startup_trace(),
+                vec![
+                    macos::StartupStep::Excluded(vec![target]),
+                    macos::StartupStep::Started
+                ],
+                "native exclusion must precede delivery (pre-existing={target_exists})"
             );
         }
+    }
+
+    #[test]
+    fn batch_size_limit_splits_burst() {
+        let paths: Vec<_> = (0..200)
+            .map(|n| PathBuf::from(format!("f{n}.rs")))
+            .collect();
+        let batches: Vec<_> = split_batches(&paths, 100).collect();
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().all(|batch| batch.changed_paths.len() <= 100));
+        assert_eq!(
+            batches
+                .into_iter()
+                .flat_map(|batch| batch.changed_paths)
+                .collect::<Vec<_>>(),
+            paths,
+            "batch splitting must retain every path in order"
+        );
     }
 
     #[test]

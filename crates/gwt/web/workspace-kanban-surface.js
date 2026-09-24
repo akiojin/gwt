@@ -620,7 +620,6 @@ export function createWorkspaceKanbanSurface({
     ).toLowerCase();
     if (name.includes("claude")) return "yellow";
     if (name.includes("codex")) return "cyan";
-    if (name.includes("gemini")) return "magenta";
     if (name.includes("opencode")) return "green";
     if (name.includes("copilot")) return "blue";
     return "gray";
@@ -1355,11 +1354,6 @@ export function createWorkspaceKanbanSurface({
       ["antigravity", "agy"],
       ["antigravity cli", "agy"],
       ["antigravity-cli", "agy"],
-      ["gemini", "gemini"],
-      ["gemini cli", "gemini"],
-      ["gemini-cli", "gemini"],
-      ["gemini cli legacy", "gemini"],
-      ["gemini cli (legacy)", "gemini"],
       ["opencode", "opencode"],
       ["open-code", "opencode"],
       ["openclaw", "openclaw"],

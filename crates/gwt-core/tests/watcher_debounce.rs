@@ -7,6 +7,11 @@ use std::{fs, time::Duration};
 
 use gwt_core::index::watcher::{start_watcher, WatcherConfig};
 
+// Issue #4676: a native FSEvents probe needed 12.189s after write bursts
+// (source event at 12.086s, no drops). FlushSync returned before delivery.
+// Keep ~2.5x that latency for real filesystem events; receipt ends the wait.
+const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn write_file(dir: &std::path::Path, name: &str, contents: &str) {
     fs::write(dir.join(name), contents).unwrap();
 }
@@ -18,6 +23,7 @@ async fn burst_of_events_collapses_to_one_batch() {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
     };
+    // test-hygiene: allow-native-watcher-deadline Real OS integration probe; inventoried in #4681 AC-5.
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
     for i in 0..50 {
@@ -31,7 +37,7 @@ async fn burst_of_events_collapses_to_one_batch() {
     let mut rs_paths: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
     while rs_paths.len() < 50 {
-        let batch = tokio::time::timeout(Duration::from_secs(8), handle.recv_batch())
+        let batch = tokio::time::timeout(EVENT_TIMEOUT, handle.recv_batch())
             .await
             .expect("watcher must keep emitting batches until 50 files seen")
             .expect("watcher channel must not close");
@@ -46,41 +52,6 @@ async fn burst_of_events_collapses_to_one_batch() {
 }
 
 #[tokio::test]
-async fn batch_size_limit_splits_burst() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cfg = WatcherConfig {
-        debounce: Duration::from_secs(2),
-        batch_limit: 100,
-    };
-    let mut handle = start_watcher(tmp.path(), cfg).unwrap();
-
-    for i in 0..200 {
-        write_file(tmp.path(), &format!("f{i}.rs"), "// c\n");
-    }
-
-    let mut total_rs: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-    while total_rs.len() < 200 {
-        let batch = tokio::time::timeout(Duration::from_secs(8), handle.recv_batch())
-            .await
-            .expect("expected next batch within 8s")
-            .expect("channel open");
-        assert!(
-            batch.changed_paths.len() <= 100,
-            "batch must respect 100 file limit (got {})",
-            batch.changed_paths.len()
-        );
-        for p in &batch.changed_paths {
-            if p.extension().and_then(|s| s.to_str()) == Some("rs") {
-                total_rs.insert(p.clone());
-            }
-        }
-    }
-    assert_eq!(total_rs.len(), 200);
-    handle.shutdown().await;
-}
-
-#[tokio::test]
 async fn gitignored_files_are_excluded() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join(".gitignore"), "ignored/\n").unwrap();
@@ -91,6 +62,7 @@ async fn gitignored_files_are_excluded() {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
     };
+    // test-hygiene: allow-native-watcher-deadline Real OS integration probe; inventoried in #4681 AC-5.
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
     fs::write(tmp.path().join("ignored/should_skip.rs"), "// x\n").unwrap();
@@ -99,7 +71,7 @@ async fn gitignored_files_are_excluded() {
     // The debouncer can split nearby events across multiple batches under
     // Linux inotify, so drain until we see the kept file or a deadline
     // fires. Each batch must still pass the "no gitignored path" check.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
     let mut saw_kept = false;
     while !saw_kept {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -138,12 +110,13 @@ async fn nested_gitignored_files_are_excluded() {
         debounce: Duration::from_secs(2),
         batch_limit: 100,
     };
+    // test-hygiene: allow-native-watcher-deadline Real OS integration probe; inventoried in #4681 AC-5.
     let mut handle = start_watcher(tmp.path(), cfg).unwrap();
 
     fs::write(app.join("view.generated"), "ignored\n").unwrap();
     fs::write(app.join("view.rs"), "// kept\n").unwrap();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
     let mut saw_kept = false;
     while !saw_kept {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

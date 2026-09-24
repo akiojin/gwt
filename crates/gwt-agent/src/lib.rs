@@ -2,7 +2,7 @@
 //!
 //! This crate provides a unified interface for discovering, configuring,
 //! launching, and tracking coding agent sessions (Claude Code, Codex,
-//! Gemini, OpenCode, Copilot, and custom agents).
+//! OpenCode, Copilot, and custom agents).
 
 pub mod audit;
 pub mod backend;

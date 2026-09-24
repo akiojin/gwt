@@ -2764,6 +2764,7 @@ fn apply_child_environment_contract(process: &mut std::process::Command) {
 }
 
 use crate::cli::daemon::verification_host::VerificationHost;
+use crate::cli::verification_lease::CommandProgress;
 
 /// The exact environment a `verify.run` child receives, as a complete list.
 ///
@@ -2839,18 +2840,23 @@ fn execute_command_with_isolation(
     isolated_baseline: bool,
     capture: Option<&headed_e2e::Capture>,
     host: &VerificationHost,
+    progress: Option<&CommandProgress>,
 ) -> Result<(i32, String), String> {
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
     match host {
-        VerificationHost::Daemon(endpoint) => execute_command_on_daemon(
-            worktree,
-            command,
-            &args,
-            &assignments,
-            isolated_baseline,
-            capture,
-            endpoint,
-        ),
+        VerificationHost::Daemon(endpoint) => {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let request = delegated_spawn_request(
+                worktree,
+                &args,
+                &assignments,
+                isolated_baseline,
+                capture,
+                temp.path().join("stdout"),
+                temp.path().join("stderr"),
+            );
+            execute_command_on_daemon(command, &request, endpoint, progress)
+        }
         VerificationHost::Inherit => {
             let mut process = gwt_core::process::hidden_command(&args[0]);
             process.args(&args[1..]).current_dir(worktree);
@@ -2879,6 +2885,8 @@ fn execute_command_with_isolation(
             // has declared that it accepts its own.
             let output = match gwt_core::process_tree::spawn_at_normal_priority(&mut process)
                 .and_then(|spawned| {
+                    let _command_scope =
+                        progress.map(|progress| progress.start(spawned.child.id()));
                     let priority = spawned.priority.clone();
                     spawned.wait_with_output().map(|output| (output, priority))
                 }) {
@@ -2948,27 +2956,14 @@ fn delegated_spawn_request(
 
 /// Run one command through the daemon and read back what it produced.
 fn execute_command_on_daemon(
-    worktree: &Path,
     command: &str,
-    args: &[String],
-    assignments: &[(String, String)],
-    isolated_baseline: bool,
-    capture: Option<&headed_e2e::Capture>,
+    request: &gwt_core::daemon::VerificationSpawnRequest,
     endpoint: &gwt_core::daemon::DaemonEndpoint,
+    progress: Option<&CommandProgress>,
 ) -> Result<(i32, String), String> {
-    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let stdout_path = temp.path().join("stdout");
-    let stderr_path = temp.path().join("stderr");
-    let request = delegated_spawn_request(
-        worktree,
-        args,
-        assignments,
-        isolated_baseline,
-        capture,
-        stdout_path.clone(),
-        stderr_path.clone(),
-    );
-    let delegated = match crate::cli::daemon::verification_host::run(endpoint, &request) {
+    let delegated = match crate::cli::daemon::verification_host::run(endpoint, request, |pid| {
+        progress.map(|progress| progress.start(pid))
+    }) {
         Ok(delegated) => delegated,
         // A daemon that cannot take the command is a spawn failure like any
         // other: the record must be written with the partial transcript, not
@@ -2989,8 +2984,8 @@ fn execute_command_on_daemon(
              daemon killed its process group (Issue #3845)\n",
         );
     }
-    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
-    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+    let stdout = std::fs::read(&request.stdout_path).unwrap_or_default();
+    let stderr = std::fs::read(&request.stderr_path).unwrap_or_default();
     tail.push_str(&render_streams(&[("stdout", &stdout), ("stderr", &stderr)]));
     Ok((delegated.exit_code, tail))
 }
@@ -3050,6 +3045,7 @@ fn measure_baseline(
     merge_base_sha: &str,
     request: &VerificationQuarantineRequest,
     host: &VerificationHost,
+    progress: Option<&CommandProgress>,
 ) -> Result<(i32, String), String> {
     request.validate()?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -3072,8 +3068,14 @@ fn measure_baseline(
             std::ffi::OsStr::new(merge_base_sha),
         ],
     )?;
-    let (exit_code, output) =
-        execute_command_with_isolation(&checkout, &request.baseline_command, true, None, host)?;
+    let (exit_code, output) = execute_command_with_isolation(
+        &checkout,
+        &request.baseline_command,
+        true,
+        None,
+        host,
+        progress,
+    )?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
     }
@@ -3208,6 +3210,7 @@ struct RunOptions<'a> {
     /// is resolved once for the whole run, and every caller that has an
     /// opinion about the other options has one about this too.
     host: VerificationHost,
+    command_progress: Option<&'a CommandProgress>,
     on_progress: Option<&'a mut dyn FnMut(usize, usize, std::time::Duration)>,
 }
 
@@ -3339,6 +3342,7 @@ where
             false,
             capture.as_ref(),
             &options.host,
+            options.command_progress,
         )?;
         let headed_e2e = capture.as_ref().map(|capture| {
             capture.evidence().unwrap_or(headed_e2e::HeadedE2eEvidence {
@@ -3410,7 +3414,7 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host)
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host, options.command_progress)
                 {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
@@ -4744,6 +4748,9 @@ pub(super) fn run<E: CliEnv>(
                     },
                     headed_e2e_commands: &headed_e2e_commands,
                     host,
+                    command_progress: admission
+                        .as_ref()
+                        .map(|admission| admission.command_progress()),
                     on_progress: Some(&mut |done, total, elapsed| {
                         if let Some(admission) = admission.as_ref() {
                             admission.publish_progress(done, total, elapsed);

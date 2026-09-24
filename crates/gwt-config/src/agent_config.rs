@@ -13,7 +13,7 @@ pub const DEFAULT_TERMINAL_CLOSE_GRACE_SECS: u64 = 60;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    /// Default agent identifier (e.g. "claude", "codex", "gemini").
+    /// Default agent identifier (e.g. "claude", "codex").
     pub default_agent: Option<String>,
     /// Named agent executable paths.
     pub agent_paths: HashMap<String, PathBuf>,

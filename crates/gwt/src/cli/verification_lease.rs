@@ -29,6 +29,8 @@ use crate::cli::CliEnv;
 pub(crate) mod admission;
 /// Issue #4405: starved-versus-progressing reading of the lease holder.
 pub(crate) mod holder_activity;
+mod renewal;
+pub(crate) use renewal::CommandProgress;
 
 const CARGO_SCOPED_SUBCOMMANDS: &[&str] = &["test", "t", "nextest"];
 /// Flags that widen a `cargo test` past a single target, wherever they sit.

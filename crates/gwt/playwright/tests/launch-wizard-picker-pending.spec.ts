@@ -17,7 +17,7 @@ test.describe("Launch Wizard states", () => {
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
 
-    await expect(page.locator(".project-tab")).toBeVisible({
+    await expect(page.locator("#close-project-button")).toBeVisible({
       timeout: 10_000,
     });
 

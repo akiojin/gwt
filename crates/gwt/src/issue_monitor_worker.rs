@@ -431,11 +431,7 @@ pub fn issue_monitor_daemon_payloads(
         for notice in monitor.take_autonomous_notices() {
             payloads.push(IssueMonitorDaemonPayload {
                 event: "toast".to_string(),
-                payload: serde_json::json!({
-                    "level": notice.level,
-                    "message": notice.message,
-                    "issue_number": notice.issue_number,
-                }),
+                payload: serde_json::to_value(notice).expect("operator notice serializes"),
             });
         }
     }
@@ -2935,12 +2931,24 @@ mod tests {
             toast.payload.get("level").and_then(|v| v.as_str()),
             Some("error")
         );
+        assert_eq!(
+            toast
+                .payload
+                .get("notification_transition")
+                .and_then(|v| v.as_str()),
+            Some("needs_human")
+        );
         assert!(toast
             .payload
             .get("message")
             .and_then(|v| v.as_str())
             .is_some_and(|message| message.contains("review rejected")));
-        // Drained: a second pass emits no duplicate.
+        // Re-observing the same parked state is not a new transition.
+        monitor.escalate_to_needs_human(
+            42,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "review rejected",
+        );
         let again = issue_monitor_daemon_payloads(&mut monitor, true);
         assert!(!again.iter().any(|payload| {
             payload.event == "toast"

@@ -26,8 +26,10 @@ function fixture({ routeProjectKey = null } = {}) {
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
     socketReceiveDispatcher: null, recoveryCenterController: null,
-    closeResetCount: 0,
+    closeResetCount: 0, notificationResetCount: 0,
+    agentCompletionNotifier: { reset() { context.notificationResetCount += 1; } },
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
+    projectPageMetadata: { resetConnection() {} },
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
     opened, renderRouteNotFound() { context.notFoundRendered = true; },
@@ -155,6 +157,7 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.connectSocket();
+  assert.equal(context.notificationResetCount, 2, "reconnect discards observed Running duration");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
@@ -170,4 +173,38 @@ test("project not found stops every reconnect for the route", () => {
   const count = sockets.length;
   context.connectSocket();
   assert.equal(sockets.length, count);
+});
+
+
+test("aggregate control events bypass held rendering frames and stale sockets stay fenced", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const held = [];
+  context.createSocketReceiveDispatcher = ({ receive }) => ({ handle(event) { held.push(() => receive(JSON.parse(event.data))); } });
+  context.connectSocket();
+  sockets[1].open();
+  const old = sockets[1];
+  const aggregate = { kind: "project_agent_aggregate", aggregate: { running_count: 2, unread: true, revision: 3 } };
+  old.handlers.message({ data: JSON.stringify(aggregate) });
+  assert.equal(context.received.at(-1)?.kind, "project_agent_aggregate");
+  assert.equal(held.length, 0, "aggregate must never wait for animation frames");
+  old.handlers.message({ data: JSON.stringify({ kind: "workspace_state" }) });
+  assert.equal(held.length, 1, "normal render scheduling must remain unchanged");
+  old.close();
+  context.connectSocket();
+  sockets.at(-1).open();
+  const before = context.received.length;
+  old.handlers.message({ data: JSON.stringify(aggregate) });
+  held[0]();
+  assert.equal(context.received.length, before, "old control and queued render events remain fenced");
+});
+
+test("offline acknowledgement is ephemeral and never replays against a fresh connection", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  sockets[1].close();
+  assert.equal(context.send({ kind: "project_aggregate_ack", revision: 99, visible: true, focused: true }), "unavailable");
+  context.connectSocket();
+  sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
 });
