@@ -29,6 +29,10 @@ type NativeWatcher = macos::WorktreeWatcher;
 #[cfg(not(target_os = "macos"))]
 type NativeWatcher = notify::RecommendedWatcher;
 
+#[cfg(feature = "test-support")]
+#[path = "watcher_fixture.rs"]
+pub mod fixture;
+
 use crate::{
     error::{GwtError, Result},
     index::path_policy::{
@@ -62,9 +66,20 @@ pub struct WatcherBatch {
 /// Handle returned from `start_watcher`. Drop or call `shutdown()` to stop.
 pub struct WatcherHandle {
     rx: mpsc::Receiver<WatcherBatch>,
-    _debouncer: Debouncer<NativeWatcher>,
+    _debouncer: WatcherGuard,
     _shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     forwarder: Option<tokio::task::JoinHandle<()>>,
+}
+
+// Keep the backend's concrete type private and retain its Drop lifetime.
+enum WatcherGuard {
+    Native {
+        _debouncer: Debouncer<NativeWatcher>,
+    },
+    #[cfg(feature = "test-support")]
+    Fixture {
+        _debouncer: Debouncer<fixture::FixtureWatcher>,
+    },
 }
 
 impl WatcherHandle {
@@ -89,6 +104,16 @@ impl WatcherHandle {
 /// Start a per-Worktree watcher rooted at `worktree_path`. Returns a handle
 /// the caller can poll for batches.
 pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<WatcherHandle> {
+    start_watcher_with::<NativeWatcher>(worktree_path, cfg, |debouncer| WatcherGuard::Native {
+        _debouncer: debouncer,
+    })
+}
+
+fn start_watcher_with<W: notify::Watcher>(
+    worktree_path: &Path,
+    cfg: WatcherConfig,
+    guard: impl FnOnce(Debouncer<W>) -> WatcherGuard,
+) -> Result<WatcherHandle> {
     if !worktree_path.is_dir() {
         return Err(GwtError::Other(format!(
             "worktree path is not a directory: {}",
@@ -108,7 +133,7 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
 
     // Bridge sync notify callback → tokio mpsc.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    let mut debouncer: Debouncer<NativeWatcher> = new_debouncer_opt(
+    let mut debouncer: Debouncer<W> = new_debouncer_opt(
         DebouncerConfig::default().with_timeout(cfg.debounce),
         move |res: DebounceEventResult| {
             if let Ok(events) = res {
@@ -168,7 +193,7 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
 
     Ok(WatcherHandle {
         rx,
-        _debouncer: debouncer,
+        _debouncer: guard(debouncer),
         _shutdown_tx: Some(shutdown_tx),
         forwarder: Some(forwarder),
     })
