@@ -1470,6 +1470,7 @@ name = "gwt-docker"
 version = "9.102.0"
 dependencies = [
  "gwt-core",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",
