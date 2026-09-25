@@ -381,6 +381,14 @@ Priority の変更と daemon 不在時の設定変更は、実行中 instance �
 場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
 実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
+低容量時の自動 GC は、マージ済みの idle キャッシュを先に回収します。それでも
+`[build_artifact_gc]` の設定閾値を下回る場合は、空き容量を1件ごとに確認しながら
+未マージの idle キャッシュを回収します。両段階とも生存プロセスと launch を保護します。
+回収量がゼロなら、`issue.monitor.status` の `build_artifact_gc` に
+`outcome: no_reclaim`、`warning`、`kept_by_reason` を出し、列挙の成功だけを
+回収成功として扱いません。すべてのキャッシュが使用中の場合、GC だけでディスク枯渇を
+防げる保証はありません。
+
 Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考え方を使います。
 マージ済みまたは差分の無い Workspace は、未コミットの差分が gwt 自身の書き込み
 （`.gwt/` namespace、materialize された `gwt-*` skill / command、手書きの内容を含まない

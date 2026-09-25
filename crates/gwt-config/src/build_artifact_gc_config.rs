@@ -18,7 +18,7 @@ pub const DEFAULT_BELOW_PERCENT: u64 = 5;
 
 fn default_auto() -> bool {
     // On by default. The sweep only removes `target/` from worktrees that are
-    // merged and idle — a rebuild cost, never lost work — while the failure it
+    // idle, preferring merged caches — a rebuild cost, never lost work — while the failure it
     // prevents (a full disk failing every `verify.run` on the host) stops the
     // whole fleet. Off by default is how 749 GB accumulated in the first place.
     true

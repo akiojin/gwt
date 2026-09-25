@@ -6,8 +6,9 @@
 //! of build output with 327 GB of it reclaimable across 43 merged worktrees,
 //! and it stayed there because only an operator ever ran the sweep. The Issue
 //! Monitor scan now asks [`maybe_spawn`] on every pass: once the threshold the
-//! warning uses is crossed, the sweep runs with the dry-run defaults on a
-//! background thread and its result is appended to a record the status reads.
+//! warning uses is crossed, the sweep runs on a background thread, preferring
+//! merged caches and reclaiming idle unmerged caches only while pressure
+//! remains. Its result is appended to a record the status reads.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -20,9 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::cli::worktree_gc::{self, GcFailure, GcOptions, GcRemoval, GcReport};
 use crate::disk_space::{DiskSpaceStatus, DiskThresholds};
 
-/// The automatic sweep widens nothing: it keeps exactly what an unqualified
-/// dry run keeps — running and tracked worktrees, unmerged branches, shared
-/// base-branch workspaces (AC-2).
+/// The first priority is the same as the manual defaults. Under continued
+/// pressure the runner also considers idle unmerged caches (Issue #4704).
 pub(crate) const AUTO_GC_OPTIONS: GcOptions = GcOptions {
     include_unmerged: false,
     include_protected_workspaces: false,
@@ -59,9 +59,10 @@ pub enum AutoGcDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildArtifactGcOutcome {
-    /// The worktrees were enumerated and judged, so the counts say what was
-    /// found — including a legitimate "nothing to reclaim".
+    /// The sweep reclaimed build cache bytes.
     Swept,
+    /// Disk pressure triggered a sweep, but it reclaimed no bytes.
+    NoReclaim,
     /// The sweep never got a worktree list. `candidates`,
     /// `reclaimable_bytes` and `reclaimed_bytes` are placeholders below, not
     /// measurements: a reader must not take the zeros for an idle host.
@@ -76,9 +77,8 @@ pub struct BuildArtifactGcRecord {
     /// The disk warning that started the run.
     pub trigger: String,
     pub base: String,
-    /// Whether the counts below mean anything. Runs recorded before #4566
-    /// carry no value; [`BuildArtifactGcRecord::outcome`] reads it back from
-    /// `error` for them, so read that rather than this field.
+    /// Whether enumeration and reclaim succeeded. [`Self::outcome`] also
+    /// interprets legacy records that lack this field or call zero bytes swept.
     #[serde(default, rename = "outcome")]
     pub recorded_outcome: Option<BuildArtifactGcOutcome>,
     pub candidates: usize,
@@ -94,6 +94,9 @@ pub struct BuildArtifactGcRecord {
     /// reads to see why space was not reclaimed.
     #[serde(default)]
     pub kept_by_reason: BTreeMap<String, usize>,
+    /// Pressure was not relieved by any reclaim; kept reasons explain why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     /// The sweep itself failed (for example `git worktree list`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -102,11 +105,27 @@ pub struct BuildArtifactGcRecord {
 impl BuildArtifactGcRecord {
     /// What this run actually did, for records old and new alike.
     pub fn outcome(&self) -> BuildArtifactGcOutcome {
-        self.recorded_outcome.unwrap_or(if self.error.is_some() {
+        let outcome = self.recorded_outcome.unwrap_or(if self.error.is_some() {
             BuildArtifactGcOutcome::EnumerationFailed
         } else {
             BuildArtifactGcOutcome::Swept
-        })
+        });
+        if outcome == BuildArtifactGcOutcome::Swept && self.reclaimed_bytes == 0 {
+            BuildArtifactGcOutcome::NoReclaim
+        } else {
+            outcome
+        }
+    }
+
+    fn normalize_outcome(&mut self) {
+        let outcome = self.outcome();
+        self.recorded_outcome = Some(outcome);
+        if outcome == BuildArtifactGcOutcome::NoReclaim {
+            self.warning = Some(format!(
+                "disk pressure GC reclaimed 0 bytes; kept_by_reason: {:?}",
+                self.kept_by_reason
+            ));
+        }
     }
 }
 
@@ -173,9 +192,12 @@ pub fn record_path(project_root: &Path) -> PathBuf {
 /// The most recent run, if any. Read-only: a missing file is `None`.
 pub fn last_record(path: &Path) -> Option<BuildArtifactGcRecord> {
     let text = std::fs::read_to_string(path).ok()?;
-    text.lines()
+    let mut record: BuildArtifactGcRecord = text
+        .lines()
         .rev()
-        .find_map(|line| serde_json::from_str(line).ok())
+        .find_map(|line| serde_json::from_str(line).ok())?;
+    record.normalize_outcome();
+    Some(record)
 }
 
 fn append_record(path: &Path, record: &BuildArtifactGcRecord) -> std::io::Result<()> {
@@ -267,10 +289,21 @@ fn run_exclusive(project_root: &Path, record_path: &Path, trigger: &str) {
     }
     let started_at = now_rfc3339();
     let base = gwt_git::pr_status::SETTLEMENT_BASE_BRANCH;
-    let result = worktree_gc::run_gc(project_root, base, AUTO_GC_OPTIONS, false)
-        .map_err(|error| error.to_string());
+    let config = current_config();
+    let observe_disk = || probe_disk(project_root, &config);
+    let result = worktree_gc::run_gc_with_pressure(
+        project_root,
+        base,
+        AUTO_GC_OPTIONS,
+        false,
+        Some(&observe_disk),
+    )
+    .map_err(|error| error.to_string());
     let finished_at = now_rfc3339();
     let record = record_from_result(result, started_at, finished_at, trigger, base);
+    if let Some(warning) = &record.warning {
+        tracing::warn!(%warning, kept_by_reason = ?record.kept_by_reason, "build artifact auto-gc did not reclaim space");
+    }
     tracing::info!(
         outcome = ?record.outcome(),
         candidates = record.candidates,
@@ -315,6 +348,7 @@ fn record_from_result(
                 removed: Vec::new(),
                 failed: Vec::new(),
                 kept_by_reason: BTreeMap::new(),
+                warning: None,
                 error: Some(error),
             };
         }
@@ -325,7 +359,7 @@ fn record_from_result(
             .entry(kept_reason_category(&kept.reason))
             .or_default() += 1;
     }
-    BuildArtifactGcRecord {
+    let mut record = BuildArtifactGcRecord {
         started_at,
         finished_at,
         trigger: trigger.to_string(),
@@ -337,8 +371,11 @@ fn record_from_result(
         removed: report.removed,
         failed: report.failed,
         kept_by_reason,
+        warning: None,
         error: None,
-    }
+    };
+    record.normalize_outcome();
+    record
 }
 
 /// `active process: claude (pid 1)` → `active process`; `not merged into
@@ -351,6 +388,9 @@ fn kept_reason_category(reason: &str) -> String {
         .trim()
         .to_string()
 }
+
+#[cfg(test)]
+mod pressure_tests;
 
 #[cfg(test)]
 mod tests {
@@ -463,10 +503,10 @@ mod tests {
         }
     }
 
-    /// AC-2 / AC-6: the automatic sweep keeps running and unmerged worktrees
-    /// and the shared base workspace; only the merged idle one is reclaimed.
+    /// The first priority keeps unmerged caches; the pressure runner separately
+    /// considers them after merged caches. Process/launch/shared guards remain.
     #[test]
-    fn automatic_sweep_excludes_running_and_unmerged_worktrees() {
+    fn first_priority_excludes_running_and_unmerged_worktrees() {
         let mut running = probe("/work/running");
         running.active_processes = vec!["cargo (pid 7)".to_string()];
         let mut launched = probe("/work/launched");
@@ -568,17 +608,20 @@ mod tests {
         assert_eq!(json["outcome"], "enumeration_failed", "{json}");
     }
 
-    /// The other half of AC-2: a sweep that did enumerate says so, even when
-    /// it found nothing to reclaim.
+    /// Issue #4704 AC-1: enumeration success is not pressure relief.
     #[test]
-    fn a_sweep_that_found_nothing_is_still_recorded_as_swept() {
+    fn a_pressure_sweep_that_reclaims_nothing_is_a_warning() {
         let report = GcReport {
             dry_run: false,
             base: "develop".to_string(),
             include_unmerged: false,
             include_protected_workspaces: false,
             candidates: Vec::new(),
-            kept: Vec::new(),
+            kept: vec![GcKept {
+                worktree: PathBuf::from("/work/busy"),
+                branch: None,
+                reason: "active process: cargo (pid 7)".into(),
+            }],
             reclaimable_bytes: 0,
             removed: Vec::new(),
             failed: Vec::new(),
@@ -588,12 +631,15 @@ mod tests {
 
         let record = record_from_result(Ok(report), "s".into(), "f".into(), "trigger", "develop");
 
-        assert_eq!(record.outcome(), BuildArtifactGcOutcome::Swept);
-        assert_eq!(record.error, None);
+        let json = serde_json::to_value(&record).expect("record");
+        assert_eq!(json["outcome"], "no_reclaim");
+        assert!(json["warning"]
+            .as_str()
+            .is_some_and(|text| text.contains("0 bytes")));
+        assert_eq!(json["kept_by_reason"]["active process"], 1);
     }
 
-    /// Runs recorded before #4566 carry no `outcome` key. Their `error` says
-    /// the same thing, so reading an old history stays honest.
+    /// Legacy zero-byte runs must not keep presenting success after upgrade.
     #[test]
     fn a_legacy_record_without_an_outcome_falls_back_to_its_error() {
         let legacy = |error: &str| {
@@ -608,7 +654,10 @@ mod tests {
             serde_json::from_str(&legacy("null")).expect("clean record");
 
         assert_eq!(failed.outcome(), BuildArtifactGcOutcome::EnumerationFailed);
-        assert_eq!(clean.outcome(), BuildArtifactGcOutcome::Swept);
+        assert_ne!(clean.outcome(), BuildArtifactGcOutcome::Swept);
+        let mut old_swept = clean;
+        old_swept.recorded_outcome = Some(BuildArtifactGcOutcome::Swept);
+        assert_ne!(old_swept.outcome(), BuildArtifactGcOutcome::Swept);
     }
 
     /// AC-3: runs are appended, never overwritten, and the last one is what
@@ -630,6 +679,7 @@ mod tests {
             removed: Vec::new(),
             failed: Vec::new(),
             kept_by_reason: BTreeMap::new(),
+            warning: None,
             error: None,
         };
 

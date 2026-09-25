@@ -411,6 +411,15 @@ are kept by default because their rebuild lands on whoever opens them next.
 Running worktrees, the main worktree, the calling worktree, and the worktree
 hosting the running `gwtd` are never touched, whatever the flags say.
 
+Automatic low-disk GC reclaims merged idle caches first. If disk space still
+falls below the configured `[build_artifact_gc]` thresholds, it then reclaims
+idle unmerged caches, checking disk space before each one. Live processes and
+launches remain protected in both stages. A sweep that reclaims zero bytes
+reports `build_artifact_gc.outcome: no_reclaim`, a `warning`, and
+`kept_by_reason` in `issue.monitor.status`; successful enumeration alone is
+not reported as successful reclaim. If every cache is in use, GC cannot
+guarantee that the disk will not fill.
+
 The Workspace panel's `Clean Up Ready` count uses the same idea for whole
 worktrees: a merged or change-free Workspace stays cleanup-ready when its only
 uncommitted difference is something gwt itself wrote — its `.gwt/` namespace,

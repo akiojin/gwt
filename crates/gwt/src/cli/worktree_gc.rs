@@ -9,7 +9,7 @@
 //! reports the candidates, the kept worktrees with their reasons, and the
 //! bytes that would be freed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use gwt_github::SpecOpsError;
@@ -251,6 +251,19 @@ pub(crate) fn run_gc(
     options: GcOptions,
     dry_run: bool,
 ) -> Result<GcReport, SpecOpsError> {
+    run_gc_with_pressure(repo_path, base, options, dry_run, None)
+}
+
+/// Automatic GC gives unmerged caches lower priority, rather than permanent
+/// protection. The probe is shared with the trigger, including its configured
+/// thresholds, and is checked before each unmerged removal.
+pub(crate) fn run_gc_with_pressure(
+    repo_path: &Path,
+    base: &str,
+    mut options: GcOptions,
+    dry_run: bool,
+    pressure_probe: Option<&dyn Fn() -> crate::disk_space::DiskSpaceStatus>,
+) -> Result<GcReport, SpecOpsError> {
     let repo_path = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let git_root = git_root_for(&repo_path);
     let worktrees = gwt_git::worktree::WorktreeManager::new(&git_root)
@@ -286,15 +299,35 @@ pub(crate) fn run_gc(
         })
         .collect();
     let protected = protected_roots(&repo_path, &root_paths);
-    let mut plan = plan(probes, base, options, &protected);
-    for candidate in &mut plan.candidates {
-        candidate.bytes = directory_size(&candidate.target);
+    let unmerged: BTreeSet<_> = probes
+        .iter()
+        .filter(|probe| probe.merged == Ok(false))
+        .map(|probe| probe.root.clone())
+        .collect();
+    if pressure_probe.is_some() {
+        options.include_unmerged = true;
     }
-    let reclaimable_bytes = plan.candidates.iter().map(|c| c.bytes).sum();
+    let mut plan = plan(probes, base, options, &protected);
+    if pressure_probe.is_some() {
+        plan.candidates
+            .sort_by_key(|candidate| unmerged.contains(&candidate.worktree));
+    }
+    let mut candidates = Vec::new();
     let mut removed = Vec::new();
     let mut failed = Vec::new();
-    if !dry_run {
-        for candidate in &plan.candidates {
+    for mut candidate in plan.candidates {
+        if unmerged.contains(&candidate.worktree)
+            && pressure_probe.is_some_and(|probe| probe().warning.is_none())
+        {
+            plan.kept.push(GcKept {
+                worktree: candidate.worktree,
+                branch: candidate.branch,
+                reason: "unmerged cache: no remaining disk pressure".to_string(),
+            });
+            continue;
+        }
+        candidate.bytes = directory_size(&candidate.target);
+        if !dry_run {
             // Only ever `<worktree>/target` of a listed worktree; the plan
             // cannot name anything else.
             debug_assert_eq!(
@@ -314,16 +347,21 @@ pub(crate) fn run_gc(
                 }),
             }
         }
+        candidates.push(candidate);
     }
+    let reclaimable_bytes = candidates.iter().map(|c| c.bytes).sum();
     let reclaimed_bytes = removed.iter().map(|r| r.bytes).sum();
     let coordinator_root = gwt_core::index_coordinator::coordinator_root();
-    let disk_space = crate::disk_space::probe(&[repo_path.as_path(), coordinator_root.as_path()]);
+    let disk_space = pressure_probe.map_or_else(
+        || crate::disk_space::probe(&[repo_path.as_path(), coordinator_root.as_path()]),
+        |probe| probe(),
+    );
     Ok(GcReport {
         dry_run,
         base: base.to_string(),
         include_unmerged: options.include_unmerged,
         include_protected_workspaces: options.include_protected_workspaces,
-        candidates: plan.candidates,
+        candidates,
         kept: plan.kept,
         reclaimable_bytes,
         removed,
