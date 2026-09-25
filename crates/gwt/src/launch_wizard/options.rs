@@ -99,7 +99,7 @@ pub(super) struct CodexModelCapability {
     pub(super) max_effort: &'static str,
 }
 
-// SPEC-1921 US-20 / FR-121..FR-123 + Issue #3962: fixed 2026-09-05 Codex
+// SPEC-1921 US-20 / FR-121..FR-123 + Issue #4677: fixed 2026-09-23 Codex
 // picker snapshot, in the CLI's own picker order — the first row is the Codex
 // default model. Model rows and reasoning rows both derive from this single
 // capability table so stop counts and defaults cannot drift from the model
@@ -109,15 +109,31 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-6-astra",
-            description: "Our most capable model for complex, demanding work",
+            description: "Frontier intelligence for the most demanding work.",
         },
         default_effort: "medium",
         max_effort: "ultra",
     },
     CodexModelCapability {
         model: ModelDisplayOption {
+            label: "gpt-6-sol",
+            description: "Workhorse model for coding and everyday work.",
+        },
+        default_effort: "medium",
+        max_effort: "ultra",
+    },
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-6-luna",
+            description: "Fast and affordable model for easier tasks.",
+        },
+        default_effort: "medium",
+        max_effort: "max",
+    },
+    CodexModelCapability {
+        model: ModelDisplayOption {
             label: "gpt-5.6-sol",
-            description: "Reliable agentic workhorse for everyday tasks",
+            description: "Older coding model for complex work.",
         },
         default_effort: "low",
         max_effort: "ultra",
@@ -125,7 +141,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.6-terra",
-            description: "Balanced agentic coding model for everyday work",
+            description: "Older balanced model for straightforward work.",
         },
         default_effort: "medium",
         max_effort: "ultra",
@@ -133,7 +149,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.6-luna",
-            description: "Fast and affordable agentic coding model",
+            description: "Older fast and efficient model.",
         },
         default_effort: "medium",
         max_effort: "max",
@@ -141,25 +157,9 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.5",
-            description: "Proven previous-generation model for coding and general work",
+            description: "Legacy coding model.",
         },
         default_effort: "medium",
-        max_effort: "xhigh",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-5.4-mini",
-            description: "Small, fast, and cost-efficient model for simpler coding tasks",
-        },
-        default_effort: "medium",
-        max_effort: "xhigh",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-5.3-codex-spark",
-            description: "Ultra-fast coding model",
-        },
-        default_effort: "high",
         max_effort: "xhigh",
     },
 ];
@@ -1792,12 +1792,12 @@ mod tests {
             current_model_options("codex"),
             vec![
                 "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
                 "gpt-5.5",
-                "gpt-5.4-mini",
-                "gpt-5.3-codex-spark",
             ]
         );
         assert!(current_model_options("gemini").is_empty());
@@ -1809,12 +1809,10 @@ mod tests {
         assert!(!model_display_options("codex").is_empty());
     }
 
-    // SPEC-1921 US-20 / FR-121 + Issue #3962 AC-1: the Codex picker is the
-    // fixed, tested 2026-09-05 seven-model snapshot in picker order, with the
-    // descriptions the CLI shows. `gpt-6-astra` leads as the new default and
-    // the retired `gpt-5.4` is gone.
+    // SPEC-1921 US-20 / FR-121 + Issue #4677 AC-1/2: visible rows from
+    // the 2026-09-23 cache snapshot, in ascending picker priority.
     #[test]
-    fn codex_model_catalog_matches_2026_09_05_snapshot() {
+    fn codex_model_catalog_matches_2026_09_23_snapshot() {
         let rows: Vec<(&str, &str)> = model_display_options("codex")
             .iter()
             .map(|option| (option.label, option.description))
@@ -1824,32 +1822,21 @@ mod tests {
             vec![
                 (
                     "gpt-6-astra",
-                    "Our most capable model for complex, demanding work",
+                    "Frontier intelligence for the most demanding work."
                 ),
-                (
-                    "gpt-5.6-sol",
-                    "Reliable agentic workhorse for everyday tasks",
-                ),
+                ("gpt-6-sol", "Workhorse model for coding and everyday work."),
+                ("gpt-6-luna", "Fast and affordable model for easier tasks."),
+                ("gpt-5.6-sol", "Older coding model for complex work."),
                 (
                     "gpt-5.6-terra",
-                    "Balanced agentic coding model for everyday work",
+                    "Older balanced model for straightforward work."
                 ),
-                ("gpt-5.6-luna", "Fast and affordable agentic coding model"),
-                (
-                    "gpt-5.5",
-                    "Proven previous-generation model for coding and general work",
-                ),
-                (
-                    "gpt-5.4-mini",
-                    "Small, fast, and cost-efficient model for simpler coding tasks",
-                ),
-                ("gpt-5.3-codex-spark", "Ultra-fast coding model"),
+                ("gpt-5.6-luna", "Older fast and efficient model."),
+                ("gpt-5.5", "Legacy coding model."),
             ]
         );
-        assert!(
-            !rows.iter().any(|(label, _)| *label == "gpt-5.4"),
-            "gpt-5.4 left the Codex picker and must not be selectable"
-        );
+        // Exact equality also excludes retired models and hidden cache rows
+        // (gpt-reserve / codex-auto-review).
     }
 
     fn codex_capability_row(model: &str) -> (Vec<&'static str>, &'static str) {
@@ -1868,8 +1855,8 @@ mod tests {
     // expectations below mirror the CLI's own effort picker
     // (`supported_reasoning_levels` / `default_reasoning_level`), so Astra /
     // Sol / Terra expose six stops through Ultra, Luna five through Max, and
-    // the rest four through Extra high, with Sol=Low / Spark=High /
-    // others=Medium defaults.
+    // gpt-5.5 four through Extra high. Only gpt-5.6-sol defaults to Low;
+    // every other visible model defaults to Medium.
     #[test]
     fn codex_reasoning_capability_rows_follow_model() {
         const SIX: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
@@ -1890,25 +1877,22 @@ mod tests {
             (FIVE.to_vec(), "medium")
         );
         assert_eq!(codex_capability_row("gpt-5.5"), (FOUR.to_vec(), "medium"));
+        assert_eq!(codex_capability_row("gpt-6-sol"), (SIX.to_vec(), "medium"));
         assert_eq!(
-            codex_capability_row("gpt-5.4-mini"),
-            (FOUR.to_vec(), "medium")
-        );
-        assert_eq!(
-            codex_capability_row("gpt-5.3-codex-spark"),
-            (FOUR.to_vec(), "high")
+            codex_capability_row("gpt-6-luna"),
+            (FIVE.to_vec(), "medium")
         );
 
         // Every catalog row must be covered by the expectations above, so a
         // future snapshot cannot add a model whose effort ladder goes untested.
         let covered = [
             "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
             "gpt-5.5",
-            "gpt-5.4-mini",
-            "gpt-5.3-codex-spark",
         ];
         assert_eq!(current_model_options("codex"), covered.to_vec());
     }
