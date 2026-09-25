@@ -268,9 +268,9 @@ fn contains_word(lower: &str, word: &str) -> bool {
     false
 }
 
-/// Remove only negated PR references, so a separate affirmative PR request
-/// still arms the gate. Keep the original prompt for the other obligation kinds.
-fn has_non_negated_pr_reference(lower: &str) -> bool {
+/// Exclude negated PR requests from both work-verb and PR-reference detection.
+/// Other obligation kinds still use the original prompt for their markers.
+fn without_negated_pr_requests(lower: &str) -> std::borrow::Cow<'_, str> {
     static NEGATED_PR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
             r"(?x)
@@ -283,15 +283,14 @@ fn has_non_negated_pr_reference(lower: &str) -> bool {
             (?:pr|pull\s+request)(?-u:\b)
             |
             (?:(?-u:\b)(?:pr|pull\s+request)(?-u:\b)|プルリク(?:エスト)?)
-            \s*(?:を|は)?\s*
-            (?:作ら(?:ない|ず)|作成(?:しない|せず)|不要)",
+            \s*(?:
+                (?:を|は)?\s*(?:作ら(?:ない|ず)|作成(?:しない|せず)|不要) |
+                の\s*作成\s*は\s*不要
+            )",
         )
         .expect("valid negated PR pattern")
     });
-    let affirmative = NEGATED_PR.replace_all(lower, " ");
-    affirmative.contains("pull request")
-        || affirmative.contains("プルリク")
-        || contains_word(&affirmative, "pr")
+    NEGATED_PR.replace_all(lower, " ")
 }
 
 /// T-240 core classifier: a prompt arms an obligation only when it carries
@@ -328,10 +327,14 @@ pub fn classify_prompt(prompt: &str) -> Option<ObligationKind> {
         "create ",
         "update ",
     ];
-    if !WORK_FORMS.iter().any(|form| lower.contains(form)) {
+    let affirmative = without_negated_pr_requests(&lower);
+    if !WORK_FORMS.iter().any(|form| affirmative.contains(form)) {
         return None;
     }
-    if has_non_negated_pr_reference(&lower) {
+    if affirmative.contains("pull request")
+        || affirmative.contains("プルリク")
+        || contains_word(&affirmative, "pr")
+    {
         return Some(ObligationKind::Pr);
     }
     if lower.contains("検証")
@@ -748,6 +751,7 @@ mod tests {
             "新規 PR は作成しない。修正して",
             "PR を作成せずに修正して",
             "PR は不要です。修正して",
+            "PR の作成は不要です。修正して",
             "fix this with no PR",
             "fix this with no pull request",
             "fix this without creating a new PR",
@@ -764,6 +768,7 @@ mod tests {
         for prompt in [
             "Do not change tests; create a PR",
             "新規 PR は作成しない。既存 PR を更新して",
+            "PR の作成は不要です。既存 PR を更新して",
         ] {
             assert_eq!(
                 classify_prompt(prompt),
@@ -771,6 +776,18 @@ mod tests {
                 "{prompt}"
             );
         }
+    }
+
+    #[test]
+    fn classifier_requires_work_outside_negated_pr_requests() {
+        assert_eq!(
+            classify_prompt("Do not create a PR. Tests already passed."),
+            None
+        );
+        assert_eq!(
+            classify_prompt("Do not create a PR. Fix the tests."),
+            Some(ObligationKind::Verification)
+        );
     }
 
     fn materialize_execution(
