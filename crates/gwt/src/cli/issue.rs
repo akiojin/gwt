@@ -7881,14 +7881,14 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let mut out = String::new();
 
+        let mut codex = pool_patch("codex", &[]);
+        codex.profile.model = Some("gpt-6-sol".to_string());
+
         let code = run(
             &mut env,
             IssueCommand::MonitorProfilesSet {
                 project_root: Some(repo.clone()),
-                profiles: vec![
-                    pool_patch("codex", &[]),
-                    pool_patch("claude", &["kind:spec"]),
-                ],
+                profiles: vec![codex, pool_patch("claude", &["kind:spec"])],
                 usage_threshold_percent: Some(70),
             },
             &mut out,
@@ -7905,6 +7905,7 @@ mod tests {
             vec!["codex", "claude"]
         );
         assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+        assert_eq!(pool[0].model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(pool[1].prefer_for, vec!["kind:spec".to_string()]);
         assert_eq!(prefs.launch_usage_threshold_percent, 70);
         assert_eq!(
@@ -7932,6 +7933,7 @@ mod tests {
         assert_eq!(payload["launch_profiles"].as_array().map(Vec::len), Some(2));
         assert_eq!(payload["launch_profiles"][0]["index"], 0);
         assert_eq!(payload["launch_profiles"][0]["agent_id"], "codex");
+        assert_eq!(payload["launch_profiles"][0]["model"], "gpt-6-sol");
         assert_eq!(
             payload["launch_profiles"][0]["held_until"],
             "2999-01-01T04:00:00Z"
