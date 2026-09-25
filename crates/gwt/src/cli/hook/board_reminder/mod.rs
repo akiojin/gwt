@@ -830,6 +830,19 @@ fn preserve_board_diff_cursor_after_failed_read(
     // would permanently hide entries posted after the previous successful
     // prompt, so only successful materializations may commit the position.
     plan.next_reminders.last_injected_at = previous_last_injected_at;
+    const UNAVAILABLE: &str = "Board context unavailable: the prompt could not read the Board. \
+        This does not mean there are no new posts. Read board.show before relying on Board state; \
+        the next prompt will retry from the last successful read.";
+    match &mut plan.output {
+        HookOutput::HookSpecificAdditionalContext { text, .. } => {
+            text.push_str("\n\n");
+            text.push_str(UNAVAILABLE);
+        }
+        HookOutput::Silent => {
+            plan.output = HookOutput::hook_specific_additional_context(event, UNAVAILABLE);
+        }
+        _ => {}
+    }
 }
 
 fn terminal_work_state_reminders_suppressed(resolved_worktree: &Path, session_id: &str) -> bool {
@@ -1376,6 +1389,10 @@ mod tests {
         );
 
         assert_eq!(plan.next_reminders.last_injected_at, Some(previous));
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = plan.output else {
+            panic!("unavailable Board context must be visible");
+        };
+        assert!(text.contains("Board context unavailable"), "{text}");
     }
 
     #[test]

@@ -811,6 +811,102 @@ mod tests {
     }
 
     #[test]
+    fn issue_4686_user_prompt_defers_a_contended_pm_refresh() {
+        use fs2::FileExt;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let project = gwt_core::paths::gwt_projects_dir().join("prompt-contention");
+        let worktree = project.join("pm/worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(project.join("project-state")).unwrap();
+        let lock_path = project.join("project-state/pm-refresh.lock");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = std::fs::File::create(lock_path).unwrap();
+            FileExt::lock_exclusive(&lock).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let result = handle_with_input("UserPromptSubmit", "{}", &worktree, None);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let output = result.expect("refresh contention must not fail the prompt");
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
+            panic!("deferred refresh must be visible: {output:?}");
+        };
+        assert!(text.contains("refresh deferred"), "{text}");
+        assert!(text.contains("pid=unknown"), "legacy holder: {text}");
+        // Once acquisition succeeds, an invalid PM Git identity still fails.
+        assert!(handle_with_input("UserPromptSubmit", "{}", &worktree, None).is_err());
+    }
+
+    #[test]
+    fn issue_4686_prompt_reads_board_while_the_writer_lock_is_held() {
+        use fs2::FileExt;
+        use gwt_core::coordination::{coordination_dir, post_entry, AuthorKind, LocalProvider};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        let session = Session::new(&worktree, "work/board-lock", AgentId::Codex);
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+            Rc::new(LocalProvider),
+        );
+        post_entry(
+            &worktree,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Fixture",
+                BoardEntryKind::Status,
+                "board-content-under-writer-lock",
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .unwrap();
+        let lock_path = coordination_dir(&worktree).join(".lock");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
+            FileExt::lock_exclusive(&lock).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let result = handle_with_input("UserPromptSubmit", "{}", &worktree, Some(&session.id));
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = result.unwrap() else {
+            panic!("expected Board context");
+        };
+        assert!(text.contains("board-content-under-writer-lock"), "{text}");
+    }
+
+    #[test]
     fn degraded_remote_board_and_hook_live_fail_open_within_prompt_budget() {
         let _env_lock = crate::env_test_lock()
             .lock()

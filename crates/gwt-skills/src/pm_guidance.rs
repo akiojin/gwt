@@ -99,10 +99,28 @@ into this generated skill supplements the PM contract.
 
 You own the backlog for its whole life, not just at creation.
 
-- Search first. Run `gwt-search` (the `search` operation) with two or three
+- Establish the owning `gwt-spec` first. Run `issue.spec.list` before
+  registering anything new. It returns every open `gwt-spec` with its
+  scope in one call, so it cannot miss the owner the way a phrasing can.
+  The question to answer is "which `gwt-spec` owns this area?", not "does
+  the same Issue already exist?" — #4677 was registered standalone after
+  a search that found only closed near-duplicates, while SPEC-1921 owned
+  the area the whole time.
+- Then search. Run `gwt-search` (the `search` operation) with two or three
   keyword phrasings before registering anything new. Extending the
   right existing Issue beats adding a near-duplicate that splits the
-  work and the discussion.
+  work and the discussion. Semantic search is the supporting step, never
+  the deciding one: a search that returns nothing does not establish that
+  no owner exists, because the result turns on the words you happened to
+  choose. Only `issue.spec.list` settles the owner.
+- When a `gwt-spec` owns the area, register the work as that spec's
+  implementation Issue: a plain Issue whose body names the parent spec
+  and whose acceptance criteria include registering the change in that
+  spec's `spec` / `plan` / `tasks` sections. Do not fold the work into
+  the spec's sections instead of registering it, and do not register it
+  standalone. The reason is that the Issue Monitor launches Issues, not
+  spec sections, so work written only into a spec never runs — while a
+  standalone Issue splits the area's history away from its owner.
 - Decompose one user request into independently deliverable Issues.
   Record cross-Issue ordering with dependency markers in the body.
 - Registration template: a clear problem statement, acceptance
@@ -1660,6 +1678,42 @@ mod tests {
         assert!(body.contains("`gwt-search`"), "重複確認の導線が要る");
         assert!(body.contains("before registering anything new"));
         assert!(body.contains("Keep the backlog honest"));
+    }
+
+    /// Issue #4680 AC-1 / AC-2: the search clause told the PM to run
+    /// `gwt-search` and nothing else, so a PM that followed it to the letter
+    /// still registered #4677 standalone while SPEC-1921 owned the area. The
+    /// contract now names `issue.spec.list` as the step that settles the
+    /// owner, says in so many words that a semantic search cannot settle it,
+    /// and fixes what to do once an owner is found — rather than leaving that
+    /// to PM discretion, which is how the precedent went unwritten.
+    #[test]
+    fn contract_settles_the_owning_spec_before_registering_and_says_what_to_do_with_it() {
+        let body = body();
+        for phrase in [
+            // AC-1: the operation that cannot miss an owner, named and ordered
+            // ahead of the phrasing-dependent search.
+            "Establish the owning `gwt-spec` first",
+            "Run `issue.spec.list` before",
+            "in one call",
+            // AC-1: the question is about ownership, not duplication.
+            "which `gwt-spec` owns this area?",
+            // AC-1: semantic search is explicitly demoted to a supporting step,
+            // so an empty result can never be read as "no owner exists".
+            "Semantic search is the supporting step, never",
+            "does not establish that",
+            "no owner exists",
+            "Only `issue.spec.list` settles the owner",
+            // AC-2: one written outcome, with both wrong turns named.
+            "register the work as that spec's",
+            "acceptance criteria include registering the change in that",
+            "Do not fold the work into",
+            "do not register it",
+            "standalone",
+            "launches Issues, not",
+        ] {
+            assert!(body.contains(phrase), "missing phrase: {phrase}");
+        }
     }
 
     /// Issue #3865 AC-6 / AC-7: plain Issues have a body-update path, and the

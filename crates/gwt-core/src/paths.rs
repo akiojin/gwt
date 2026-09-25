@@ -759,6 +759,19 @@ pub fn gwt_work_notes_discussions_path(repo_path: &Path) -> PathBuf {
     gwt_work_notes_dir(repo_path).join("discussions.md")
 }
 
+/// Return the machine-local record of the PM's last `gwt-spec` survey
+/// (`~/.gwt/projects/<repo-hash>/pm/spec-survey.json`).
+///
+/// Issue #4680: the registration gate has to know whether this PM ran
+/// `issue.spec.list` before it registers, and the answer must outlive the
+/// single hook process that observed the call. It is machine-local and
+/// branch-independent for the same reason the Board and Work state are —
+/// writing it into the worktree would leave an untracked file behind the
+/// Stop gate, which is the failure #4669 records.
+pub fn gwt_pm_spec_survey_path(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("pm/spec-survey.json")
+}
+
 /// Resolve the project memory path for READS: the machine-local home file
 /// when present, otherwise the legacy git-tracked repo-local file
 /// (`<repo_root>/.gwt/work/memory.md`) as a fallback, otherwise the (not yet

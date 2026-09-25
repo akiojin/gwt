@@ -68,8 +68,13 @@ pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
     }
 }
 
-fn refresh_at_safe_boundary(worktree: &Path) -> io::Result<Option<String>> {
-    match pm_registry::refresh_pm_worktree_at_safe_boundary(worktree) {
+fn refresh_at_safe_boundary(worktree: &Path, nonblocking: bool) -> io::Result<Option<String>> {
+    let refreshed = if nonblocking {
+        pm_registry::try_refresh_pm_worktree_at_safe_boundary(worktree)
+    } else {
+        pm_registry::refresh_pm_worktree_at_safe_boundary(worktree)
+    };
+    match refreshed {
         Ok(Some(outcome)) if !outcome.is_fresh() => Ok(Some(format!(
             "Resident PM worktree refresh is degraded: state={:?}, stage={:?}, reason={}",
             outcome.freshness.state,
@@ -81,6 +86,16 @@ fn refresh_at_safe_boundary(worktree: &Path) -> io::Result<Option<String>> {
                 .unwrap_or("unknown")
         ))),
         Ok(_) => Ok(None),
+        Err(error)
+            if error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<pm_registry::PmRefreshDeferred>()) =>
+        {
+            Ok(Some(format!(
+                "Resident PM worktree refresh deferred: {error}. \
+                 This prompt did not refresh the worktree; freshness is unverified."
+            )))
+        }
         Err(error) => {
             tracing::warn!(%error, "resident PM worktree refresh failed at a safe boundary");
             Err(error)
@@ -94,7 +109,7 @@ fn refresh_at_safe_boundary(worktree: &Path) -> io::Result<Option<String>> {
 /// reports it immediately instead of silently claiming freshness.
 pub fn handle_user_prompt_submit(worktree: &Path) -> io::Result<Option<String>> {
     let refresh_context = if super::is_resident_pm_worktree(worktree) {
-        refresh_at_safe_boundary(worktree)?
+        refresh_at_safe_boundary(worktree, true)?
     } else {
         None
     };
@@ -255,7 +270,7 @@ fn handle_at(
     // The current model turn has completed and this gate has decided to start
     // the next resident cycle. This is the only Stop-side mutation boundary;
     // quiet-time wake selection never fetches or repoints the worktree.
-    let refresh_context = match refresh_at_safe_boundary(worktree) {
+    let refresh_context = match refresh_at_safe_boundary(worktree, false) {
         Ok(context) => context,
         Err(error) => {
             tracing::warn!(%error, "resident PM continuation parked after refresh failure");
