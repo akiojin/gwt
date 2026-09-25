@@ -64,11 +64,43 @@ fn detached_foreign_container_stays_detached_after_intake_and_rebuild() {
         assert_eq!(new.execution_containers, std::slice::from_ref(&foreign));
     };
     assert_detached();
+    // Board milestone refresh uses this transaction even when its callback
+    // produces no event. An unprojected close event refolds retained history.
+    let detached = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+    let receipt = container_detachments_path(&path);
+    let held_receipt = receipt.with_extension("held");
+    let close = WorkEvent::new(WorkEventKind::Done, "unrelated", at);
+    fs::write(
+        path.with_file_name("work-events-closed.jsonl"),
+        format!("{}\n", serde_json::to_string(&close).unwrap()),
+    )
+    .unwrap();
+    for with_receipt in [false, true] {
+        if !with_receipt {
+            fs::rename(&receipt, &held_receipt).unwrap();
+        }
+        save_workspace_work_items_projection_to_path(&path, &detached).unwrap();
+        transact_workspace_state(&repo, |_, items, _| {
+            let old = items
+                .work_items
+                .iter()
+                .find(|item| item.id == "old")
+                .unwrap();
+            assert_eq!(
+                old.execution_containers.len(),
+                if with_receipt { 1 } else { 2 }
+            );
+            Ok(((), Vec::new()))
+        })
+        .unwrap();
+        if !with_receipt {
+            fs::rename(&held_receipt, &receipt).unwrap();
+        }
+    }
+    assert_detached();
     // Simulate an interrupted write-ahead repair: the receipt commits, but
     // works.json still has its old bytes. A pre-existing cache must miss even
     // though that projection file does not change when the receipt appears.
-    let receipt = container_detachments_path(&path);
-    let held_receipt = receipt.with_extension("held");
     fs::rename(&receipt, &held_receipt).unwrap();
     fs::write(&path, &original_bytes).unwrap();
     let mut cache = WorkItemsCache::new();
