@@ -567,35 +567,85 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn container_runtime_kind_timeout_terminates_non_exec_descendants() {
-        use std::{os::unix::fs::PermissionsExt, time::Duration};
+        use std::{
+            ffi::CString,
+            fs::{File, OpenOptions},
+            io::{Read, Write},
+            os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+            sync::{Arc, Mutex},
+        };
 
         let temp = TempDir::new().expect("tempdir");
         let wrapper = temp.path().join("descendant-container-wrapper");
         let marker = wrapper.with_extension("marker");
         let ready = wrapper.with_extension("ready");
-        std::fs::write(
+        let release = wrapper.with_extension("release");
+        for path in [&ready, &release] {
+            let path = CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+            // SAFETY: path is a valid NUL-terminated path in our unique tempdir.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        write_executable(
             &wrapper,
-            "#!/bin/sh\nprintf ready > \"${0}.ready\"\n(trap '' HUP TERM; sleep 3; printf leaked > \"${0}.marker\") </dev/null >/dev/null 2>&1 &\nsleep 0.1\nwhile :; do sleep 1; done\n",
-        )
-        .expect("write descendant wrapper");
-        let mut permissions = std::fs::metadata(&wrapper)
-            .expect("wrapper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&wrapper, permissions).expect("chmod descendant wrapper");
+            r#"#!/bin/sh
+(
+  trap '' HUP TERM
+  exec 3<> "${0}.release"
+  exec 4> "${0}.ready"
+  printf ready >&4
+  read -r release <&3
+  printf leaked > "${0}.marker"
+) </dev/null >/dev/null 2>&1 &
+wait
+"#,
+        );
 
-        let error = probe_container_runtime_kind_with_timeout(
-            wrapper.to_str().expect("UTF-8 wrapper path"),
-            Duration::from_secs(2),
+        // The descendant owns both FIFO descriptors before notifying us. Keep
+        // the ready reader until EOF to observe its exit, not a guessed delay.
+        let reader = Arc::new(Mutex::new(None));
+        let reader_slot = Arc::clone(&reader);
+        let timeout = Duration::from_secs(2);
+        let error = gwt_core::process_console::spawn::with_spawn_ready_for_tests(
+            timeout,
+            move || {
+                let mut file = File::open(ready).expect("open readiness FIFO");
+                let mut message = [0; 5];
+                file.read_exact(&mut message).expect("descendant readiness");
+                assert_eq!(&message, b"ready");
+                *reader_slot.lock().expect("reader slot") = Some(file);
+            },
+            || {
+                probe_container_runtime_kind_with_timeout(
+                    wrapper.to_str().expect("UTF-8 wrapper path"),
+                    timeout,
+                )
+            },
         )
         .expect_err("a stuck wrapper must fail closed");
         assert!(error.contains("timed out"), "unexpected error: {error}");
-        assert!(
-            ready.exists(),
-            "the non-exec descendant must start before the wrapper timeout"
-        );
 
-        std::thread::sleep(Duration::from_millis(3_200));
+        // If cleanup regresses, release the surviving descendant so it writes
+        // the marker and closes its ready writer. A killed child has no reader
+        // (ENXIO), or closes it while we write (BrokenPipe).
+        match OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(release)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(b"go\n") {
+                    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+                }
+            }
+            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
+        }
+        reader
+            .lock()
+            .expect("reader slot")
+            .as_mut()
+            .expect("descendant started")
+            .read_to_end(&mut Vec::new())
+            .expect("all descendant ready writers closed");
         assert!(
             !marker.exists(),
             "timeout cleanup must terminate the wrapper process tree before a descendant can act"
