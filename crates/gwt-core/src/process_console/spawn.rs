@@ -42,6 +42,34 @@ thread_local! {
 
 static SPAWN_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(any(test, feature = "test-support"))]
+type SpawnReadyHook = (Duration, Box<dyn FnOnce() + Send>);
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_SPAWN_READY: std::cell::RefCell<Option<SpawnReadyHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Start the next synchronous deadline spawn's budget after a fixture signals
+/// readiness. Only the test clock origin changes; spawning and tree cleanup are
+/// real. The hook is consumed once on this thread, and restored even on panic.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_spawn_ready_for_tests<T>(
+    budget: Duration,
+    ready: impl FnOnce() + Send + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<SpawnReadyHook>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_SPAWN_READY.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore =
+        Restore(TEST_SPAWN_READY.with(|slot| slot.borrow_mut().replace((budget, Box::new(ready)))));
+    run()
+}
+
 /// Knobs that control how `spawn_logged` runs the child process.
 #[derive(Debug, Clone)]
 pub struct SpawnOptions {
@@ -202,7 +230,13 @@ async fn spawn_logged_inner(
     options: SpawnOptions,
     deadline: Option<Instant>,
 ) -> std::io::Result<SpawnOutput> {
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+    #[cfg(any(test, feature = "test-support"))]
+    let has_ready_hook =
+        deadline.is_some() && TEST_SPAWN_READY.with(|slot| slot.borrow().is_some());
+    let expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
+    #[cfg(any(test, feature = "test-support"))]
+    let expired = expired && !has_ready_hook;
+    if expired {
         return Err(deadline_error());
     }
     // Issue #3675 AC-2: in test builds (armed via
@@ -367,6 +401,16 @@ async fn spawn_logged_inner(
             return Err(error);
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    let ready_hook = deadline.and_then(|_| TEST_SPAWN_READY.with(|slot| slot.borrow_mut().take()));
+    #[cfg(any(test, feature = "test-support"))]
+    let deadline = match ready_hook {
+        Some((budget, ready)) => {
+            ready();
+            Some(Instant::now() + budget)
+        }
+        None => deadline,
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let forward_output = options.forward_output;
@@ -1089,6 +1133,38 @@ mod tests {
     /// in the full Windows suite, so a tighter wall-clock assertion tests host
     /// load instead of scoped-deadline propagation.
     const FINITE_SLEEP_TERMINATION_BOUND: Duration = Duration::from_secs(30);
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_hook_survives_a_failed_spawn_before_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&ready_count);
+        with_spawn_ready_for_tests(
+            QUICK_PROCESS_FIXTURE_BUDGET,
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            },
+            || {
+                let hub = ProcessConsoleHub::new();
+                let spawn = |program: &std::ffi::OsStr| {
+                    spawn_logged_blocking_with_deadline(
+                        &hub,
+                        ProcessKind::Docker,
+                        program,
+                        &["-c", "exit 0"],
+                        SpawnOptions::new("readiness retry").forward_output(false),
+                        Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
+                    )
+                };
+                let error = spawn(directory.path().join("missing").as_os_str()).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(ready_count.load(Ordering::SeqCst), 0);
+                assert!(spawn(std::ffi::OsStr::new("/bin/sh")).unwrap().success());
+                assert_eq!(ready_count.load(Ordering::SeqCst), 1);
+            },
+        );
+    }
 
     struct PostReapDelayGuard(u64);
 
