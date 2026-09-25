@@ -268,6 +268,31 @@ fn contains_word(lower: &str, word: &str) -> bool {
     false
 }
 
+/// Exclude negated PR requests from both work-verb and PR-reference detection.
+/// Other obligation kinds still use the original prompt for their markers.
+fn without_negated_pr_requests(lower: &str) -> std::borrow::Cow<'_, str> {
+    static NEGATED_PR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?x)
+            (?-u:\b)(?:
+                no[\s-]+ |
+                without\s+(?:(?:creating|opening|making)\s+)? |
+                (?:do\s+not|don't|never)\s+(?:create|open|make)\s+
+            )
+            (?:(?:a|an|any|new|another|implementation)\s+)*
+            (?:pr|pull\s+request)(?-u:\b)
+            |
+            (?:(?-u:\b)(?:pr|pull\s+request)(?-u:\b)|プルリク(?:エスト)?)
+            \s*(?:
+                (?:を|は)?\s*(?:作ら(?:ない|ず)|作成(?:しない|せず)|不要) |
+                の\s*作成\s*は\s*不要
+            )",
+        )
+        .expect("valid negated PR pattern")
+    });
+    NEGATED_PR.replace_all(lower, " ")
+}
+
 /// T-240 core classifier: a prompt arms an obligation only when it carries
 /// an explicit WORK verb (imperative/te-form). Polite forms alone
 /// ("ください", "お願い", "please", "can you") are not sufficient — polite
@@ -302,10 +327,13 @@ pub fn classify_prompt(prompt: &str) -> Option<ObligationKind> {
         "create ",
         "update ",
     ];
-    if !WORK_FORMS.iter().any(|form| lower.contains(form)) {
+    let affirmative = without_negated_pr_requests(&lower);
+    if !WORK_FORMS.iter().any(|form| affirmative.contains(form)) {
         return None;
     }
-    if lower.contains("pull request") || lower.contains("プルリク") || contains_word(&lower, "pr")
+    if affirmative.contains("pull request")
+        || affirmative.contains("プルリク")
+        || contains_word(&affirmative, "pr")
     {
         return Some(ObligationKind::Pr);
     }
@@ -712,6 +740,53 @@ mod tests {
         assert_eq!(
             classify_prompt("調査の進捗はどうですか？よろしくお願いします"),
             None
+        );
+    }
+
+    #[test]
+    fn classifier_does_not_arm_pr_for_negated_pr_requests() {
+        for prompt in [
+            "PR を作らずに修正して",
+            "PR を作らないで修正して",
+            "新規 PR は作成しない。修正して",
+            "PR を作成せずに修正して",
+            "PR は不要です。修正して",
+            "PR の作成は不要です。修正して",
+            "fix this with no PR",
+            "fix this with no pull request",
+            "fix this without creating a new PR",
+            "fix this; do not create a PR",
+            "fix this; don't open a pull request",
+            "Before changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
+        ] {
+            assert_ne!(classify_prompt(prompt), Some(ObligationKind::Pr), "{prompt}");
+        }
+        assert_eq!(
+            classify_prompt("PR を作らずにテストを実行して"),
+            Some(ObligationKind::Verification)
+        );
+        for prompt in [
+            "Do not change tests; create a PR",
+            "新規 PR は作成しない。既存 PR を更新して",
+            "PR の作成は不要です。既存 PR を更新して",
+        ] {
+            assert_eq!(
+                classify_prompt(prompt),
+                Some(ObligationKind::Pr),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_requires_work_outside_negated_pr_requests() {
+        assert_eq!(
+            classify_prompt("Do not create a PR. Tests already passed."),
+            None
+        );
+        assert_eq!(
+            classify_prompt("Do not create a PR. Fix the tests."),
+            Some(ObligationKind::Verification)
         );
     }
 
