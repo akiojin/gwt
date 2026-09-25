@@ -4223,12 +4223,13 @@ fn resolve_unique_existing_work(
                 )
             })
         {
-            return Err(workspace_ensure_error(
+            return Err(workspace_ensure_error_with_remedy(
                 session_id,
                 &format!(
                     "assigned Work {work_id} execution container is ambiguous with Work {}",
                     other.id
                 ),
+                WORK_PRUNE_REMEDY,
             ));
         }
     }
@@ -4262,8 +4263,26 @@ fn mutation_container_matches(
 }
 
 fn workspace_ensure_error(session_id: &str, reason: &str) -> GwtError {
+    workspace_ensure_error_with_remedy(session_id, reason, WORKSPACE_ENSURE_REMEDY)
+}
+
+/// The remedy that fits most target-resolution refusals: the Session has no
+/// usable assignment yet, and `workspace.ensure` creates one.
+const WORKSPACE_ENSURE_REMEDY: &str =
+    "run workspace.ensure for this Session before retrying workspace.update";
+
+/// Issue #4693: a Work whose execution container collides with another Work is
+/// the one refusal `workspace.ensure` cannot clear — it succeeds and reports
+/// `already-assigned`, and the next `workspace.update` is refused again. The
+/// operation that detaches the losing container ref is `workspace.work_prune`,
+/// and only the PM runs it. Two measured cases (2026-09-24 #4693 vs #2359,
+/// 2026-09-25 #4685 vs #4119) differ in whether the prune can act at all, so
+/// the text says what to do when it cannot rather than promising a fix.
+const WORK_PRUNE_REMEDY: &str = "this is not cleared by workspace.ensure — ask the PM to run workspace.work_prune (dry_run first; the losing ref appears under detach_candidates). If the other Work's owner Issue is still open the prune may skip it, and the bookkeeping cannot be recovered: deliver without workspace.update and report it";
+
+fn workspace_ensure_error_with_remedy(session_id: &str, reason: &str, remedy: &str) -> GwtError {
     mutation_error(format!(
-        "Session-bound Work target for Session {session_id} is invalid: {reason}; run workspace.ensure for this Session before retrying workspace.update"
+        "Session-bound Work target for Session {session_id} is invalid: {reason}; {remedy}"
     ))
 }
 
@@ -4504,6 +4523,50 @@ fn fill_option_path(target: &mut Option<PathBuf>, source: Option<&Path>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #4693 AC-1 / AC-4: every target-resolution refusal used to append
+    /// the same remedy, so an agent could not tell "run workspace.ensure and it
+    /// will clear" from "workspace.ensure already succeeded and this will not
+    /// clear". The container-ambiguity refusal is the measured case of the
+    /// second kind (#4693 vs #2359 on 2026-09-24, #4685 vs #4119 on 2026-09-25),
+    /// and it must not point at the operation that demonstrably does not fix it.
+    #[test]
+    fn container_ambiguity_refusal_does_not_point_at_workspace_ensure() {
+        let ambiguous = workspace_ensure_error_with_remedy(
+            "session-4693",
+            "assigned Work work-a execution container is ambiguous with Work work-b",
+            WORK_PRUNE_REMEDY,
+        );
+        let message = ambiguous.to_string();
+
+        assert!(
+            message.contains("workspace.work_prune"),
+            "the ambiguity refusal must name the operation that clears it: {message}"
+        );
+        assert!(
+            message.contains("not cleared by workspace.ensure"),
+            "the ambiguity refusal must say the default remedy does not apply: {message}"
+        );
+        assert!(
+            message.contains("detach_candidates"),
+            "the ambiguity refusal must say where the losing ref shows up: {message}"
+        );
+        assert!(
+            message.contains("owner Issue is still open"),
+            "the ambiguity refusal must cover the case the prune cannot act on: {message}"
+        );
+        assert!(
+            !message.contains(WORKSPACE_ENSURE_REMEDY),
+            "the ambiguity refusal must not carry the default remedy too: {message}"
+        );
+
+        let missing =
+            workspace_ensure_error("session-4693", "canonical Session assignment is missing");
+        assert!(
+            missing.to_string().contains(WORKSPACE_ENSURE_REMEDY),
+            "refusals that workspace.ensure does clear keep the default remedy: {missing}"
+        );
+    }
 
     #[test]
     fn classify_target_error_preserves_distinct_workspace_ensure_causes() {
