@@ -2345,8 +2345,21 @@ mod tests {
         }
     }
 
-    fn repoint_fixture(incoming: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, String) {
+    struct RepointFixture {
+        // Restore the previous thread-local home before deleting its directory.
+        _home: gwt_core::test_support::ScopedGwtHome,
+        temp: tempfile::TempDir,
+    }
+
+    impl RepointFixture {
+        fn path(&self) -> &Path {
+            self.temp.path()
+        }
+    }
+
+    fn repoint_fixture(incoming: &[(&str, &str)]) -> (RepointFixture, PathBuf, String) {
         let temp = tempfile::tempdir().unwrap();
+        let home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("pm/worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         repoint_git(&worktree, &["init", "--quiet"]);
@@ -2366,7 +2379,18 @@ mod tests {
         repoint_git(&worktree, &["commit", "--quiet", "-m", "incoming"]);
         let target = repoint_git(&worktree, &["rev-parse", "HEAD"]);
         repoint_git(&worktree, &["checkout", "--quiet", "--detach", &base]);
-        (temp, worktree, target)
+        (RepointFixture { _home: home, temp }, worktree, target)
+    }
+
+    #[test]
+    fn repoint_fixture_keeps_home_isolated_until_drop() {
+        let outer = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(outer.path());
+        let (fixture, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
+        assert_eq!(gwt_core::paths::gwt_home(), fixture.path().join(".gwt"));
+        assert!(super::managed_asset_lock_path(&worktree).starts_with(fixture.path()));
+        drop(fixture);
+        assert_eq!(gwt_core::paths::gwt_home(), outer.path().join(".gwt"));
     }
 
     fn seed_repoint_collision(worktree: &Path, path: &str, bytes: &str) {
@@ -2535,8 +2559,7 @@ mod tests {
     #[test]
     fn pm_repoint_transaction_holds_materializer_lock_through_callback() {
         let asset = ".claude/commands/gwt-execute.md";
-        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt"));
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
         seed_repoint_collision(&worktree, asset, "original");
         let identity_root = gwt_git::worktree::main_worktree_root(&worktree).unwrap();
         let identity = gwt_core::repo_hash::compute_path_hash(&identity_root);
@@ -2745,6 +2768,8 @@ mod tests {
 
     #[test]
     fn materialize_into_missing_worktree_fails_with_clear_attribution() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         // #fix: when the launch's worktree was never created (branch/worktree
         // materialization failed), managed-asset materialization must fail fast
         // with a clear, attributed error — NOT the misleading downstream
