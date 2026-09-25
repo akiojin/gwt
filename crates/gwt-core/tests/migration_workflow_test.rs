@@ -1032,6 +1032,34 @@ mod store_consolidation {
     fn apply_quarantines_the_source_and_rebuilds_from_durable_events() {
         let fixture = SplitStoreFixture::new("https://example.invalid/acme/consolidate-apply.git");
         fixture.seed_canonical_event("work-canonical", "Work the canonical store already had");
+        // Issue #4703: the unchanged source event still carries a detached ref.
+        let container = serde_json::json!({"branch": "work/reused"});
+        let mut event = start_event("work-orphaned", "Previously repaired Work");
+        event.execution_container = Some(serde_json::from_value(container.clone()).unwrap());
+        write_events(
+            &fixture.orphan_store.join("project-state/work-events.jsonl"),
+            &[event],
+        );
+        // Same-path receipts with different branches have different matching sets.
+        let shared_path = fixture.layout_root.join("reused");
+        std::fs::write(
+            fixture.canonical_works.with_extension("detachments.json"),
+            serde_json::to_vec(&serde_json::json!({"work-orphaned": [{
+                "branch": "work/previous", "worktree_path": shared_path
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture
+                .orphan_store
+                .join("project-state/works.detachments.json"),
+            serde_json::to_vec(&serde_json::json!({"work-orphaned": [{
+                "branch": "work/reused", "worktree_path": shared_path
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
         let source_bytes =
             std::fs::read(fixture.orphan_store.join("project-state/works.json")).expect("source");
         let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
@@ -1078,6 +1106,47 @@ mod store_consolidation {
             "the rebuild must carry both stores' durable Work forward"
         );
         assert_eq!(work_item_count, 2);
+        let projection = gwt_core::workspace_projection::load_workspace_work_items_from_path(
+            &fixture.canonical_works,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(projection
+            .work_items
+            .iter()
+            .all(|item| item.execution_containers.is_empty()));
+        assert!(fixture
+            .canonical_works
+            .with_extension("detachments.json")
+            .exists());
+    }
+
+    #[test]
+    fn failed_consolidation_restores_detachment_receipts() {
+        let fixture = SplitStoreFixture::new("https://example.invalid/acme/receipt-rollback.git");
+        let receipt = fixture.canonical_works.with_extension("detachments.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        let before = b"{\"canonical\":[]}";
+        std::fs::write(&receipt, before).unwrap();
+        std::fs::write(
+            fixture
+                .orphan_store
+                .join("project-state/works.detachments.json"),
+            b"{\"work-orphaned\":[{\"branch\":\"work/reused\"}]}",
+        )
+        .unwrap();
+        // Missing replayable source history forces the existing readback gate.
+        std::fs::write(
+            fixture.orphan_store.join("project-state/work-events.jsonl"),
+            b"{}",
+        )
+        .unwrap();
+        let plan = plan_store_consolidation(&fixture.layout_root).unwrap();
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .unwrap_err();
+        assert_eq!(error.refusal, StoreConsolidationRefusal::ReadbackFailed);
+        assert_eq!(std::fs::read(&receipt).unwrap(), before);
+        assert!(fixture.orphan_store.exists());
     }
 
     /// AC-8 idempotence: re-applying an approved plan changes nothing.
@@ -1116,11 +1185,18 @@ mod store_consolidation {
         let before = std::fs::read(fixture.orphan_store.join("project-state/works.json"))
             .expect("source before");
 
-        let error = apply_store_consolidation(&fixture.layout_root, "0000deadbeef", TEST_SESSION)
+        // A receipt-only change also invalidates the reviewed plan.
+        std::fs::write(
+            fixture
+                .orphan_store
+                .join("project-state/works.detachments.json"),
+            "{}",
+        )
+        .expect("receipt changed after review");
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
             .expect_err("a stale manifest must fail closed");
 
         assert_eq!(error.refusal, StoreConsolidationRefusal::ManifestChanged);
-        assert!(plan.manifest_hash != "0000deadbeef");
         assert_eq!(
             std::fs::read(fixture.orphan_store.join("project-state/works.json"))
                 .expect("source after"),

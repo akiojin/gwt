@@ -5,6 +5,107 @@ use crate::paths::{gwt_repo_local_work_event_shard_path, gwt_repo_local_work_eve
 
 use super::*;
 
+/// Issue #4703: repairing the projection must survive replay of its source.
+#[test]
+fn detached_foreign_container_stays_detached_after_intake_and_rebuild() {
+    let _guard = lock_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(&tmp.path().join("home"));
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let path = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let own = WorkspaceExecutionContainerRef {
+        branch: Some("work/old".into()),
+        worktree_path: Some(repo.join("old")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
+    let foreign = WorkspaceExecutionContainerRef {
+        branch: Some("work/new".into()),
+        worktree_path: Some(repo.join("new")),
+        ..own.clone()
+    };
+    let at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(at);
+    let mut source = String::new();
+    for (id, container) in [("old", &own), ("new", &foreign), ("old", &foreign)] {
+        let mut event = WorkEvent::new(WorkEventKind::Update, id, at);
+        event.owner = Some("Issue #2359".into());
+        event.execution_container = Some(container.clone());
+        source.push_str(&serde_json::to_string(&event).unwrap());
+        source.push('\n');
+        projection.apply_event(event);
+    }
+    save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    let original_bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        detach_foreign_container_refs(&repo, "new", &["old".into()], |container| {
+            workspace_execution_container_same(container, &foreign)
+        })
+        .unwrap(),
+        ["old"]
+    );
+    let assert_detached = || {
+        let loaded = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+        let old = loaded
+            .work_items
+            .iter()
+            .find(|item| item.id == "old")
+            .unwrap();
+        assert_eq!(old.execution_containers, std::slice::from_ref(&own));
+        assert!(old.is_incomplete() && !old.discarded);
+        assert_eq!(old.owner.as_deref(), Some("Issue #2359"));
+        let new = loaded
+            .work_items
+            .iter()
+            .find(|item| item.id == "new")
+            .unwrap();
+        assert_eq!(new.execution_containers, std::slice::from_ref(&foreign));
+    };
+    assert_detached();
+    // Simulate an interrupted write-ahead repair: the receipt commits, but
+    // works.json still has its old bytes. A pre-existing cache must miss even
+    // though that projection file does not change when the receipt appears.
+    let receipt = container_detachments_path(&path);
+    let held_receipt = receipt.with_extension("held");
+    fs::rename(&receipt, &held_receipt).unwrap();
+    fs::write(&path, &original_bytes).unwrap();
+    let mut cache = WorkItemsCache::new();
+    cache.load_or_synthesize(&repo).unwrap();
+    fs::rename(&held_receipt, &receipt).unwrap();
+    let cached = cache.load_or_synthesize(&repo).unwrap();
+    assert_eq!(
+        cache.parse_count, 2,
+        "receipt commit invalidates cached refs"
+    );
+    assert_eq!(
+        cached
+            .work_items
+            .iter()
+            .find(|item| item.id == "old")
+            .unwrap()
+            .execution_containers,
+        std::slice::from_ref(&own)
+    );
+    crate::work_events_intake::ingest_work_events_content(&path, &source).unwrap();
+    assert_detached();
+    // The repair must survive loss of the disposable projection too.
+    fs::remove_file(&path).unwrap();
+    crate::work_events_intake::rebuild_work_events_paths(
+        &path,
+        [&*source],
+        Some(&path.with_file_name("work-events-closed.jsonl")),
+    )
+    .unwrap();
+    assert_detached();
+    // An unreadable decision is not a corrupt projection that rebuild may drop.
+    fs::write(&receipt, b"{broken").unwrap();
+    let error =
+        crate::work_events_intake::rebuild_work_events_paths(&path, [&*source], None).unwrap_err();
+    assert!(error.to_string().contains("container detachments"));
+}
+
 #[cfg(windows)]
 fn open_directory_for_mtime(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::fs::OpenOptions;

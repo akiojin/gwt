@@ -99,7 +99,8 @@ pub use persistence::{
     WORKSPACE_AGENT_IDENTITY_RESET_VERSION, WORK_ITEMS_REBUILD_VERSION,
 };
 pub(crate) use persistence::{
-    with_workspace_current_and_work_items_lock, with_workspace_work_items_lock, write_atomic,
+    apply_workspace_container_detachments, with_workspace_current_and_work_items_lock,
+    with_workspace_work_items_lock, write_atomic,
 };
 pub use projection::{
     workspace_projection_default_created_at, GitDetails, WorkspaceCleanupCandidate,

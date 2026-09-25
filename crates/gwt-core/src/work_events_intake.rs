@@ -252,6 +252,10 @@ fn ingest_work_events_sources_locked(
         })
         .collect();
     let mut projection = refold_work_events_projection_with_keys(&previous, replayable)?;
+    crate::workspace_projection::apply_workspace_container_detachments(
+        work_items_path,
+        &mut projection,
+    )?;
     let changed = !work_item_sets_equal(&projection, &previous);
     reconcile_refold_report(
         &previous,
@@ -588,6 +592,10 @@ fn rebuild_work_event_sources_locked_with_legacy(
     for item in eventless_items {
         merge_eventless_legacy_item(&mut projection, item);
     }
+    crate::workspace_projection::apply_workspace_container_detachments(
+        work_items_path,
+        &mut projection,
+    )?;
     projection
         .work_items
         .sort_by_key(|item| std::cmp::Reverse(item.updated_at));

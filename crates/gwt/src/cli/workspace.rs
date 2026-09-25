@@ -11389,6 +11389,129 @@ pub(crate) mod tests {
         );
     }
 
+    /// Issue #4703 AC-1: distinguish direct operation writes from Host intake.
+    #[test]
+    fn detached_container_operation_isolation() {
+        let _guard = env_guard();
+        let mut restored = Vec::new();
+        for operation in ["build.start", "build.phase", "workspace.update"] {
+            let gwt_home = tempfile::tempdir().expect("gwt home");
+            let _home = ScopedHome::set(gwt_home.path());
+            let temp = tempfile::tempdir().expect("repo");
+            let repo = temp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let session_id = "session-operation-isolation";
+            write_projectionless_session(session_id, &repo, &repo, 3412);
+            let canonical_id =
+                seed_exact_workspace_work(&repo, &repo, session_id, Some("Issue #3412"), "codex");
+            let mut projection = WorkspaceProjection::default_for_project(&repo);
+            projection.id = canonical_id.clone();
+            projection.agents.push(assigned_agent_with_window(
+                session_id,
+                "project::agent-1",
+                &repo,
+            ));
+            projection.agents[0].workspace_id = Some(canonical_id);
+            save_workspace_projection(&repo, &projection).unwrap();
+            let _session = crate::cli::test_support::ScopedEnvVar::set(
+                gwt_agent::GWT_SESSION_ID_ENV,
+                session_id,
+            );
+            let stale_id = "work-work-issue-2359-stale";
+            seed_accreted_foreign_container_work(&repo, &repo, stale_id, "session-old");
+            let count = || {
+                load_workspace_work_items(&repo)
+                    .unwrap()
+                    .unwrap()
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == stale_id)
+                    .unwrap()
+                    .execution_containers
+                    .len()
+            };
+            assert_eq!(count(), 2);
+            let mut env = TestEnv::new(repo.clone());
+            let mut output = String::new();
+            if operation == "build.phase" {
+                assert_eq!(
+                    super::super::build::run(
+                        &mut env,
+                        crate::cli::SkillStateAction::Start { spec: 3412 },
+                        &mut output,
+                    )
+                    .unwrap(),
+                    0,
+                    "{output}"
+                );
+            }
+            assert_eq!(
+                run_work_prune(&repo, false, &[stale_id.to_string()], &mut output).unwrap(),
+                0,
+                "{output}"
+            );
+            assert_eq!(count(), 1, "{operation}: detach result: {output}");
+            let code = match operation {
+                "build.start" => super::super::build::run(
+                    &mut env,
+                    crate::cli::SkillStateAction::Start { spec: 3412 },
+                    &mut output,
+                ),
+                "build.phase" => super::super::build::run(
+                    &mut env,
+                    crate::cli::SkillStateAction::Phase {
+                        spec: 3412,
+                        label: "red".to_string(),
+                    },
+                    &mut output,
+                ),
+                _ => run(
+                    &mut env,
+                    WorkspaceCommand::Update {
+                        title: None,
+                        status: None,
+                        status_text: None,
+                        summary: None,
+                        progress_summary: None,
+                        next_action: None,
+                        owner: None,
+                        agent_session: Some(session_id.to_string()),
+                        current_focus: Some("Isolate persistence trigger".to_string()),
+                        title_summary: None,
+                    },
+                    &mut output,
+                ),
+            }
+            .unwrap();
+            assert_eq!(code, 0, "{operation}: {output}");
+            eprintln!("{operation}: detached=1 after_operation={}", count());
+            assert_eq!(
+                count(),
+                1,
+                "{operation}: direct operation must preserve detach"
+            );
+            let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+            let previous = load_workspace_work_items(&repo).unwrap().unwrap();
+            let event = &previous
+                .work_items
+                .iter()
+                .find(|item| item.id == stale_id)
+                .unwrap()
+                .events[0];
+            let content = serde_json::to_string(event).unwrap();
+            gwt_core::work_events_intake::ingest_work_events_content(&path, &content)
+                .expect("Host intake refold");
+            eprintln!("{operation}: after_host_intake={}", count());
+            if count() != 1 {
+                restored.push(operation);
+            }
+        }
+        assert!(
+            restored.is_empty(),
+            "intake restored detached refs: {restored:?}"
+        );
+    }
+
     /// Issue #4465 AC-4'': scoping the prune to one Work id must actually work.
     /// The `ids` filter used to be applied before canonical resolution, so
     /// naming only the stale Work silently produced zero candidates — the

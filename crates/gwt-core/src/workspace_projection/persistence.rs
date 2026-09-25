@@ -5,7 +5,7 @@
 //! stale-detection / classify / prune pipeline.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -741,7 +741,8 @@ pub fn heal_same_container_duplicate_claim_attachments_for_work_event_root(
 
 /// Issue #4465: physically detach refs to `container` from every Work other
 /// than `canonical_id`, under the split-root state lock. Pure projection
-/// repair — no events are appended, and no Work is terminalized. Idempotent,
+/// repair — no events are appended, and no Work is terminalized. A local
+/// detachment receipt keeps replay from restoring the removed refs. Idempotent,
 /// so `workspace.ensure` can run it before every transaction. Returns the
 /// healed Work ids.
 pub fn detach_foreign_container_refs_for_work_event_root<F>(
@@ -762,19 +763,12 @@ where
         &current_path,
         &work_items_path,
         |_| {
-            let Some(mut work_items) = load_workspace_work_items_from_path(&work_items_path)?
-            else {
-                return Ok(Vec::new());
-            };
-            let healed = work_items.detach_foreign_container_refs(
+            persist_container_detachments_locked(
+                &work_items_path,
                 canonical_id,
                 restrict_to,
                 &matches_container,
-            );
-            if !healed.is_empty() {
-                save_workspace_work_items_projection_to_path(&work_items_path, &work_items)?;
-            }
-            Ok(healed)
+            )
         },
     )
 }
@@ -794,16 +788,128 @@ where
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
-        let Some(mut work_items) = load_workspace_work_items_from_path(&work_items_path)? else {
-            return Ok(Vec::new());
-        };
-        let healed =
-            work_items.detach_foreign_container_refs(canonical_id, restrict_to, &matches_container);
-        if !healed.is_empty() {
-            save_workspace_work_items_projection_to_path(&work_items_path, &work_items)?;
-        }
-        Ok(healed)
+        persist_container_detachments_locked(
+            &work_items_path,
+            canonical_id,
+            restrict_to,
+            &matches_container,
+        )
     })
+}
+
+// Issue #4703: repair decisions are machine-local durable state, not inferred
+// from the event-derived projection. Keep them outside WorkEvent/WorkItem:
+// older Hosts strictly decode those schemas and must still read works.json.
+type ContainerDetachments = BTreeMap<String, Vec<WorkspaceExecutionContainerRef>>;
+
+pub(super) fn container_detachments_path(works_path: &Path) -> PathBuf {
+    works_path.with_extension("detachments.json")
+}
+
+pub(super) fn load_container_detachments(works_path: &Path) -> Result<ContainerDetachments> {
+    let path = container_detachments_path(works_path);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            // This is authoritative repair state. Never let rebuild treat its
+            // corruption as a disposable malformed projection.
+            GwtError::Other(format!("container detachments {}: {error}", path.display()))
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Called under the existing source/destination store locks during migration.
+pub(super) fn merge_container_detachments(destination: &Path, source: &Path) -> Result<()> {
+    let incoming = load_container_detachments(source)?;
+    if incoming.is_empty() {
+        return Ok(());
+    }
+    let mut detachments = load_container_detachments(destination)?;
+    for (id, containers) in incoming {
+        let removed = detachments.entry(id).or_default();
+        for container in containers {
+            if !removed.contains(&container) {
+                removed.push(container);
+            }
+        }
+    }
+    write_atomic(
+        &container_detachments_path(destination),
+        &serde_json::to_vec_pretty(&detachments)
+            .map_err(|error| GwtError::Other(format!("container detachments json: {error}")))?,
+    )
+}
+
+fn remove_detached_containers(
+    projection: &mut WorkItemsProjection,
+    detachments: &ContainerDetachments,
+) {
+    for item in &mut projection.work_items {
+        if let Some(removed) = detachments.get(&item.id) {
+            item.execution_containers.retain(|container| {
+                !removed
+                    .iter()
+                    .any(|old| workspace_execution_container_same(old, container))
+            });
+        }
+    }
+}
+
+pub(crate) fn apply_workspace_container_detachments(
+    works_path: &Path,
+    projection: &mut WorkItemsProjection,
+) -> Result<()> {
+    remove_detached_containers(projection, &load_container_detachments(works_path)?);
+    Ok(())
+}
+
+fn persist_container_detachments_locked(
+    works_path: &Path,
+    canonical_id: &str,
+    restrict_to: &[String],
+    matches_container: &impl Fn(&WorkspaceExecutionContainerRef) -> bool,
+) -> Result<Vec<String>> {
+    let Some(mut projection) = load_workspace_work_items_from_path(works_path)? else {
+        return Ok(Vec::new());
+    };
+    let candidates: ContainerDetachments = projection
+        .work_items
+        .iter()
+        .map(|item| {
+            (
+                item.id.clone(),
+                item.execution_containers
+                    .iter()
+                    .filter(|container| matches_container(container))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
+    let healed =
+        projection.detach_foreign_container_refs(canonical_id, restrict_to, matches_container);
+    if healed.is_empty() {
+        return Ok(healed);
+    }
+    let mut detachments = load_container_detachments(works_path)?;
+    for id in &healed {
+        let removed = detachments.entry(id.clone()).or_default();
+        for container in &candidates[id] {
+            if !removed.contains(container) {
+                removed.push(container.clone());
+            }
+        }
+    }
+    // Write ahead: even if the projection save fails, subsequent reads and
+    // rebuilds enforce this decision. Both writes hold the WorkItems lock.
+    write_atomic(
+        &container_detachments_path(works_path),
+        &serde_json::to_vec_pretty(&detachments)
+            .map_err(|error| GwtError::Other(format!("container detachments json: {error}")))?,
+    )?;
+    save_workspace_work_items_projection_to_path(works_path, &projection)?;
+    Ok(healed)
 }
 
 /// Recover an interrupted Workspace state transaction without synthesizing or
@@ -2271,6 +2377,7 @@ fn build_workspace_state_transaction_locked<T>(
     };
     let recovered_close_events = recover_unprojected_workspace_work_events_locked(
         &mut work_items,
+        work_items_path,
         &work_items_path.with_file_name("work-events-closed.jsonl"),
     )?;
     let projection_before = projection.clone();
@@ -3667,6 +3774,7 @@ pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkIte
                 }
             }
             items.refresh_derived_progress_summaries();
+            apply_workspace_container_detachments(path, &mut items)?;
             // Issue #4508: bound the resident projection before any caller can
             // hold on to it. Derived summaries are refreshed first so a legacy
             // file's complete history still decides them once, and the
@@ -3792,7 +3900,13 @@ pub fn load_or_synthesize_workspace_work_items_from_paths(
     if let Some(projection) = load_workspace_work_items_from_path(work_items_path)? {
         return Ok(projection);
     }
-    synthesize_workspace_work_items_from_legacy_paths(current_path, journal_path, project_root)
+    let mut projection = synthesize_workspace_work_items_from_legacy_paths(
+        current_path,
+        journal_path,
+        project_root,
+    )?;
+    apply_workspace_container_detachments(work_items_path, &mut projection)?;
+    Ok(projection)
 }
 
 /// SPEC-2359 (close-latency root fix, 2026-06-11): mtime+size-keyed cache in
@@ -3844,6 +3958,7 @@ struct CachedWorkItemsProjection {
 struct WorkItemsFileSignature {
     mtime: std::time::SystemTime,
     size: u64,
+    detachments: Option<(std::time::SystemTime, u64)>,
 }
 
 fn work_items_file_signature(path: &Path) -> Option<WorkItemsFileSignature> {
@@ -3851,6 +3966,9 @@ fn work_items_file_signature(path: &Path) -> Option<WorkItemsFileSignature> {
     Some(WorkItemsFileSignature {
         mtime: metadata.modified().ok()?,
         size: metadata.len(),
+        detachments: fs::metadata(container_detachments_path(path))
+            .ok()
+            .and_then(|metadata| Some((metadata.modified().ok()?, metadata.len()))),
     })
 }
 
@@ -3998,12 +4116,23 @@ pub fn save_workspace_work_items_projection_to_path(
     path: &Path,
     projection: &WorkItemsProjection,
 ) -> Result<()> {
+    let detachments = load_container_detachments(path)?;
+    let has_detached_refs = projection.work_items.iter().any(|item| {
+        detachments.get(&item.id).is_some_and(|removed| {
+            item.execution_containers.iter().any(|container| {
+                removed
+                    .iter()
+                    .any(|old| workspace_execution_container_same(old, container))
+            })
+        })
+    });
     // Issue #4508: the projection is the file's only writer, so capping the
     // inline history here is what actually stops works.json from growing with
     // uptime. A projection already inside the cap is written without the copy.
     let compacted;
-    let projection = if projection.needs_inline_event_compaction() {
+    let projection = if projection.needs_inline_event_compaction() || has_detached_refs {
         let mut owned = projection.clone();
+        remove_detached_containers(&mut owned, &detachments);
         owned.compact_inline_events();
         compacted = owned;
         &compacted
@@ -6267,7 +6396,11 @@ fn emit_workspace_terminal_event_outcome_locked(
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let mut projection = load_workspace_work_items_from_path(work_items_path)?
         .unwrap_or_else(|| WorkItemsProjection::empty(event.updated_at));
-    let recovered = recover_unprojected_workspace_work_events_locked(&mut projection, events_path)?;
+    let recovered = recover_unprojected_workspace_work_events_locked(
+        &mut projection,
+        work_items_path,
+        events_path,
+    )?;
     let item = projection
         .work_items
         .iter()
@@ -6323,6 +6456,7 @@ fn terminal_outcome_for_item(
 
 fn recover_unprojected_workspace_work_events_locked(
     projection: &mut WorkItemsProjection,
+    work_items_path: &Path,
     events_path: &Path,
 ) -> Result<bool> {
     let events = read_machine_local_workspace_work_events_from_path(events_path)?;
@@ -6342,8 +6476,9 @@ fn recover_unprojected_workspace_work_events_locked(
         return Ok(false);
     }
 
-    let rebuilt =
+    let mut rebuilt =
         crate::work_events_intake::refold_work_events_projection(projection, durable_events)?;
+    apply_workspace_container_detachments(work_items_path, &mut rebuilt)?;
     let changed = rebuilt.work_items != projection.work_items;
     if changed {
         *projection = rebuilt;

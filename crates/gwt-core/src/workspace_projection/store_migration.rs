@@ -48,6 +48,10 @@ use crate::{
     workspace_projection::load_workspace_work_items_from_path,
 };
 
+use super::persistence::{
+    container_detachments_path, load_container_detachments, merge_container_detachments,
+};
+
 /// Schema version of [`QuarantineManifest`].
 pub const QUARANTINE_MANIFEST_VERSION: u32 = 1;
 
@@ -369,6 +373,7 @@ pub fn apply_store_consolidation(
 
     let canonical_works = gwt_project_state_works_path(&confirmed.canonical_hash);
     let works_snapshot = fs::read(&canonical_works).ok();
+    let detachments_snapshot = read_optional_bytes(&container_detachments_path(&canonical_works))?;
     let mut moved: Vec<MovedStore> = Vec::new();
 
     leases.release_source_leases_before_move();
@@ -386,7 +391,12 @@ pub fn apply_store_consolidation(
             work_item_count,
         }),
         Err(error) => {
-            rollback(&canonical_works, works_snapshot.as_deref(), &moved);
+            rollback(
+                &canonical_works,
+                works_snapshot.as_deref(),
+                detachments_snapshot.as_deref(),
+                &moved,
+            );
             Err(error)
         }
     }
@@ -477,6 +487,10 @@ fn inspect_store(
 ) -> ConsolidationResult<OrphanedStore> {
     let works_path = gwt_project_state_works_path(source_hash);
     let works_bytes = read_optional_bytes(&works_path)?;
+    let detachments_bytes = read_optional_bytes(&container_detachments_path(&works_path))?;
+    load_container_detachments(&works_path).map_err(|error| {
+        NeedsHuman::new(StoreConsolidationRefusal::CorruptInput, error.to_string())
+    })?;
     let work_item_count = if works_bytes.is_some() {
         load_workspace_work_items_from_path(&works_path)
             .map_err(|error| {
@@ -511,7 +525,14 @@ fn inspect_store(
         store_dir,
         work_item_count,
         work_event_count,
-        revision: content_revision(works_bytes.as_deref()),
+        revision: match detachments_bytes.as_deref() {
+            Some(bytes) => format!(
+                "{}:{}",
+                content_revision(works_bytes.as_deref()),
+                content_revision(Some(bytes))
+            ),
+            None => content_revision(works_bytes.as_deref()),
+        },
     })
 }
 
@@ -631,6 +652,9 @@ fn rebuild_canonical_projection(
     let mut legacy_items = Vec::new();
     for entry in moved {
         let orphan_works = entry.quarantined.join("project-state").join("works.json");
+        merge_container_detachments(canonical_works, &orphan_works).map_err(|error| {
+            NeedsHuman::new(StoreConsolidationRefusal::CorruptInput, error.to_string())
+        })?;
         let Some(projection) = load_store_projection(&orphan_works)? else {
             continue;
         };
@@ -750,7 +774,12 @@ fn load_store_projection(
     })
 }
 
-fn rollback(canonical_works: &Path, snapshot: Option<&[u8]>, moved: &[MovedStore]) {
+fn rollback(
+    canonical_works: &Path,
+    snapshot: Option<&[u8]>,
+    detachments_snapshot: Option<&[u8]>,
+    moved: &[MovedStore],
+) {
     for entry in moved {
         clear_read_only(&entry.manifest);
         let _ = fs::remove_file(&entry.manifest);
@@ -758,12 +787,20 @@ fn rollback(canonical_works: &Path, snapshot: Option<&[u8]>, moved: &[MovedStore
             let _ = fs::rename(&entry.quarantined, &entry.source);
         }
     }
-    match snapshot {
-        Some(bytes) => {
-            let _ = fs::write(canonical_works, bytes);
-        }
-        None => {
-            let _ = fs::remove_file(canonical_works);
+    for (path, snapshot) in [
+        (canonical_works, snapshot),
+        (
+            container_detachments_path(canonical_works).as_path(),
+            detachments_snapshot,
+        ),
+    ] {
+        match snapshot {
+            Some(bytes) => {
+                let _ = fs::write(path, bytes);
+            }
+            None => {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }
