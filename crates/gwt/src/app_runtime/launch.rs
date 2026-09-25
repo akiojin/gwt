@@ -9708,6 +9708,7 @@ fi
         permissions.set_mode(0o755);
         std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
 
+        // test-hygiene: allow-production-probe-deadline Integration test observes real CLI invocation counts and pinned binary reuse.
         let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
             wrapper.to_str().expect("UTF-8 wrapper path"),
         )

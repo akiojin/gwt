@@ -4985,30 +4985,16 @@ mod tests {
     fn resolved_test_docker_runtime(
         directory: &Path,
     ) -> gwt_docker::detect::ResolvedContainerRuntime {
-        #[cfg(windows)]
-        let wrapper = directory.join("docker.cmd");
-        #[cfg(not(windows))]
-        let wrapper = directory.join("docker");
-        #[cfg(windows)]
-        fs::write(&wrapper, "@echo Docker version 28.3.0, build test\r\n")
-            .expect("write fake Docker CLI");
-        #[cfg(not(windows))]
-        fs::write(
-            &wrapper,
-            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\n",
-        )
-        .expect("write fake Docker CLI");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&wrapper)
-                .expect("fake Docker CLI metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&wrapper, permissions).expect("chmod fake Docker CLI");
-        }
-        gwt_docker::detect::ResolvedContainerRuntime::resolve(
-            wrapper.to_str().expect("UTF-8 fake Docker CLI path"),
+        let binary = directory.join("docker");
+        gwt_docker::detect::ResolvedContainerRuntime::from_probe_output_for_tests(
+            binary.to_str().expect("UTF-8 fake Docker CLI path"),
+            gwt_core::process_console::SpawnOutput {
+                exit_code: Some(0),
+                stdout: "Docker version 28.3.0, build test\n".to_string(),
+                stderr: String::new(),
+                stdout_lines: 1,
+                stderr_lines: 0,
+            },
         )
         .expect("resolve fake Docker runtime")
     }
@@ -8462,6 +8448,7 @@ fi
             .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+        // test-hygiene: allow-production-probe-deadline Integration test observes real CLI invocation counts and pinned binary reuse.
         let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
             wrapper.to_str().expect("UTF-8 wrapper path"),
         )

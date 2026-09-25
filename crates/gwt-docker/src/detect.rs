@@ -65,6 +65,15 @@ impl ResolvedContainerRuntime {
         container_runtime_binary: &str,
         timeout: Duration,
     ) -> Result<Self, String> {
+        Self::resolve_with_probe(container_runtime_binary, |binary| {
+            probe_container_runtime_kind_with_timeout(binary, timeout)
+        })
+    }
+
+    fn resolve_with_probe(
+        container_runtime_binary: &str,
+        probe: impl FnOnce(&str) -> Result<ContainerRuntimeKind, String>,
+    ) -> Result<Self, String> {
         let binary = container_runtime_binary.trim();
         if binary.is_empty() {
             return Err(
@@ -72,10 +81,22 @@ impl ResolvedContainerRuntime {
                     .to_string(),
             );
         }
-        let kind = probe_container_runtime_kind_with_timeout(binary, timeout)?;
+        let kind = probe(binary)?;
         Ok(Self {
             binary: binary.to_string(),
             kind,
+        })
+    }
+
+    /// Resolve a fixture through the production output validation without
+    /// spawning a CLI. Consumer tests need a pinned identity, not a timed probe.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_probe_output_for_tests(
+        binary: &str,
+        output: gwt_core::process_console::SpawnOutput,
+    ) -> Result<Self, String> {
+        Self::resolve_with_probe(binary, |binary| {
+            container_runtime_kind_from_probe_output(binary, &output)
         })
     }
 
@@ -150,6 +171,13 @@ fn probe_container_runtime_kind_with_timeout(
             )
         }
     })?;
+    container_runtime_kind_from_probe_output(container_runtime_binary, &output)
+}
+
+fn container_runtime_kind_from_probe_output(
+    container_runtime_binary: &str,
+    output: &gwt_core::process_console::SpawnOutput,
+) -> Result<ContainerRuntimeKind, String> {
     if !output.success() {
         return Err(format!(
             "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN '{container_runtime_binary}' failed its --version probe"
@@ -470,6 +498,7 @@ mod tests {
         let configured = format!("  {}  ", wrapper.display());
 
         let runtime =
+            // test-hygiene: allow-production-probe-deadline Real CLI invocation counts prove that runtime resolution is not repeated.
             ResolvedContainerRuntime::resolve(&configured).expect("resolve masquerading wrapper");
 
         assert_eq!(runtime.kind(), ContainerRuntimeKind::Podman);
@@ -482,28 +511,32 @@ mod tests {
         assert_eq!(calls.lines().collect::<Vec<_>>(), ["--version"]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn resolved_runtime_rejects_ambiguous_or_failed_known_basename_wrappers() {
-        let temp = TempDir::new().expect("tempdir");
-        let ambiguous = temp.path().join("ambiguous").join("docker");
-        write_executable(
-            &ambiguous,
-            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\nprintf 'podman version 5.4.2\\n' >&2\n",
-        );
-        let failed = temp.path().join("failed").join("docker");
-        write_executable(
-            &failed,
-            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\nexit 19\n",
-        );
-
-        let ambiguous_error = ResolvedContainerRuntime::resolve(
-            ambiguous.to_str().expect("UTF-8 ambiguous wrapper path"),
+        // Supply completed probe observations: process scheduling must not
+        // change which validation error a known-basename wrapper produces.
+        let ambiguous_error = ResolvedContainerRuntime::from_probe_output_for_tests(
+            "/ambiguous/docker",
+            gwt_core::process_console::SpawnOutput {
+                exit_code: Some(0),
+                stdout: "Docker version 28.3.0, build test\n".to_string(),
+                stderr: "podman version 5.4.2\n".to_string(),
+                stdout_lines: 1,
+                stderr_lines: 1,
+            },
         )
         .expect_err("ambiguous known basename must fail closed");
-        let failed_error =
-            ResolvedContainerRuntime::resolve(failed.to_str().expect("UTF-8 failed wrapper path"))
-                .expect_err("failed known basename must fail closed");
+        let failed_error = ResolvedContainerRuntime::from_probe_output_for_tests(
+            "/failed/docker",
+            gwt_core::process_console::SpawnOutput {
+                exit_code: Some(19),
+                stdout: "Docker version 28.3.0, build test\n".to_string(),
+                stderr: String::new(),
+                stdout_lines: 1,
+                stderr_lines: 0,
+            },
+        )
+        .expect_err("failed known basename must fail closed");
 
         assert!(
             ambiguous_error.contains("did not identify"),
@@ -685,6 +718,7 @@ esac
         std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
 
         let runtime =
+            // test-hygiene: allow-production-probe-deadline Real CLI invocation counts prove that runtime resolution is not repeated.
             ResolvedContainerRuntime::resolve(wrapper.to_str().expect("UTF-8 wrapper path"))
                 .expect("resolve runtime");
         launch_preflight_for_resolved_runtime(&runtime).expect("resolved runtime preflight");

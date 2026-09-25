@@ -8,6 +8,9 @@ authors.workspace = true
 description = "Docker detection, container management, and DevContainer support for gwt"
 publish = false
 
+[features]
+test-support = []
+
 [dependencies]
 gwt-core.workspace = true
 serde.workspace = true

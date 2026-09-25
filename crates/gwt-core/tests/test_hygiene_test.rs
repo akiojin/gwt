@@ -5,7 +5,7 @@
 //! time did not work: 16 open issues accumulated over three and a half
 //! months, every one of them discovered *after* CI went red.
 //!
-//! Two mechanisms are gated here:
+//! The following mechanisms are gated here:
 //!
 //! * **(A) wall-clock dependence** — a sub-100ms `Duration` literal in test
 //!   code. Scheduling jitter on a saturated runner is measured in tens of
@@ -17,6 +17,12 @@
 //! * **(B) unlocked process-wide state** — `env::set_var` / `remove_var` /
 //!   `set_current_dir` without holding the shared env lock. Those are
 //!   process-global and stomp on sibling tests in the same binary.
+//! * **(C) production probe deadlines** — test calls to
+//!   `ResolvedContainerRuntime::resolve` start a real process under an internal
+//!   deadline, even when the test contains no Duration literal. Retained
+//!   process integration contracts need a reason; pure tests inject the probe.
+//!   This lexical rule covers that known entrypoint, not aliases or indirect
+//!   calls through arbitrary helpers.
 //!
 //! Existing violations are grandfathered in `test_hygiene_baseline.txt`, one
 //! line per `<rule>|<file>|<context>`. The baseline only shrinks: a violation
@@ -28,6 +34,7 @@
 //! // test-hygiene: allow-short-duration polling interval, not an assertion deadline
 //! // test-hygiene: allow-unlocked-env the whole binary is single-threaded
 //! // test-hygiene: allow-native-watcher-deadline retained real-OS integration probe
+//! // test-hygiene: allow-production-probe-deadline retained wrapper execution contract
 //! ```
 //!
 //! The reason text is mandatory; a bare marker does not silence the gate.
@@ -149,6 +156,65 @@ fn scan_fixture(text: &str) -> Vec<hygiene::Finding> {
         text,
         SourceKind::WholeFileIsTest,
     )
+}
+
+#[test]
+fn production_probe_deadline_is_reported_without_a_duration_literal() {
+    let findings = scan_fixture(
+        r#"
+fn resolves_fake_runtime() {
+    gwt_docker::detect::ResolvedContainerRuntime::resolve(binary).unwrap();
+}
+fn seconds_do_not_make_a_real_probe_deterministic() {
+    let timeout = Duration::from_secs(30);
+    ResolvedContainerRuntime::resolve(binary).unwrap();
+}
+"#,
+    );
+    assert_eq!(findings.len(), 2, "unexpected findings: {findings:?}");
+    assert!(findings
+        .iter()
+        .all(|finding| finding.rule.id() == "production-probe-deadline"));
+}
+
+#[test]
+fn production_probe_deadline_requires_a_reason_for_real_process_contracts() {
+    let findings = scan_fixture(
+        r#"
+fn declared_process_contract() {
+    // test-hygiene: allow-production-probe-deadline Verify the actual wrapper is probed once.
+    ResolvedContainerRuntime::resolve(binary).unwrap();
+}
+fn missing_reason() {
+    // test-hygiene: allow-production-probe-deadline
+    ResolvedContainerRuntime::resolve(binary).unwrap();
+}
+"#,
+    );
+    assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+    assert_eq!(findings[0].context, "missing_reason");
+}
+
+#[test]
+fn production_probe_deadline_ignores_production_code_and_injected_probe_seams() {
+    let findings = scan_source(
+        "crates/demo/src/lib.rs",
+        r#"
+fn production() {
+    ResolvedContainerRuntime::resolve(binary).unwrap();
+}
+#[cfg(test)]
+mod tests {
+    fn injected_probe() {
+        ResolvedContainerRuntime::resolve_with_probe(binary, probe).unwrap();
+        // ResolvedContainerRuntime::resolve(binary)
+        let source = "ResolvedContainerRuntime::resolve(binary)";
+    }
+}
+"#,
+        SourceKind::CfgTestBlocksOnly,
+    );
+    assert!(findings.is_empty(), "unexpected findings: {findings:?}");
 }
 
 #[test]
@@ -482,6 +548,11 @@ fn no_undeclared_native_watcher_delivery_deadlines() {
 }
 
 #[test]
+fn no_undeclared_production_probe_deadlines() {
+    assert_no_new_violations(Rule::ProductionProbeDeadline);
+}
+
+#[test]
 fn the_baseline_only_shrinks() {
     let baseline = read_baseline();
     let live: BTreeSet<String> = scan_workspace()
@@ -603,6 +674,7 @@ mod hygiene {
         ShortWallClock,
         UnlockedProcessEnv,
         NativeWatcherDeadline,
+        ProductionProbeDeadline,
     }
 
     impl Rule {
@@ -611,6 +683,7 @@ mod hygiene {
                 Rule::ShortWallClock => "short-wall-clock",
                 Rule::UnlockedProcessEnv => "unlocked-process-env",
                 Rule::NativeWatcherDeadline => "native-watcher-deadline",
+                Rule::ProductionProbeDeadline => "production-probe-deadline",
             }
         }
 
@@ -619,6 +692,7 @@ mod hygiene {
                 "short-wall-clock" => Some(Rule::ShortWallClock),
                 "unlocked-process-env" => Some(Rule::UnlockedProcessEnv),
                 "native-watcher-deadline" => Some(Rule::NativeWatcherDeadline),
+                "production-probe-deadline" => Some(Rule::ProductionProbeDeadline),
                 _ => None,
             }
         }
@@ -628,6 +702,7 @@ mod hygiene {
                 Rule::ShortWallClock => "test-hygiene: allow-short-duration",
                 Rule::UnlockedProcessEnv => "test-hygiene: allow-unlocked-env",
                 Rule::NativeWatcherDeadline => "test-hygiene: allow-native-watcher-deadline",
+                Rule::ProductionProbeDeadline => "test-hygiene: allow-production-probe-deadline",
             }
         }
 
@@ -656,6 +731,13 @@ mod hygiene {
                     "Test the subscription/delivery contract without waiting for the OS.\n",
                     "A retained real-OS integration probe requires an explicit reason:\n",
                     "    // test-hygiene: allow-native-watcher-deadline <reason>"
+                ),
+                Rule::ProductionProbeDeadline => concat!(
+                    "ResolvedContainerRuntime::resolve starts a real process under a\n",
+                    "production wall-clock deadline, even with no Duration in the test.\n",
+                    "Inject the probe result for pure contracts. If executing the real\n",
+                    "wrapper is essential to this test, declare why:\n",
+                    "    // test-hygiene: allow-production-probe-deadline <reason>"
                 ),
             }
         }
@@ -828,6 +910,7 @@ mod hygiene {
                 Rule::ShortWallClock,
                 Rule::UnlockedProcessEnv,
                 Rule::NativeWatcherDeadline,
+                Rule::ProductionProbeDeadline,
             ] {
                 if !line_violates(rule, line) {
                     continue;
@@ -885,6 +968,7 @@ mod hygiene {
             }
             Rule::UnlockedProcessEnv => env_mutation_regex().is_match(code),
             Rule::NativeWatcherDeadline => native_watcher_regex().is_match(code),
+            Rule::ProductionProbeDeadline => production_probe_regex().is_match(code),
         }
     }
 
@@ -1132,6 +1216,13 @@ mod hygiene {
     fn native_watcher_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| Regex::new(r"\bstart_watcher\s*\(").expect("valid regex"))
+    }
+
+    fn production_probe_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"\bResolvedContainerRuntime\s*::\s*resolve\s*\(").expect("valid regex")
+        })
     }
 
     fn sub_millisecond_regex() -> &'static Regex {

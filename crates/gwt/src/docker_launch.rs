@@ -210,6 +210,7 @@ pub fn resolved_test_docker_runtime(
         permissions.set_mode(0o755);
         std::fs::set_permissions(&wrapper, permissions).expect("chmod fake Docker CLI");
     }
+    // test-hygiene: allow-production-probe-deadline Retained gwt launch integration fixture; consumer migration is outside the agent/docker audit scope.
     gwt_docker::detect::ResolvedContainerRuntime::resolve(
         wrapper.to_str().expect("UTF-8 fake Docker CLI path"),
     )
@@ -1113,6 +1114,7 @@ fi
         permissions.set_mode(0o755);
         std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
 
+        // test-hygiene: allow-production-probe-deadline Integration test observes real CLI invocation counts and pinned binary reuse.
         let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
             wrapper.to_str().expect("UTF-8 wrapper path"),
         )
@@ -1262,6 +1264,7 @@ fi
         write_phase85_runtime_wrapper(&bound_runtime, &bound_marker);
         write_phase85_runtime_wrapper(&ambient_runtime, &ambient_marker);
 
+        // test-hygiene: allow-production-probe-deadline Integration test observes real CLI invocation counts and pinned binary reuse.
         let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
             bound_runtime.to_str().expect("UTF-8 bound runtime path"),
         )
@@ -1311,6 +1314,7 @@ fi
         write_phase85_runtime_wrapper(&bound_runtime, &bound_marker);
         write_phase85_runtime_wrapper(&ambient_runtime, &ambient_marker);
 
+        // test-hygiene: allow-production-probe-deadline Integration test observes real CLI invocation counts and pinned binary reuse.
         let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
             bound_runtime.to_str().expect("UTF-8 bound runtime path"),
         )
