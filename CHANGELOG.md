@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.102.1] - 2026-09-25
+
+### Bug Fixes
+
+- **test:** Watcher除外とbatch分割の配送期限依存を除去
+- **test:** Watcher配送テストのOS通知待ちを決定的入力へ置換
+- **launch-wizard:** Codexのモデル一覧を現行7モデルへ更新
+- **pm:** Establish the owning gwt-spec before registering an Issue
+- **pm:** Drop the redundant closure the CI clippy gate rejected
+- **pm:** Stop the public doc from linking a private constant
+- **hook:** PM更新ロック競合時もプロンプト処理を継続する
+
 ## [9.102.0] - 2026-09-23
 
 ### Bug Fixes
