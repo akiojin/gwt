@@ -31,6 +31,7 @@ pub mod health;
 mod identity;
 pub mod known_workarounds;
 pub mod pm_loop_stop_check;
+pub mod pm_spec_survey;
 pub mod provider_event;
 pub mod runtime_state;
 pub mod segments;

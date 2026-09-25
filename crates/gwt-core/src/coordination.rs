@@ -23,7 +23,6 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -1374,7 +1373,9 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     if legacy_event_log_needs_import(&coordination_root)?
         || projection_needs_rebuild(&projection, &manifest)
     {
-        return with_coordination_lock(worktree_root, || repair_snapshot_locked(worktree_root));
+        return with_coordination_lock(worktree_root, "board.snapshot.repair", || {
+            repair_snapshot_locked(worktree_root)
+        });
     }
     Ok(CoordinationSnapshot { board: projection })
 }
@@ -1407,7 +1408,7 @@ pub fn load_escalation_store(worktree_root: &Path) -> Result<BoardEscalationStor
             }
         }
     }
-    with_coordination_lock(worktree_root, || {
+    with_coordination_lock(worktree_root, "board.escalations.repair", || {
         rebuild_escalation_store_locked(worktree_root)
     })
 }
@@ -1559,7 +1560,7 @@ pub fn post_entry_exact(
     let entry_id = entry.id.clone();
     let attempted_payload_digest = board_entry_payload_digest(&entry)?;
 
-    let decision = with_coordination_lock(worktree_root, || {
+    let decision = with_coordination_lock(worktree_root, "board.append.exact", || {
         ensure_repo_local_files_for_exact(worktree_root)?;
         let coordination_root = coordination_dir(worktree_root);
         let imported_legacy = import_late_legacy_event_log_exact_locked(&coordination_root)?;
@@ -1675,7 +1676,7 @@ pub fn post_entry_deterministic(
     }
     entry.normalize_audience();
 
-    with_coordination_lock(worktree_root, || {
+    with_coordination_lock(worktree_root, "board.append.deterministic", || {
         ensure_repo_local_files(worktree_root)?;
         let coordination_root = coordination_dir(worktree_root);
         if let Some(existing) = find_board_entry_in_segments(&coordination_root, &entry.id)? {
@@ -1760,7 +1761,7 @@ fn append_event_outcome(
     worktree_root: &Path,
     event: &CoordinationEvent,
 ) -> Result<BoardPostOutcome> {
-    with_coordination_lock(worktree_root, || {
+    with_coordination_lock(worktree_root, "board.append", || {
         if exact_legacy_import_transaction_pending(&coordination_dir(worktree_root))? {
             return Err(GwtError::Other(
                 "exact Board legacy import recovery must complete before a normal append"
@@ -1774,19 +1775,17 @@ fn append_event_outcome(
 
 fn with_coordination_lock<T>(
     worktree_root: &Path,
+    operation_name: &str,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     std::fs::create_dir_all(coordination_dir(worktree_root))?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(coordination_lock_path(worktree_root))?;
-    crate::operation_deadline::lock_exclusive(&lock)?;
+    let lock = crate::operation_deadline::NamedFileLock::acquire(
+        &coordination_lock_path(worktree_root),
+        operation_name,
+    )?;
 
     let result = operation();
-    let unlock_result = FileExt::unlock(&lock);
+    let unlock_result = lock.unlock();
     if let Err(error) = &unlock_result {
         tracing::warn!(
             path = %coordination_lock_path(worktree_root).display(),

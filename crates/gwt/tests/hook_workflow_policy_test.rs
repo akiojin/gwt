@@ -1241,3 +1241,104 @@ fn spec_owner_without_plan_or_tasks_implementation_edit_stays_silent() {
         "AC-7 case 6: spec owner before plan/tasks refresh (requires_spec_plan_tasks removed)",
     );
 }
+
+/// Issue #4680 (AC-3): the PM registers a new Issue only after it has
+/// established which `gwt-spec` owns the area. #4677 was registered standalone
+/// while SPEC-1921 owned it, because the contract asked for a keyword search
+/// and a keyword search answers a different question.
+#[test]
+fn pm_registration_is_denied_until_the_spec_survey_has_run() {
+    for operation in ["issue.create", "issue.spec.create"] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({ "title": "x" })) }),
+        );
+        let output = evaluate(
+            &event,
+            workflow_policy::WorkflowContext::unknown()
+                .with_pm_session(true)
+                .with_pm_spec_survey_fresh(false),
+        )
+        .unwrap_or_else(|| panic!("{operation} should be denied without a survey"));
+        let rendered = format!("{output:?}");
+        assert!(
+            rendered.contains("issue.spec.list"),
+            "{operation} denial should name the remedy: {rendered}"
+        );
+    }
+}
+
+/// Issue #4680 (AC-4): the gate asks whether the PM looked, never what it
+/// found. Once the survey is on file every registration passes, including one
+/// for an area no spec owns — the failure mode SPEC #3245 removed the owner
+/// guard for was exactly a classifier that had to be right.
+#[test]
+fn pm_registration_passes_once_the_spec_survey_is_on_file() {
+    for operation in ["issue.create", "issue.spec.create"] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({ "title": "x" })) }),
+        );
+        assert!(
+            evaluate(
+                &event,
+                workflow_policy::WorkflowContext::unknown()
+                    .with_pm_session(true)
+                    .with_pm_spec_survey_fresh(true),
+            )
+            .is_none(),
+            "{operation} should pass once the survey is recorded"
+        );
+    }
+}
+
+/// Issue #4680 (AC-4): implementation agents never call `issue.create` — they
+/// post Issue proposals to the Board and the PM registers them — so gating a
+/// non-PM session would deny an operation it does not perform.
+#[test]
+fn the_spec_survey_gate_applies_only_to_the_pm_session() {
+    let event = event(
+        "Bash",
+        json!({ "command": json_envelope_command("issue.create", json!({ "title": "x" })) }),
+    );
+    assert!(
+        evaluate(
+            &event,
+            workflow_policy::WorkflowContext::unknown()
+                .with_pm_session(false)
+                .with_pm_spec_survey_fresh(false),
+        )
+        .is_none(),
+        "a non-PM session should register unconditionally"
+    );
+}
+
+/// Issue #4680 (AC-4): the gate covers registration alone. The survey itself,
+/// and every other PM operation, stay open — otherwise the remedy for the
+/// denial would itself be denied.
+#[test]
+fn the_spec_survey_gate_leaves_the_survey_and_other_operations_open() {
+    for operation in [
+        "issue.spec.list",
+        "issue.edit",
+        "issue.spec.edit",
+        "issue.comment",
+        "issue.monitor.status",
+        "board.post",
+    ] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({})) }),
+        );
+        assert!(
+            evaluate(
+                &event,
+                workflow_policy::WorkflowContext::unknown()
+                    .with_pm_session(true)
+                    .with_pm_spec_survey_fresh(false),
+            )
+            .is_none(),
+            "{operation} must not be gated by the registration survey"
+        );
+    }
+}
