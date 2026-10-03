@@ -8,6 +8,7 @@ use crate::{
     IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState,
     IssueReadinessFailure, MonitorInboxState,
 };
+use gwt_github::client::{IssueClient, LabelAssignment};
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
 pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
@@ -21,6 +22,7 @@ pub struct IssueMonitorDaemonPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedIssueMonitorCandidates {
     pub issues: Vec<IssueMonitorIssue>,
+    pub urgent_assignments: BTreeMap<u64, LabelAssignment>,
     pub source: IssueMonitorCandidateSource,
     /// The live-list failure that forced a cache fallback. Kept alongside the
     /// read model so failures never render as healthy.
@@ -708,6 +710,53 @@ where
     (candidates, errors)
 }
 
+/// Reuse revision-bound provenance and enrich newly observed urgent labels.
+fn load_urgent_assignments_with<E: fmt::Display>(
+    issues: &[IssueMonitorIssue],
+    prefs: &crate::IssueMonitorPrefs,
+    mut fetch: impl FnMut(u64) -> Result<Option<LabelAssignment>, E>,
+) -> BTreeMap<u64, LabelAssignment> {
+    let mut assignments = BTreeMap::new();
+    for issue in issues.iter().filter(|issue| {
+        issue.state == IssueMonitorIssueState::Open
+            && issue
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case("urgent"))
+    }) {
+        if let Some(grant) = prefs
+            .urgent_queue
+            .grants
+            .get(&issue.number)
+            .filter(|grant| {
+                grant.label_present
+                    && issue.updated_at.is_some()
+                    && grant.issue_updated_at == issue.updated_at
+                    && grant.assignment_revision == issue.updated_at
+                    && grant.assigned_at.is_some()
+            })
+        {
+            assignments.insert(
+                issue.number,
+                LabelAssignment {
+                    actor: grant.assigned_by.clone(),
+                    created_at: grant.assigned_at.clone().expect("known assignment time"),
+                },
+            );
+            continue;
+        }
+        match fetch(issue.number) {
+            Ok(Some(assignment)) => {
+                assignments.insert(issue.number, assignment);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(issue = issue.number, %error,
+                "urgent label assignment unavailable; continuing candidate scan"),
+        }
+    }
+    assignments
+}
+
 /// Load live candidates when available, retaining typed provenance for capped
 /// (therefore incomplete) live lists and cache fallbacks.
 pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
@@ -740,6 +789,36 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                         number,
                     )
                 });
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo_path),
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "urgent assignment cache unavailable");
+                crate::IssueMonitorPrefs::default()
+            });
+            // Construct/authenticate only when a live urgent revision actually
+            // needs enrichment. Retain a construction error for this scan so a
+            // broken credential probe is not repeated for every urgent row.
+            let mut client = None;
+            let urgent_assignments = load_urgent_assignments_with(&issues, &prefs, |number| {
+                if !readback_fan_out_has_budget() {
+                    return Err("urgent assignment deferred to preserve launch budget".to_string());
+                }
+                run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+                    let client = client
+                        .get_or_insert_with(|| {
+                            gwt_github::client::http::HttpIssueClient::from_runtime_environment(
+                                owner, repo,
+                            )
+                        })
+                        .as_ref()
+                        .map_err(ToString::to_string)?;
+                    client
+                        .fetch_label_assignment(IssueNumber(number), "urgent")
+                        .map_err(|error| error.to_string())
+                })
+                .map_err(|error| error.to_string())
+            });
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
                 source,
@@ -748,6 +827,7 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 // refresh. The per-Issue reasons ride their own rows instead.
                 live_error: None,
                 readiness_failures,
+                urgent_assignments,
             });
         }
         Err(error) => error.to_string(),
@@ -808,6 +888,7 @@ where
                 source,
                 live_error: None,
                 readiness_failures: Vec::new(),
+                urgent_assignments: BTreeMap::new(),
             })
         }
         Err(live_error) => {
@@ -818,6 +899,7 @@ where
                         source: IssueMonitorCandidateSource::Cache,
                         live_error: Some(live_error),
                         readiness_failures: Vec::new(),
+                        urgent_assignments: BTreeMap::new(),
                     });
                 }
             }
@@ -891,6 +973,14 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             expected_project_tab_id,
             now,
         );
+    for (number, assignment) in &loaded.urgent_assignments {
+        let revision = loaded
+            .issues
+            .iter()
+            .find(|issue| issue.number == *number)
+            .and_then(|issue| issue.updated_at.as_deref());
+        monitor.record_urgent_assignment(*number, revision, assignment);
+    }
     // Issue #3964 AC-1: every scan — daemon or GUI fallback — asks the owner
     // ledger whether a generation-conflict hold still protects anything. The
     // reaper released 29 of the 45 stranded production generations and their
@@ -1550,7 +1640,7 @@ fn autonomous_eligibility_candidates<'a>(
                 .inbox_item(issue.number)
                 .is_some_and(|item| item.state == MonitorInboxState::Queued)
         })
-        .filter(|issue| monitor.retry_ready(issue.number, now))
+        .filter(|issue| monitor.retry_ready_for_saved_profile(issue.number, now))
         .collect()
 }
 
@@ -2305,6 +2395,147 @@ mod tests {
             readiness: IssueMonitorReadiness::NotApplicable,
             updated_at: Some("2026-08-15T00:00:00Z".to_string()),
         }
+    }
+
+    #[test]
+    fn urgent_assignment_loader_reuses_revision_and_fetches_changed_urgent_only() {
+        let mut cached = issue(1);
+        cached.labels.push("urgent".into());
+        cached.updated_at = Some("2026-10-03T00:00:00Z".into());
+        let mut changed = cached.clone();
+        changed.number = 2;
+        changed.updated_at = Some("2026-10-03T01:00:00Z".into());
+        let mut monitor = IssueMonitorState::new(Default::default());
+        let prior = LabelAssignment {
+            actor: Some("first".into()),
+            created_at: "2026-10-02T00:00:00Z".into(),
+        };
+        for number in [1, 2] {
+            let mut old = cached.clone();
+            old.number = number;
+            monitor.observe_urgent_issue(&old, "2026-10-03T00:00:00Z");
+            monitor.record_urgent_assignment(number, old.updated_at.as_deref(), &prior);
+        }
+        let fresh = LabelAssignment {
+            actor: Some("second".into()),
+            created_at: "2026-10-03T01:00:00Z".into(),
+        };
+        let mut calls = Vec::new();
+        let assignments = load_urgent_assignments_with(
+            &[cached, changed, issue(3)],
+            &monitor.prefs(),
+            |number| {
+                calls.push(number);
+                Ok::<_, String>(Some(fresh.clone()))
+            },
+        );
+        assert_eq!(calls, vec![2]);
+        assert_eq!(assignments.get(&1), Some(&prior));
+        assert_eq!(assignments.get(&2), Some(&fresh));
+    }
+
+    #[test]
+    fn urgent_assignment_failed_refresh_preserves_fifo_and_retries() {
+        let mut first = issue(1);
+        first.labels.push("urgent".into());
+        first.updated_at = Some("2026-10-03T03:00:00Z".into());
+        let mut second = first.clone();
+        second.number = 2;
+        let mut monitor = IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[1, 2], "test", "2026-10-03T03:00:00Z");
+        for (issue, assigned_at) in [
+            (&first, "2026-10-03T01:00:00Z"),
+            (&second, "2026-10-03T02:00:00Z"),
+        ] {
+            monitor.observe_urgent_issue(issue, "2026-10-03T03:00:00Z");
+            monitor.record_urgent_assignment(
+                issue.number,
+                issue.updated_at.as_deref(),
+                &LabelAssignment {
+                    actor: Some("actor".into()),
+                    created_at: assigned_at.into(),
+                },
+            );
+        }
+        first.updated_at = Some("2026-10-03T04:00:00Z".into());
+        monitor.observe_urgent_issue(&first, "2026-10-03T04:00:00Z");
+        let failed =
+            load_urgent_assignments_with(std::slice::from_ref(&first), &monitor.prefs(), |_| {
+                Err::<Option<LabelAssignment>, _>("events unavailable")
+            });
+        assert!(failed.is_empty());
+        let projection = monitor.urgent_queue_projection(&crate::process::current_hostname());
+        assert_eq!(
+            projection
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            projection.entries[0].assigned_at.as_deref(),
+            Some("2026-10-03T01:00:00Z")
+        );
+
+        // A failed refresh preserves ordering, but must not mark the new
+        // revision's event history as successfully fetched.
+        let mut retried = false;
+        let refreshed =
+            load_urgent_assignments_with(std::slice::from_ref(&first), &monitor.prefs(), |_| {
+                retried = true;
+                Ok::<_, String>(Some(LabelAssignment {
+                    actor: Some("other".into()),
+                    created_at: "2026-10-03T04:00:00Z".into(),
+                }))
+            });
+        assert!(retried);
+        monitor.record_urgent_assignment(1, first.updated_at.as_deref(), &refreshed[&1]);
+        let projection = monitor.urgent_queue_projection(&crate::process::current_hostname());
+        assert_eq!(
+            projection
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn urgent_assignment_loaded_metadata_reaches_status_projection() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path().join("home"));
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut urgent = issue(7);
+        urgent.labels.push("urgent".into());
+        let loaded = LoadedIssueMonitorCandidates {
+            issues: vec![urgent],
+            source: IssueMonitorCandidateSource::Live,
+            live_error: None,
+            readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::from([(
+                7,
+                LabelAssignment {
+                    actor: Some("octocat".into()),
+                    created_at: "2026-10-02T00:00:00Z".into(),
+                },
+            )]),
+        };
+        let mut monitor = IssueMonitorState::new(Default::default());
+        scan_loaded_issue_monitor_candidates(&mut monitor, &loaded, &repo, "2026-10-03T00:00:00Z");
+        let status = monitor.status_view();
+        let entry = status
+            .terminal_queue
+            .iter()
+            .find(|entry| entry.number == 7)
+            .unwrap();
+        assert_eq!(entry.assigned_by.as_deref(), Some("octocat"));
+        assert_eq!(entry.assigned_at.as_deref(), Some("2026-10-02T00:00:00Z"));
     }
 
     fn github_issue(number: u64) -> IssueSnapshot {
@@ -3332,6 +3563,7 @@ mod tests {
             source: IssueMonitorCandidateSource::Live,
             live_error: None,
             readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
         };
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
@@ -4138,6 +4370,7 @@ mod tests {
             source: IssueMonitorCandidateSource::Live,
             live_error: Some("issue #43 targeted refresh failed".to_string()),
             readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
         };
         assert!(
             live_with_failed_spec_enrichment.authorizes_remote_effects(),
@@ -4191,6 +4424,7 @@ mod tests {
             source: IssueMonitorCandidateSource::Cache,
             live_error: Some("operation deadline exceeded at issue-list stage".to_string()),
             readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
         };
 
         let summary = scan_loaded_issue_monitor_candidates(

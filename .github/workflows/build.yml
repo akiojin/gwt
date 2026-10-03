@@ -3,6 +3,14 @@ name: Build
 on:
   pull_request:
     branches: [develop, main]
+  # Issue #4872: develop lands through a GitHub merge queue. The queue re-tests
+  # each pull request on the latest base under this event, and a required
+  # check nobody reports for it stays pending forever, so every job here runs
+  # for the queue exactly as it does for a pull request. Pinned by
+  # crates/gwt/tests/ci_concurrency_contract_test.rs; the settings this pairs
+  # with are recorded in AGENTS.md ("Merge queue").
+  merge_group:
+    types: [checks_requested]
 
 # Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
 # update-branch `synchronize` starts a fresh run, and without this group the

@@ -102,9 +102,6 @@ impl LaunchWizardState {
             // the inherited preference is both editable and honored.
             show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
             show_fast_mode,
-            show_codex_fast_mode: show_manual_setup
-                && self.launch_target_is_agent()
-                && self.agent_is_codex(),
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
@@ -115,6 +112,7 @@ impl LaunchWizardState {
             // pool, so it fills this in when the wizard is the Issue Monitor
             // Agent Settings form.
             issue_monitor_pool_impact: None,
+            issue_monitor_pool: None,
             hermes_provider: self.hermes_provider.clone(),
             hermes_provider_options: self.hermes_choices.providers.clone(),
             hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
@@ -144,7 +142,6 @@ impl LaunchWizardState {
             primary_action_enabled: self.primary_action_enabled(),
             progress_steps: self.progress_steps_view(),
             fast_mode,
-            codex_fast_mode: self.codex_fast_mode && self.agent_is_codex(),
             launch_summary: self.launch_summary_view(),
             phase: self.current_phase(),
             error: self.error.clone(),
@@ -1906,7 +1903,12 @@ mod tests {
         assert_eq!(view.selected_version, "0.110.0");
         assert!(view.show_reasoning);
         assert!(view.show_version);
-        assert!(view.show_codex_fast_mode);
+        assert!(view.show_fast_mode);
+        let payload = serde_json::to_value(&view).expect("serialize wizard view");
+        assert_eq!(payload["show_fast_mode"], true);
+        assert_eq!(payload["fast_mode"], true);
+        assert!(payload.get("show_codex_fast_mode").is_none());
+        assert!(payload.get("codex_fast_mode").is_none());
         assert!(view
             .launch_summary
             .iter()

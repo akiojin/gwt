@@ -57,8 +57,10 @@ enum WorkEventsSourceKind {
     Shard,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkEventsIngestSummary {
+    /// A canonical read failure that could not be recovered from complete sources.
+    pub load_error: Option<gwt_core::WorkspaceStateLoadError>,
     /// Sources whose content was read and offered to the intake.
     pub sources_ingested: usize,
     /// Sources skipped because their fingerprint was already current.
@@ -416,6 +418,14 @@ where
     let mut phases =
         gwt::perf::global::RoutePhaseClock::start(gwt::perf::PerfRoute::WorkEventsIngest);
     let mut summary = WorkEventsIngestSummary::default();
+    // Current and Works form one startup admission boundary. A failed Current
+    // read must not let the subsequent ingest/reconcile create an empty Work.
+    if let Err(error) = gwt_core::workspace_projection::load_workspace_projection_from_path(
+        &work_items_path.with_file_name("current.json"),
+    ) {
+        summary.load_error = Some(crate::workspace_state_load_error(project_root, error));
+        return summary;
+    }
     let mut store = WorkEventsIntakeStore::open(state_path);
     summary.state_sources = store.source_count();
     summary.state_bytes = store.stored_bytes();
@@ -424,25 +434,15 @@ where
         match gwt_core::workspace_projection::load_workspace_work_items_from_path(work_items_path) {
             Ok(Some(_)) => false,
             Ok(None) => true,
-            Err(gwt_core::GwtError::JsonDecode {
-                kind: gwt_core::JsonDecodeKind::Malformed,
-                message: error,
-                ..
-            }) => {
-                tracing::warn!(
-                    %error,
-                    path = %work_items_path.display(),
-                    "work events ingest: corrupt projection requires rebuild"
-                );
-                true
-            }
             Err(error) => {
-                tracing::warn!(
-                    %error,
-                    path = %work_items_path.display(),
-                    "work events ingest: projection read failed"
-                );
-                return summary;
+                let error = crate::workspace_state_load_error(project_root, error);
+                let recoverable = error.kind == gwt_core::WorkspaceStateLoadErrorKind::Malformed;
+                tracing::warn!(%error, "work events ingest: projection read failed");
+                summary.load_error = Some(error);
+                if !recoverable {
+                    return summary;
+                }
+                true
             }
         };
     let mut rebuild_required = projection_requires_rebuild
@@ -753,6 +753,42 @@ where
         return summary;
     }
 
+    if let Some(error) = summary.load_error.as_mut() {
+        // Healthy projections can reflect intentional source deletion. A
+        // corrupt projection cannot prove what a missing or truncated source
+        // held, so retain its bytes unless every previously recorded source
+        // is still available unchanged. Newly discovered sources may be added.
+        let available = pending_sources
+            .iter()
+            .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
+            .collect::<HashMap<_, _>>();
+        let known_groups = store
+            .group_names()
+            .filter(|name| name.starts_with(SOURCE_WORKTREE) || name.starts_with(SOURCE_REF))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let shared_incomplete = known_groups.iter().any(|group| {
+            store.group_sources(group).is_none_or(|sources| {
+                sources.iter().any(|(key, fingerprint)| {
+                    available.get(key.as_str()).copied() != Some(fingerprint.as_str())
+                })
+            })
+        });
+        let local_incomplete = close_path.as_ref().is_some_and(|path| {
+            let key = format!("{SOURCE_LOCAL_LIFECYCLE}{}", path.display());
+            store.contains(&key)
+                && !pending_local_lifecycle
+                    .as_ref()
+                    .is_some_and(|(_, fingerprint)| store.is_current(&key, fingerprint))
+        });
+        if shared_incomplete || local_incomplete {
+            error.message.push_str(
+                "; recovery refused: a previously recorded event source is missing or changed",
+            );
+            return summary;
+        }
+    }
+
     if pending_sources.is_empty() && pending_local_lifecycle.is_none() {
         let authoritative_empty_source_deletion =
             rebuild_required && source_list_changed && had_source_list_fingerprint;
@@ -785,7 +821,45 @@ where
     let intake = if rebuild_required {
         rebuild_work_events_with_shared_loader(
             work_items_path,
-            || load_pending_sources_for_rebuild(&pending_sources, worktree_entries),
+            || {
+                let loaded = load_pending_sources_for_rebuild(&pending_sources, worktree_entries)?;
+                if let Some(error) = summary.load_error.as_ref() {
+                    // Discovery preceded the projection lock. Refuse recovery if
+                    // that source set became incomplete while intake was waiting.
+                    let available = loaded
+                        .1
+                        .iter()
+                        .map(|(key, value)| (key, value))
+                        .collect::<HashMap<_, _>>();
+                    if pending_sources.iter().any(|source| {
+                        available.get(&source.key).copied() != Some(&source.fingerprint)
+                    }) {
+                        let mut error = error.clone();
+                        error.message.push_str(
+                            "; recovery refused: an event source disappeared or changed before intake",
+                        );
+                        return Err(error.into());
+                    }
+                    // Local lifecycle writers hold this same Works lock, so
+                    // validate their discovered snapshot here before the core
+                    // rebuild reads it under the still-held lock.
+                    if let (Some(path), Some((_, expected))) =
+                        (close_path.as_ref(), pending_local_lifecycle.as_ref())
+                    {
+                        let actual = std::fs::read_to_string(path)
+                            .map(|content| content_fingerprint(&content))
+                            .map_err(|cause| gwt_core::WorkspaceStateLoadError::io(path, cause))?;
+                        if &actual != expected {
+                            let mut error = error.clone();
+                            error.message.push_str(
+                                "; recovery refused: local lifecycle history changed before intake",
+                            );
+                            return Err(error.into());
+                        }
+                    }
+                }
+                Ok(loaded)
+            },
             close_path.as_deref(),
         )
     } else if pending_local_lifecycle.is_some() {
@@ -819,6 +893,7 @@ where
     phases.mark("intake");
     match intake {
         Ok((report, shared_fingerprints, local_fingerprint)) => {
+            summary.load_error = None;
             summary.sources_ingested =
                 shared_fingerprints.len() + usize::from(local_fingerprint.is_some());
             summary.events_applied = report.applied;
@@ -853,6 +928,9 @@ where
         }
         Err(error) => {
             tracing::warn!(%error, "work events ingest: globally ordered intake failed");
+            if matches!(error, gwt_core::GwtError::WorkspaceStateLoad(_)) {
+                summary.load_error = Some(crate::workspace_state_load_error(project_root, error));
+            }
         }
     }
     summary
@@ -1669,11 +1747,8 @@ mod tests {
             .find(|item| item.id == "work-ref-bbbb2222")
             .expect("remote item");
         assert!(
-            remote_item
-                .execution_containers
-                .iter()
-                .any(|container| container.branch.as_deref() == Some("work/remote-side")),
-            "legacy branch-less events imported from a source ref keep that ref's branch"
+            remote_item.execution_containers.is_empty(),
+            "restoring legacy history must not grant ownership of its reader source"
         );
 
         // Second run: every source fingerprint is current — nothing re-reads.
@@ -1926,10 +2001,10 @@ mod tests {
             .iter()
             .find(|item| item.id == "work-remote-shard")
             .expect("ref shard Work restored");
-        assert!(item.execution_containers.iter().any(|container| {
-            container.branch.as_deref() == Some("work/remote-shard")
-                && container.worktree_path.is_none()
-        }));
+        assert!(
+            item.execution_containers.is_empty(),
+            "a fetched shard without an explicit container restores history only"
+        );
     }
 
     #[test]
@@ -3020,6 +3095,97 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_current_state_prevents_startup_ingest_writes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_shard(&repo, "evt-no-overwrite", "work-no-overwrite");
+        let works = temp.path().join("state/works.json");
+        let state = temp.path().join("state/work-events-intake.json");
+        let current = works.with_file_name("current.json");
+        std::fs::create_dir_all(&current).expect("unreadable current fixture");
+
+        let result = ingest_project_work_events_paths(&repo, &works, &state);
+
+        assert!(
+            !result.changed(),
+            "unreadable current must stop startup writers"
+        );
+        assert!(!works.exists(), "do not create a new canonical Work state");
+        assert!(current.is_dir());
+    }
+
+    #[test]
+    fn corrupt_projection_is_not_rebuilt_after_a_known_source_disappears() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_shard(&repo, "evt-kept", "work-kept");
+        let removed = write_shard(&repo, "evt-lost", "work-lost");
+        let works = temp.path().join("state/works.json");
+        let state = temp.path().join("state/work-events-intake.json");
+        assert!(ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
+        let intake_before = load_work_events_intake_state(&state);
+        let corrupt = b"{\"work_items\":";
+        std::fs::write(&works, corrupt).expect("corrupt projection");
+        let result =
+            ingest_project_work_events_paths_with_before_intake(&repo, &works, &state, || {
+                std::fs::remove_file(removed).expect("remove known source after discovery");
+            });
+
+        assert!(
+            !result.projection_rebuilt,
+            "partial history is not recovery"
+        );
+        assert_eq!(std::fs::read(&works).unwrap(), corrupt);
+        assert_eq!(load_work_events_intake_state(&state), intake_before);
+        // The subsequent pass must also refuse a source already absent at discovery.
+        let retry = ingest_project_work_events_paths(&repo, &works, &state);
+        assert!(!retry.projection_rebuilt);
+        assert_eq!(std::fs::read(&works).unwrap(), corrupt);
+        assert_eq!(load_work_events_intake_state(&state), intake_before);
+    }
+
+    #[test]
+    fn corrupt_projection_is_not_rebuilt_after_local_lifecycle_disappears_before_lock() {
+        use gwt_core::workspace_projection::{WorkEvent, WorkEventKind};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_shard(&repo, "evt-kept", "work-kept");
+        let works = temp.path().join("state/works.json");
+        let state = works.with_file_name("work-events-intake.json");
+        let close_path = works.with_file_name("work-events-closed.jsonl");
+        std::fs::create_dir_all(works.parent().unwrap()).unwrap();
+        let done = WorkEvent::new(WorkEventKind::Done, "work-kept", chrono::Utc::now());
+        std::fs::write(&close_path, serde_json::to_vec(&done).unwrap()).unwrap();
+        assert!(ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
+        let intake_before = load_work_events_intake_state(&state);
+        let corrupt = b"{\"work_items\":";
+        std::fs::write(&works, corrupt).unwrap();
+
+        let result =
+            ingest_project_work_events_paths_with_before_intake(&repo, &works, &state, || {
+                std::fs::remove_file(&close_path).unwrap();
+            });
+
+        assert!(
+            !result.projection_rebuilt,
+            "partial history is not recovery"
+        );
+        assert!(result.load_error.is_some());
+        assert_eq!(std::fs::read(&works).unwrap(), corrupt);
+        assert_eq!(load_work_events_intake_state(&state), intake_before);
+    }
+
+    #[test]
     fn projection_parse_failure_requires_rebuild_with_current_version_and_fingerprints() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -3150,7 +3316,7 @@ mod tests {
     }
 
     #[test]
-    fn ingest_reprocesses_old_raw_fingerprint_state_to_repair_source_container() {
+    fn ingest_reprocesses_old_raw_fingerprint_state_without_inventing_source_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -3217,7 +3383,7 @@ mod tests {
             legacy_projection.work_items[0]
                 .execution_containers
                 .is_empty(),
-            "pre-fix projection starts without branch context"
+            "legacy history has no explicit container"
         );
 
         let mut old_state = WorkEventsIntakeState::default();
@@ -3227,17 +3393,17 @@ mod tests {
         let repaired = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
         assert_eq!(
             repaired.events_applied, 1,
-            "old raw fingerprint cache must not skip source-context repair"
+            "old raw fingerprint cache must not skip history replay"
         );
 
         let projection =
             gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
                 .expect("load repaired")
                 .expect("repaired projection");
-        assert!(projection.work_items[0]
-            .execution_containers
-            .iter()
-            .any(|container| container.branch.as_deref() == Some("work/cache-repair")));
+        assert!(
+            projection.work_items[0].execution_containers.is_empty(),
+            "replaying legacy history must not infer reader-source ownership"
+        );
 
         let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
         assert_eq!(second.events_applied, 0);

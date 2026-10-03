@@ -326,6 +326,24 @@ pub struct PrClosingIssue {
     pub state: Option<String>,
 }
 
+/// What GitHub's merge queue is doing with one PR (Issue #4872 AC-4).
+///
+/// On a base that lands through a merge queue, `BEHIND` stops meaning "sync
+/// the branch and run CI again": the queue re-tests the PR on the latest base
+/// itself, and pushing to a queued PR removes it from the queue. The inventory
+/// carries this so a `BEHIND` row says which of the two it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrMergeQueueState {
+    /// Whether the PR's base branch lands through a merge queue.
+    pub enabled: bool,
+    /// Position in the queue. `None` when the PR is not queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+    /// GitHub's `MergeQueueEntryState` for a queued PR, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
 /// Fields needed to classify one open PR without the derived lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrInventoryFields {
@@ -368,6 +386,11 @@ pub struct PrInventoryFields {
     /// the `Auto Merge PR` workflow does — so an armed PR that stays mergeable
     /// across cycles is the shape the PM must be able to see.
     pub auto_merge_enabled: bool,
+    /// Issue #4872 AC-4: the merge queue's view of this PR. `None` means the
+    /// read did not ask — only rows that are or may be held as `BEHIND` are
+    /// probed — or GitHub did not answer, and is never the same as "no merge
+    /// queue".
+    pub merge_queue: Option<PrMergeQueueState>,
 }
 
 /// Result of classifying one open PR for the PM inventory.
@@ -472,6 +495,10 @@ pub struct PrInventoryItem {
     /// the workflow that performs the merge is not running.
     #[serde(default)]
     pub auto_merge_enabled: bool,
+    /// Issue #4872 AC-4: the merge queue's view of this PR, present only when
+    /// it was probed. An absent key is "unknown", never "no merge queue".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_queue: Option<PrMergeQueueState>,
     #[serde(default = "default_stale_after_hours")]
     pub stale_after_hours: i64,
     #[serde(default = "default_true")]
@@ -649,6 +676,7 @@ impl PrInventoryItem {
             coderabbit_review_complete: self.coderabbit_review_complete,
             fallback_owner_closed: self.owner_issue_closed,
             auto_merge_enabled: self.auto_merge_enabled,
+            merge_queue: self.merge_queue.clone(),
         }
     }
 
@@ -831,6 +859,8 @@ pub fn classify_pr_lifecycle_with(
 fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLifecycleDecision {
     let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues)
         || (fields.closing_issues.is_empty() && fields.fallback_owner_closed);
+    let queue_owns_base_sync =
+        class == PrLifecycleClass::Behind && merge_queue_owns_base_sync(fields);
     let default_action = match (class, fields.is_draft) {
         (PrLifecycleClass::ReadyToPromote, _) => "mark ready".to_string(),
         (PrLifecycleClass::MergeCandidate, true) => "mark ready".to_string(),
@@ -839,6 +869,7 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
             "rerun the Auto Merge PR workflow run for this head branch".to_string()
         }
         (PrLifecycleClass::Conflicted, _) => "relaunch owner to resolve conflict".to_string(),
+        (PrLifecycleClass::Behind, _) if queue_owns_base_sync => merge_queue_action(fields),
         (PrLifecycleClass::Behind, _) => "update-branch".to_string(),
         (PrLifecycleClass::CiRed, _) => "relaunch owner to fix CI".to_string(),
         (PrLifecycleClass::Superseded, _) => {
@@ -861,7 +892,12 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     } else {
         None
     };
-    let default_action_operation = default_action_operation(class, fields.is_draft);
+    // Leaving a PR to the queue is advice, not a call: no operation performs it.
+    let default_action_operation = if queue_owns_base_sync {
+        None
+    } else {
+        default_action_operation(class, fields.is_draft)
+    };
     let default_action_executable = !(class.relaunches_owner() && blocker.is_some());
     let fallback =
         (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string());
@@ -878,6 +914,31 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         default_action_operation,
         blocker: blocker.map(str::to_string),
         fallback,
+    }
+}
+
+/// Issue #4872 AC-4: whether a `BEHIND` PR is the merge queue's to bring up to
+/// date rather than the PM's.
+///
+/// Only a probed, enabled queue answers yes. An unprobed row keeps the
+/// update-branch action it always had, so a host whose GitHub cannot answer
+/// the probe behaves exactly as before. A Draft is excluded because it cannot
+/// enter the queue at all.
+fn merge_queue_owns_base_sync(fields: &PrInventoryFields) -> bool {
+    !fields.is_draft
+        && fields
+            .merge_queue
+            .as_ref()
+            .is_some_and(|queue| queue.enabled)
+}
+
+/// The advisory action for a `BEHIND` PR the merge queue owns.
+fn merge_queue_action(fields: &PrInventoryFields) -> String {
+    match fields.merge_queue.as_ref().and_then(|queue| queue.position) {
+        Some(position) => format!(
+            "leave: in the merge queue at position {position}, which re-tests on the latest base"
+        ),
+        None => "leave: the merge queue re-tests on the latest base, no update-branch".to_string(),
     }
 }
 
@@ -953,6 +1014,7 @@ fn inventory_item_from_fields(
         dwell_hours: decision.dwell_hours,
         age_hours: decision.age_hours,
         auto_merge_enabled: fields.auto_merge_enabled,
+        merge_queue: fields.merge_queue,
         stale_after_hours: options.stale_after_hours,
         default_action_executable: decision.default_action_executable,
         default_action_operation: decision.default_action_operation.map(str::to_string),
@@ -1040,6 +1102,9 @@ fn inventory_item_from_value(
         auto_merge_enabled: value
             .get("autoMergeRequest")
             .is_some_and(|request| !request.is_null()),
+        merge_queue: value
+            .get(GWT_MERGE_QUEUE_KEY)
+            .and_then(|queue| serde_json::from_value(queue.clone()).ok()),
         closing_issues: value
             .get("closingIssuesReferences")
             .map(parse_closing_issues)
@@ -1114,6 +1179,9 @@ const PR_READY_PROBE_CAP: usize = 5;
 /// Key under which a probed [`PrReviewState`] rides along a cached row. Not a
 /// GitHub field: the `gwt_` prefix keeps it from ever colliding with one.
 const GWT_REVIEW_STATE_KEY: &str = "gwtReviewState";
+
+/// Key under which a probed [`PrMergeQueueState`] rides along a cached row.
+const GWT_MERGE_QUEUE_KEY: &str = "gwtMergeQueue";
 
 /// Heavy fields of one PR, keyed by the `updated_at` they were fetched for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1575,10 +1643,15 @@ where
     let (mut rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
     let owner_calls = hydrate_fallback_owners(repo_path, &mut rows, ledger, now, &mut run_gh)?;
     github_calls += owner_calls as u32;
+    let queue_calls = probe_merge_queue(repo_path, &mut rows, ledger, now, &mut run_gh);
+    github_calls += queue_calls as u32;
     let mut heavy = BTreeMap::new();
     // The fallback owner-state batch is a hydration too: it spends one of the
     // shared PR_INVENTORY_HYDRATION_CAP slots instead of adding a new burst
-    // allowance (#4141 AC-6 over the #3891 budget ledger).
+    // allowance (#4141 AC-6 over the #3891 budget ledger). The merge-queue
+    // probe (#4872) spends another on the same terms, but is not reported as
+    // a hydration: it may have failed, and it fetches no heavy field.
+    let batch_calls = owner_calls + queue_calls;
     let mut hydrated = owner_calls;
     let mut skipped_unchanged = 0usize;
     let mut pending = Vec::new();
@@ -1593,7 +1666,7 @@ where
         if let Some(fields) =
             hydration_needed(previous.as_ref(), updated_at, head_ref_oid, options, now)
         {
-            if pending.len() + owner_calls < PR_INVENTORY_HYDRATION_CAP {
+            if pending.len() + batch_calls < PR_INVENTORY_HYDRATION_CAP {
                 pending.push((number, updated_at, head_ref_oid, fields));
             }
         } else if previous.is_some() && !options.include.is_empty() {
@@ -1887,6 +1960,116 @@ where
         eprintln!("warning: owner issue state unavailable (NOT_FOUND): {missing:?}");
     }
     Ok(1)
+}
+
+/// Issue #4872 AC-4: ask GitHub what its merge queue is doing with the rows
+/// that are, or may be held as, `BEHIND`, in one batched call, and attach the
+/// answer to each of them.
+///
+/// Probing only those non-Draft rows keeps the cost bounded the same way the
+/// conflict measurement and the review probe do: an inventory with no such row
+/// spends nothing, and one with any spends a single call however many there
+/// are.
+///
+/// A failed probe is not a failed read. The rows stay unannotated, which
+/// classifies them exactly as before the probe existed; a GitHub that does not
+/// know the merge-queue fields therefore costs a warning, not the inventory.
+/// Returns the number of calls spent.
+fn probe_merge_queue<F>(
+    repo_path: &Path,
+    rows: &mut [serde_json::Value],
+    ledger: &BudgetLedger,
+    now: DateTime<Utc>,
+    run_gh: &mut F,
+) -> usize
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    // A Draft cannot enter the queue, so its answer would change nothing. A
+    // row GitHub has not computed yet is included: the history may hold it as
+    // `BEHIND`, and that happens right after every landing.
+    let field_is = |row: &serde_json::Value, key: &str, expected: &str| {
+        row.get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+    };
+    let behind: Vec<u64> = rows
+        .iter()
+        .filter(|row| {
+            (field_is(row, "mergeStateStatus", "BEHIND")
+                || field_is(row, "mergeStateStatus", "UNKNOWN")
+                || field_is(row, "mergeable", "UNKNOWN"))
+                && row.get("isDraft").and_then(serde_json::Value::as_bool) != Some(true)
+        })
+        .filter_map(|row| row.get("number").and_then(serde_json::Value::as_u64))
+        .collect();
+    if behind.is_empty() {
+        return 0;
+    }
+    let fields = behind
+        .iter()
+        .map(|n| {
+            format!(
+                "pr_{n}:pullRequest(number:{n}){{isMergeQueueEnabled mergeQueueEntry{{position state}}}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rate_limit = github_budget::GRAPHQL_RATE_LIMIT_SELECTION;
+    let query = format!("query=query($owner:String!,$repo:String!){{{rate_limit} repository(owner:$owner,name:$repo){{{fields}}}}}");
+    let output = match run_gh(
+        repo_path,
+        &[
+            "api",
+            "graphql",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "repo={repo}",
+            "-f",
+            &query,
+        ],
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("warning: merge queue state unavailable: {error}");
+            return 1;
+        }
+    };
+    let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap_or_default();
+    if let Some(rate_limit) = github_budget::parse_graphql_rate_limit(&value) {
+        ledger.record_graphql_response(
+            &github_budget::spawn_source(&["api", "graphql"]),
+            &rate_limit,
+            now,
+        );
+    }
+    if !output.success {
+        eprintln!(
+            "warning: merge queue state unavailable: {}",
+            output.stderr.trim()
+        );
+        return 1;
+    }
+    for row in rows {
+        let Some(number) = row.get("number").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let answer = &value["data"]["repository"][format!("pr_{number}")];
+        let Some(enabled) = answer["isMergeQueueEnabled"].as_bool() else {
+            continue;
+        };
+        let entry = &answer["mergeQueueEntry"];
+        let state = PrMergeQueueState {
+            enabled,
+            position: entry["position"]
+                .as_u64()
+                .and_then(|position| u32::try_from(position).ok()),
+            state: entry["state"].as_str().map(str::to_string),
+        };
+        row[GWT_MERGE_QUEUE_KEY] = serde_json::to_value(state).unwrap_or_default();
+    }
+    1
 }
 
 /// Issue #3891 AC-4: the reason a periodic read must not spend right now.
@@ -4982,6 +5165,7 @@ mod tests {
             body: "Closes #10".to_string(),
             fallback_owner_closed: false,
             auto_merge_enabled: false,
+            merge_queue: None,
             closing_issues: vec![],
             conflict: None,
             unresolved_review_threads: None,
@@ -5320,6 +5504,106 @@ mod tests {
         assert_eq!(decision.default_action, "update-branch");
         assert_eq!(decision.default_action_operation, Some("pr.update_branch"));
         assert!(decision.default_action_executable);
+    }
+
+    /// Issue #4872 AC-4: on a base that lands through a merge queue, `BEHIND`
+    /// is the queue's to resolve. The row must say so instead of recommending
+    /// an update-branch that would restart CI — and, for a queued PR, eject it.
+    #[test]
+    fn a_behind_pr_on_a_merge_queue_base_is_left_to_the_queue() {
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        fields.merge_queue = Some(PrMergeQueueState {
+            enabled: true,
+            position: None,
+            state: None,
+        });
+        let waiting = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(waiting.class, PrLifecycleClass::Behind);
+        assert_eq!(
+            waiting.default_action,
+            "leave: the merge queue re-tests on the latest base, no update-branch"
+        );
+        assert_eq!(waiting.default_action_operation, None);
+
+        fields.merge_queue = Some(PrMergeQueueState {
+            enabled: true,
+            position: Some(2),
+            state: Some("AWAITING_CHECKS".to_string()),
+        });
+        let queued = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(
+            queued.default_action,
+            "leave: in the merge queue at position 2, which re-tests on the latest base"
+        );
+        assert_eq!(queued.default_action_operation, None);
+    }
+
+    /// Issue #4872 AC-4: GitHub answers `UNKNOWN` right after every base move,
+    /// and the history then holds the previous class. A `BEHIND` held that way
+    /// must still defer to the queue — that moment follows every landing, so
+    /// it is exactly when an update-branch would eject a queued PR.
+    #[test]
+    fn a_behind_class_held_through_unknown_still_defers_to_the_merge_queue() {
+        let options = PrInventoryOptions::default();
+        let queue = Some(PrMergeQueueState {
+            enabled: true,
+            position: None,
+            state: None,
+        });
+        let behind = PrInventoryFields {
+            merge_state_status: "BEHIND".to_string(),
+            merge_queue: queue.clone(),
+            ..sample_inventory_fields()
+        };
+        let unknown = PrInventoryFields {
+            merge_state_status: "UNKNOWN".to_string(),
+            merge_queue: queue,
+            ..sample_inventory_fields()
+        };
+        let mut history = PrInventoryHistory::default();
+        let mut first = vec![inventory_item_from_fields(behind, now_3868(), &options)];
+        history.observe(&mut first, now_3868(), &options);
+        let mut second = vec![inventory_item_from_fields(unknown, now_3868(), &options)];
+        history.observe(&mut second, now_3868(), &options);
+
+        assert_eq!(second[0].lifecycle, "BEHIND");
+        assert_eq!(second[0].lifecycle_source, "held");
+        assert!(
+            second[0].default_action.starts_with("leave:"),
+            "{}",
+            second[0].default_action
+        );
+        assert_eq!(second[0].default_action_operation, None);
+    }
+
+    /// Issue #4872 AC-4: only a probed, enabled queue takes the redo away. A
+    /// queue that is off, a row nobody probed, and a Draft (which cannot enter
+    /// a queue) all keep the update-branch they had before.
+    #[test]
+    fn a_behind_pr_without_an_enabled_merge_queue_still_needs_update_branch() {
+        let disabled = PrMergeQueueState {
+            enabled: false,
+            position: None,
+            state: None,
+        };
+        let enabled = PrMergeQueueState {
+            enabled: true,
+            ..disabled.clone()
+        };
+        for (merge_queue, is_draft) in [
+            (None, false),
+            (Some(disabled), false),
+            (Some(enabled), true),
+        ] {
+            let mut fields = sample_inventory_fields();
+            fields.merge_state_status = "BEHIND".to_string();
+            fields.merge_queue = merge_queue;
+            fields.is_draft = is_draft;
+            let decision = classify_pr_lifecycle(&fields, now_3868());
+            assert_eq!(decision.default_action, "update-branch");
+            assert_eq!(decision.default_action_operation, Some("pr.update_branch"));
+        }
     }
 
     /// SPEC #3835 AC-17: advisory actions name no operation. "leave in
@@ -6304,6 +6588,139 @@ mod tests {
         .unwrap();
         assert_eq!(cached.github_calls, 0);
         assert!(cached.items.iter().all(|item| item.owner_issue_closed));
+    }
+
+    /// A `gh` that answers the merge-queue probe with `answer` and everything
+    /// else from `gh`, returning the probe queries it saw.
+    fn read_with_merge_queue_answer(
+        tmp: &Path,
+        gh: &mut FakeGh,
+        now: DateTime<Utc>,
+        answer: GhCliOutput,
+    ) -> (PrInventoryRead, Vec<String>) {
+        let ledger = BudgetLedger::at(&tmp.join("budget"));
+        let probes = std::sync::Mutex::new(Vec::new());
+        let gh = std::sync::Mutex::new(gh);
+        let read = fetch_pr_inventory_cached_with(
+            Path::new("/tmp/repo"),
+            &tmp.join(PR_INVENTORY_CACHE_FILE),
+            &ledger,
+            now,
+            &PrInventoryOptions::default(),
+            |_, args| {
+                if args.starts_with(&["api", "graphql"]) {
+                    probes.lock().unwrap().push(args.join(" "));
+                    Ok(GhCliOutput {
+                        success: answer.success,
+                        stdout: answer.stdout.clone(),
+                        stderr: answer.stderr.clone(),
+                    })
+                } else {
+                    gh.lock().unwrap().run(args)
+                }
+            },
+        )
+        .expect("inventory read");
+        (read, probes.into_inner().unwrap())
+    }
+
+    /// Issue #4872 AC-4: one batched probe covers the `BEHIND` rows and only
+    /// them, the answer reaches the row, and a read served from the snapshot
+    /// keeps it without asking again.
+    #[test]
+    fn inventory_probes_the_merge_queue_once_for_possibly_behind_rows_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut gh = FakeGh::new(vec![
+            light_row(7, "2026-09-01T00:00:00Z", "BEHIND"),
+            light_row(8, "2026-09-01T00:00:00Z", "CLEAN"),
+            light_row(9, "2026-09-01T00:00:00Z", "BEHIND"),
+            light_row(10, "2026-09-01T00:00:00Z", "UNKNOWN"),
+        ]);
+        let answer = GhCliOutput {
+            success: true,
+            stderr: String::new(),
+            stdout: serde_json::json!({"data":{"repository":{
+                "pr_7":{"isMergeQueueEnabled":true,"mergeQueueEntry":{"position":1,"state":"AWAITING_CHECKS"}},
+                "pr_9":{"isMergeQueueEnabled":true,"mergeQueueEntry":null},
+                "pr_10":{"isMergeQueueEnabled":true,"mergeQueueEntry":null}
+            }}})
+            .to_string(),
+        };
+
+        let (read, probes) = read_with_merge_queue_answer(tmp.path(), &mut gh, now_3891(), answer);
+
+        assert_eq!(probes.len(), 1, "one batched probe: {probes:?}");
+        assert!(probes[0].contains("pr_7:pullRequest(number:7)"));
+        assert!(probes[0].contains("pr_9:pullRequest(number:9)"));
+        assert!(
+            probes[0].contains("pr_10:pullRequest(number:10)"),
+            "an UNKNOWN row may be held as BEHIND, so it is probed too: {}",
+            probes[0]
+        );
+        assert!(
+            !probes[0].contains("number:8"),
+            "a PR that is not BEHIND is not probed: {}",
+            probes[0]
+        );
+        let row = |number| {
+            read.items
+                .iter()
+                .find(|item| item.number == number)
+                .expect("row")
+        };
+        assert_eq!(row(7).lifecycle, "BEHIND");
+        assert_eq!(
+            row(7).merge_queue,
+            Some(PrMergeQueueState {
+                enabled: true,
+                position: Some(1),
+                state: Some("AWAITING_CHECKS".to_string()),
+            })
+        );
+        assert_eq!(row(7).default_action_operation, None);
+        assert_eq!(
+            row(9).default_action,
+            "leave: the merge queue re-tests on the latest base, no update-branch"
+        );
+        assert_eq!(row(8).merge_queue, None);
+        assert!(row(10).merge_queue.is_some());
+
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let cached = cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891() + chrono::Duration::seconds(1),
+            &PrInventoryOptions::default(),
+        )
+        .expect("cached read");
+        assert_eq!(cached.source, "cache");
+        assert_eq!(cached.github_calls, 0);
+        assert_eq!(cached.items[0].merge_queue, row(7).merge_queue);
+    }
+
+    /// Issue #4872 AC-4: a GitHub that cannot answer the probe costs a warning,
+    /// not the inventory. The row keeps the update-branch it always had.
+    #[test]
+    fn a_failed_merge_queue_probe_leaves_the_behind_row_as_it_was() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut gh = FakeGh::new(vec![light_row(7, "2026-09-01T00:00:00Z", "BEHIND")]);
+        let answer = GhCliOutput {
+            success: false,
+            stderr: "Field 'isMergeQueueEnabled' doesn't exist on type 'PullRequest'".to_string(),
+            stdout: r#"{"errors":[{"message":"Field 'isMergeQueueEnabled' doesn't exist"}]}"#
+                .to_string(),
+        };
+
+        let (read, probes) = read_with_merge_queue_answer(tmp.path(), &mut gh, now_3891(), answer);
+
+        assert_eq!(probes.len(), 1);
+        assert_eq!(read.items[0].merge_queue, None);
+        assert_eq!(read.items[0].default_action, "update-branch");
+        assert_eq!(
+            read.items[0].default_action_operation.as_deref(),
+            Some("pr.update_branch")
+        );
     }
 
     #[test]

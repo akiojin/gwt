@@ -854,6 +854,12 @@ pub(super) fn run<E: CliEnv>(
             0
         }
     };
+    // Issue #4850: a skipped best-effort step is said on the text surface too,
+    // so the argv path and the daemon log read the same warning the JSON
+    // envelope carries in `warnings[]`.
+    for warning in crate::cli::operation_warnings::snapshot() {
+        out.push_str(&format!("warning: {}\n", warning.message));
+    }
     if cmd_settles_pr_obligation && code == 0 {
         // P11: successful PR mutations settle open PR obligations.
         if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
@@ -900,6 +906,31 @@ fn record_explicit_pr_metadata<E: CliEnv>(
 // Called inside dispatch_pr_mutation's existing owner/Session lease. A valid
 // execution binding remains authoritative when the shared current projection
 // no longer carries the Session, including delivery after Work finalization.
+/// Issue #4850 AC-1: how long the post-mutation Work metadata recording may
+/// wait for the workspace Work items / verification locks. The GitHub
+/// mutation is already committed when this runs, so an unbounded wait hangs
+/// `pr.edit` with the PR updated remotely and nothing to show for it locally
+/// (five-minute stalls on a contended host). Past the bound the recording is
+/// skipped with a warning that names the observed holder, never a hang.
+const PR_METADATA_RECORD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The warning code the envelope carries when the recording was skipped.
+pub(crate) const WORK_PR_METADATA_RECORDING_SKIPPED: &str = "work_pr_metadata_recording_skipped";
+
+#[cfg(test)]
+thread_local! {
+    static PR_METADATA_RECORD_DEADLINE_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn pr_metadata_record_deadline() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(override_) = PR_METADATA_RECORD_DEADLINE_OVERRIDE.with(std::cell::Cell::get) {
+        return override_;
+    }
+    PR_METADATA_RECORD_DEADLINE
+}
+
 fn record_mutated_workspace_pr_metadata<E: CliEnv>(
     env: &E,
     pr: &PrStatus,
@@ -907,6 +938,12 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
     requested_head: Option<&str>,
     require_existing_pr: bool,
 ) -> std::io::Result<()> {
+    // Issue #4850 AC-1: bound every local lock this step takes. Nested
+    // deadlines keep the earliest, so an ambient (shorter) deadline still
+    // wins; without one this used to wait forever on `works.lock`.
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + pr_metadata_record_deadline(),
+    );
     let result = (|| {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         // Every successful mutation certifies the exact event returned by its
@@ -947,12 +984,28 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
         }
         Ok(())
     })();
-    result.map_err(|error| {
-        std::io::Error::other(format!(
+    match result {
+        Ok(()) => Ok(()),
+        // Issue #4850 AC-1/AC-2: out of budget is not a broken binding. The
+        // remote mutation stands; say what was skipped, and who held the
+        // lock (the named lock's observed holder rides in `error`).
+        Err(error) if gwt_core::operation_deadline::is_deadline_expired(&error) => {
+            crate::cli::operation_warnings::push(
+                WORK_PR_METADATA_RECORDING_SKIPPED,
+                format!(
+                    "PR #{} ({}) was updated on GitHub, but local Work PR metadata recording was skipped: it did not obtain the workspace lock within {}s ({error}). Retry pr.ready for this existing PR once the lock holder finishes; do not create another PR.",
+                    pr.number,
+                    pr.url,
+                    pr_metadata_record_deadline().as_secs(),
+                ),
+            );
+            Ok(())
+        }
+        Err(error) => Err(std::io::Error::other(format!(
             "PR #{} ({}) was updated on GitHub, but Work PR metadata was not recorded: {error}. Repair the Work binding and retry pr.ready for this existing PR; do not create another PR.",
             pr.number, pr.url
-        ))
-    })
+        ))),
+    }
 }
 
 fn sync_workspace_pr_metadata<E: CliEnv>(
@@ -1407,6 +1460,12 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
             if let Some(blocker) = &item.ready_to_promote_blocker {
                 row["ready_to_promote_blocker"] = serde_json::json!(blocker);
             }
+            // Issue #4872 AC-4: what the merge queue is doing with a row that
+            // is, or may be held as, `BEHIND`. Probed for those rows only, so
+            // the key is absent — unknown, not "no queue" — everywhere else.
+            if let Some(queue) = &item.merge_queue {
+                row["merge_queue"] = serde_json::json!(queue);
+            }
             row
         })
         .collect();
@@ -1570,6 +1629,7 @@ mod tests {
             created_at: None,
             age_hours: None,
             auto_merge_enabled: false,
+            merge_queue: None,
             check_counts: None,
             conflict: None,
             unresolved_review_threads: None,
@@ -1854,6 +1914,130 @@ mod tests {
             worktree.path(),
             Some("session-current"),
         );
+    }
+
+    /// Issue #4850 AC-1/AC-2/AC-3: with `works.lock` held by someone else,
+    /// `pr.edit` still returns `ok` for the committed GitHub update within the
+    /// bound, carries a warning that names the holder and the skipped
+    /// recording, and records nothing; with the lock free it records the PR
+    /// metadata exactly as before.
+    #[test]
+    fn issue_4850_pr_edit_returns_with_a_warning_when_the_work_items_lock_is_held() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-current");
+        persist_pr_generation_session(worktree.path(), "session-current", identity);
+        seed_pr_generation_work(worktree.path(), "session-current");
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "session-current",
+        );
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
+        env.seed_created_pr(seeded_pr());
+        // The edited PR is the current branch's PR, so the Work link holds.
+        env.seed_current_pr(Some(seeded_pr()));
+        crate::cli::operation_warnings::take();
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(worktree.path());
+        let recorded_pr_number = |works_path: &std::path::Path| {
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(works_path)
+                .expect("read works")
+                .expect("works seeded")
+                .work_items
+                .iter()
+                .flat_map(|item| item.execution_containers.iter())
+                .find_map(|container| container.pr_number)
+        };
+        assert_eq!(recorded_pr_number(&works_path), None);
+
+        // Another process is holding the Work items lock (a Monitor scan, a
+        // PM refresh). The deadline is shortened so the test does not wait
+        // the production ten seconds.
+        PR_METADATA_RECORD_DEADLINE_OVERRIDE
+            .with(|cell| cell.set(Some(std::time::Duration::from_millis(300))));
+        let holder = gwt_core::operation_deadline::NamedFileLock::acquire(
+            &works_path.with_extension("lock"),
+            "pm.refresh",
+        )
+        .expect("hold the Work items lock");
+        let started = std::time::Instant::now();
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("updated")),
+                body: None,
+                add_labels: vec![s("auto-merge")],
+            },
+            &mut out,
+        )
+        .expect("edit returns instead of hanging");
+        let elapsed = started.elapsed();
+        PR_METADATA_RECORD_DEADLINE_OVERRIDE.with(|cell| cell.set(None));
+        assert_eq!(code, 0, "the remote mutation succeeded: {out}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "returned within the bound, took {elapsed:?}"
+        );
+        assert_eq!(env.pr_edit_call_log.len(), 1, "GitHub was updated first");
+        let warnings = crate::cli::operation_warnings::take();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, WORK_PR_METADATA_RECORDING_SKIPPED);
+        let message = &warnings[0].message;
+        assert!(message.contains("PR #7"), "{message}");
+        assert!(message.contains("recording was skipped"), "{message}");
+        assert!(
+            message.contains(&format!("pid={}", std::process::id())),
+            "AC-2: the holder pid is named: {message}"
+        );
+        assert!(
+            message.contains("operation=pm.refresh"),
+            "AC-2: the holder operation: {message}"
+        );
+        assert!(
+            message.contains("acquired_at="),
+            "AC-2: since when: {message}"
+        );
+        assert!(message.contains("deadline expired"), "{message}");
+        assert!(out.contains("updated pull request"), "{out}");
+        assert!(
+            out.contains("warning:") && out.contains("recording was skipped"),
+            "the text surface says it too: {out}"
+        );
+        assert_eq!(
+            recorded_pr_number(&works_path),
+            None,
+            "nothing was recorded while the lock was held"
+        );
+        holder.unlock().expect("release the Work items lock");
+
+        // Lock free: the same edit records the PR on the Work as today.
+        env.pr_edit_call_log.clear();
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("updated again")),
+                body: None,
+                add_labels: vec![],
+            },
+            &mut out,
+        )
+        .expect("edit with the lock free");
+        assert_eq!(code, 0, "{out}");
+        assert!(crate::cli::operation_warnings::take().is_empty());
+        assert!(!out.contains("warning:"), "{out}");
+        assert_eq!(recorded_pr_number(&works_path), Some(7));
     }
 
     #[test]
@@ -3493,6 +3677,7 @@ mod tests {
         assert!(out.contains("\"count\": 1"), "{out}");
         assert!(!out.contains("CLI family split body"), "{out}");
         assert!(!out.contains("deferred_user_verification"), "{out}");
+        assert!(!out.contains("merge_queue"), "{out}");
         // Issue #3891 AC-1 / AC-4: where the rows came from and what the read
         // cost are part of every answer, so a throttled or cached read is
         // observable by the PM.
@@ -3526,6 +3711,36 @@ mod tests {
         assert_eq!(
             env.pr_list_options,
             Some(gwt_git::PrInventoryOptions::default())
+        );
+    }
+
+    /// Issue #4872 AC-4: a probed row carries the merge queue's view, so the
+    /// PM can tell a `BEHIND` the queue resolves from one that needs a redo.
+    #[test]
+    fn pr_list_renders_the_merge_queue_state_of_a_probed_row() {
+        let mut item = seeded_inventory_item();
+        item.merge_queue = Some(gwt_git::PrMergeQueueState {
+            enabled: true,
+            position: Some(2),
+            state: Some("AWAITING_CHECKS".to_string()),
+        });
+        let read = gwt_git::PrInventoryRead {
+            items: vec![item],
+            source: "github",
+            fetched_at: None,
+            cache_age_secs: Some(0),
+            throttled: None,
+            github_calls: 2,
+            hydrated: 0,
+            skipped_unchanged: 0,
+            unlanded_branches: Vec::new(),
+        };
+        let mut out = String::new();
+        render_pr_inventory(&mut out, &read);
+        let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            payload["pull_requests"][0]["merge_queue"],
+            serde_json::json!({"enabled": true, "position": 2, "state": "AWAITING_CHECKS"})
         );
     }
 

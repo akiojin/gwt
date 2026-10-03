@@ -510,6 +510,7 @@ test("Workspace-owned cleanup result re-renders the modal even without a Branche
   surface.applyBranchCleanupReceiveEvent({
     kind: "branch_cleanup_result",
     id: workspaceWindowId,
+    operation_id: sent[0].operation_id,
     results: [
       {
         branch: "work/20260615-0125",

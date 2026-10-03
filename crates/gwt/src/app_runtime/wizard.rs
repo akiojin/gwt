@@ -397,9 +397,10 @@ use super::{
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
     workspace_resume_owner_issue_number, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
-    BackendEvent, DispatchTarget, IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext,
-    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    BackendEvent, DispatchTarget, IssueLaunchWizardPrepared, IssueMonitorAgentSettingsSets,
+    IssueMonitorProfileSaveContext, LaunchFeedbackContext, LaunchWizardMemoryCache,
+    LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
@@ -452,6 +453,178 @@ fn issue_monitor_pool_impact_view(
     }
 }
 
+/// Issue #4911 AC-6: shown next to `−` and returned when the last set is
+/// removed anyway.
+const AGENT_SETTINGS_LAST_SET_REASON: &str =
+    "At least one Agent Settings set is required: Issue Monitor needs an agent to launch.";
+const AGENT_SETTINGS_ALL_AGENTS_USED_REASON: &str =
+    "Every available agent already has an Agent Settings set.";
+/// Issue #4911 AC-8: the form writes the whole pool, so it refuses to write
+/// over a pool it did not open.
+const AGENT_SETTINGS_CHANGED_ELSEWHERE_REASON: &str =
+    "Issue Monitor settings changed in another window or through issue.monitor.profiles.set \
+     while this form was open. Nothing was saved. Cancel and reopen the settings to edit the \
+     current Agent Settings sets.";
+
+/// The provider a set launches, keyed the way the saved pool dedupes it.
+fn agent_settings_provider_key(agent_id: &str) -> String {
+    gwt_agent::resolve_agent_id(agent_id)
+        .map(|id| id.command().to_ascii_lowercase())
+        .unwrap_or_else(|| agent_id.trim().to_ascii_lowercase())
+}
+
+/// Issue #4911 AC-7: the saved pool holds one candidate per provider and
+/// silently drops a later duplicate, so the form refuses one instead.
+fn agent_settings_duplicate_error(profiles: &[gwt::IssueMonitorLaunchProfile]) -> Option<String> {
+    profiles.iter().enumerate().find_map(|(index, profile)| {
+        let key = agent_settings_provider_key(&profile.agent_id);
+        profiles[..index]
+            .iter()
+            .position(|earlier| agent_settings_provider_key(&earlier.agent_id) == key)
+            .map(|earlier| {
+                format!(
+                    "Agent Settings {} and {} both use {}. An agent can appear in one set only; \
+                     change or remove one of them.",
+                    earlier + 1,
+                    index + 1,
+                    profile.agent_id
+                )
+            })
+    })
+}
+
+/// A set for an agent the pool does not hold yet, resolved by the sparse rule
+/// `issue.monitor.profiles.set` applies to `{agent_id}`: it inherits how the
+/// first set is run, never its model.
+fn new_agent_settings_profile(
+    profiles: &[gwt::IssueMonitorLaunchProfile],
+    agent_id: &str,
+) -> Option<gwt::IssueMonitorLaunchProfile> {
+    let patch = serde_json::from_value(serde_json::json!({ "agent_id": agent_id })).ok()?;
+    gwt::merge_issue_monitor_profiles_set(profiles, profiles.first(), &[patch])
+        .0
+        .into_iter()
+        .next()
+}
+
+/// The read-only rows of a set the form is not editing, in the vocabulary of
+/// `issue.monitor.profiles` (`default` model, `auto` reasoning, `host`).
+fn agent_settings_set_summary(
+    profile: &gwt::IssueMonitorLaunchProfile,
+    agents: &[gwt::AgentOption],
+) -> Vec<gwt::LaunchWizardSummaryView> {
+    let row = |label: &str, value: String| gwt::LaunchWizardSummaryView {
+        label: label.to_string(),
+        value,
+    };
+    let key = agent_settings_provider_key(&profile.agent_id);
+    let agent = agents
+        .iter()
+        .find(|agent| agent_settings_provider_key(&agent.id) == key)
+        .map_or_else(|| profile.agent_id.clone(), |agent| agent.name.clone());
+    let mut rows = vec![
+        row("Agent", agent),
+        row(
+            "Model",
+            profile
+                .model
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+        ),
+        row(
+            "Reasoning",
+            profile
+                .reasoning
+                .clone()
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
+    ];
+    if let Some(version) = profile.version.clone() {
+        rows.push(row("Version", version));
+    }
+    rows.push(row(
+        "Runtime",
+        match (profile.runtime_target, profile.docker_service.as_deref()) {
+            (gwt_agent::LaunchRuntimeTarget::Host, _) => "host".to_string(),
+            (gwt_agent::LaunchRuntimeTarget::Docker, Some(service)) => format!("docker:{service}"),
+            (gwt_agent::LaunchRuntimeTarget::Docker, None) => "docker".to_string(),
+        },
+    ));
+    rows
+}
+
+impl IssueMonitorAgentSettingsSets {
+    /// The sets as a save would write them. `open` is what the form reads for
+    /// the open set right now; `runtime_chosen` says whether the form has been
+    /// through its Runtime step, before which it reads Host for every set.
+    fn resolved(
+        &self,
+        open: Option<gwt::IssueMonitorLaunchProfile>,
+        runtime_chosen: bool,
+    ) -> Vec<gwt::IssueMonitorLaunchProfile> {
+        let mut profiles = self.profiles.clone();
+        let (Some(open), Some(slot)) = (open, profiles.get_mut(self.active)) else {
+            return profiles;
+        };
+        let same_agent = agent_settings_provider_key(&slot.agent_id)
+            == agent_settings_provider_key(&open.agent_id);
+        // A model or reasoning level only means something for the agent it was
+        // chosen for, so a set whose agent changed takes the form's as they are.
+        let opened_as = self.opened_as.as_ref().filter(|_| same_agent);
+        type Same = fn(&gwt::IssueMonitorLaunchProfile, &gwt::IssueMonitorLaunchProfile) -> bool;
+        let edited = |same: Same| !opened_as.is_some_and(|opened_as| same(opened_as, &open));
+        if edited(|a, b| a.model == b.model) {
+            slot.model = open.model.clone();
+        }
+        if edited(|a, b| a.reasoning == b.reasoning) {
+            slot.reasoning = open.reasoning.clone();
+        }
+        if edited(|a, b| a.version == b.version) {
+            slot.version = open.version.clone();
+        }
+        if edited(|a, b| a.session_mode == b.session_mode) {
+            slot.session_mode = open.session_mode;
+        }
+        if edited(|a, b| a.skip_permissions == b.skip_permissions) {
+            slot.skip_permissions = open.skip_permissions;
+        }
+        if edited(|a, b| a.fast_mode == b.fast_mode) {
+            slot.fast_mode = open.fast_mode;
+        }
+        if runtime_chosen {
+            slot.runtime_target = open.runtime_target;
+            slot.docker_service = open.docker_service.clone();
+            slot.docker_lifecycle_intent = open.docker_lifecycle_intent;
+            slot.windows_shell = open.windows_shell;
+        }
+        if !same_agent {
+            // Routing tags describe a candidate rather than a position, and the
+            // form has no tag input, so they do not follow a set to another
+            // agent (the rule the head switch already follows).
+            slot.prefer_for.clear();
+        }
+        slot.agent_id = open.agent_id;
+        profiles
+    }
+}
+
+/// What the form reads for the open set, or why it cannot be one: the launch
+/// target is a shell, or the chosen agent has no way to launch here.
+fn open_agent_settings_profile(
+    sets: &IssueMonitorAgentSettingsSets,
+    wizard: &LaunchWizardState,
+) -> Result<gwt::IssueMonitorLaunchProfile, String> {
+    wizard
+        .build_launch_config()
+        .map(|config| gwt::IssueMonitorLaunchProfile::from(&config))
+        .map_err(|error| {
+            format!(
+                "Agent Settings {} cannot be left as it is: {error}",
+                sets.active + 1
+            )
+        })
+}
+
 impl AppRuntime {
     /// SPEC-3864 FR-006: feed the host-global "is this agent configured?"
     /// probes into the wizard. The probes are per-agent (they read that
@@ -475,12 +648,207 @@ impl AppRuntime {
             {
                 view.primary_action_label = "Save settings".to_string();
             }
-            view.issue_monitor_pool_impact = session
-                .wizard
-                .preview_launch_profile()
-                .map(|profile| issue_monitor_pool_impact_view(&save_context.pool, profile));
+            match save_context.sets.as_ref() {
+                Some(sets) => {
+                    view.issue_monitor_pool =
+                        Some(self.agent_settings_sets_view(sets, &session.wizard));
+                }
+                None => {
+                    view.issue_monitor_pool_impact = session
+                        .wizard
+                        .preview_launch_profile()
+                        .map(|profile| issue_monitor_pool_impact_view(&save_context.pool, profile));
+                }
+            }
         }
         view
+    }
+
+    fn agent_settings_sets_view(
+        &self,
+        sets: &IssueMonitorAgentSettingsSets,
+        wizard: &LaunchWizardState,
+    ) -> gwt::LaunchWizardIssueMonitorPoolView {
+        let profiles = sets.resolved(
+            wizard.preview_launch_profile(),
+            wizard.runtime_context_resolved,
+        );
+        gwt::LaunchWizardIssueMonitorPoolView {
+            active_index: sets.active,
+            sets: profiles
+                .iter()
+                .enumerate()
+                .map(
+                    |(index, profile)| gwt::LaunchWizardIssueMonitorPoolSetView {
+                        agent_id: profile.agent_id.clone(),
+                        summary: if index == sets.active {
+                            Vec::new()
+                        } else {
+                            agent_settings_set_summary(profile, &wizard.detected_agents)
+                        },
+                    },
+                )
+                .collect(),
+            add_disabled_reason: self
+                .unused_agent_settings_agent(&profiles)
+                .is_none()
+                .then(|| AGENT_SETTINGS_ALL_AGENTS_USED_REASON.to_string()),
+            remove_disabled_reason: (profiles.len() <= 1)
+                .then(|| AGENT_SETTINGS_LAST_SET_REASON.to_string()),
+            resulting_summary: gwt::issue_monitor_launch_profile_pool_summary(&profiles),
+        }
+    }
+
+    /// The agent a new set starts on: the first built-in no set uses yet,
+    /// installed ones first. The form's own agent picker then offers the rest.
+    fn unused_agent_settings_agent(
+        &self,
+        profiles: &[gwt::IssueMonitorLaunchProfile],
+    ) -> Option<String> {
+        let used = profiles
+            .iter()
+            .map(|profile| agent_settings_provider_key(&profile.agent_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        let unused = self
+            .launch_wizard_cache
+            .agent_options()
+            .into_iter()
+            .filter(|agent| {
+                agent.custom_agent.is_none()
+                    && !used.contains(&agent_settings_provider_key(&agent.id))
+            })
+            .collect::<Vec<_>>();
+        unused
+            .iter()
+            .find(|agent| agent.available)
+            .or(unused.first())
+            .map(|agent| agent.id.clone())
+    }
+
+    /// Issue #4911: apply one edit to the Agent Settings sets. `None` when
+    /// `action` is not such an edit or this wizard is not the settings form,
+    /// so the caller hands the action to the wizard as before.
+    fn apply_agent_settings_set_action(
+        &self,
+        session: &mut LaunchWizardSession,
+        action: &gwt::LaunchWizardAction,
+    ) -> Option<Result<(), String>> {
+        let mut sets = session.issue_monitor_profile_save.as_ref()?.sets.clone()?;
+        let open_other_set = match action {
+            gwt::LaunchWizardAction::SetAgent { agent_id } => {
+                let key = agent_settings_provider_key(agent_id);
+                let taken = sets
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .position(|(index, profile)| {
+                        index != sets.active
+                            && agent_settings_provider_key(&profile.agent_id) == key
+                    })?;
+                return Some(Err(format!(
+                    "{agent_id} is already Agent Settings {}. An agent can appear in one set \
+                     only; move that set up to launch it first.",
+                    taken + 1
+                )));
+            }
+            gwt::LaunchWizardAction::AddAgentSettingsSet
+            | gwt::LaunchWizardAction::RemoveAgentSettingsSet { .. }
+            | gwt::LaunchWizardAction::MoveAgentSettingsSet { .. }
+            | gwt::LaunchWizardAction::SelectAgentSettingsSet { .. }
+                if session.wizard.runtime_resolution_pending
+                    || session.wizard.launch_materialization_pending =>
+            {
+                return Some(Ok(()));
+            }
+            gwt::LaunchWizardAction::AddAgentSettingsSet => {
+                let open = match open_agent_settings_profile(&sets, &session.wizard) {
+                    Ok(open) => open,
+                    Err(error) => return Some(Err(error)),
+                };
+                let mut profiles =
+                    sets.resolved(Some(open), session.wizard.runtime_context_resolved);
+                if let Some(error) = agent_settings_duplicate_error(&profiles) {
+                    return Some(Err(error));
+                }
+                let Some(added) = self
+                    .unused_agent_settings_agent(&profiles)
+                    .and_then(|agent_id| new_agent_settings_profile(&profiles, &agent_id))
+                else {
+                    return Some(Err(AGENT_SETTINGS_ALL_AGENTS_USED_REASON.to_string()));
+                };
+                profiles.push(added);
+                sets.active = profiles.len() - 1;
+                sets.profiles = profiles;
+                true
+            }
+            gwt::LaunchWizardAction::RemoveAgentSettingsSet { index } => {
+                if sets.profiles.len() <= 1 {
+                    return Some(Err(AGENT_SETTINGS_LAST_SET_REASON.to_string()));
+                }
+                if *index >= sets.profiles.len() {
+                    return Some(Ok(()));
+                }
+                sets.profiles.remove(*index);
+                let removed_open_set = *index == sets.active;
+                if *index < sets.active {
+                    sets.active -= 1;
+                }
+                sets.active = sets.active.min(sets.profiles.len() - 1);
+                removed_open_set
+            }
+            gwt::LaunchWizardAction::MoveAgentSettingsSet { index, to } => {
+                let (index, to) = (*index, *to);
+                if index >= sets.profiles.len() || to >= sets.profiles.len() {
+                    return Some(Ok(()));
+                }
+                let moved = sets.profiles.remove(index);
+                sets.profiles.insert(to, moved);
+                // The open set keeps its form wherever the move puts it.
+                sets.active = if sets.active == index {
+                    to
+                } else if index < sets.active && to >= sets.active {
+                    sets.active - 1
+                } else if index > sets.active && to <= sets.active {
+                    sets.active + 1
+                } else {
+                    sets.active
+                };
+                false
+            }
+            gwt::LaunchWizardAction::SelectAgentSettingsSet { index } => {
+                if *index == sets.active || *index >= sets.profiles.len() {
+                    return Some(Ok(()));
+                }
+                let open = match open_agent_settings_profile(&sets, &session.wizard) {
+                    Ok(open) => open,
+                    Err(error) => return Some(Err(error)),
+                };
+                let profiles = sets.resolved(Some(open), session.wizard.runtime_context_resolved);
+                if let Some(error) = agent_settings_duplicate_error(&profiles) {
+                    return Some(Err(error));
+                }
+                sets.profiles = profiles;
+                sets.active = *index;
+                true
+            }
+            _ => return None,
+        };
+        if open_other_set {
+            let project_root = self.tab(&session.tab_id)?.project_root.clone();
+            let profile = sets.profiles.get(sets.active)?.clone();
+            session.wizard = self.issue_monitor_settings_wizard(
+                project_root,
+                gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.into())),
+            );
+            sets.opened_as = session.wizard.preview_launch_profile();
+            // A runtime resolution still in flight belongs to the form that
+            // was just replaced and must not land on this one.
+            session.wizard_id = Uuid::new_v4().to_string();
+        }
+        if let Some(save_context) = session.issue_monitor_profile_save.as_mut() {
+            save_context.sets = Some(sets);
+        }
+        Some(Ok(()))
     }
 
     pub(crate) fn launch_wizard_for(
@@ -2151,6 +2519,7 @@ impl AppRuntime {
                 client_id: client_id.to_string(),
                 issue_number: Some(issue_number),
                 pool,
+                sets: None,
             });
             session
                 .wizard
@@ -2223,42 +2592,30 @@ impl AppRuntime {
         }
 
         let project_root = tab.project_root.clone();
-        let base_branch_name = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
         // Issue #4366 AC-6: the settings form shows what the operator saved.
         // The launch choice skips held providers, and pre-filling from it made
         // a hold look like the saved agent had changed — and saving the form
         // unchanged wrote the fallback over the head.
         let previous_profiles = self.issue_monitor_saved_head_profiles(&project_root);
         let pool = self.issue_monitor_saved_pool(&project_root);
-        let quick_start_root = project_root;
-        let quick_start_entries = Vec::new();
-        let agent_options = self.launch_wizard_cache.agent_options();
-        let docker_context = None;
-        let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
-        let mut wizard = LaunchWizardState::open_start_work_with_previous_profiles(
-            LaunchWizardContext {
-                selected_branch: synthetic_branch_entry(&base_branch_name),
-                normalized_branch_name: normalize_branch_name(&base_branch_name),
-                worktree_path: None,
-                quick_start_root,
-                live_sessions: Vec::new(),
-                docker_context,
-                docker_service_status,
-                linked_issue_number: None,
-                linked_issue_kind: None,
-                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
-                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-            },
-            base_branch_name,
-            agent_options,
-            quick_start_entries,
-            previous_profiles,
-        );
-        Self::apply_agent_configuration_state(&mut wizard);
-        wizard.mark_runtime_context_unresolved();
-        wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
-            method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+        let wizard = self.issue_monitor_settings_wizard(project_root, previous_profiles);
+        // Issue #4911: every saved candidate is one Agent Settings set and the
+        // form opens on the first. A pool that was never configured starts as
+        // the one set the form shows.
+        let profiles = if pool.is_empty() {
+            wizard
+                .preview_launch_profile()
+                .or_else(|| new_agent_settings_profile(&[], &wizard.agent_id))
+                .into_iter()
+                .collect()
+        } else {
+            pool.clone()
+        };
+        let sets = (!profiles.is_empty()).then(|| IssueMonitorAgentSettingsSets {
+            profiles,
+            active: 0,
+            opened_as: wizard.preview_launch_profile(),
         });
         self.store_launch_wizard(LaunchWizardSession {
             project_context: context.clone(),
@@ -2272,6 +2629,7 @@ impl AppRuntime {
                 client_id: client_id.to_string(),
                 issue_number: None,
                 pool,
+                sets,
             }),
             issue_monitor_launch_issue_number: None,
             origin: super::LaunchWizardOrigin::IssueMonitor,
@@ -2290,6 +2648,42 @@ impl AppRuntime {
             ),
             self.launch_wizard_state_outbound(context),
         ]
+    }
+
+    /// The Issue Monitor settings form, pre-filled from one saved profile. It
+    /// configures a launch profile rather than a launch, so it has no branch,
+    /// session or Docker context of its own.
+    fn issue_monitor_settings_wizard(
+        &self,
+        project_root: PathBuf,
+        previous_profiles: gwt::LaunchWizardPreviousProfiles,
+    ) -> LaunchWizardState {
+        let base_branch_name = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
+        let mut wizard = LaunchWizardState::open_start_work_with_previous_profiles(
+            LaunchWizardContext {
+                selected_branch: synthetic_branch_entry(&base_branch_name),
+                normalized_branch_name: normalize_branch_name(&base_branch_name),
+                worktree_path: None,
+                quick_start_root: project_root,
+                live_sessions: Vec::new(),
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                linked_issue_number: None,
+                linked_issue_kind: None,
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
+            },
+            base_branch_name,
+            self.launch_wizard_cache.agent_options(),
+            Vec::new(),
+            previous_profiles,
+        );
+        Self::apply_agent_configuration_state(&mut wizard);
+        wizard.mark_runtime_context_unresolved();
+        wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
+            method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        wizard
     }
 
     pub(super) fn issue_monitor_previous_profiles(
@@ -2328,14 +2722,8 @@ impl AppRuntime {
             .unwrap_or_default()
     }
 
-    /// SPEC #3914 FR-007: choose the launch candidate for one Issue Monitor
-    /// launch. A non-empty pool goes through [`gwt::select_launch_profile`]
-    /// (usage telemetry arrives in Phase 2); an empty pool keeps the
-    /// pre-#3914 Last-settings fallback from the Launch Wizard cache.
-    ///
-    /// When every candidate is held the head still launches: the daemon gate
-    /// already withholds launch requests in that state, so this only happens
-    /// on a race, and the existing limit-notice path re-holds the provider.
+    /// Preview saved profiles, retaining the head when every candidate is
+    /// held. Actual owner launches use the fallible owner selector below.
     fn issue_monitor_launch_profile_choice(
         &self,
         project_root: &Path,
@@ -2349,8 +2737,8 @@ impl AppRuntime {
         )
     }
 
-    /// Select automatic tiers only when an owner is known. Settings previews
-    /// and manually configured pools retain their existing selection behavior.
+    /// Select an eligible candidate for an owner, rejecting all-held pools
+    /// for both automatic tiers and manually configured candidates.
     fn issue_monitor_owner_launch_profile_choice(
         &self,
         project_root: &Path,
@@ -4427,6 +4815,20 @@ impl AppRuntime {
             self.store_launch_wizard(session);
             return vec![self.launch_wizard_state_outbound(context)];
         }
+        if let Some(result) = self.apply_agent_settings_set_action(&mut session, &action) {
+            session.wizard.error = result.err();
+            if let Some(error) = session.wizard.error.as_deref() {
+                Self::log_launch_wizard_error(
+                    &session,
+                    action_stage,
+                    action_label,
+                    requested_agent_id.as_deref(),
+                    error,
+                );
+            }
+            self.store_launch_wizard(session);
+            return vec![self.launch_wizard_state_outbound(context)];
+        }
         let mut apply_action = true;
         match &action {
             gwt::LaunchWizardAction::MoveExistingPane {
@@ -5260,7 +5662,8 @@ impl AppRuntime {
         let IssueMonitorProfileSaveContext {
             client_id,
             issue_number,
-            pool: _,
+            pool: opened_pool,
+            sets,
         } = save_context;
         let LaunchWizardLaunchRequest::Agent(config) = config else {
             session.wizard.error =
@@ -5278,6 +5681,14 @@ impl AppRuntime {
         };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let launch_profile = gwt::IssueMonitorLaunchProfile::from(config.as_ref());
+        // Issue #4911: the settings form saves every Agent Settings set, in
+        // order; the open one is the profile this request carries.
+        let sets = sets.map(|sets| sets.resolved(Some(launch_profile.clone()), true));
+        if let Some(error) = sets.as_deref().and_then(agent_settings_duplicate_error) {
+            session.wizard.error = Some(error);
+            self.store_launch_wizard(session);
+            return vec![self.launch_wizard_state_outbound(&context)];
+        }
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + std::time::Duration::from_millis(250),
         );
@@ -5285,26 +5696,34 @@ impl AppRuntime {
             &prefs_path,
             &gwt::IssueMonitorPrefs::recovery_default(),
             |prefs| {
-                if prefs.advance_effect_authority_epoch().is_some() {
-                    // SPEC #3914 FR-003 / Issue #4079 AC-1: an Agent Settings
-                    // save is a switch, so it writes the pool head (and the
-                    // `launch_profile` mirror the Monitor launches from).
-                    // Upserting by provider left the head — and therefore the
-                    // effective agent — untouched whenever the chosen provider
-                    // already sat further down the pool.
-                    prefs.set_head_launch_profile(launch_profile);
-                    true
-                } else {
-                    false
+                // Issue #4911 AC-8: compared under the prefs lock, so a pool
+                // written since the form opened is never replaced unseen.
+                if sets.is_some() && prefs.launch_profile_pool() != opened_pool {
+                    return Err(AGENT_SETTINGS_CHANGED_ELSEWHERE_REASON.to_string());
                 }
+                if prefs.advance_effect_authority_epoch().is_none() {
+                    return Err(
+                        "Failed to save Issue Monitor settings: authority epoch overflow"
+                            .to_string(),
+                    );
+                }
+                match sets {
+                    Some(sets) => prefs.set_launch_profile_pool(sets),
+                    // SPEC #3914 FR-003 / Issue #4079 AC-1: the per-Issue
+                    // Agent Settings save is a switch, so it writes the pool
+                    // head (and the `launch_profile` mirror the Monitor
+                    // launches from). Upserting by provider left the head —
+                    // and therefore the effective agent — untouched whenever
+                    // the chosen provider already sat further down the pool.
+                    None => prefs.set_head_launch_profile(launch_profile),
+                }
+                Ok(())
             },
         );
         match saved {
-            Ok((_, true)) => {}
-            Ok((_, false)) => {
-                session.wizard.error = Some(
-                    "Failed to save Issue Monitor settings: authority epoch overflow".to_string(),
-                );
+            Ok((_, Ok(()))) => {}
+            Ok((_, Err(error))) => {
+                session.wizard.error = Some(error);
                 self.store_launch_wizard(session);
                 return vec![self.launch_wizard_state_outbound(&context)];
             }
@@ -5347,7 +5766,20 @@ impl AppRuntime {
             return Vec::new();
         }
         match result {
-            Ok(hydration) => {
+            Ok(mut hydration) => {
+                // Issue #4911: the Runtime step proposes where the open Agent
+                // Settings set runs, so it starts from that set's own saved
+                // runtime rather than from the last launch in this repository.
+                if let Some(open_set) = session
+                    .issue_monitor_profile_save
+                    .as_ref()
+                    .and_then(|save_context| save_context.sets.as_ref())
+                    .and_then(|sets| sets.profiles.get(sets.active))
+                {
+                    hydration.previous_profiles = hydration
+                        .previous_profiles
+                        .map(|profiles| profiles.with_repo_local(Some(open_set.clone().into())));
+                }
                 session.wizard.apply_runtime_context(hydration);
                 let auto_submit_bounds = session.auto_submit_after_runtime_resolution.take();
                 self.store_launch_wizard(session);
@@ -5768,6 +6200,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_prefers_checked_out_develop_in_container_workspace() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5781,6 +6217,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_uses_checked_out_main_without_develop() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5794,6 +6234,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_preserves_existing_normal_current_branch() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -5807,6 +6251,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_uses_existing_bare_head_without_default_worktree() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5820,6 +6268,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_rejects_empty_bare_repository() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5833,6 +6285,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_rejects_unborn_current_branch() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -5847,6 +6303,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_uses_develop_worktree_from_detached_head() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -5865,6 +6325,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_falls_back_from_unusable_root_git_metadata() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5879,6 +6343,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_prefers_develop_when_project_root_is_bare() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5892,6 +6360,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_rejects_local_ref_that_is_not_a_commit() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5911,6 +6383,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_preserves_git_error_when_fallback_is_unavailable() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
@@ -5927,6 +6403,10 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_preserves_malformed_local_ref_error() {
+        // `git` is resolved through PATH, which sibling tests replace under the env lock.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -5971,6 +6451,29 @@ fn issue_monitor_owner_launch_profile_choice(
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
     if !prefs.launch_auto {
+        let pool = prefs.launch_profile_pool();
+        if !pool.is_empty() {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let selection = gwt::select_launch_profile(
+                &pool,
+                &prefs.launch_admission_provider_quota_holds(),
+                &[],
+                None,
+                &now,
+            );
+            let index = selection.selected.ok_or_else(|| {
+                "No eligible Issue Monitor launch candidate: every provider is held".to_string()
+            })?;
+            let profile = pool[index].clone();
+            return Ok(IssueMonitorLaunchProfileChoice {
+                profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
+                    profile.clone().into(),
+                )),
+                selected_agent_id: Some(profile.agent_id),
+                skipped: selection.skipped,
+                tier: None,
+            });
+        }
         return Ok(issue_monitor_launch_profile_choice(
             cache,
             provider_usage_accounts,
@@ -5985,9 +6488,7 @@ fn issue_monitor_owner_launch_profile_choice(
         .map(|option| option.id)
         .collect::<Vec<_>>();
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let holds = prefs.launch_admission_provider_quota_holds(&now, |provider| {
-        gwt::issue_monitor::provider_reports_healthy_for_agent(provider, provider_usage_accounts)
-    });
+    let holds = prefs.launch_admission_provider_quota_holds();
     let work_tags = vec![if linked_issue_kind == gwt::LinkedIssueKind::Spec {
         "kind:spec".to_string()
     } else {
@@ -5998,17 +6499,7 @@ fn issue_monitor_owner_launch_profile_choice(
             issue_number,
             linked_issue_kind == gwt::LinkedIssueKind::Spec,
             Some(&available),
-            |pool| {
-                gwt::select_launch_profile(
-                    pool,
-                    &holds,
-                    provider_usage_accounts,
-                    prefs.launch_usage_threshold_percent,
-                    &work_tags,
-                    None,
-                    &now,
-                )
-            },
+            |pool| gwt::select_launch_profile(pool, &holds, &work_tags, None, &now),
         )
         .ok_or_else(|| "No eligible Issue Monitor automatic tier candidate".to_string())?;
     Ok(IssueMonitorLaunchProfileChoice {
@@ -6023,7 +6514,7 @@ fn issue_monitor_owner_launch_profile_choice(
 
 fn issue_monitor_launch_profile_choice(
     cache: &LaunchWizardMemoryCache,
-    provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
+    _provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
     project_root: &Path,
     avoid_provider: Option<&str>,
 ) -> IssueMonitorLaunchProfileChoice {
@@ -6034,18 +6525,7 @@ fn issue_monitor_launch_profile_choice(
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             let selection = gwt::select_launch_profile(
                 &pool,
-                // Issue #4366 AC-4: a held provider due its
-                // re-verification is selectable for that one launch —
-                // over a free candidate only while the poller reads it
-                // as usable (Issue #4636 AC-1).
-                &prefs.launch_admission_provider_quota_holds(&now, |provider| {
-                    gwt::issue_monitor::provider_reports_healthy_for_agent(
-                        provider,
-                        provider_usage_accounts,
-                    )
-                }),
-                &[],
-                prefs.launch_usage_threshold_percent,
+                &prefs.launch_admission_provider_quota_holds(),
                 &[],
                 avoid_provider,
                 &now,
@@ -6056,7 +6536,7 @@ fn issue_monitor_launch_profile_choice(
                     tracing::warn!(
                         project_root = %project_root.display(),
                         skipped = ?selection.skipped,
-                        "every Issue Monitor launch candidate is held; launching the pool head"
+                        "every Issue Monitor launch candidate is held; previewing the saved pool head"
                     );
                     (0, Vec::new())
                 }

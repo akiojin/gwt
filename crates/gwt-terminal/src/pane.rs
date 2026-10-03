@@ -620,6 +620,9 @@ mod tests {
     /// Drive `check_status` until the child is reaped, then return the exit
     /// receipt Issue #3341 requires the pane to keep.
     fn wait_for_exit(pane: &mut Pane) -> PaneExit {
+        // ConPTY blocks the child on its startup cursor-position query until
+        // the terminal answers it, so the child never exits unanswered.
+        answer_cursor_position_query(pane.pty());
         drain_pty_output(pane);
         for _ in 0..100 {
             if pane

@@ -60,6 +60,14 @@ impl LazyIssueClient {
 }
 
 impl IssueClient for LazyIssueClient {
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<gwt_github::client::LabelAssignment>, gwt_github::client::ApiError> {
+        self.resolve()?.fetch_label_assignment(number, label)
+    }
+
     fn fetch(
         &self,
         number: IssueNumber,

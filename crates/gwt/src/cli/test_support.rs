@@ -172,7 +172,14 @@ fn main() -> ExitCode {
             println!("[]");
             return ExitCode::SUCCESS;
         }
-        [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" => {
+        // Issue #4849 AC-1: the job log endpoint is read with
+        // `--allow-escape-sequences`; without it current `gh` refuses a response
+        // that carries colour codes, which every cargo test job does.
+        [api, allow, endpoint]
+            if api == "api"
+                && allow == "--allow-escape-sequences"
+                && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
+        {
             if mode == "job-log-zip" {
                 print!("PKZIP");
             } else {

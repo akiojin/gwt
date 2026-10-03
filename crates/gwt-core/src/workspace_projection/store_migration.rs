@@ -372,7 +372,7 @@ pub fn apply_store_consolidation(
     }
 
     let canonical_works = gwt_project_state_works_path(&confirmed.canonical_hash);
-    let works_snapshot = fs::read(&canonical_works).ok();
+    let works_snapshot = read_optional_bytes(&canonical_works)?;
     let detachments_snapshot = read_optional_bytes(&container_detachments_path(&canonical_works))?;
     let mut moved: Vec<MovedStore> = Vec::new();
 

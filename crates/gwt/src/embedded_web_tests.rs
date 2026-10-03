@@ -4312,3 +4312,22 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
     assert!(!pool_styles.contains("rgba("));
     assert!(!pool_styles.contains("rgb("));
 }
+
+#[test]
+fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
+    let js = app_js();
+    assert!(js.contains("import { createPmChat } from \"/pm-chat.js\""));
+    assert!(root_js_module_source("/pm-chat.js").contains("export function createPmChat"));
+    assert!(js.contains("windowData.is_pm && presetSurface(windowData.preset) === \"terminal\""));
+    assert!(js.contains("event.session_id === view.sessionId"));
+    let render_key = js_braced_block_after(js, "function workspaceWindowsRenderKey(").unwrap();
+    assert!(render_key.contains("windowData?.session_id"));
+    assert!(render_key.contains("windowData?.is_pm"));
+    assert!(js.contains("view.controller.setSession(windowData.session_id)"));
+    assert!(js.contains("view.controller.dispose()"));
+    assert!(js.contains("kind: \"load_pm_conversation\", id: windowData.id"));
+    assert!(js.contains("window.setInterval(requestVisiblePmConversations, 5000)"));
+    assert!(js.contains("case \"pm_conversation\""));
+    assert!(js.contains("case \"pane_send_result\""));
+    assert!(js.contains("frontendUnits.terminalHost.writeOutput(event.id, event.data_base64)"));
+}

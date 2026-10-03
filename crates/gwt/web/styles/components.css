@@ -7088,6 +7088,42 @@ button.workspace-board-ref:focus-visible {
 .agent-tile__input textarea { flex: 1; width: 0; min-width: 0; resize: none; }
 .agent-tile__input [role="status"] { width: 100%; font-size: var(--type-xs); }
 .agents-empty { padding: var(--space-3); color: var(--color-text-muted); }
+
+/* Keep persistence diagnostics in the shell layout, above every workspace surface. */
+#app:has(> .workspace-state-notice) {
+  grid-template-rows: 44px auto 1fr 28px;
+  grid-template-areas: "projectbar projectbar" "notice notice" "rail canvas" "strip strip";
+}
+.workspace-state-notice {
+  grid-area: notice;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border-bottom: 1px solid var(--color-border-strong);
+  font-size: var(--type-sm);
+  overflow-wrap: anywhere;
+}
+.workspace-state-notice span { flex: 1; min-width: 0; }
+.workspace-state-notice button {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
+}
+.workspace-state-notice button:focus-visible { outline: 2px solid var(--color-focus-ring); }
+@media (max-width: 860px) {
+  #app:has(> .workspace-state-notice) {
+    grid-template-rows: 44px auto auto minmax(0, 1fr) 28px;
+    grid-template-areas: "projectbar" "notice" "rail" "canvas" "strip";
+  }
+}
 .terminal-text-preview { margin: 0; padding: var(--space-2); overflow: auto; height: 100%; white-space: pre; font-family: var(--font-mono); color: var(--color-text); background: var(--color-surface); }
 
 .issue-split-terminal .terminal-text-preview::before {
@@ -7097,3 +7133,27 @@ button.workspace-board-ref:focus-visible {
   font-family: var(--font-body);
   font-size: var(--type-xs);
 }
+
+/* PM conversation */
+.pm-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; color: var(--color-text); background: var(--color-surface); font-family: var(--font-body); font-size: var(--type-sm); }
+.pm-chat[hidden], .pm-chat [hidden] { display: none; }
+.pm-chat--logs { flex: 0 0 auto; }
+.pm-chat__toolbar { display: flex; gap: var(--space-2); padding: var(--space-2); border-bottom: 1px solid var(--color-border); }
+.pm-chat button { padding: var(--space-1) var(--space-3); border: 1px solid var(--color-button-border); border-radius: var(--radius-sm); background: var(--color-button-bg); color: var(--color-button-fg); font: inherit; cursor: pointer; }
+.pm-chat button[aria-pressed="true"] { border-color: var(--color-focus-ring); }
+.pm-chat button:hover { background: var(--color-button-bg-hover); }
+.pm-chat button:disabled { cursor: default; color: var(--color-text-disabled); }
+.pm-chat button:focus-visible, .pm-chat textarea:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.pm-chat__body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.pm-chat__notice { padding: var(--space-3); margin: 0; color: var(--color-text-muted); }
+.pm-chat__transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); }
+.pm-chat__message { margin-bottom: var(--space-3); padding: var(--space-3); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.pm-chat__message--user { border-inline-start: 2px solid var(--color-border-strong); }
+.pm-chat__author { color: var(--color-text-muted); font-size: var(--type-xs); }
+.pm-chat__text { margin: var(--space-2) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__input { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--color-border); }
+.pm-chat__input textarea { flex: 1; min-width: 0; resize: vertical; padding: var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font: inherit; }
+.pm-chat__error { flex-basis: 100%; margin: 0; color: var(--color-state-blocked); }
+.pm-conversation-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.pm-conversation-log { position: relative; flex: 1; min-height: 0; }
+.pm-conversation-log[hidden] { display: none; }

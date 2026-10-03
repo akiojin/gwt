@@ -25,7 +25,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{GwtError, JsonDecodeKind, Result};
+use crate::error::{GwtError, Result, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
     save_workspace_work_items_projection_to_path, workspace_execution_container_same,
@@ -50,23 +50,24 @@ impl WorkEventsIntakeReport {
     }
 }
 
-/// One shared `events.jsonl` source plus the execution container inferred from
-/// its worktree or remote ref. The raw content remains immutable and may be
-/// shared across several refs that point at the same Git blob.
+/// One shared `events.jsonl` source plus its reader context for diagnostics.
+/// Only explicit event containers establish Work refs; the reader's worktree
+/// or remote ref must never supply one. The raw content remains immutable and
+/// may be shared across several refs that point at the same Git blob.
 #[derive(Debug, Clone)]
 pub struct SharedWorkEventsSource {
     content: Arc<str>,
-    fallback_execution_container: Option<WorkspaceExecutionContainerRef>,
+    source_execution_container: Option<WorkspaceExecutionContainerRef>,
 }
 
 impl SharedWorkEventsSource {
     pub fn new(
         content: impl Into<Arc<str>>,
-        fallback_execution_container: Option<WorkspaceExecutionContainerRef>,
+        source_execution_container: Option<WorkspaceExecutionContainerRef>,
     ) -> Self {
         Self {
             content: content.into(),
-            fallback_execution_container,
+            source_execution_container,
         }
     }
 }
@@ -548,18 +549,13 @@ fn rebuild_work_event_sources_locked_with_legacy(
     close_content: Option<&str>,
     extra_legacy_items: Vec<WorkItem>,
 ) -> Result<WorkEventsIntakeReport> {
+    let mut corrupt_state = None;
     let previous = match load_workspace_work_items_from_path(work_items_path) {
         Ok(previous) => previous,
-        Err(GwtError::JsonDecode {
-            kind: JsonDecodeKind::Malformed,
-            message: error,
-            ..
-        }) => {
-            tracing::warn!(
-                %error,
-                path = %work_items_path.display(),
-                "work events rebuild: discarding corrupt projection"
-            );
+        Err(GwtError::WorkspaceStateLoad(error))
+            if error.kind == WorkspaceStateLoadErrorKind::Malformed =>
+        {
+            corrupt_state = Some(error);
             None
         }
         Err(error) => return Err(error),
@@ -581,6 +577,16 @@ fn rebuild_work_event_sources_locked_with_legacy(
         incoming.extend(collect_machine_local_work_events(content)?);
     }
 
+    if let Some(error) = &corrupt_state {
+        if incoming.is_empty() || report.skipped_invalid > 0 || report.skipped_opaque > 0 {
+            let mut error = error.clone();
+            error
+                .message
+                .push_str("; recovery refused: complete readable event history is required");
+            return Err(error.into());
+        }
+    }
+
     let initial_updated_at = incoming
         .iter()
         .map(|(event, _)| event.updated_at)
@@ -600,7 +606,15 @@ fn rebuild_work_event_sources_locked_with_legacy(
         .work_items
         .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
     projection.updated_at = Utc::now();
-    save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    if let Some(error) = corrupt_state {
+        crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
+            work_items_path,
+            &projection,
+        )?;
+        tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
+    } else {
+        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    }
     Ok(report)
 }
 
@@ -652,6 +666,14 @@ where
                         }
                         Some(match decode(line.as_bytes()) {
                             Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
+                                if event.execution_container.is_none() && !is_close_kind(event.kind) {
+                                    tracing::warn!(
+                                        event_id = %event.id,
+                                        work_item_id = %event.work_item_id,
+                                        source = ?source.source_execution_container,
+                                        "work events intake: event has no explicit container; retaining history without a Work ref"
+                                    );
+                                }
                                 CachedSharedWorkEventLine::Known(event)
                             }
                             Ok(DecodedWorkspaceWorkEvent::Opaque) => {
@@ -663,7 +685,7 @@ where
                     .collect()
             });
         for cached in decoded.iter() {
-            let mut event = match cached {
+            let event = match cached {
                 CachedSharedWorkEventLine::Known(event) => event.as_ref().clone(),
                 CachedSharedWorkEventLine::Opaque => {
                     report.skipped_opaque += 1;
@@ -675,9 +697,6 @@ where
                     continue;
                 }
             };
-            if event.execution_container.is_none() {
-                event.execution_container = source.fallback_execution_container.clone();
-            }
             if is_close_kind(event.kind) {
                 report.skipped_close_kind += 1;
                 continue;
@@ -1453,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_shared_content_decodes_once_and_preserves_source_provenance() {
+    fn contextual_shared_content_decodes_once_without_inventing_containers() {
         let content: Arc<str> = Arc::from(
             [
                 event_json(
@@ -1486,14 +1505,60 @@ mod tests {
         assert_eq!(report.skipped_opaque, 2, "accounting remains per source");
         assert_eq!(report.skipped_invalid, 2, "accounting remains per source");
         assert_eq!(incoming.len(), 2);
-        assert_eq!(
-            incoming[0].0.execution_container.as_ref(),
-            Some(&source_container("work/one"))
-        );
-        assert_eq!(
-            incoming[1].0.execution_container.as_ref(),
-            Some(&source_container("work/two"))
-        );
+        assert!(incoming
+            .iter()
+            .all(|(event, _)| event.execution_container.is_none()));
+    }
+
+    #[test]
+    fn legacy_claim_does_not_acquire_new_launch_source_containers() {
+        // The container-less #2359 claim copied into the four affected refs.
+        let legacy = r#"{"id":"bff5fbd9-66be-4fb2-8505-e44f7f587437","work_item_id":"work-work-issue-2359-34a6ca7a","kind":"claim","status_category":"active","owner":"SPEC-2359","agent_session_id":"8e38a0f0-9dde-4b7e-a7fa-4852b978a308","agent_id":"codex","execution_container":null,"updated_at":"2026-08-03T05:20:28.093392Z"}"#;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        for issue in [4595, 4558, 4557, 4554] {
+            let branch = format!("work/issue-{issue}");
+            let work_id = format!("work-launch-{issue}");
+            let launch = event_json(
+                &format!("launch-{issue}"),
+                &work_id,
+                "start",
+                "2026-10-02T06:00:00Z",
+                &format!(",\"title\":\"new launch\",\"status_category\":\"active\",\"execution_container\":{{\"branch\":\"{branch}\"}}"),
+            );
+            let original = format!("{legacy}\n{launch}\n");
+            let content: Arc<str> = Arc::from(original.as_str());
+            ingest_work_events_sources(
+                &works,
+                [SharedWorkEventsSource::new(
+                    Arc::clone(&content),
+                    Some(source_container(&branch)),
+                )],
+            )
+            .expect("ingest legacy claim and explicit launch");
+            assert_eq!(content.as_ref(), original, "source must remain unchanged");
+            let projection = load_workspace_work_items_from_path(&works)
+                .expect("load")
+                .expect("projection");
+            let legacy_work = projection
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-work-issue-2359-34a6ca7a")
+                .expect("legacy history retained");
+            assert!(
+                legacy_work.execution_containers.is_empty(),
+                "source {branch} must not become an old Work ref"
+            );
+            let new_work = projection
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .expect("new launch retained");
+            assert_eq!(
+                new_work.execution_containers,
+                vec![source_container(&branch)]
+            );
+        }
     }
 
     #[test]
@@ -2090,6 +2155,36 @@ mod tests {
             .events
             .iter()
             .any(|event| event.id == "evt-recovered"));
+    }
+
+    #[test]
+    fn rebuild_preserves_corrupt_projection_when_sources_are_empty_or_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let works = tmp.path().join("works.json");
+        let original = b"{\"updated_at\":";
+        let valid = event_json(
+            "evt-recovered",
+            "work-recovered",
+            "start",
+            "2026-07-16T07:00:00Z",
+            ",\"title\":\"Recovered\",\"status_category\":\"active\"",
+        );
+        let opaque = event_json(
+            "evt-future",
+            "work-recovered",
+            "future_event",
+            "2026-07-16T08:00:00Z",
+            "",
+        );
+        for source in [
+            String::new(),
+            format!("{valid}\n{{"),
+            format!("{valid}\n{opaque}"),
+        ] {
+            std::fs::write(&works, original).unwrap();
+            assert!(rebuild_work_events_contents(&works, [source.as_str()], None).is_err());
+            assert_eq!(std::fs::read(&works).unwrap(), original);
+        }
     }
 
     #[test]

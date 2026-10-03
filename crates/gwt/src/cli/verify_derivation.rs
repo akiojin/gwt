@@ -58,8 +58,11 @@
 //! fails with `os error 5` every time (#3808, #4172). CI has no such process,
 //! which is why the two gates legitimately differ. That difference is pinned
 //! by `windows_derived_rust_matrix_tracks_the_ci_windows_gate` so neither
-//! side can drift on its own. Every derived `cargo test` stays serialized
-//! there.
+//! side can drift on its own. The portable fallback stays serialized there.
+//! Projects declaring a `gwt-verify` nextest profile opt into process-isolated
+//! tests and JUnit evidence on Windows (#4822), with resource scheduling owned
+//! by that profile. The same target coverage is preserved, including separate
+//! rustdoc commands when the original gate included doctests.
 //!
 //! Every other package keeps CI's full gate, because only these targets have
 //! ever been observed to wedge — narrowing further would buy nothing and
@@ -489,6 +492,37 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
             push_unique(&mut commands, package_test_command_for(package, host));
         }
     }
+    // Projects opt in through their own nextest profile. Do not require an
+    // additional runner in unrelated projects or change non-Windows gates.
+    let nextest_profile = std::fs::read_to_string(worktree.join(".config/nextest.toml"))
+        .ok()
+        .and_then(|config| toml::from_str::<toml::Value>(&config).ok())
+        .is_some_and(|config| {
+            config
+                .get("profile")
+                .and_then(|p| p.get("gwt-verify"))
+                .is_some()
+        });
+    if host == VerificationHost::Windows && nextest_profile {
+        let mut nextest_commands = Vec::new();
+        for command in commands {
+            if let Some(selection) = command.strip_prefix("cargo test ") {
+                let selection = selection.trim_end_matches(" -- --test-threads=1");
+                nextest_commands.push(format!(
+                    "cargo nextest run {selection} --profile gwt-verify --retries 0"
+                ));
+                // nextest does not run rustdoc. A library-only cargo test
+                // never did either; preserve that existing target boundary.
+                if !selection.split_whitespace().any(|arg| arg == "--lib") {
+                    nextest_commands.push(format!("cargo test {selection} --doc"));
+                }
+            } else {
+                nextest_commands.push(command);
+            }
+        }
+        commands = nextest_commands;
+    }
+
     // Only lint files that still exist — a deleted path would make
     // markdownlint-cli2 exit 0 on zero matches (a vacuous PASS), and paths
     // are quoted so spaces survive the runner's tokenizer.
@@ -1005,6 +1039,50 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn windows_nextest_profile_preserves_targets_and_doctests() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(
+            dir.path(),
+            ".config/nextest.toml",
+            "[profile.gwt-verify]\nretries = 0\n",
+        );
+        write(dir.path(), "crates/gwt/src/lib.rs", "");
+        write(dir.path(), "crates/gwt-core/src/lib.rs", "");
+        let plan = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            plan.commands.contains(
+                &"cargo nextest run -p gwt --lib --all-features --profile gwt-verify --retries 0"
+                    .to_string()
+            ),
+            "{plan:?}"
+        );
+        assert!(
+            plan.commands.contains(
+                &"cargo nextest run -p gwt-core --all-features --profile gwt-verify --retries 0"
+                    .to_string()
+            ),
+            "{plan:?}"
+        );
+        assert!(
+            plan.commands
+                .contains(&"cargo test -p gwt-core --all-features --doc".to_string()),
+            "{plan:?}"
+        );
+        assert!(!plan
+            .commands
+            .iter()
+            .any(|command| command.contains("-p gwt --all-features --doc")));
+        assert!(!plan
+            .commands
+            .iter()
+            .any(|command| command.contains("--test-threads=1")));
+        let other = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
+        assert!(other
+            .commands
+            .contains(&"cargo test -p gwt --all-features".to_string()));
     }
 
     // #4182 AC-8 / AC-9: the run that holds the verification lease is itself

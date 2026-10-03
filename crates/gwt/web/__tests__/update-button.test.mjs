@@ -112,6 +112,42 @@ test("update_apply_error reuses the same CTA and allows retry", () => {
   ]);
 });
 
+test("issue #4933: a newer release removes the stale ready modal before offering its download", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateProgress({ downloaded: 100, total: 100 });
+  controller.handleUpdateReady({ version: "9.26.0" });
+
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.27.0" });
+
+  assert.equal(Boolean(fixture.document.getElementById("update-modal")), false);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "available");
+  assert.match(cta.textContent, /v9\.27\.0/);
+  cta.click();
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "downloading");
+  assert.equal(modal.dataset.version, "9.27.0");
+  assert.equal(modal.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "0");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }, { kind: "apply_update_start" }]);
+});
+
+test("issue #4933: a newer release removes the failed update modal", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateApplyError({ reason: "Install failed" });
+
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.27.0" });
+
+  assert.equal(Boolean(fixture.document.getElementById("update-modal")), false);
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "available");
+  assert.match(fixture.document.getElementById("update-cta").textContent, /v9\.27\.0/);
+});
+
 test("update CTA dismiss hides available state without applying", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
@@ -557,6 +593,14 @@ test("phase19: [Later] closes modal, sends apply_update_later, and morphs CTA to
   assert.equal(cta.dataset.status, "ready");
   assert.match(cta.textContent, /Update v9.26.0 ready\s*[—-]\s*Restart now/);
   assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
+
+  // Issue #4933 AC-5: periodic polls must not undo Later for this release.
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.26.0" });
+  assert.equal(cta.dataset.status, "ready");
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.27.0" });
+  assert.equal(cta.dataset.status, "available");
+  assert.match(cta.textContent, /v9\.27\.0/);
 });
 
 test("phase19: re-clicking CTA in ready state opens modal at ready (no re-download)", () => {

@@ -2858,6 +2858,7 @@ fn a_readiness_refresh_failure_lands_on_its_own_row_not_on_the_whole_scan() {
 
     let loaded = LoadedIssueMonitorCandidates {
         issues: vec![issue(4378, &["bug"]), issue(4388, &["gwt-spec"])],
+        urgent_assignments: Default::default(),
         source: IssueMonitorCandidateSource::Live,
         live_error: None,
         readiness_failures: vec![gwt::IssueReadinessFailure {
@@ -2909,6 +2910,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
 
     let loaded = LoadedIssueMonitorCandidates {
         issues: vec![issue(42, &["bug"]), issue(43, &["enhancement"])],
+        urgent_assignments: Default::default(),
         source: IssueMonitorCandidateSource::Live,
         live_error: None,
         readiness_failures: Vec::new(),

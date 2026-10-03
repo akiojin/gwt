@@ -246,6 +246,125 @@ export function createLaunchWizardSurface({
         return note;
       }
 
+      // Issue #4911: the Issue Monitor settings form repeats the Agent
+      // Settings block once per launch candidate, in launch order. The backend
+      // owns the list — it holds one editable draft, so only the open set
+      // carries the form and the others show what they launch with. Returns
+      // the body of the open set, which the setup sections render into.
+      function appendAgentSettingsSets(parent, pool) {
+        const sets = Array.isArray(pool?.sets) ? pool.sets : [];
+        if (sets.length === 0) return null;
+        const list = createNode("div", "launch-agent-sets");
+        let openBody = null;
+        const appendSetButton = (row, className, text, label, disabledReason, action) => {
+          const button = createNode("button", className, text);
+          button.type = "button";
+          button.setAttribute("aria-label", label);
+          if (disabledReason) {
+            button.disabled = true;
+            if (typeof disabledReason === "string") button.title = disabledReason;
+          }
+          button.addEventListener("click", () => {
+            if (button.disabled || !releaseWizardInteractionGuardForChromeAction()) return;
+            sendWizardAction(action);
+          });
+          row.appendChild(button);
+          return button;
+        };
+        sets.forEach((set, index) => {
+          const isOpen = index === pool.active_index;
+          const name = `Agent Settings ${index + 1}`;
+          const block = createNode("section", "launch-agent-set");
+          block.classList.toggle("is-open", isOpen);
+          block.dataset.agentId = set.agent_id || "";
+          block.setAttribute("aria-label", name);
+          const header = createNode("div", "launch-agent-set__header");
+          const heading = createNode("div", "launch-agent-set__heading");
+          heading.appendChild(createNode("div", "launch-section-title", name));
+          if (index === 0) {
+            heading.appendChild(
+              createNode("span", "launch-agent-set__badge", "Launches first"),
+            );
+          }
+          header.appendChild(heading);
+          const actions = createNode("div", "launch-agent-set__actions");
+          if (!isOpen) {
+            appendSetButton(actions, "wizard-button is-compact", "Edit", `Edit ${name}`, false, {
+              kind: "select_agent_settings_set",
+              index,
+            });
+          }
+          appendSetButton(actions, "icon-button", "↑", `Move ${name} up`, index === 0, {
+            kind: "move_agent_settings_set",
+            index,
+            to: index - 1,
+          });
+          appendSetButton(
+            actions,
+            "icon-button",
+            "↓",
+            `Move ${name} down`,
+            index === sets.length - 1,
+            { kind: "move_agent_settings_set", index, to: index + 1 },
+          );
+          appendSetButton(
+            actions,
+            "icon-button",
+            "−",
+            `Remove ${name}`,
+            pool.remove_disabled_reason,
+            { kind: "remove_agent_settings_set", index },
+          );
+          header.appendChild(actions);
+          block.appendChild(header);
+          const body = createNode("div", "launch-agent-set__body");
+          if (isOpen) {
+            openBody = body;
+          } else {
+            const summary = createNode("div", "wizard-confirm-summary");
+            for (const item of set.summary || []) {
+              const card = createNode("div", "wizard-summary-item");
+              card.appendChild(createNode("div", "wizard-summary-label", item.label));
+              card.appendChild(createNode("div", "wizard-summary-value", item.value));
+              summary.appendChild(card);
+            }
+            body.appendChild(summary);
+          }
+          block.appendChild(body);
+          list.appendChild(block);
+        });
+        const footer = createNode("div", "launch-agent-sets__footer");
+        appendSetButton(
+          footer,
+          "wizard-button is-compact",
+          "＋ Add Agent Settings",
+          "Add Agent Settings",
+          pool.add_disabled_reason,
+          { kind: "add_agent_settings_set" },
+        );
+        for (const reason of [pool.add_disabled_reason, pool.remove_disabled_reason]) {
+          if (reason) footer.appendChild(createNode("div", "launch-field-help", reason));
+        }
+        list.appendChild(footer);
+        appendAgentSettingsOrderNote(list, pool);
+        parent.appendChild(list);
+        return openBody;
+      }
+
+      // Issue #4911: the sets launch in list order, so the form states the
+      // order the save will produce in the words `issue.monitor.profiles` uses.
+      function appendAgentSettingsOrderNote(parent, pool) {
+        if (!pool?.resulting_summary) return null;
+        const note = createNode(
+          "div",
+          "launch-note launch-agent-sets__order",
+          `Sets launch in this order; the first one starts the next launch. After saving: ${pool.resulting_summary}`,
+        );
+        note.setAttribute("role", "note");
+        parent.appendChild(note);
+        return note;
+      }
+
       function appendChoiceField(
         parent,
         label,
@@ -1352,6 +1471,7 @@ export function createLaunchWizardSurface({
             summaryList.appendChild(card);
           }
           section.appendChild(summaryList);
+          appendAgentSettingsOrderNote(section, launchWizard.issue_monitor_pool);
           panel.appendChild(section);
         }
 
@@ -1639,6 +1759,13 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
+        // Issue #4911: in the Issue Monitor settings form the sections below
+        // are one Agent Settings set, so they render inside the open set.
+        const setupParent = (
+          showSetupForms
+            && appendAgentSettingsSets(panel, launchWizard.issue_monitor_pool)
+        ) || panel;
+
         if (showSetupForms) {
           const section = createLaunchSection(
             "Launch",
@@ -1751,7 +1878,7 @@ export function createLaunchWizardSurface({
               launchWizard.issue_monitor_pool_impact,
             );
           }
-          panel.appendChild(section);
+          setupParent.appendChild(section);
         }
 
         if (
@@ -1759,12 +1886,11 @@ export function createLaunchWizardSurface({
           (
             launchWizard.show_version ||
             launchWizard.show_skip_permissions ||
-            launchWizard.show_fast_mode ||
-            launchWizard.show_codex_fast_mode
+            launchWizard.show_fast_mode
           )
         ) {
           const showFastMode = Boolean(
-            launchWizard.show_fast_mode ?? launchWizard.show_codex_fast_mode,
+            launchWizard.show_fast_mode,
           );
           const section = createLaunchSection(
             "Launch settings",
@@ -1802,7 +1928,7 @@ export function createLaunchWizardSurface({
               grid,
               "Fast mode",
               "Use the agent's Fast mode",
-              Boolean(launchWizard.fast_mode ?? launchWizard.codex_fast_mode),
+              Boolean(launchWizard.fast_mode),
               (enabled) =>
                 sendWizardAction({
                   kind: "set_fast_mode",
@@ -1811,7 +1937,7 @@ export function createLaunchWizardSurface({
             );
           }
           section.appendChild(grid);
-          panel.appendChild(section);
+          setupParent.appendChild(section);
         }
 
         // SPEC-3152: Hermes-specific launch options, rendered only for the
@@ -1921,7 +2047,7 @@ export function createLaunchWizardSurface({
               }),
           );
           section.appendChild(grid);
-          panel.appendChild(section);
+          setupParent.appendChild(section);
         }
 
         // SPEC-3151 FR-008: OpenCode-specific launch options, rendered only
@@ -1947,7 +2073,7 @@ export function createLaunchWizardSurface({
               }),
           );
           section.appendChild(grid);
-          panel.appendChild(section);
+          setupParent.appendChild(section);
         }
 
         // SPEC-2014 Amendment 2026-05-20 (FR-057 / FR-058):

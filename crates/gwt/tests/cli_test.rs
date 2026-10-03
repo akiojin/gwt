@@ -595,7 +595,29 @@ fn red_107_parse_actions_job_logs() {
     let cmd = parse_actions_args(&[s("job-logs"), s("--job"), s("202")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::Actions(ActionsCommand::JobLogs { job_id: 202 })
+        CliCommand::Actions(ActionsCommand::JobLogs {
+            job_id: 202,
+            failed_only: false,
+            context_lines: 5,
+        })
+    );
+    // Issue #4849 AC-2: the failures view and its context window.
+    let cmd = parse_actions_args(&[
+        s("job-logs"),
+        s("--job"),
+        s("202"),
+        s("--failed-only"),
+        s("--context"),
+        s("2"),
+    ])
+    .unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Actions(ActionsCommand::JobLogs {
+            job_id: 202,
+            failed_only: true,
+            context_lines: 2,
+        })
     );
 }
 

@@ -6218,6 +6218,66 @@ body {
   color: var(--color-text-strong);
 }
 
+/* Issue 4911 — the Issue Monitor settings form repeats the Agent Settings
+   block once per launch candidate; the open set carries the form.
+   (No `#` before the number: the token audits scan this block for hex colors.) */
+.launch-agent-sets {
+  display: grid;
+  gap: 12px;
+}
+
+.launch-agent-set {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.launch-agent-set.is-open {
+  border-color: var(--color-focus-ring);
+}
+
+.launch-agent-set__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.launch-agent-set__heading,
+.launch-agent-set__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launch-agent-set__badge {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.launch-agent-set__actions .icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.launch-agent-set__body {
+  display: grid;
+  gap: 12px;
+}
+
+.launch-agent-sets__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 /* SPEC-2359 US-80 — Start Work intake prompt + duplicate-work advisory. */
 .launch-intake-input {
   width: 100%;

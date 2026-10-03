@@ -78,7 +78,9 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
         if !clients.has_clients() {
             continue;
         }
-        let snapshot = poller.poll_once(Utc::now(), forced).await;
+        let now = Utc::now();
+        let snapshot = poller.poll_once(now, forced).await;
+        publish_accounts(&snapshot.accounts, now);
         // Issue #3616: hand the account rows to the event loop before the
         // broadcast. Both consumers need the same tick, and the classifier is
         // the one whose absence lets a quota-dead pane hold a slot for days.
@@ -90,6 +92,23 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
                 consumption: snapshot.consumption,
             },
         )]);
+    }
+}
+
+/// Issue #4908 AC-5: publish this tick's account rows where
+/// `issue.monitor.status` reads them. The status bar was the only place these
+/// readings went, so a JSON reader could not see the usage a hold sat beside.
+/// A failed write costs that reader one tick, never the poll itself.
+fn publish_accounts(accounts: &[ProviderUsage], now: DateTime<Utc>) {
+    let path = gwt_core::usage::snapshot_store::provider_usage_snapshot_path();
+    if let Err(error) =
+        gwt_core::usage::snapshot_store::write_provider_usage_snapshot(&path, accounts, now)
+    {
+        tracing::warn!(
+            %error,
+            path = %path.display(),
+            "provider usage snapshot could not be published; issue.monitor.status keeps the previous reading"
+        );
     }
 }
 

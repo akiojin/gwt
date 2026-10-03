@@ -76,6 +76,24 @@ into this generated skill supplements the PM contract.
 
 ## Request intake via sub-agents
 
+- Offer once for each new user work request that may require Issue registration
+  or update. Do not repeat the offer for status queries, monitor events, or
+  replies within the same intake. Immediate registration remains the default
+  for every request type unless the user opts into refinement.
+- Before registration, offer one optional line in the user's language:
+  "Would you like to refine the details? Otherwise I will proceed with the
+  defaults." Do not wait for a reply or repeat the question. If the user says
+  no or gives no answer, continue the default intake and registration below.
+- If the user opts in, follow the existing `gwt-discussion` skill and its
+  references for investigation and clarification; do not duplicate its dialogue
+  flow here. Explicit opt-in permits that skill's questions instead of the
+  default question-minimization rule below. Use `gwt-plan-spec` when the
+  resulting design-required Issue needs planning. Read these from the PM
+  runtime's gwt-managed skills, not the project's configuration, and do not
+  depend on a provider-specific plan mode or slash command. Persist the
+  refined result as verifiable acceptance criteria in the same Issue's `spec`
+  section / acceptance criteria used by default intake. A later opt-in refines
+  the existing owner rather than creating a duplicate Issue.
 - For every new work request that may require Issue registration or update,
   delegate a bounded intake packet to one or more in-session sub-agents. The
   packet must inspect the existing implementation and duplicate Issues,
@@ -86,8 +104,8 @@ into this generated skill supplements the PM contract.
   Apply those defaults yourself to every branch that is neither irreversible
   nor a core specification choice, and continue through registration without
   asking the user.
-- Ask the user only when a branch is irreversible or determines a core
-  specification choice. Present all remaining questions in a single batch;
+- Outside opted-in refinement, ask the user only when a branch is irreversible
+  or determines a core specification choice. Present all remaining questions in a single batch;
   each question includes your recommendation and rationale plus a copy-paste
   answer example.
 - For every branch registered using a PM default, add a Notes entry to the
@@ -246,16 +264,33 @@ body cannot hold `plan` / `tasks` sections.
   with `issue.monitor.quota_hold.clear` for a genuine outage — the clear is
   for a false hold only.
 - Provider switching is automatic. `issue.monitor.profiles` returns the launch
-  candidate pool (ordered providers with their holds) and the usage threshold;
+  candidate pool (ordered providers with their holds);
   `issue.monitor.profiles.set` replaces the whole pool with
   `params.profiles` (`[{"agent_id":"codex"},{"agent_id":"claude"}]`, unique
   per provider, known agents only, optional `prefer_for` tags such as
-  `type:fix` / `kind:spec` / `label:bug`) and optionally
-  `params.usage_threshold_percent` (1-100). The Monitor skips held providers
-  and launches the first eligible candidate (`prefer_for` routing and the
-  usage threshold apply), so a held provider never stalls the queue while
-  another candidate exists. Prefer adding a candidate over stopping the
-  Monitor when one provider hits its limit.
+  `type:fix` / `kind:spec` / `label:bug`). The Monitor skips held providers
+  and launches the first eligible candidate (`prefer_for` routing applies),
+  so a held provider never stalls the queue while another candidate exists.
+  Prefer adding a candidate over stopping the Monitor when one provider hits
+  its limit.
+  What switches launches is a refusal, never a reading: a provider is held
+  on its first rate-limit refusal, including the last candidate, and the
+  refused Issue relaunches on the next candidate at once. No usage reading or
+  threshold moves launches ahead of a refusal — an account shown at 100% can
+  still be serving — and `usage_threshold_percent` is accepted and stored
+  but no longer affects selection. `effective_launch_profile` says a switch is
+  in force and why: `refused_provider`, `refused_at`, the `refusal` wording,
+  and the candidate launches use instead. Holds never admit timed probes or
+  use usage readings to infer recovery. When all candidates are held and at
+  least one reset is known, wait for the earliest reset and resume automatically.
+  `provider_usage` is where you confirm it: one row per provider with
+  `state`, `windows[*].used_percent`, and `fetched_at`. A row whose `state`
+  is `not_observed`, `stale`, `disabled`, `no_data`, or `unavailable` carries
+  no fresh numbers and its `detail` says why — the poller runs only while a
+  gwt window is open — so never read a missing reading as a healthy account.
+  `needs_human_fleet` with kind `launch_candidates_exhausted` means every
+  candidate refused and every reset is unknown: report it immediately, like
+  `agent_blackout`, with the providers and resets its `reason` lists.
   An element that names only `agent_id` keeps the settings already saved for
   that provider (model / reasoning / version / permissions / Docker / shell),
   so a plain reorder changes nothing else; a provider that is new to the pool
@@ -468,8 +503,11 @@ same profile to try again.
 - `issue.monitor.quota_hold.list` and `issue.monitor.quota_hold.clear`
   are how you handle a **provider-wide quota hold**. A hold stops every
   launch on that provider until the reset the provider printed, which
-  can be days out, and it is formed from a notice on a pane screen plus
-  the usage poller's reading. The list shows each hold with its
+  can be days out. The first observed rate-limit refusal forms the hold;
+  usage readings are telemetry, never a prerequisite or a release signal.
+  A refusal with no usable future reset reads `reset_at: "unknown"`: it
+  never expires on a timer. Explicit clear or a confirmed account replacement
+  can release it. The list shows each hold with its
   evidence (`screen_text`, `poller_state`, `poller_windows` with
   `used_percent`), which is also what `issue.monitor.status` reports
   under `provider_quota_holds`. The hold is false only when the poller's
@@ -1052,6 +1090,16 @@ measure; never leave a column out and never guess one.
   `pr.ready` for a Draft `MERGE-CANDIDATE`. A row with no
   `default_action_operation` is advice you act on, not a call you make.
   Never invent an operation for a row that names none.
+- A `BEHIND` row with `merge_queue.enabled: true` is not yours to update
+  (Issue #4872). Its base lands through a merge queue, which re-tests the
+  PR on the latest base by itself; the row names no operation and its
+  `default_action` starts with `leave:`. Do not run `pr.update_branch`
+  on it: the update restarts CI for nothing, and
+  pushing to a queued PR removes it from the queue
+  (`merge_queue.position` is present while it is queued).
+  An absent `merge_queue` key means unknown, not "no merge queue": only
+  non-Draft rows that are, or may be held as, `BEHIND` are probed, and a
+  `BEHIND` row without the key keeps `update-branch`.
 - **Run `pr.update_branch` one PR at a time.** Every merge into the base
   puts every other open PR back to `BEHIND`, so a fan-out re-runs CI on
   branches that are about to go stale again. Each cycle, pick the single
@@ -1863,6 +1911,18 @@ mod tests {
             "For every branch registered using a PM default",
             "PM default ruling (override available)",
             "one-line correction",
+            "Offer once for each new user work request that may require Issue registration or update.",
+            "Do not repeat the offer for status queries, monitor events, or replies within the same intake.",
+            "Immediate registration remains the default for every request type unless the user opts into refinement.",
+            "Before registration, offer one optional line",
+            "Would you like to refine the details?",
+            "Do not wait for a reply",
+            "If the user says no or gives no answer",
+            "If the user opts in, follow the existing `gwt-discussion` skill",
+            "Use `gwt-plan-spec` when the resulting design-required Issue needs planning",
+            "same Issue's `spec` section / acceptance criteria",
+            "runtime's gwt-managed skills",
+            "provider-specific plan mode",
         ] {
             assert!(
                 request_intake.contains(phrase),
@@ -2281,6 +2341,22 @@ mod tests {
             "pick the single PR closest to promotion",
             "Do not update a second PR in the same cycle",
             "never update every `BEHIND` row at once",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #4872 AC-4: on a base that lands through a merge queue, the queue
+    /// brings a `BEHIND` PR up to date. An update-branch there restarts CI for
+    /// nothing and removes a queued PR from the queue, so the PM must read the
+    /// row's `merge_queue` before acting on `BEHIND`.
+    #[test]
+    fn contract_leaves_a_behind_pr_to_an_enabled_merge_queue() {
+        let body = body();
+        for phrase in [
+            "A `BEHIND` row with `merge_queue.enabled: true` is not yours to update",
+            "pushing to a queued PR removes it from the queue",
+            "An absent `merge_queue` key means unknown",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
@@ -2750,6 +2826,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             .expect("codex mirror exists");
         assert_eq!(claude, codex, "mirrors must be byte-identical");
         assert_eq!(claude, render_skill_md());
+        let intake = unwrapped(&claude);
+        assert!(intake.contains("Before registration, offer one optional line"));
+        assert!(intake.contains("If the user opts in, follow the existing `gwt-discussion` skill"));
+        assert!(intake.contains("If the user says no or gives no answer"));
         assert!(claude.contains("Only canonical `verify.run` acquires the host-wide lease"));
         assert!(!claude.contains("every 3 minutes"));
         assert!(!claude.contains("15 attempts"));

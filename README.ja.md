@@ -87,6 +87,35 @@ download marker、Windows Installer の `msiexec` verbose log、インストー�
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
+### アップグレード下限
+
+一回限りの移行処理を廃止する際の upgrade floor は **v9.72.1** です。
+2026-10-02 の変更日から60日前、2026-08-03 UTC 時点の最新リリースを基準にしています。
+それより古い環境では、先に [v9.106.0](https://github.com/akiojin/gwt/releases/tag/v9.106.0)
+をインストールし、各プロジェクトを開いて既存の移行を実行してから新しい版に更新してください。
+更新前に gwt の設定とプロジェクト状態をバックアップしてください。
+
+旧 Claude Code backend 行は例外で、公開版の起動経路から自動移行が呼ばれていませんでした。
+**旧 backend 設定は自動移行されません。Settings で provider を再登録してください**
+Settings → Agent Backends で旧設定の endpoint・API key・model を再登録し、
+組み込みの Claude Code と登録した backend を選択してください。
+旧設定は引き続き読み取り可能で、起動時に書き換えたり削除したりしません。
+
+floor 以降に追加された Session schema 5、PM scratch、work-item projection rebuild v2、
+ProjectKey の移行は維持します。
+usage の `window_minutes` 契約と、未完了の SPEC #2359 に属する Workspace projection
+backfill も維持します。旧 HOME / Workspace の `workspace/current.json` と
+`work_items.json` からの取り込みはデータ保護の例外として保持し、起動時に新しい状態を
+作る前に未対応の配置を安全に案内できるようになるまで削除しません。
+coordination のイベント取り込みと discussion の取り込みも、現用の回復処理と session 別
+Stop 契約が利用するため保持します。旧 agent identity reset は廃止し、起動時には保存済みの
+目的・進捗を保持します。`agent_identity.migration.json` は既存の内容を変更せず、
+未作成なら新たに作成しません。
+
+組み込みフロントエンドは現行の Fast mode フィールドを使用し、cleanup リクエストには
+operation ID を必須とします。更新前から開いているタブは再読み込みしてください。
+保存済みの Fast mode 設定は保持します。
+
 ## 前提
 
 - `PATH` 上で `git` が使えること
@@ -347,11 +376,21 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
-open な GitHub Issue は、明示的にキューへ追加するか、有効にした Auto-refill が追加する
+open な GitHub Issue は、明示的な追加、有効な Auto-refill、または `urgent` ラベルによる投入
 まで Backlog に留まります。キューへの所属は Monitor の実行候補になる条件であり、
 準備状態・claim・同時実行数のチェックは引き続き適用されます。行の `Launch now` は
 起動フローを開き、起動時に `work/issue-N` のブランチ/worktree を作成して
 `gwt-execute #N` でエージェントを開始します。起動失敗は Issue 行に残ります。
+
+`urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
+自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
+先頭群へ入り、保存済みの通常順序と `max_active` は変わりません。
+`issue.monitor.queue.urgent_limit` の `limit` で上限を変更できます（`0` は先頭群への昇格だけを無効化）。
+超過分は通常順序に従います。`issue.monitor.queue.demote` の `number` で指定した Issue は
+永続的に通常優先度へ戻り、scan・再起動後も urgent ラベルより降格が優先されます。
+カードと詳細では urgent・上限超過・降格を区別し、`issue.monitor.queue.list` と
+`issue.monitor.status` からも理由と観測済みの GitHub ラベル付与者・時刻を確認できます。
+未取得の履歴は不明として表示します。
 
 Agent や自動化からは `issue.monitor.status` で確認し、`issue.monitor.queue.push`、
 `issue.monitor.queue.remove`、`issue.monitor.queue.move` で所属と順序を変更できます。
@@ -372,10 +411,18 @@ idle になったエージェント窓はスロットを自動的に解放しま
 または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
 `issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
 プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
-で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
+で起動する（rate limit の hold と `prefer_for` routing が適格性を決め、provider は
+使用率の読み値による予測ではなく、起動を拒否した時点でプールから外れる。
 詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
-ため、1 つの provider が rate limit に入ってもキューは止まりません。GUI の Agent
-settings で別 provider を保存すると同じプールに追加されます。各 operation
+ため、1 つの provider が rate limit に入ってもキューは止まりません。
+`issue.monitor.status` は provider ごとの最新の使用率の読み値を `provider_usage` に
+返し、読み値が無い場合はその理由を返します。レートリミットの初回拒否で provider を
+hold し、全候補が hold 中なら最も早い既知の reset 時刻に自動再開します。
+reset がすべて不明なら定期再試行せず、`needs_human_fleet` の
+`launch_candidates_exhausted` として通知します。GUI の Issue Monitor 設定フォーム
+（`⚙ Settings`）は同じプールを Agent Settings の組として並べ、`＋` で組を追加、
+`−` で削除、矢印で並べ替えができ、保存した並び順がそのまま起動候補の順序になります。
+各 operation
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。

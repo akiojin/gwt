@@ -87,6 +87,8 @@ pub(crate) struct ActiveWorkProjectionPrepared {
     pub(crate) generation: u64,
     pub(crate) profile: ActiveWorkProjectionProfile,
     pub(crate) result: Result<Option<PreparedActiveWorkProjection>, String>,
+    pub(crate) load_error: Option<gwt_core::WorkspaceStateLoadError>,
+    pub(crate) imported_from: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -2849,14 +2851,17 @@ pub(super) fn agent_launch_purpose_title(
     linked_issue_number: Option<u64>,
     branch_name: Option<&str>,
     issue_link_cache_dir: &Path,
-) -> Option<String> {
-    linked_issue_number
+) -> gwt_core::error::Result<Option<String>> {
+    let issue_title = linked_issue_number
         .and_then(|issue_number| issue_title_from_cache(project_root, issue_number))
         .or_else(|| {
             linked_issue_number_for_branch(project_root, branch_name, issue_link_cache_dir)
                 .and_then(|issue_number| issue_title_from_cache(project_root, issue_number))
-        })
-        .or_else(|| workspace_projection_owner_title(project_root, branch_name))
+        });
+    match issue_title {
+        Some(title) => Ok(Some(title)),
+        None => workspace_projection_owner_title(project_root, branch_name),
+    }
 }
 
 fn issue_title_from_cache(project_root: &Path, issue_number: u64) -> Option<String> {
@@ -2946,7 +2951,7 @@ pub(super) fn save_resumed_workspace_projection(
 
 fn prepare_active_work_projection(
     input: ActiveWorkProjectionPrepareInput,
-) -> Result<Option<PreparedActiveWorkProjection>, String> {
+) -> gwt_core::error::Result<Option<PreparedActiveWorkProjection>> {
     #[cfg(test)]
     FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(|count| count.set(count.get() + 1));
     let sessions = input.sessions.iter().collect::<Vec<_>>();
@@ -2956,9 +2961,8 @@ fn prepare_active_work_projection(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cache_lock_wait_micros = cache_lock_started.elapsed().as_micros() as u64;
-    let (work_items, mut load_profile) = work_items_cache
-        .load_or_synthesize_shared(&input.project_root)
-        .map_err(|error| error.to_string())?;
+    let (work_items, mut load_profile) =
+        work_items_cache.load_or_synthesize_shared(&input.project_root)?;
     load_profile.lock_wait_micros = load_profile
         .lock_wait_micros
         .saturating_add(cache_lock_wait_micros);
@@ -2969,9 +2973,9 @@ fn prepare_active_work_projection(
     let saved_parse_started = Instant::now();
     let saved_projection_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&input.project_root);
-    let saved_projection =
-        gwt_core::workspace_projection::load_workspace_projection_from_path(&saved_projection_path)
-            .map_err(|error| error.to_string())?;
+    let saved_projection = gwt_core::workspace_projection::load_workspace_projection_from_path(
+        &saved_projection_path,
+    )?;
     load_profile.parse_micros = load_profile
         .parse_micros
         .saturating_add(saved_parse_started.elapsed().as_micros() as u64);
@@ -3015,8 +3019,7 @@ fn prepare_active_work_projection(
             gwt_core::workspace_projection::load_recent_workspace_journal_entries(
                 &input.project_root,
                 WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
-            )
-            .map_err(|error| error.to_string())?
+            )?
             .iter()
             .map(workspace_journal_entry_view_from_entry)
             .collect::<Vec<_>>();
@@ -3127,7 +3130,8 @@ fn prepare_active_work_projection(
     let (payload, serialization_ms) =
         serialize_active_work_projection_event_with(&event, |event| {
             serde_json::to_string(event).map_err(|error| error.to_string())
-        })?;
+        })
+        .map_err(gwt_core::error::GwtError::Other)?;
     let context = input
         .profile_context
         .unwrap_or(RuntimeHookProjectionProfileContext {
@@ -3734,7 +3738,18 @@ impl AppRuntime {
                     .iter()
                     .any(|agent| live_session_ids.contains(&agent.session_id))
             };
-        let plan = classify_workspace_projections(&scan_root, &config, now, is_active_session);
+        let plan = match classify_workspace_projections(&scan_root, &config, now, is_active_session)
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::WorkspaceProjectionPruneError {
+                        message: error.to_string(),
+                    },
+                )]
+            }
+        };
         let filtered: Vec<_> = if ids.is_empty() {
             plan
         } else {
@@ -3905,7 +3920,22 @@ impl AppRuntime {
             })
             .unwrap_or_default();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
-            let result = prepare_active_work_projection(input);
+            let mut imported_from = None;
+            let mut load_error = None;
+            let result = gwt_core::workspace_projection::pending_legacy_workspace_state_import(
+                &task_project_root,
+            )
+            .and_then(|pending| {
+                imported_from = pending;
+                prepare_active_work_projection(input)
+            })
+            .map_err(|error| {
+                let message = error.to_string();
+                if let gwt_core::error::GwtError::WorkspaceStateLoad(error) = error {
+                    load_error = Some(error);
+                }
+                message
+            });
             #[cfg(debug_assertions)]
             complete_active_work_projection_playwright_rendezvous(&task_project_root);
             let profile = result
@@ -3921,6 +3951,8 @@ impl AppRuntime {
                     generation,
                     profile,
                     result,
+                    load_error,
+                    imported_from,
                 },
             )));
         }) {
@@ -3932,6 +3964,8 @@ impl AppRuntime {
                     generation,
                     profile: fallback_profile,
                     result: Err(error),
+                    load_error: None,
+                    imported_from: None,
                 },
             )));
         }
@@ -4036,6 +4070,19 @@ impl AppRuntime {
         };
 
         if accept {
+            if let Some(error) = prepared.load_error {
+                self.proxy.for_project(prepared.context.clone()).send(
+                    UserEvent::WorkspaceStateLoadFailed {
+                        project_root: prepared.project_root.clone(),
+                        error,
+                    },
+                );
+            } else if prepared.result.is_ok() {
+                self.recheck_workspace_state_after_projection(
+                    &prepared.project_root,
+                    prepared.imported_from,
+                );
+            }
             match prepared.result {
                 Ok(Some(prepared_projection)) => {
                     self.project_state_for_tab(&prepared.tab_id)
@@ -4426,10 +4473,17 @@ impl AppRuntime {
             tab_id,
             view,
             completed,
+            load_error,
+            imported_from,
         } = refreshed;
         if !completed || !self.project_context_is_current(&context) {
             return Vec::new();
         }
+        if let Some(error) = load_error {
+            return self.handle_workspace_state_load_failed(&context.project_root, error);
+        }
+        self.recheck_workspace_state_after_projection(&context.project_root, imported_from);
+        let mut events = Vec::new();
         {
             let mut cache = self
                 .project_state_for_tab(&tab_id)
@@ -4445,15 +4499,15 @@ impl AppRuntime {
                 }
             }
         }
-        view.map(|view| {
-            vec![OutboundEvent::project(
+        if let Some(view) = view {
+            events.push(OutboundEvent::project(
                 context.project_key,
                 BackendEvent::ActiveWorkProjection {
                     projection: Box::new(view),
                 },
-            )]
-        })
-        .unwrap_or_default()
+            ));
+        }
+        events
     }
 
     pub(crate) fn active_work_projection_broadcast_for_tab(
@@ -4690,17 +4744,34 @@ pub(crate) struct ActiveWorkProjectionRefreshed {
     /// False when the rebuild never finished (it panicked off-thread). The
     /// cached projection then stands instead of the rail going blank.
     pub(crate) completed: bool,
+    pub(crate) load_error: Option<gwt_core::WorkspaceStateLoadError>,
+    pub(crate) imported_from: Option<PathBuf>,
 }
 
 /// Rebuild one tab's Active Work projection. Runs off the GUI event loop.
 pub(crate) fn run_active_work_projection_refresh(
     job: ActiveWorkProjectionJob,
 ) -> ActiveWorkProjectionRefreshed {
+    let loaded =
+        gwt_core::workspace_projection::pending_legacy_workspace_state_import(&job.project_root)
+            .and_then(|imported_from| {
+                build_active_work_projection(&job).map(|view| (view, imported_from))
+            });
+    let (view, imported_from, load_error) = match loaded {
+        Ok((view, imported_from)) => (view, imported_from, None),
+        Err(error) => (
+            None,
+            None,
+            Some(crate::workspace_state_load_error(&job.project_root, error)),
+        ),
+    };
     ActiveWorkProjectionRefreshed {
         context: job.context.clone(),
         tab_id: job.tab_id.clone(),
-        view: build_active_work_projection(&job),
+        view,
         completed: true,
+        load_error,
+        imported_from,
     }
 }
 
@@ -4716,14 +4787,14 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// captured runtime state plus the home projection files.
 fn build_active_work_projection(
     job: &ActiveWorkProjectionJob,
-) -> Option<gwt::ActiveWorkProjectionView> {
+) -> gwt_core::error::Result<Option<gwt::ActiveWorkProjectionView>> {
     #[cfg(test)]
     FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(|count| count.set(count.get() + 1));
     let sessions = job.sessions.iter().collect::<Vec<_>>();
     let saved_projection =
-        gwt_core::workspace_projection::load_workspace_projection(&job.project_root)
-            .ok()
-            .flatten();
+        gwt_core::workspace_projection::load_workspace_projection(&job.project_root)?;
+    let work_items =
+        lock_recover(&job.work_items_cache).load_or_synthesize_shared(&job.project_root)?;
     // SPEC-2359 Phase W-15 (FR-379/FR-382): the Workspace list is the
     // union of existing worktrees and unclosed records, independent of
     // live agents and of whether the project was ever launched here. When
@@ -4734,15 +4805,11 @@ fn build_active_work_projection(
     // copy. A repository-scale works.json costs megabytes per copy, and this
     // build runs on every rail refresh for the life of the process.
     let loaded_projection = saved_projection.or_else(|| {
-        lock_recover(&job.work_items_cache)
-            .load_or_synthesize_shared(&job.project_root)
-            .ok()
-            .filter(|(works, _)| !works.work_items.is_empty())
-            .map(|_| {
-                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
-                    &job.project_root,
-                )
-            })
+        (!work_items.0.work_items.is_empty()).then(|| {
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                &job.project_root,
+            )
+        })
     });
     if let Some(projection) = loaded_projection {
         let mut projection = projection;
@@ -4786,12 +4853,10 @@ fn build_active_work_projection(
         // The `Arc` handle keeps this projection alive for the whole read even
         // if a later refresh replaces the cache entry, so the borrow never
         // outlives what it points at (Issue #4234).
-        let work_items = lock_recover(&job.work_items_cache)
-            .load_or_synthesize_shared(&job.project_root)
-            .ok();
         let workspaces = work_items
+            .0
+            .work_items
             .iter()
-            .flat_map(|(items, _)| items.work_items.iter())
             .map(|item| workspace_work_item_view_from_item(item, &session_index, resume_branches))
             .collect::<Vec<_>>();
         let mut view = active_work_projection_from_saved_with_journal(
@@ -4866,10 +4931,7 @@ fn build_active_work_projection(
         );
         attach_active_work_issue_numbers(
             &mut view.active_works,
-            work_items
-                .as_ref()
-                .map(|(items, _)| items.work_items.as_slice())
-                .unwrap_or(&[]),
+            &work_items.0.work_items,
             &agent_sessions,
             gwt_core::repo_hash::detect_repo_hash(&job.project_root),
             &super::knowledge::load_issue_branch_links(
@@ -4877,7 +4939,7 @@ fn build_active_work_projection(
                 &job.issue_link_cache_dir,
             ),
         );
-        return Some(view);
+        return Ok(Some(view));
     }
 
     // Issue #4172: same single ledger read for the live-session projection.
@@ -4912,7 +4974,7 @@ fn build_active_work_projection(
             &hook_failures,
         );
     }
-    view
+    Ok(view)
 }
 
 #[cfg(test)]

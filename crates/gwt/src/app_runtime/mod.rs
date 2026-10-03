@@ -63,6 +63,8 @@ pub(crate) enum UpdateAutoApplyRelease {
     Cancelled,
     /// The persisted manifest for the drained version is gone.
     PayloadMissing,
+    /// A newer release invalidated this staged version.
+    Superseded,
 }
 
 /// A notification-center record about the self-update (AC-12), broadcast to
@@ -275,6 +277,7 @@ mod migration;
 mod native_project_picker;
 pub(crate) mod persist_dispatcher;
 pub(crate) mod pm;
+mod pm_chat;
 mod profile;
 mod project_route;
 mod project_tabs;
@@ -751,6 +754,28 @@ pub struct IssueMonitorProfileSaveContext {
     /// the wizard can say which candidate the save replaces without re-reading
     /// preferences on every keystroke.
     pub(crate) pool: Vec<gwt::IssueMonitorLaunchProfile>,
+    /// Issue #4911: the Agent Settings sets the settings form is editing.
+    /// `None` for the per-Issue form, which still switches the pool head.
+    pub(crate) sets: Option<IssueMonitorAgentSettingsSets>,
+}
+
+/// Issue #4911: the ordered Agent Settings sets of one open settings form,
+/// one per launch candidate.
+///
+/// Only the open set lives in the wizard, and the wizard cannot show a saved
+/// profile as it is: it fills an unset model or reasoning with its own default
+/// and holds no runtime choice before its Runtime step. So a set is changed
+/// only where the operator changed the form, and a set nobody touched is
+/// written back unchanged.
+#[derive(Debug, Clone)]
+pub struct IssueMonitorAgentSettingsSets {
+    /// Never empty. The entry at `active` is the open set as it was saved or
+    /// last left; the wizard holds the operator's edits to it.
+    pub(crate) profiles: Vec<gwt::IssueMonitorLaunchProfile>,
+    pub(crate) active: usize,
+    /// What the form read when the open set was opened, before any edit.
+    /// `None` when the form could not launch that set's agent at all.
+    pub(crate) opened_as: Option<gwt::IssueMonitorLaunchProfile>,
 }
 
 #[derive(Debug, Clone)]
@@ -954,6 +979,7 @@ pub(crate) struct ProjectContext {
 }
 
 pub(crate) struct ProjectRuntimeState {
+    pub(crate) workspace_state_notice: Option<gwt::WorkspaceStateNoticeView>,
     /// Latest close preview nonce for each requesting connection; never persisted.
     pub(crate) close_project_nonces: HashMap<ClientId, String>,
     /// Single-use launch requests keyed by the exact wizard that produced
@@ -1000,6 +1026,8 @@ pub(crate) struct ProjectRuntimeState {
     /// mark the PM window without touching disk on every render. Refreshed
     /// wherever the registration is read or written.
     pub(crate) pm_sessions: HashMap<PathBuf, String>,
+    /// One bounded append reader per Project; native file reads stay off tao.
+    pub(crate) pm_conversation_reader: Arc<Mutex<gwt::pm_conversation::PmConversationReader>>,
     /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
@@ -1044,10 +1072,12 @@ pub(crate) fn initial_project_states(
             (
                 context.project_key.clone(),
                 ProjectRuntimeState {
+                    workspace_state_notice: None,
                     close_project_nonces: HashMap::new(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
+                    pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
@@ -2984,10 +3014,12 @@ impl AppRuntime {
             self.project_states
                 .entry(context.project_key.clone())
                 .or_insert_with(|| ProjectRuntimeState {
+                    workspace_state_notice: None,
                     close_project_nonces: HashMap::new(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
+                    pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
@@ -3489,6 +3521,13 @@ impl AppRuntime {
                     &state_path,
                     worktree_inventory.as_deref().map(Vec::as_slice),
                 );
+            if let Some(error) = summary.load_error.as_ref() {
+                proxy.send(UserEvent::WorkspaceStateLoadFailed {
+                    project_root,
+                    error: error.clone(),
+                });
+                return;
+            }
             // #3065: detection-based repair for the resume owner bleed. Runs
             // after every ingest so re-ingested contaminated logs (from other
             // machines / refs) self-heal; converges to a no-op on clean data.
@@ -8112,13 +8151,17 @@ impl AppRuntime {
                     "Update v{version} is no longer staged on disk — the drain was released; download it again from the update button."
                 ),
             ),
+            UpdateAutoApplyRelease::Superseded => (
+                "info",
+                format!("Update v{version} was replaced by a newer release; its automatic apply was cancelled."),
+            ),
         };
         self.record_update_apply_observation(
             version,
-            if release == UpdateAutoApplyRelease::Cancelled {
-                "pending_refused"
-            } else {
-                "pending_failed"
+            match release {
+                UpdateAutoApplyRelease::Cancelled => "pending_refused",
+                UpdateAutoApplyRelease::PayloadMissing => "pending_failed",
+                UpdateAutoApplyRelease::Superseded => "pending_superseded",
             },
             &message,
         );
@@ -8300,6 +8343,7 @@ impl AppRuntime {
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
+            | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -8356,6 +8400,7 @@ impl AppRuntime {
                 .map(|address| address.tab_id.as_str()),
             // These operations target the authenticated project connection.
             FrontendEvent::CreateWindow { .. }
+            | FrontendEvent::RetryWorkspaceStateLoad
             | FrontendEvent::OpenActiveWorkLaunchWizard { .. }
             | FrontendEvent::RunWorkspaceCleanup { .. }
             | FrontendEvent::CycleFocus { .. }
@@ -8629,6 +8674,7 @@ impl AppRuntime {
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
+            | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -8711,6 +8757,15 @@ impl AppRuntime {
                     refresh.notify_one();
                 }
                 self.frontend_project_sync_events(&client_id, context)
+            }
+            FrontendEvent::RetryWorkspaceStateLoad => {
+                spawn_workspace_projection_reload(
+                    &self.blocking_tasks,
+                    self.proxy.clone(),
+                    context.clone(),
+                    None,
+                );
+                Vec::new()
             }
             FrontendEvent::LoadRecoveryCenter { request_id } => {
                 self.load_recovery_center_events(context, &client_id, &request_id)
@@ -8880,6 +8935,9 @@ impl AppRuntime {
             FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(context),
             FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
+            FrontendEvent::LoadPmConversation { id } => {
+                self.load_pm_conversation_events(context, client_id, &id)
+            }
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
@@ -9128,7 +9186,7 @@ impl AppRuntime {
                 &branches,
                 delete_remote,
                 force_filesystem_delete,
-                operation_id.as_deref(),
+                &operation_id,
             ),
             FrontendEvent::RunWorkspaceCleanup {
                 branch,
@@ -9141,7 +9199,7 @@ impl AppRuntime {
                 &branch,
                 delete_remote,
                 force_filesystem_delete,
-                operation_id.as_deref(),
+                &operation_id,
             ),
             FrontendEvent::SyncBranchCleanup { id, operation_id } => {
                 self.sync_branch_cleanup_events(context, &client_id, &id, &operation_id)
@@ -10500,6 +10558,14 @@ impl AppRuntime {
         if let Some(event) = self.active_work_projection_reply(client_id, &context.tab_id) {
             events.insert(1, event);
         }
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::WorkspaceStateNotice {
+                notice: self
+                    .project_state(context)
+                    .and_then(|state| state.workspace_state_notice.clone()),
+            },
+        ));
         // SPEC-3431 FR-026: hydrate the PM settings panel on connect. Without
         // this a freshly loaded page shows the panel's built-in defaults until
         // some unrelated PM transition happens to broadcast.
@@ -11265,75 +11331,8 @@ impl AppRuntime {
             }
         }
         self.provider_usage_accounts = accounts;
-        self.hasten_provider_quota_reverifications(now);
         events.extend(self.sweep_provider_quota_candidates(now));
         events
-    }
-
-    /// Issue #4366 AC-5: a poller reading newer than a held provider's last
-    /// refused launch, and reading the account as usable, contradicts the
-    /// hold. The daemon is asked to give that provider its re-verification
-    /// launch now; the launch outcome, not the reading, decides the release.
-    fn hasten_provider_quota_reverifications(&self, now: chrono::DateTime<chrono::Utc>) {
-        let at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let mut project_roots: Vec<PathBuf> = Vec::new();
-        for tab in &self.tabs {
-            if tab.kind == gwt::ProjectKind::Git && !project_roots.contains(&tab.project_root) {
-                project_roots.push(tab.project_root.clone());
-            }
-        }
-        for project_root in project_roots {
-            let Ok(prefs) = gwt::load_issue_monitor_prefs(
-                &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
-            ) else {
-                continue;
-            };
-            // Only a hold whose re-verification is not yet due is hastened;
-            // every due one is left out whatever the pool offers.
-            let admission_holds = prefs.launch_admission_provider_quota_holds(&at, |_| true);
-            for (provider, evidence) in &prefs.provider_quota_hold_evidence {
-                if !admission_holds.contains_key(provider)
-                    || !gwt::issue_monitor::provider_reports_healthy_for_agent(
-                        provider,
-                        &self.provider_usage_accounts,
-                    )
-                {
-                    continue;
-                }
-                let reading_is_newer = self
-                    .provider_usage_accounts
-                    .iter()
-                    .filter(|account| {
-                        matches!(
-                            (&account.provider, provider.as_str()),
-                            (gwt_core::usage::UsageProvider::Codex, "codex")
-                                | (gwt_core::usage::UsageProvider::ClaudeCode, "claude")
-                        )
-                    })
-                    .filter_map(|account| account.fetched_at)
-                    .zip(
-                        chrono::DateTime::parse_from_rfc3339(&evidence.recorded_at)
-                            .ok()
-                            .map(|recorded| recorded.with_timezone(&chrono::Utc)),
-                    )
-                    .any(|(fetched, recorded)| fetched > recorded);
-                if !reading_is_newer {
-                    continue;
-                }
-                if let Err(error) = self.publish_issue_monitor_control(
-                    &project_root,
-                    serde_json::json!({
-                        "quota_hold_reverify": { "provider": provider, "at": at },
-                    }),
-                ) {
-                    tracing::debug!(
-                        error = %error,
-                        provider = %provider,
-                        "issue monitor quota re-verification publish failed (non-fatal)"
-                    );
-                }
-            }
-        }
     }
 
     #[cfg(test)]

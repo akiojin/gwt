@@ -154,7 +154,9 @@ pub fn proposals(
             "claude" => ("switch_provider", CLAUDE_NOTICE.to_owned()),
             _ => return None,
         };
-        Some(ResetProposal { provider: provider.clone(), reset_at: reset_at.clone(), action, message })
+        // Issue #4908 AC-3: a hold with no stated reset reads `unknown`.
+        let reset_at = crate::issue_monitor::provider_quota_reset_label(reset_at).to_owned();
+        Some(ResetProposal { provider: provider.clone(), reset_at, action, message })
     }).collect()
 }
 

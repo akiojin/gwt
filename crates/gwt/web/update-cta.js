@@ -265,6 +265,18 @@ export function createUpdateCtaController({
     }
     removeLegacyUpdateSurfaces();
     setVersionState(event.current, event.latest);
+    const previousVersion = pendingVersion || latestVersion;
+    if (event.latest && previousVersion && previousVersion !== event.latest) {
+      // Issue #4933: the authoritative target supersedes the staged release,
+      // including any open Restart action and its download progress.
+      pendingVersion = null;
+      lastProgress = null;
+      drainBlockers = [];
+      dismissedDrainVersion = null;
+      closeModal();
+      showAvailable(event.latest);
+      return;
+    }
     if (status === "applying" && latestVersion === event.latest) {
       return;
     }

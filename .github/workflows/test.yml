@@ -3,6 +3,14 @@ name: Test
 on:
   pull_request:
     branches: [develop, main]
+  # Issue #4872: develop lands through a GitHub merge queue. The queue re-tests
+  # each pull request on the latest base under this event, and a required
+  # check nobody reports for it stays pending forever, so every job here runs
+  # for the queue exactly as it does for a pull request. Pinned by
+  # crates/gwt/tests/ci_concurrency_contract_test.rs; the settings this pairs
+  # with are recorded in AGENTS.md ("Merge queue").
+  merge_group:
+    types: [checks_requested]
 
 # Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
 # update-branch `synchronize` starts a fresh run, and without this group the
@@ -35,19 +43,36 @@ jobs:
       # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
       # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
       flake_targets: ${{ steps.classify.outputs.flake_targets }}
+      verify_timings: ${{ steps.classify.outputs.verify_timings }}
     steps:
+      # Issue #4872: a merge group has no pull request number to ask the API
+      # about, so its files come from its own diff against the commit it was
+      # built on. `blob:none` keeps the full-history fetch to commits and
+      # trees, which is all `--name-only` reads.
+      - uses: actions/checkout@v7
+        if: github.event_name == 'merge_group'
+        with:
+          fetch-depth: 0
+          filter: blob:none
       - name: Classify changed files
         id: classify
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
-          files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            files=$(git diff --name-only --no-renames "$MERGE_GROUP_BASE" "$MERGE_GROUP_HEAD")
+          else
+            files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          fi
           # Documentation is Markdown anywhere plus docs/. Markdown the binaries
           # embed is code: CHANGELOG.md (include_str! in gwt-core) and
           # .claude/ + .codex/ (include_dir! in gwt-skills).
           docs_only=true
+          verify_timings=false
           flake_targets=""
           add_target() {
             case " $flake_targets " in
@@ -61,6 +86,9 @@ jobs:
               CHANGELOG.md|.claude/*|.codex/*) docs_only=false ;;
               docs/*|*.md) ;;
               *) docs_only=false ;;
+            esac
+            case "$file" in
+              .config/nextest.toml|.github/workflows/test.yml|scripts/ci_verify_timings.py|scripts/test_ci_verify_timings.py|crates/gwt/src/cli/verify_derivation.rs|crates/gwt/src/cli/verification_record*) verify_timings=true ;;
             esac
             case "$file" in
               crates/*/*) crate="${file#crates/}"; crate="${crate%%/*}" ;;
@@ -88,6 +116,7 @@ jobs:
           echo "flake_targets=$flake_targets"
           echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
           echo "flake_targets=$flake_targets" >>"$GITHUB_OUTPUT"
+          echo "verify_timings=$verify_timings" >>"$GITHUB_OUTPUT"
 
   test:
     name: Test (Rust workspace)
@@ -254,17 +283,21 @@ jobs:
   test-rust-required:
     name: Test (Rust)
     runs-on: ubuntu-latest
-    needs: [test, test-linux-infrastructure]
-    if: always()
+    needs: [test, test-linux-infrastructure, test-windows-verify-timings]
+    if: ${{ !cancelled() }}
     steps:
-      - name: Require both Rust verification jobs
+      - name: Require Rust verification and paired evidence
         env:
           RUST_RESULT: ${{ needs.test.result }}
           INFRA_RESULT: ${{ needs.test-linux-infrastructure.result }}
+          TIMINGS_RESULT: ${{ needs.test-windows-verify-timings.result }}
         run: |
           echo "Rust workspace: $RUST_RESULT; Linux infrastructure: $INFRA_RESULT"
           test "$RUST_RESULT" = success
           test "$INFRA_RESULT" = success
+          # This job skips only when the classifier explicitly reports no
+          # measurement surface. Classification failure runs it (fail closed).
+          case "$TIMINGS_RESULT" in success|skipped) ;; *) exit 1 ;; esac
 
   # SPEC #4551 T-055 / AC-6: one green run says nothing about a test whose
   # result is not a function of its source. All 16 issues this SPEC bundles
@@ -356,9 +389,50 @@ jobs:
           ~/.gwt/runtime/chroma-venv/bin/pip install --upgrade pip
           ~/.gwt/runtime/chroma-venv/bin/pip install -r crates/gwt-core/runtime/project_index_requirements.txt
       - name: Run ignored e2e tests with real e5 model
-        run: cargo test -p gwt-core --tests -- --ignored
+        run: cargo test -p gwt-core --test index_runner_spawn -- --ignored
         timeout-minutes: 30
         continue-on-error: true
+
+  # #4822: both schedules use the same complete derived gwt-lib selection,
+  # in one Windows job. This is not the #4877 dev-host wall-clock measurement.
+  test-windows-verify-timings:
+    name: Windows derived verification timings (paired)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.verify_timings != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: windows-workspace
+        continue-on-error: true
+      - name: Check paired evidence comparison
+        run: python -m unittest discover -s scripts -p test_ci_verify_timings.py
+      - name: Measure serial and grouped derived gwt-lib schedules
+        env:
+          GWT_TIMING_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/ci_verify_timings.py --output target/verify-timings
+        timeout-minutes: 90
+      - name: Upload both measurements even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-verify-timings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/verify-timings/
+          if-no-files-found: error
+          retention-days: 14
+        timeout-minutes: 5
 
   test-windows-rust:
     name: Test (Rust, Windows)

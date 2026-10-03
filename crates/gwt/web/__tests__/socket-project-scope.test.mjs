@@ -30,6 +30,7 @@ function fixture({ routeProjectKey = null } = {}) {
     agentCompletionNotifier: { reset() { context.notificationResetCount += 1; } },
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
     projectPageMetadata: { resetConnection() {} },
+    requestVisiblePmConversations() {}, pmChatViews: new Map(),
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
     opened, renderRouteNotFound() { context.notFoundRendered = true; },
@@ -40,6 +41,7 @@ function fixture({ routeProjectKey = null } = {}) {
       open: (...args) => { opened.push(args); return null; },
     },
     document: {},
+    droppedInputs: 0, connectionOverlay: { reportInputDropped() { context.droppedInputs += 1; } },
     clearTimeout() {}, clearPickerPending() {}, setConnectionState() {}, syncRunningBranchCleanups() {},
     createSocketReceiveDispatcher: ({ receive }) => ({ handle(event) { receive(JSON.parse(event.data)); } }),
     received: [], receive(event) { context.received.push(event); },
@@ -72,20 +74,24 @@ test("Hub bootstrap retains its catalog socket while selecting a project", () =>
   assert.equal(context.reconnectTimer, null, "stale close must not reset the new connection");
 });
 
-test("queued input waits for a matching socket and never crosses project switches", () => {
+test("offline input is discarded while queued control messages retain project scope", () => {
   const { context, sockets, select } = fixture();
   context.connectSocket();
   sockets[0].open();
   select("0123456789abcdef");
   context.send({ kind: "terminal_input", id: "pane-a", data: "a" });
+  context.send({ kind: "pane_send_input", session_id: "pane-a", text: "a" });
+  context.send({ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } });
   select("fedcba9876543210");
   context.send({ kind: "terminal_input", id: "pane-b", data: "b" });
+  context.send({ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } });
+  assert.equal(context.droppedInputs, 3, "every discarded input is surfaced immediately");
   assert.equal(sockets.length, 3);
   sockets[2].open();
-  assert.deepEqual(sockets[2].sent.filter((m) => m.kind === "terminal_input"), [{ kind: "terminal_input", id: "pane-b", data: "b" }]);
+  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } }]);
   select("0123456789abcdef");
   sockets[3].open();
-  assert.deepEqual(sockets[3].sent.filter((m) => m.kind === "terminal_input"), [{ kind: "terminal_input", id: "pane-a", data: "a" }]);
+  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } }]);
 });
 
 test("Hub socket refuses pane input before project scope is known", () => {

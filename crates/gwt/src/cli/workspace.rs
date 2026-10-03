@@ -1759,7 +1759,8 @@ fn run_projection_list_with_scan_root<F>(
 where
     F: Fn(&WorkspaceProjection) -> bool,
 {
-    let plan = classify_workspace_projections(scan_root, config, now, is_active_session);
+    let plan = classify_workspace_projections(scan_root, config, now, is_active_session)
+        .map_err(core_error)?;
     let filtered = filter_projection_list(&plan, stale, all);
     out.push_str(&format!(
         "# workspace projection list (mode: {}, count: {})\n",
@@ -1800,7 +1801,8 @@ fn run_projection_prune_with_scan_root<F>(
 where
     F: Fn(&WorkspaceProjection) -> bool,
 {
-    let plan = classify_workspace_projections(scan_root, config, now, is_active_session);
+    let plan = classify_workspace_projections(scan_root, config, now, is_active_session)
+        .map_err(core_error)?;
     let filtered: Vec<ClassifiedProjection> = if ids.is_empty() {
         plan
     } else {
@@ -7313,6 +7315,75 @@ pub(crate) mod tests {
             before_retry,
             "continued Session retry must not duplicate the Claim event"
         );
+
+        // Restart/intake reloads a repository-wide projection whose selected
+        // Work may belong to another pane. It must retain this Session's
+        // strict authority through update and canonical verification.
+        let current_path = gwt_workspace_projection_path_for_repo_path(&project_root);
+        let mut reloaded = load_workspace_projection_from_path(&current_path)
+            .expect("reload shared projection")
+            .expect("shared projection");
+        reloaded.id = "work-selected-in-another-pane".to_string();
+        gwt_core::workspace_projection::save_workspace_projection_to_path(&current_path, &reloaded)
+            .expect("persist another selected Work");
+        drop(reloaded);
+        gwt_core::workspace_projection::repair_resume_owner_bleed_paths(
+            &gwt_workspace_work_items_path_for_repo_path(&project_root),
+            &current_path,
+            Utc::now(),
+        )
+        .expect("restart intake repair");
+        let session = gwt_agent::Session::load_and_migrate(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{current_session}.toml")),
+        )
+        .expect("reload durable Session");
+        let update = crate::agent_project_state::apply_bound_authenticated_workspace_update(
+            &project_root,
+            current_session,
+            session
+                .execution_binding
+                .as_ref()
+                .expect("execution binding"),
+            crate::AgentWorkspaceUpdateRequest {
+                schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: current_session.to_string(),
+                observation: crate::observe_agent_runtime(&worktree).expect("runtime observation"),
+                intent: crate::AgentWorkspaceUpdateIntent {
+                    summary: Some("Continued Session survives restart intake".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("workspace.update after reload");
+        assert_eq!(update.work_id, work_id);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            current_session,
+        );
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                commands: Vec::new(),
+                derive: true,
+            }),
+        )
+        .expect("verify.plan after reload");
+        assert_eq!(code, 0, "{output}");
+        let plan = crate::cli::verification_record::load_plan(&worktree)
+            .expect("load verification plan")
+            .expect("verification plan");
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands: plan.commands,
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            }),
+        )
+        .expect("verify.run after reload");
+        assert_eq!(code, 0, "{output}");
     }
 
     #[test]

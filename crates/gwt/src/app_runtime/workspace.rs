@@ -67,20 +67,29 @@ pub(super) fn active_agent_summary_from_session(
 pub(super) fn workspace_projection_owner_title(
     project_root: &Path,
     branch_name: Option<&str>,
-) -> Option<String> {
-    let branch_name = branch_name?.trim();
-    if branch_name.is_empty() {
-        return None;
+) -> gwt_core::error::Result<Option<String>> {
+    let Some(branch_name) = branch_name
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(projection) = gwt_core::workspace_projection::load_workspace_projection(project_root)?
+    else {
+        return Ok(None);
+    };
+    let projection_branch = projection
+        .git_details
+        .as_ref()
+        .and_then(|details| details.branch.as_deref())
+        .map(str::trim);
+    if projection_branch != Some(branch_name) {
+        return Ok(None);
     }
-    let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
-        .ok()
-        .flatten()?;
-    let projection_branch = projection.git_details.as_ref()?.branch.as_deref()?.trim();
-    if projection_branch != branch_name {
-        return None;
-    }
-    let owner = projection.owner?.trim().to_string();
-    (!owner.is_empty()).then_some(owner)
+    Ok(projection
+        .owner
+        .map(|owner| owner.trim().to_string())
+        .filter(|owner| !owner.is_empty()))
 }
 
 pub(super) fn merge_active_sessions_into_projection<'a>(
@@ -466,7 +475,7 @@ pub(super) struct WorkspaceCleanupAsyncTask {
     pub(super) project_root: PathBuf,
     pub(super) active_session_branches: std::collections::HashSet<String>,
     pub(super) branch: String,
-    pub(super) operation_id: Option<String>,
+    pub(super) operation_id: String,
     pub(super) operations: Arc<BranchCleanupOperationStore>,
     pub(super) options: BranchCleanupOptions,
 }
@@ -479,7 +488,7 @@ struct BranchCleanupAsyncTask {
     project_root: PathBuf,
     active_session_branches: std::collections::HashSet<String>,
     branches: Vec<String>,
-    operation_id: Option<String>,
+    operation_id: String,
     operations: Arc<BranchCleanupOperationStore>,
     options: BranchCleanupOptions,
 }
@@ -513,7 +522,7 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                             // reconnected mid-cleanup still receives progress.
                             progress_operations.record_progress(
                                 WORKSPACE_CLEANUP_EVENT_ID,
-                                progress_operation_id.as_deref(),
+                                &progress_operation_id,
                                 &progress,
                             );
                             progress_proxy.send(UserEvent::ProjectDispatch {
@@ -534,11 +543,7 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                             });
                         },
                     );
-                    operations.record_result(
-                        WORKSPACE_CLEANUP_EVENT_ID,
-                        operation_id.as_deref(),
-                        &results,
-                    );
+                    operations.record_result(WORKSPACE_CLEANUP_EVENT_ID, &operation_id, &results);
                     let mut events = vec![OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::BranchCleanupResult {
@@ -656,7 +661,7 @@ fn branch_cleanup_snapshot_event(
         gwt::BranchCleanupOperationSnapshot::Progress(progress) => {
             BackendEvent::BranchCleanupProgress {
                 id: id.to_string(),
-                operation_id: Some(operation_id.to_string()),
+                operation_id: operation_id.to_string(),
                 branch: progress.branch,
                 execution_branch: progress.execution_branch,
                 index: progress.index,
@@ -667,7 +672,7 @@ fn branch_cleanup_snapshot_event(
         }
         gwt::BranchCleanupOperationSnapshot::Result(results) => BackendEvent::BranchCleanupResult {
             id: id.to_string(),
-            operation_id: Some(operation_id.to_string()),
+            operation_id: operation_id.to_string(),
             results,
         },
     }
@@ -704,7 +709,7 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
                             // reconnected mid-cleanup still receives progress.
                             progress_operations.record_progress(
                                 &progress_window_id,
-                                progress_operation_id.as_deref(),
+                                &progress_operation_id,
                                 &progress,
                             );
                             progress_proxy.send(UserEvent::ProjectDispatch {
@@ -725,7 +730,7 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
                             });
                         },
                     );
-                    operations.record_result(&window_id, operation_id.as_deref(), &results);
+                    operations.record_result(&window_id, &operation_id, &results);
                     let mut events = vec![OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::BranchCleanupResult {
@@ -775,6 +780,89 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
 }
 
 impl AppRuntime {
+    /// A cached rail refresh cannot prove that an unreadable works.json has
+    /// recovered: file permissions are not part of its cache signature.
+    pub(crate) fn recheck_workspace_state_after_projection(
+        &self,
+        project_root: &Path,
+        imported_from: Option<PathBuf>,
+    ) {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return;
+        };
+        let pending = self.project_state(&context).is_some_and(|state| {
+            state
+                .workspace_state_notice
+                .as_ref()
+                .is_some_and(|notice| notice.kind == gwt::WorkspaceStateNoticeKind::LoadError)
+        });
+        if pending || imported_from.is_some() {
+            crate::spawn_workspace_projection_reload(
+                &self.blocking_tasks,
+                self.proxy.clone(),
+                context,
+                imported_from,
+            );
+        }
+    }
+
+    pub(crate) fn handle_workspace_state_load_failed(
+        &mut self,
+        project_root: &Path,
+        error: gwt_core::WorkspaceStateLoadError,
+    ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
+        tracing::warn!(path = %error.path.display(), error = %error.message, "workspace state load failed");
+        let notice = gwt::WorkspaceStateNoticeView {
+            path: error.path.display().to_string(),
+            message: error.message,
+            kind: gwt::WorkspaceStateNoticeKind::LoadError,
+        };
+        self.project_state_mut(&context)
+            .expect("current project")
+            .workspace_state_notice = Some(notice.clone());
+        vec![OutboundEvent::project(
+            context.project_key,
+            BackendEvent::WorkspaceStateNotice {
+                notice: Some(notice),
+            },
+        )]
+    }
+
+    pub(crate) fn handle_workspace_state_loaded(
+        &mut self,
+        project_root: &Path,
+        imported_from: Option<PathBuf>,
+    ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
+        let state = self.project_state_mut(&context).expect("current project");
+        let recovered = state
+            .workspace_state_notice
+            .as_ref()
+            .is_some_and(|notice| notice.kind == gwt::WorkspaceStateNoticeKind::LoadError);
+        if imported_from.is_none() && !recovered {
+            return Vec::new();
+        }
+        let notice = imported_from.map(|path| gwt::WorkspaceStateNoticeView {
+            path: path.display().to_string(),
+            message: "旧配置から取り込みました。元のファイルは保持されています。".to_string(),
+            kind: gwt::WorkspaceStateNoticeKind::LegacyImported,
+        });
+        state.workspace_state_notice = notice.clone();
+        if recovered {
+            self.spawn_work_events_ingest(project_root.to_path_buf(), true);
+            let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
+        }
+        vec![OutboundEvent::project(
+            context.project_key,
+            BackendEvent::WorkspaceStateNotice { notice },
+        )]
+    }
+
     pub(crate) fn run_branch_cleanup_events(
         &self,
         client_id: &str,
@@ -782,7 +870,7 @@ impl AppRuntime {
         branches: &[String],
         delete_remote: bool,
         force_filesystem_delete: bool,
-        operation_id: Option<&str>,
+        operation_id: &str,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -836,7 +924,7 @@ impl AppRuntime {
                 project_root: tab.project_root.clone(),
                 active_session_branches: self.active_session_branches_for_tab(&address.tab_id),
                 branches: branches.to_vec(),
-                operation_id: operation_id.map(str::to_string),
+                operation_id: operation_id.to_string(),
                 operations: state.branch_cleanup_operations.clone(),
                 options: BranchCleanupOptions {
                     delete_remote,
@@ -854,7 +942,7 @@ impl AppRuntime {
         branch: &str,
         delete_remote: bool,
         force_filesystem_delete: bool,
-        operation_id: Option<&str>,
+        operation_id: &str,
     ) -> Vec<OutboundEvent> {
         let tab_id = &context.tab_id;
         let Some(tab) = self.tab(tab_id) else {
@@ -877,7 +965,7 @@ impl AppRuntime {
                 project_root: tab.project_root.clone(),
                 active_session_branches: self.active_session_branches_for_tab(tab_id),
                 branch: branch.to_string(),
-                operation_id: operation_id.map(str::to_string),
+                operation_id: operation_id.to_string(),
                 operations: state.branch_cleanup_operations.clone(),
                 options: BranchCleanupOptions {
                     delete_remote,

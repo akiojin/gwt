@@ -132,6 +132,14 @@ pub struct ClientRef<'a, C: IssueClient> {
 }
 
 impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<gwt_github::client::LabelAssignment>, gwt_github::client::ApiError> {
+        self.inner.fetch_label_assignment(number, label)
+    }
+
     fn fetch(
         &self,
         number: IssueNumber,

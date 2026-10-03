@@ -38,47 +38,21 @@ impl LaunchWizardState {
             ));
         }
 
-        // SPEC-1921 FR-090 (2026-05-18 amendment) / T295: when a saved
-        // Quick Start entry recorded `AgentId::Custom("<old-id>")` for a
-        // legacy `ClaudeCodeOpenaiCompat` preset that has since been
-        // migrated to `[builtinAgents.claudeCode.backends.<old-id>]`, the
-        // wizard MUST relaunch through the built-in Claude Code path with
-        // the matching backend profile attached. The remap is transparent
-        // to the caller; no UI prompt is shown.
-        let raw_agent_id = agent_id_from_key(&selected_agent.id);
-        let config_path = gwt_core::paths::gwt_config_path();
-        let remap_backend_id = if let gwt_agent::AgentId::Custom(_) = &raw_agent_id {
-            gwt_agent::resolve_legacy_backend_remap(&raw_agent_id, &config_path)
-        } else {
-            None
-        };
-        let (agent_id, backend_profile) = if let Some(backend_id) = remap_backend_id {
-            let profile = gwt_agent::load_backends_for_agent(
-                &config_path,
-                gwt_agent::BuiltinAgentId::ClaudeCode,
-            )
-            .ok()
-            .and_then(|profiles| profiles.into_iter().find(|p| p.id == backend_id));
-            match profile {
-                Some(profile) => (gwt_agent::AgentId::ClaudeCode, Some(profile)),
-                None => (raw_agent_id, None),
-            }
-        } else {
-            (raw_agent_id, None)
-        };
-
+        let agent_id = agent_id_from_key(&selected_agent.id);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
-        // FR-090: drop the legacy `selected_agent.custom_agent` when remap
-        // succeeded — the launch is now a built-in Claude Code with backend
-        // profile, not a Custom Coding Agent.
-        match (&backend_profile, selected_agent.custom_agent) {
-            (Some(profile), _) => {
-                builder = builder.backend_profile(profile.clone());
+        if let Some(custom_agent) = selected_agent.custom_agent {
+            // #4825: the old backend row migration was never wired into
+            // startup. Keep the stored row readable and require explicit
+            // registration instead of silently launching or rewriting it.
+            if custom_agent.command == "@anthropic-ai/claude-code@latest"
+                && custom_agent.env.contains_key("ANTHROPIC_BASE_URL")
+            {
+                return Err(
+                    "旧 backend 設定は自動移行されません。Settings で provider を再登録してください"
+                        .to_string(),
+                );
             }
-            (None, Some(custom_agent)) => {
-                builder = builder.custom_agent(custom_agent);
-            }
-            (None, None) => {}
+            builder = builder.custom_agent(custom_agent);
         }
 
         if !self.is_new_branch {
@@ -915,8 +889,6 @@ mod tests {
         assert_eq!(view.selected_agent_id, "claude");
         assert!(view.show_fast_mode);
         assert!(view.fast_mode);
-        assert!(!view.show_codex_fast_mode);
-        assert!(!view.codex_fast_mode);
         assert!(view
             .launch_summary
             .iter()
@@ -1825,6 +1797,29 @@ mod tests {
         let config = state.build_launch_config().expect("config");
 
         assert_eq!(config.linked_issue_number, Some(1234));
+    }
+
+    #[test]
+    fn legacy_backend_requires_manual_registration_without_changing_config() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let fixture = include_str!("../../playwright/fixtures/legacy-backend-config.toml");
+        std::fs::write(&path, fixture).expect("write pre-floor fixture");
+        let agents = gwt_agent::load_custom_agents_from_path(&path).expect("read legacy data");
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            build_agent_options(Vec::new(), &gwt_agent::VersionCache::new(), agents),
+            Vec::new(),
+        );
+        state.set_agent_id("legacy-cc");
+
+        assert_eq!(
+            state
+                .build_launch_config()
+                .expect_err("manual registration required"),
+            "旧 backend 設定は自動移行されません。Settings で provider を再登録してください"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), fixture);
     }
 
     #[test]

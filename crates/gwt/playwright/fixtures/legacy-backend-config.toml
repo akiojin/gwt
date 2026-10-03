@@ -1,0 +1,10 @@
+[tools.customCodingAgents.legacy-cc]
+id = "legacy-cc"
+displayName = "Legacy Claude Code"
+agentType = "bunx"
+command = "@anthropic-ai/claude-code@latest"
+
+[tools.customCodingAgents.legacy-cc.env]
+ANTHROPIC_BASE_URL = "https://example.invalid/v1"
+ANTHROPIC_API_KEY = "fixture-key"
+ANTHROPIC_DEFAULT_OPUS_MODEL = "fixture-model"

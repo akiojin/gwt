@@ -256,3 +256,94 @@ async function waitForNewClaudeWindow(page: Page, beforeIds: string[]) {
     .then((handle) => handle.jsonValue());
   return page.locator(`.workspace-window[data-id="${id}"]`);
 }
+
+
+test("Codex Fast mode uses current fields after an older View tab reloads", async ({ page }, testInfo) => {
+  test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set");
+  test.setTimeout(120_000);
+  page.setDefaultTimeout(30_000);
+  const release = await acquireLiveGwtBackendLock(BASE, testInfo);
+  let cleanup: (() => Promise<void>) | undefined;
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(String(error)));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  try {
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await openLiveGwtProject(page);
+    await clearLiveLaunchWizard(page);
+    const theme = testInfo.project.use.colorScheme === "light" ? "light" : "dark";
+    await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    cleanup = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    // Opening is asynchronous; do not send a setup action before the wizard exists.
+    await expect(page.locator("#wizard-modal")).toBeVisible({ timeout: 30_000 });
+    await chooseConfigureAndStart(page);
+    await selectWizardAgent(page, "codex");
+    const latestView = () => page.evaluate(() => {
+      const messages = (window as any).__gwtPlaywrightMessages || [];
+      return [...messages].reverse().find((entry: any) =>
+        entry.payload?.kind === "launch_wizard_state" && entry.payload.wizard
+      )?.payload.wizard;
+    });
+    const fastMode = page.locator("#wizard-modal").getByLabel("Use the agent's Fast mode", { exact: true });
+    await expect(fastMode).toBeVisible();
+    // Saved Codex preferences may already enable Fast mode; exercise a real
+    // transition before capturing the authoritative backend view.
+    await fastMode.setChecked(false);
+    await blurActiveElement(page);
+    await expect.poll(async () => (await latestView())?.fast_mode).toBe(false);
+    await fastMode.setChecked(true);
+    await blurActiveElement(page);
+    await expect(fastModeSummaryValue(page)).toHaveText("on");
+    await expect.poll(async () => (await latestView())?.fast_mode).toBe(true);
+    const current = await latestView();
+    expect(current).toMatchObject({ selected_agent_id: "codex", show_fast_mode: true, fast_mode: true });
+    expect(current).not.toHaveProperty("show_codex_fast_mode");
+    expect(current).not.toHaveProperty("codex_fast_mode");
+    await page.evaluate((wizard) => {
+      const older = { ...wizard, show_codex_fast_mode: true, codex_fast_mode: true };
+      delete older.show_fast_mode;
+      delete older.fast_mode;
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "launch_wizard_state", wizard: older },
+      }));
+    }, current);
+    await expect(fastMode).toHaveCount(0);
+    await page.reload();
+    // gotoLiveGwt's init script reinstalls capture on reload. Its fresh buffer
+    // must receive the live backend view, not the page-local injected payload.
+    await expect.poll(latestView).toMatchObject({
+      selected_agent_id: "codex", show_fast_mode: true, fast_mode: true,
+    });
+    await expect(fastMode).toBeVisible();
+    await expect(fastMode).toBeChecked();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const reloaded = await latestView();
+    expect(reloaded).toMatchObject({ show_fast_mode: true, fast_mode: true });
+    expect(reloaded).not.toHaveProperty("show_codex_fast_mode");
+    expect(reloaded).not.toHaveProperty("codex_fast_mode");
+    await fastMode.setChecked(false);
+    await blurActiveElement(page);
+    // Reload hydration can delay the action response on a busy backend.
+    await expect.poll(async () => (await latestView())?.fast_mode, { timeout: 30_000 }).toBe(false);
+    await expect(fastModeSummaryValue(page)).toHaveText("off");
+    expect(errors).toEqual([]);
+  } finally {
+    try {
+      try {
+        await sendLiveGwtEvent(page, {
+          kind: "launch_wizard_action",
+          action: { kind: "cancel" },
+          bounds: null,
+        });
+        await expect(page.locator("#wizard-modal")).toBeHidden({ timeout: 30_000 });
+      } finally {
+        await cleanup?.();
+      }
+    } finally {
+      await release();
+    }
+  }
+});

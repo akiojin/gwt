@@ -14,6 +14,11 @@
 //! path filter that keeps docs-only changes off the heavy Windows jobs and the
 //! WebView E2E job. These tests pin both, plus the property that the filter
 //! never touches a required status check.
+//!
+//! Issue #4872 removes the cause rather than containing it: develop lands
+//! through a GitHub merge queue, so a merge no longer sends every other PR
+//! back through update-branch. The queue only works if the same workflows
+//! report under `merge_group`, which the tests below pin as well.
 
 use serde_yaml::Value;
 use std::fs;
@@ -200,6 +205,86 @@ fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
         );
     }
     assert!(checked >= 5, "expected the PR workflows (test, build, lint, auto-merge, pr-source-check), found {checked}");
+}
+
+/// Whether the workflow's `pull_request` trigger targets `develop`.
+fn gates_develop_pull_requests(doc: &Value) -> bool {
+    triggers(doc)
+        .get("pull_request")
+        .and_then(|event| event.get("branches"))
+        .and_then(Value::as_sequence)
+        .is_some_and(|branches| branches.iter().any(|b| b.as_str() == Some("develop")))
+}
+
+/// Issue #4872: develop lands through a GitHub merge queue, which re-tests each
+/// pull request on the latest base under a `merge_group` event. A required
+/// check that no workflow reports for that event stays pending forever and
+/// nothing lands, so every workflow that gates a develop pull request must run
+/// for the queue too — and no job in it may be conditioned on the
+/// `pull_request` event alone, because a job skipped that way reports Success
+/// and the queue would land a change the check never looked at.
+#[test]
+fn develop_pull_request_workflows_also_run_for_the_merge_queue() {
+    let mut checked = 0;
+    for (name, doc) in workflows() {
+        if !gates_develop_pull_requests(&doc) {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            triggers(&doc).get("merge_group").is_some(),
+            "{name}: a workflow that gates develop pull requests must also trigger on `merge_group`"
+        );
+        for (id, body) in jobs(&doc) {
+            let id = id.as_str().expect("job ids are strings");
+            let condition = condition(body);
+            assert!(
+                !condition.contains("github.event_name") || condition.contains("merge_group"),
+                "{name}: job `{id}` is limited by event name and skips the merge queue, got {condition:?}"
+            );
+        }
+    }
+    assert!(
+        checked >= 3,
+        "expected the develop PR workflows (test, build, lint), found {checked}"
+    );
+}
+
+/// Issue #4872: a merge group has no pull request number, so the classifier
+/// cannot ask the pulls API which files changed. Without its own source the
+/// step fails on every queue run and the jobs that read its outputs stop
+/// meaning what they mean on a pull request — the flake job would never run in
+/// the queue at all. The group's files come from its diff against the commit
+/// it was built on.
+#[test]
+fn the_changed_file_classifier_reads_a_merge_group_from_its_own_diff() {
+    let doc = workflow(TEST_WORKFLOW);
+    let step = job(&doc, CHANGES_JOB)
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .and_then(|steps| {
+            steps
+                .iter()
+                .find(|step| step.get("id").and_then(Value::as_str) == Some("classify"))
+        })
+        .unwrap_or_else(|| {
+            panic!("{TEST_WORKFLOW}: `{CHANGES_JOB}` must keep the `classify` step")
+        });
+    let env = serde_yaml::to_string(step.get("env").unwrap_or(&Value::Null)).unwrap_or_default();
+    for sha in [
+        "github.event.merge_group.base_sha",
+        "github.event.merge_group.head_sha",
+    ] {
+        assert!(
+            env.contains(sha),
+            "{TEST_WORKFLOW}: the `classify` step must receive `{sha}`"
+        );
+    }
+    let script = step.get("run").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        script.contains("merge_group") && script.contains("git diff --name-only"),
+        "{TEST_WORKFLOW}: the `classify` step must diff the merge group instead of asking for a PR's files"
+    );
 }
 
 /// A release run creates a tag and uploads assets; cancelling it half-way

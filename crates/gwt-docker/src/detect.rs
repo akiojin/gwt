@@ -996,7 +996,7 @@ esac
             let script_path = dir.join("docker.cmd");
             std::fs::write(
                 &script_path,
-                "@echo off\r\nif \"%1\"==\"compose\" (\r\n  echo docker: unknown command: docker compose 1>&2\r\n  exit /b 1\r\n)\r\nexit /b 0\r\n",
+                "@echo off\r\nif \"%~1\"==\"compose\" (\r\n  echo docker: unknown command: docker compose 1>&2\r\n  exit /b 1\r\n)\r\nexit /b 0\r\n",
             )
             .expect("write fake docker");
             script_path

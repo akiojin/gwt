@@ -52,6 +52,7 @@ const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
 pub mod headed_e2e;
 pub mod interruption;
+pub mod nextest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationCommandResult {
@@ -63,6 +64,9 @@ pub struct VerificationCommandResult {
     /// Measured by the command-local Playwright reporter, never by PR prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headed_e2e: Option<headed_e2e::HeadedE2eEvidence>,
+    /// Fresh command-local JUnit artifact and measured slowest tests (#4822).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nextest: Option<nextest::NextestEvidence>,
     /// The signal that killed the command from outside (Issue #4528). Such a
     /// command reports `exit_code: -1` like a spawn failure does, but it says
     /// nothing about the code under test, so it is counted apart from FAIL.
@@ -3650,14 +3654,48 @@ where
             .then(headed_e2e::Capture::new)
             .transpose()
             .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
-        let (exit_code, terminated_by_signal, mut tail) = execute_command_with_isolation(
+        let args = split_command_line(command)?;
+        let nextest_capture = (args.starts_with(&["cargo".into(), "nextest".into(), "run".into()])
+            && args
+                .windows(2)
+                .any(|args| args == ["--profile", "gwt-verify"]))
+        .then(|| nextest::Capture::new(worktree))
+        .transpose()?;
+        let execution_command = match &nextest_capture {
+            Some(capture) => format!("{command} --config-file \"{}\"", capture.arguments()[1]),
+            None => command.clone(),
+        };
+        let (mut exit_code, terminated_by_signal, mut tail) = execute_command_with_isolation(
             worktree,
-            command,
+            &execution_command,
             false,
             capture.as_ref(),
             &options.host,
             options.command_progress,
         )?;
+        let nextest = nextest_capture
+            .as_ref()
+            .and_then(|capture| match capture.evidence() {
+                Ok(evidence) => {
+                    tail.push_str("\n--- nextest: 20 slowest tests (seconds) ---\n");
+                    for test in &evidence.slowest {
+                        tail.push_str(&format!(
+                            "{} {}::{}\n",
+                            test.duration_seconds, test.classname, test.name
+                        ));
+                    }
+                    Some(evidence)
+                }
+                Err(error) => {
+                    tail.push_str(&format!(
+                        "\nnextest JUnit evidence missing or invalid: {error}\n"
+                    ));
+                    if exit_code == 0 {
+                        exit_code = -1;
+                    }
+                    None
+                }
+            });
         let headed_e2e = capture.as_ref().map(|capture| {
             capture.evidence().unwrap_or(headed_e2e::HeadedE2eEvidence {
                 chromium_dark_passed: 0,
@@ -3689,6 +3727,7 @@ where
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
             headed_e2e,
+            nextest,
             terminated_by_signal,
         });
         running.commands = results.clone();
@@ -5336,6 +5375,7 @@ pub(crate) mod tests {
             verified_head: None,
             commands: vec![VerificationCommandResult {
                 headed_e2e: None,
+                nextest: None,
                 terminated_by_signal: None,
                 command: "git --version".to_string(),
                 exit_code: 0,
@@ -6302,6 +6342,7 @@ mod tests {
             exit_code,
             output_tail: String::new(),
             headed_e2e: None,
+            nextest: None,
             terminated_by_signal,
         };
         let interrupted = [result(0, None), result(-1, Some(9))];
@@ -6390,6 +6431,7 @@ mod tests {
             verified_head: None,
             commands: vec![VerificationCommandResult {
                 headed_e2e: None,
+                nextest: None,
                 terminated_by_signal: None,
                 command: "git --version".to_string(),
                 exit_code: 0,

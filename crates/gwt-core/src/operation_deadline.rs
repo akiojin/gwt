@@ -156,6 +156,17 @@ impl NamedFileLock {
         Ok(Self::record(file, holder_path, operation))
     }
 
+    /// Like [`Self::acquire`] for a lock that is contended as a matter of
+    /// course (Issue #4850: the workspace Work items lock, taken by every
+    /// Work transaction): ordinary contention is not logged, only a failed
+    /// acquisition is — and that failure still names the observed holder.
+    pub fn acquire_quiet(path: &Path, operation: &str) -> io::Result<Self> {
+        let file = open_named_lock(path)?;
+        let holder_path = named_lock_holder_path(path);
+        lock_exclusive(&file).map_err(|error| named_lock_error(&holder_path, operation, error))?;
+        Ok(Self::record(file, holder_path, operation))
+    }
+
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.
     pub fn try_acquire(path: &Path, operation: &str) -> io::Result<Self> {
         let file = open_named_lock(path)?;
@@ -408,6 +419,39 @@ mod tests {
         let next = NamedFileLock::try_acquire(&path, "next").expect("released lock is available");
         drop(next);
         assert!(!holder_path.exists(), "drop clears metadata");
+    }
+
+    /// Issue #4850: the quiet acquisition names the holder on a deadline
+    /// failure exactly like the loud one, and records its own holder metadata.
+    #[test]
+    fn named_file_lock_quiet_acquisition_names_the_holder_when_the_deadline_expires() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("works.lock");
+        let owner = NamedFileLock::acquire_quiet(&path, "workspace work items").expect("owner");
+        let contender_path = path.clone();
+        std::thread::spawn(move || {
+            // An already-expired deadline on the fixed operation clock: the
+            // contender is refused on its first poll, so nothing here waits
+            // on wall time.
+            let start = Instant::now();
+            let _clock = ScopedOperationClock::set(start);
+            let _deadline = ScopedOperationDeadline::enter(start);
+            let error = NamedFileLock::acquire_quiet(&contender_path, "pr.edit metadata")
+                .expect_err("contended lock must time out");
+            assert!(is_deadline_expired(&error), "{error}");
+            let message = error.to_string();
+            assert!(message.contains("workspace work items"), "{message}");
+            assert!(
+                message.contains(&format!("pid={}", std::process::id())),
+                "{message}"
+            );
+            assert!(message.contains("acquired_at="), "{message}");
+            assert!(message.contains("operation=pr.edit metadata"), "{message}");
+        })
+        .join()
+        .unwrap();
+        owner.unlock().expect("unlock");
+        assert!(!named_lock_holder_path(&path).exists());
     }
 
     #[test]

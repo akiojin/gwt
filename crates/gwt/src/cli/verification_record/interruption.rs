@@ -265,6 +265,29 @@ pub(super) fn checkpoint(worktree: &Path, record: &VerificationRunRecord) -> io:
 mod tests {
     use super::*;
 
+    /// The trusted store resolves under the gwt home, which sibling tests move
+    /// by rewriting HOME / USERPROFILE under the env lock. A run whose save and
+    /// settlement straddle such a move leaves an unsettled Running record
+    /// behind in the other home, and the next run refuses admission. Pin this
+    /// thread's home instead of reading the process environment.
+    struct IsolatedWorktree {
+        dir: tempfile::TempDir,
+        _home_guard: gwt_core::test_support::ScopedGwtHome,
+        _home: tempfile::TempDir,
+    }
+
+    fn isolated_git_worktree() -> IsolatedWorktree {
+        let home = tempfile::tempdir().unwrap();
+        let home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        IsolatedWorktree {
+            dir,
+            _home_guard: home_guard,
+            _home: home,
+        }
+    }
+
     // Exercise the authenticated transition directly: no live process is killed.
     fn simulate_external_termination(worktree: &Path) {
         let result = super::super::run_verification_inner(
@@ -282,13 +305,17 @@ mod tests {
                 settle_interrupted(worktree, &record.record_id, token, false).unwrap();
             },
         );
-        assert!(result.unwrap_err().contains("replaced or interrupted"));
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("replaced or interrupted"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn dead_runner_without_watchdog_recovers_without_resetting_retry_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let fixture = isolated_git_worktree();
+        let dir = &fixture.dir;
         let token = "0123456789abcdef0123456789abcdef";
         let mut record = super::super::tests::passing_record("sess-retry", "unused");
         record.verified_head = super::super::current_head_sha(dir.path()).ok();
@@ -340,8 +367,8 @@ mod tests {
 
     #[test]
     fn unsettled_runner_cannot_be_replaced_before_watchdog_records_second_death() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let fixture = isolated_git_worktree();
+        let dir = &fixture.dir;
         let token = "0123456789abcdef0123456789abcdef";
         let mut running = super::super::tests::passing_record("sess-retry", "unused");
         running.verified_head = super::super::current_head_sha(dir.path()).ok();
@@ -387,8 +414,8 @@ mod tests {
 
     #[test]
     fn two_external_terminations_refuse_third_run_on_same_head() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let fixture = isolated_git_worktree();
+        let dir = &fixture.dir;
         simulate_external_termination(dir.path());
         // Changing uncommitted inputs cannot buy another attempt at this HEAD.
         std::fs::write(dir.path().join("changed.txt"), "changed").unwrap();

@@ -106,6 +106,50 @@ test("agent fullscreen wheel fallback does not steal normal xterm scrollback", (
   fixture.dispose();
 });
 
+// Issue #4909 AC-6: Codex enables mouse tracking, so xterm already forwards
+// the wheel as mouse events; a synthesized PageUp opens its transcript
+// overlay and sends later keystrokes to Find.
+test("agent fullscreen wheel fallback stays silent while the application tracks the mouse", () => {
+  for (const mouseTrackingMode of ["any", "vt200"]) {
+    const fixture = mountFixture({
+      isWindowsHost: () => false,
+      applicationScrollFallback: true,
+      terminalOptions: {
+        buffer: { active: { baseY: 0 } },
+        modes: { mouseTrackingMode },
+      },
+    });
+    const event = wheelEvent(fixture.window, { deltaY: -96 });
+
+    fixture.terminalRoot.dispatchEvent(event);
+
+    assert.equal(event.defaultPrevented, false, `${mouseTrackingMode} wheel must reach xterm`);
+    assert.deepEqual(fixture.inputCalls, [], `${mouseTrackingMode} must not send PageUp`);
+    assert.deepEqual(fixture.scrollCalls, []);
+    assert.equal(fixture.bubbledWheelCount, 1);
+    fixture.dispose();
+  }
+});
+
+test("agent fullscreen wheel fallback still sends PageUp when mouse tracking is off", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    terminalOptions: {
+      buffer: { active: { baseY: 0 } },
+      modes: { mouseTrackingMode: "none" },
+    },
+  });
+  const event = wheelEvent(fixture.window, { deltaY: -96 });
+
+  fixture.terminalRoot.dispatchEvent(event);
+
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual(fixture.inputCalls, [APPLICATION_SCROLL_PAGE_UP]);
+  assert.equal(fixture.bubbledWheelCount, 0);
+  fixture.dispose();
+});
+
 test("dispose removes the terminal wheel listener", () => {
   const fixture = mountFixture({ isWindowsHost: () => true });
   fixture.dispose();
@@ -161,6 +205,41 @@ test("applicationScrollInputForWheel only emits fallback input for plain wheel w
       { terminal: { buffer: { active: { baseY: 5 } } }, enabled: true },
     ),
     null,
+  );
+});
+
+test("applicationScrollInputForWheel defers to applications that track the mouse", () => {
+  for (const mouseTrackingMode of ["any", "vt200", "x10", "drag"]) {
+    assert.equal(
+      applicationScrollInputForWheel(
+        wheelEvent(null, { deltaY: -1 }),
+        {
+          terminal: { buffer: { active: { baseY: 0 } }, modes: { mouseTrackingMode } },
+          enabled: true,
+        },
+      ),
+      null,
+      `${mouseTrackingMode} must not synthesize PageUp`,
+    );
+  }
+  assert.equal(
+    applicationScrollInputForWheel(
+      wheelEvent(null, { deltaY: -1 }),
+      {
+        terminal: { buffer: { active: { baseY: 0 } }, modes: { mouseTrackingMode: "none" } },
+        enabled: true,
+      },
+    ),
+    APPLICATION_SCROLL_PAGE_UP,
+  );
+  // Terminals without xterm's public `modes` (older builds, test doubles)
+  // keep the previous behaviour.
+  assert.equal(
+    applicationScrollInputForWheel(
+      wheelEvent(null, { deltaY: 1 }),
+      { terminal: { buffer: { active: { baseY: 0 } } }, enabled: true },
+    ),
+    APPLICATION_SCROLL_PAGE_DOWN,
   );
 });
 

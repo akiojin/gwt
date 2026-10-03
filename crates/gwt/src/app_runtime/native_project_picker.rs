@@ -2,6 +2,10 @@
 
 use std::{path::PathBuf, time::Instant};
 
+#[cfg(target_os = "macos")]
+#[path = "native_project_picker/macos.rs"]
+mod macos_picker;
+
 pub(super) fn pick_project_folder(deadline: Instant) -> Result<Option<PathBuf>, String> {
     if Instant::now() >= deadline {
         return Err("Folder selection timed out".into());
@@ -10,7 +14,11 @@ pub(super) fn pick_project_folder(deadline: Instant) -> Result<Option<PathBuf>, 
     {
         windows_picker::pick(deadline)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_picker::pick(deadline)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Ok(rfd::FileDialog::new().pick_folder())
     }

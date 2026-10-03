@@ -136,6 +136,9 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
         FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::RetryWorkspaceStateLoad => {
+            FrontendUserActionLog::new("retry_workspace_state_load", "workspace")
+        }
         FrontendEvent::LoadRecoveryCenter { .. } => {
             FrontendUserActionLog::new("load_recovery_center", "recovery")
         }
@@ -772,6 +775,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
+        | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachFiles { .. } => return None,

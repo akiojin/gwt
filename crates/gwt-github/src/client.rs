@@ -109,6 +109,13 @@ pub struct IssueSnapshot {
     pub comments: Vec<CommentSnapshot>,
 }
 
+/// GitHub's latest assignment of a label to an Issue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LabelAssignment {
+    pub actor: Option<String>,
+    pub created_at: String,
+}
+
 /// Snapshot of a single Issue comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentSnapshot {
@@ -221,6 +228,15 @@ pub trait IssueClient: Send + Sync {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError>;
+
+    /// Return the latest assignment, or `None` if absent or subsequently removed.
+    fn fetch_label_assignment(
+        &self,
+        _number: IssueNumber,
+        _label: &str,
+    ) -> Result<Option<LabelAssignment>, ApiError> {
+        Ok(None)
+    }
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError>;
 

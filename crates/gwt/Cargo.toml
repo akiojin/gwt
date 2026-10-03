@@ -54,6 +54,7 @@ axum = { version = "0.8", features = ["ws"] }
 tao = "0.37"
 base64.workspace = true
 regex.workspace = true
+quick-xml = "0.39.4"
 rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true
@@ -86,7 +87,11 @@ libc = { workspace = true }
 # the `auto-launch` LaunchAgent path. `NSError` is enabled so register /
 # unregister failures surface a real message instead of a silent fallback.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
 mac-usernotifications = "0.3.1"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", features = ["NSError"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
 

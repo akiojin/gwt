@@ -823,48 +823,85 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut orphan_intake_prune_plans = Vec::new();
         for tab in &self.tabs {
-            let _ =
-                gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now);
-            // SPEC-2359 US-39 / FR-142..145: backfill Phase U-6 schema
-            // additions (`summary`, `created_at`, `creator`,
-            // `lifecycle_stage`) on legacy `workspace.json` files. Runs
-            // alongside the auto-done scan above with independent helpers
-            // and an independent `workspace.migration.json` marker, so the
-            // two migrations are exactly-once each and never duplicate work.
-            // Errors are silently dropped (`let _ = ...`) so a corrupt or
-            // unreadable Workspace cannot block daemon startup.
-            let _ = gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
-                &tab.project_root,
-            );
-            // SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items
-            // (pre-W-12 records keyed to one projection UUID fusing dozens of
-            // branches) into canonical branch-keyed items so each branch row
-            // shows its real title / sessions. Idempotent; must run before
-            // the intake/reconcile chain so decomposed branches are not
-            // redundantly backfilled.
-            let _ = gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
-                &tab.project_root,
-            );
+            let Some(context) = self.project_context_for_root(&tab.project_root) else {
+                continue;
+            };
+            let proxy = self.proxy.for_project(context);
+            let inventory = startup_inventories.get(&tab.project_root).cloned();
+            // Capture legacy provenance before these retained migrations import
+            // it. A later watcher sees only the canonical files. Stop the writer
+            // chain on a load failure; malformed Works may still recover through
+            // the complete-source intake below (Issue #4925).
+            let prepared = (|| {
+                let imported_from =
+                    gwt_core::workspace_projection::pending_legacy_workspace_state_import(
+                        &tab.project_root,
+                    )?;
+                gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now)?;
+                // SPEC-2359 US-39 and W-16: schema backfill and legacy mega-item
+                // decomposition precede intake/reconcile, preserving their order.
+                gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
+                    &tab.project_root,
+                )?;
+                gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
+                    &tab.project_root,
+                )?;
+                Ok::<_, gwt_core::GwtError>(imported_from)
+            })();
+            match prepared {
+                Ok(Some(imported_from)) => {
+                    if let Some(mut event) =
+                        crate::load_workspace_projection_user_event(&tab.project_root)
+                    {
+                        let ready = if let crate::UserEvent::WorkspaceProjectionLoaded {
+                            imported_from: captured,
+                            ..
+                        } = &mut event
+                        {
+                            *captured = Some(imported_from);
+                            true
+                        } else {
+                            false
+                        };
+                        proxy.send(event);
+                        if !ready {
+                            continue;
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let error = crate::workspace_state_load_error(&tab.project_root, error);
+                    let can_rebuild = error.kind
+                        == gwt_core::WorkspaceStateLoadErrorKind::Malformed
+                        && error.path
+                            == gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+                                &tab.project_root,
+                            );
+                    proxy.send(crate::UserEvent::WorkspaceStateLoadFailed {
+                        project_root: tab.project_root.clone(),
+                        error,
+                    });
+                    if can_rebuild {
+                        self.spawn_work_events_ingest_with_inventory(
+                            tab.project_root.clone(),
+                            true,
+                            inventory,
+                        );
+                    }
+                    continue;
+                }
+            }
             // SPEC-2359 W-16 (FR-387): cross-machine work events intake.
             // Supersedes the one-shot `rebuild_work_items_from_events_for_repo`
             // migration gate — the intake is a permanently-installed idempotent
             // consumer over the same (and more) sources. Runs on a background
             // thread; its completion event then runs the worktree reconcile
             // (intake → reconcile order) and the merge scan.
-            let inventory = startup_inventories.get(&tab.project_root).cloned();
             self.spawn_work_events_ingest_with_inventory(
                 tab.project_root.clone(),
                 true,
                 inventory.clone(),
-            );
-            // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
-            // clear of legacy prompt-derived title_summary / current_focus so
-            // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
-            // display fallback and agent re-authoring. Idempotent via
-            // `agent_identity.migration.json`; never re-clears agent-authored
-            // values written after the marker.
-            let _ = gwt_core::workspace_projection::reset_legacy_agent_identity_for_repo(
-                &tab.project_root,
             );
             // Snapshot candidates before the GUI becomes interactive, then
             // inspect/remove only that fixed set on a recovery worker. A new

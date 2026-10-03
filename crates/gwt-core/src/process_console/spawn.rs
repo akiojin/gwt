@@ -1146,8 +1146,7 @@ mod tests {
     /// llvm-cov adds enough startup overhead for a `cmd /C echo` fixture to
     /// exceed the previous two-second budget. The observed full-suite failure
     /// crossed two seconds while the focused fixture completed in 70ms. This
-    /// matches the process-tree fixtures below, whose measured parallel-load
-    /// budget already uses 15 seconds. The timeout behavior itself is covered
+    /// gives immediate commands room to start. The timeout behavior is covered
     /// by dedicated tests with deliberately short deadlines.
     const QUICK_PROCESS_FIXTURE_BUDGET: Duration = Duration::from_secs(15);
 
@@ -1300,86 +1299,36 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[tokio::test(flavor = "current_thread")]
     async fn deadline_cleanup_does_not_extend_the_absolute_hard_cap() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let parent_file = directory.path().join("hard-cap-parent.pid");
-        let descendant_file = directory.path().join("hard-cap-descendant.pid");
-        #[cfg(windows)]
-        let (program, args, budget, delay) = {
-            let script = format!(
-                "Set-Content -Path '{}' -Value $PID -Encoding ascii; \
-                 $child = Start-Process ping -ArgumentList '-n','60','127.0.0.1' \
-                 -PassThru -WindowStyle Hidden; \
-                 Set-Content -Path '{}' -Value $child.Id -Encoding ascii; \
-                 Start-Sleep -Seconds 60",
-                parent_file.display(),
-                descendant_file.display(),
-            );
-            (
-                "powershell".to_string(),
-                vec!["-NoProfile".to_string(), "-Command".to_string(), script],
-                WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
-                Duration::from_millis(1_200),
-            )
-        };
-        #[cfg(unix)]
-        let (program, args, budget, delay) = (
-            "sh".to_string(),
-            vec![
-                "-c".to_string(),
-                "echo $$ > \"$1\"; sleep 60 & echo $! > \"$2\"; wait".to_string(),
-                "gwt-hard-cap".to_string(),
-                parent_file.to_string_lossy().into_owned(),
-                descendant_file.to_string_lossy().into_owned(),
-            ],
-            Duration::from_millis(700),
-            Duration::from_millis(600),
-        );
-        let _delay = PostReapDelayGuard::set(delay);
-        let started = Instant::now();
-        let deadline = started + budget;
+        // Finish real process IO before pausing Tokio time. The process-tree
+        // tests below cover termination; this test isolates the cleanup cap.
+        let (program, args) = echo_command();
+        #[allow(clippy::disallowed_methods)]
+        let mut command = TokioCommand::new(program);
+        crate::process::configure_hidden_tokio_command(&mut command);
+        command
+            .args(args)
+            .kill_on_drop(true)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut tree = ChildProcessTree::prepare(&mut command, false).expect("empty process tree");
+        let mut child = command.spawn().expect("spawn cleanup fixture");
+        tokio::time::timeout(crate::deadline_budget::HANG_GUARD, child.wait())
+            .await
+            .expect("cleanup fixture hung")
+            .expect("reap cleanup fixture");
 
-        let error = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::IndexRunner,
-            program,
-            &args,
-            SpawnOptions::new("absolute deadline cleanup")
-                .forward_output(false)
-                // Fixtures run PowerShell while other tests in the same binary
-                // redirect HOME / LOCALAPPDATA process-wide. Without a usable
-                // cache location PowerShell falls back to writing its module
-                // analysis cache relative to the CWD, which would litter the
-                // crate directory. Pin the child to the fixture temp directory
-                // so any such fallback is cleaned up with it.
-                .current_dir(directory.path()),
-            deadline,
-        )
-        .await
-        .expect_err("fixture tree must time out");
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let deadline = (started + Duration::from_millis(700)).into_std();
+        tokio::time::advance(Duration::from_millis(600)).await;
+        let _delay = PostReapDelayGuard::set(Duration::from_millis(900));
+        let completed = cleanup_child_process(&mut tree, &mut child, Some(deadline)).await;
 
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!completed, "the original deadline must interrupt cleanup");
         assert!(
-            started.elapsed() <= budget + Duration::from_millis(250),
-            "cleanup extended the absolute deadline: budget={budget:?} elapsed={:?}",
-            started.elapsed()
+            started.elapsed() < Duration::from_millis(900),
+            "cleanup restarted its budget instead of using the remaining virtual time"
         );
-        #[cfg(windows)]
-        {
-            let parent = wait_for_pid_file_windows(&parent_file);
-            let descendant = wait_for_pid_file_windows(&descendant_file);
-            assert!(!process_is_alive_windows(parent), "root survived cleanup");
-            assert!(
-                !process_is_alive_windows(descendant),
-                "descendant survived cleanup"
-            );
-        }
-        #[cfg(unix)]
-        {
-            let parent = read_pid(&parent_file);
-            let descendant = read_pid(&descendant_file);
-            assert!(!process_is_alive(parent), "root survived cleanup");
-            assert!(!process_is_alive(descendant), "descendant survived cleanup");
-        }
     }
 
     fn echo_command() -> (String, Vec<String>) {
@@ -1913,67 +1862,104 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn deadline_terminates_and_reaps_child_process_tree_windows() {
+    #[test]
+    fn deadline_terminates_and_reaps_child_process_tree_windows() {
         // T-IDX-418 (SPEC #1939 Phase 70d): Windows counterpart of the POSIX
         // deadline tree test — the descendant a child backgrounds must not
         // survive the deadline-driven Job Object close.
         let directory = tempfile::tempdir().expect("tempdir");
+        let parent_file = directory.path().join("parent.pid");
         let descendant_file = directory.path().join("descendant.pid");
         let script = format!(
-            "$child = Start-Process ping -ArgumentList '-n','60','127.0.0.1' \
+            "Set-Content -Path '{}' -Value $PID -Encoding ascii; \
+             $child = Start-Process ping -ArgumentList '-t','127.0.0.1' \
              -PassThru -WindowStyle Hidden; \
              Set-Content -Path '{}' -Value $child.Id -Encoding ascii; \
-             Start-Sleep -Seconds 60",
+             Wait-Process -Id $child.Id",
+            parent_file.display(),
             descendant_file.display()
         );
         let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
-        let started = std::time::Instant::now();
-        let error = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::Gh,
-            "powershell",
-            &args,
-            SpawnOptions::new("test deadline tree windows").current_dir(directory.path()),
-            started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
+        let ready_parent = parent_file.clone();
+        let ready_descendant = descendant_file.clone();
+        let error = with_spawn_ready_for_tests(
+            Duration::ZERO,
+            move || {
+                let parent = wait_for_pid_file_windows(&ready_parent);
+                let descendant = wait_for_pid_file_windows(&ready_descendant);
+                assert!(
+                    process_is_alive_windows(parent),
+                    "fixture root must be alive"
+                );
+                assert!(
+                    process_is_alive_windows(descendant),
+                    "fixture descendant must be alive before the deadline"
+                );
+            },
+            || {
+                spawn_logged_blocking_with_deadline(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::Gh,
+                    "powershell",
+                    &args,
+                    SpawnOptions::new("test deadline tree windows").current_dir(directory.path()),
+                    Instant::now(),
+                )
+            },
         )
-        .await
         .expect_err("long-running windows process tree must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < WINDOWS_PROCESS_TREE_FIXTURE_BOUND);
 
+        let parent = wait_for_pid_file_windows(&parent_file);
         let descendant = wait_for_pid_file_windows(&descendant_file);
+        wait_for_process_exit_windows(parent);
         wait_for_process_exit_windows(descendant);
     }
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn deadline_reaps_windows_descendant_after_root_exits_first_with_pipe_open() {
+    #[test]
+    fn deadline_reaps_windows_descendant_after_root_exits_first_with_pipe_open() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let parent_file = directory.path().join("parent-pipe.pid");
         let descendant_file = directory.path().join("descendant-pipe.pid");
         let script = format!(
-            "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command',\
-             'Start-Sleep -Seconds 60' -PassThru -NoNewWindow; \
+            "Set-Content -Path '{}' -Value $PID -Encoding ascii; \
+             $child = Start-Process powershell -ArgumentList '-NoProfile','-Command',\
+             'while ($true) {{ Start-Sleep -Seconds 60 }}' -PassThru -NoNewWindow; \
              Set-Content -Path '{}' -Value $child.Id -Encoding ascii; exit 0",
+            parent_file.display(),
             descendant_file.display()
         );
         let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
-        let started = Instant::now();
-        let error = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::IndexRunner,
-            "powershell",
-            &args,
-            SpawnOptions::new("windows root exits before pipe descendant")
-                .forward_output(false)
-                .current_dir(directory.path()),
-            started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
+        let ready_parent = parent_file.clone();
+        let ready_descendant = descendant_file.clone();
+        let error = with_spawn_ready_for_tests(
+            Duration::ZERO,
+            move || {
+                let parent = wait_for_pid_file_windows(&ready_parent);
+                let descendant = wait_for_pid_file_windows(&ready_descendant);
+                wait_for_process_exit_windows(parent);
+                assert!(
+                    process_is_alive_windows(descendant),
+                    "descendant must still hold the pipe after the root exits"
+                );
+            },
+            || {
+                spawn_logged_blocking_with_deadline(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::IndexRunner,
+                    "powershell",
+                    &args,
+                    SpawnOptions::new("windows root exits before pipe descendant")
+                        .forward_output(false)
+                        .current_dir(directory.path()),
+                    Instant::now(),
+                )
+            },
         )
-        .await
         .expect_err("descendant-held pipe must keep collection pending until deadline");
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < WINDOWS_PROCESS_TREE_FIXTURE_BOUND);
         let descendant = wait_for_pid_file_windows(&descendant_file);
         wait_for_process_exit_windows(descendant);
     }
@@ -2026,29 +2012,11 @@ mod tests {
         wait_for_process_exit_windows(descendant);
     }
 
-    /// Absolute budget for the Windows process-tree fixtures.
-    ///
-    /// These fixtures must let PowerShell reach the statement that records the
-    /// descendant pid before the deadline reaps the Job, otherwise the test
-    /// cannot observe the tree it asserts on. Warm `powershell -NoProfile`
-    /// plus one `Start-Process` measured 1.66s median / 2.05s p95 / 2.10s max
-    /// under 24-way parallelism on the reference machine, so the previous 2s
-    /// budget sat on the p95 and flaked whenever the whole crate ran at once.
-    /// 15s keeps roughly a 7x margin for slower CI hosts; the fixtures run
-    /// concurrently with the rest of the suite, so the wall-clock cost is paid
-    /// once rather than once per fixture.
-    #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_FIXTURE_BUDGET: Duration = Duration::from_secs(15);
-
-    /// Upper bound proving the deadline fired instead of the fixture running to
-    /// completion. Kept well above the budget so it never turns into a second,
-    /// tighter timing assertion.
-    #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_FIXTURE_BOUND: Duration = Duration::from_secs(60);
-
+    /// Observe fixture readiness before starting the deadline under test.
+    /// The outer guard diagnoses a hung fixture, not a slow process startup.
     #[cfg(windows)]
     fn wait_for_pid_file_windows(path: &std::path::Path) -> u32 {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::deadline_budget::HANG_GUARD;
         while std::time::Instant::now() < deadline {
             if let Some(pid) = std::fs::read_to_string(path)
                 .ok()
@@ -2056,7 +2024,7 @@ mod tests {
             {
                 return pid;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(100));
         }
         panic!(
             "descendant pid file was not written at {} - the fixture process              never reached its pid-recording statement",
@@ -2066,7 +2034,7 @@ mod tests {
 
     #[cfg(windows)]
     fn wait_for_process_exit_windows(pid: u32) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::deadline_budget::HANG_GUARD;
         let filter = format!("PID eq {pid}");
         while std::time::Instant::now() < deadline {
             let output = crate::process::hidden_command("tasklist")
@@ -2099,17 +2067,6 @@ mod tests {
             .trim()
             .parse()
             .expect("numeric pid")
-    }
-
-    #[cfg(unix)]
-    fn process_is_alive(pid: u32) -> bool {
-        crate::process::hidden_command("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
     }
 
     #[cfg(unix)]

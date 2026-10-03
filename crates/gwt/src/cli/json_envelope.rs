@@ -97,7 +97,11 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     // this is a no-op in tests and in the argv path.
     let read_only = super::hook::workflow_policy::is_read_only_json_envelope_operation(&operation);
     let operation_started = std::time::Instant::now();
+    // Issue #4850: the warning sink is per thread; clear whatever an earlier
+    // operation on this thread left behind before this one runs.
+    super::operation_warnings::take();
     let outcome = run_collect_governed(env, parsed.command);
+    let warnings = super::operation_warnings::take();
     crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
     match outcome {
         Ok(result) => {
@@ -115,6 +119,12 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             if let Some(refusal) = refusal.as_ref() {
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
+            }
+            // Issue #4850 AC-1: a successful remote mutation whose local
+            // follow-up was skipped answers `ok:true` plus what it skipped.
+            if !warnings.is_empty() {
+                payload["warnings"] =
+                    serde_json::to_value(&warnings).expect("operation warnings must serialize");
             }
             attach_project_store(&mut payload);
             if let Err(err) = write_response(env.stdout(), &payload) {
@@ -700,6 +710,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 limit: required_usize(params, "limit")?,
             })
         }
+        "issue.monitor.queue.urgent_limit" => {
+            CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit {
+                project_root: optional_path(params, "project_root")?,
+                limit: required_usize(params, "limit")?,
+            })
+        }
+        "issue.monitor.queue.demote" => CliCommand::Issue(IssueCommand::MonitorQueueDemote {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+        }),
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
@@ -908,6 +928,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "actions.job_logs" | "actions.job-logs" => CliCommand::Actions(ActionsCommand::JobLogs {
             job_id: required_u64(params, "job_id")?,
+            // Issue #4849 AC-2: `failed_only` narrows the log to the lines
+            // around failure markers; `context_lines` sizes the window.
+            failed_only: optional_bool(params, "failed_only")?.unwrap_or(false),
+            context_lines: optional_u64(params, "context_lines")?.map_or(
+                super::actions::DEFAULT_FAILURE_CONTEXT_LINES,
+                super::actions::clamp_failure_context_lines,
+            ),
         }),
         "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
             target: actions_rerun_target(params)?,
@@ -2626,6 +2653,7 @@ mod tests {
                 closing_issues: Vec::new(),
                 fallback_owner_closed: false,
                 auto_merge_enabled: false,
+                merge_queue: None,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
@@ -5607,10 +5635,26 @@ mod tests {
             ok("actions.logs", json!({"run_id": 5})),
             CliCommand::Actions(ActionsCommand::Logs { .. })
         ));
-        assert!(matches!(
+        assert_eq!(
             ok("actions.job_logs", json!({"job_id": 5})),
-            CliCommand::Actions(ActionsCommand::JobLogs { .. })
-        ));
+            CliCommand::Actions(ActionsCommand::JobLogs {
+                job_id: 5,
+                failed_only: false,
+                context_lines: 5,
+            })
+        );
+        // Issue #4849 AC-2: the failures view and its (clamped) context.
+        assert_eq!(
+            ok(
+                "actions.job_logs",
+                json!({"job_id": 5, "failed_only": true, "context_lines": 400})
+            ),
+            CliCommand::Actions(ActionsCommand::JobLogs {
+                job_id: 5,
+                failed_only: true,
+                context_lines: 50,
+            })
+        );
         assert!(matches!(
             ok("actions.job-logs", json!({"job_id": 5})),
             CliCommand::Actions(ActionsCommand::JobLogs { .. })

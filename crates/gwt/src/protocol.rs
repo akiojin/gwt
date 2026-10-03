@@ -326,6 +326,7 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    RetryWorkspaceStateLoad,
     ProjectAggregateAck {
         revision: u64,
         visible: bool,
@@ -516,6 +517,11 @@ pub enum FrontendEvent {
         id: String,
         data: String,
     },
+    /// Read the registered PM's conversation. Native paths and identities are
+    /// resolved on the host from this authenticated window, never from the client.
+    LoadPmConversation {
+        id: String,
+    },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
     /// window id so the event can only target the caller's own pane.
@@ -702,9 +708,8 @@ pub enum FrontendEvent {
         force_filesystem_delete: bool,
         /// Issue #4433: frontend-generated id for this cleanup run, so a
         /// client that reconnects mid-cleanup can re-sync the operation it
-        /// started. `None` only for clients predating the field.
-        #[serde(default)]
-        operation_id: Option<String>,
+        /// started. Required before cleanup work can begin.
+        operation_id: String,
     },
     RunWorkspaceCleanup {
         branch: String,
@@ -712,8 +717,7 @@ pub enum FrontendEvent {
         #[serde(default)]
         force_filesystem_delete: bool,
         /// Issue #4433: see [`FrontendEvent::RunBranchCleanup::operation_id`].
-        #[serde(default)]
-        operation_id: Option<String>,
+        operation_id: String,
     },
     /// Issue #4433: a reconnected client asks for the current state of the
     /// cleanup operation it is still showing as running. The backend replies
@@ -1871,9 +1875,26 @@ pub struct ProjectAgentAggregate {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceStateNoticeKind {
+    LoadError,
+    LegacyImported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceStateNoticeView {
+    pub path: String,
+    pub message: String,
+    pub kind: WorkspaceStateNoticeKind,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
+    WorkspaceStateNotice {
+        notice: Option<WorkspaceStateNoticeView>,
+    },
     CloseProjectPreview {
         token: CloseProjectToken,
         title: String,
@@ -1946,6 +1967,11 @@ pub enum BackendEvent {
     TerminalSnapshot {
         id: String,
         data_base64: String,
+    },
+    PmConversation {
+        id: String,
+        session_id: Option<String>,
+        snapshot: crate::pm_conversation::PmConversationSnapshot,
     },
     /// Origin-client completion receipt for one authenticated pane snapshot
     /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
@@ -2275,15 +2301,13 @@ pub enum BackendEvent {
         id: String,
         /// Issue #4433: identifies the cleanup run this result belongs to so a
         /// reconnected client can drop a result from a superseded run.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        operation_id: Option<String>,
+        operation_id: String,
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchCleanupProgress {
         id: String,
         /// Issue #4433: see [`BackendEvent::BranchCleanupResult::operation_id`].
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        operation_id: Option<String>,
+        operation_id: String,
         branch: String,
         execution_branch: Option<String>,
         index: usize,
@@ -2764,6 +2788,16 @@ impl BackendEventPolicy {
 }
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
+    BackendEventPolicy::new(
+        "pm_conversation",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "workspace_state_notice",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
     BackendEventPolicy::new(
         "close_project_preview",
         BackendEventDeliveryClass::Snapshot,
@@ -3310,6 +3344,7 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
+            BackendEvent::WorkspaceStateNotice { .. } => "workspace_state_notice",
             BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
             BackendEvent::CloseProjectError { .. } => "close_project_error",
             BackendEvent::ProjectClosed { .. } => "project_closed",
@@ -3326,6 +3361,7 @@ impl BackendEvent {
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
@@ -4276,6 +4312,16 @@ mod tests {
             data_base64: "ZWNobw==".to_string(),
         };
         assert_eq!(event.delivery_policy().kind, "terminal_output");
+    }
+
+    #[test]
+    fn pm_conversation_request_addresses_a_window() {
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_conversation",
+            "id": "tab-1::pm"
+        }))
+        .expect("PM conversation is requested through the authenticated window");
+        assert!(format!("{request:?}").contains("tab-1::pm"));
     }
 
     #[test]

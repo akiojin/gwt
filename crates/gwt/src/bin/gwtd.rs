@@ -406,7 +406,7 @@ fn format_actions_help() -> String {
         "",
         "Operations:",
         "  actions.logs                            Print raw run logs",
-        "  actions.job_logs                        Print raw job logs",
+        "  actions.job_logs                        Print job logs (ANSI stripped; failed_only, context_lines)",
         "  actions.rerun                           Re-run a failed run or a single failed job",
         "",
         "Key params:",

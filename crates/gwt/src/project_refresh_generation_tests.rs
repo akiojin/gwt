@@ -78,7 +78,7 @@ fn workspace_projection_reload_callback_rejects_closed_project_generation() {
     );
     let (spawner, tasks) = crate::app_runtime::BlockingTaskSpawner::queued();
     let old = app.project_context("tab-a").unwrap();
-    super::spawn_workspace_projection_reload(&spawner, app.proxy.clone(), old);
+    super::spawn_workspace_projection_reload(&spawner, app.proxy.clone(), old, None);
     app.project_tab_incarnations
         .get_mut("tab-a")
         .unwrap()
@@ -94,9 +94,10 @@ fn workspace_projection_reload_callback_rejects_closed_project_generation() {
         &spawner,
         app.proxy.clone(),
         app.project_context("tab-a").unwrap(),
+        None,
     );
     tasks.lock().unwrap().pop().unwrap()();
     assert!(
-        matches!(app.accept_project_completion(recorded.lock().unwrap().pop().unwrap()), Some(UserEvent::WorkspaceProjectionLoaded { projection, .. }) if projection.title == "captured worker snapshot")
+        matches!(app.accept_project_completion(recorded.lock().unwrap().pop().unwrap()), Some(UserEvent::WorkspaceProjectionLoaded { projection: Some(projection), .. }) if projection.title == "captured worker snapshot")
     );
 }

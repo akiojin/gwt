@@ -200,6 +200,12 @@ function issueRowPrimaryView({ entry, attention, inlineWindow, canvasWindow }) {
     : { key: "issue:open", label: "Open", tone: "idle" };
 }
 
+function issueQueuePriorityLabel(entry) {
+  if (entry.priority_reason === "pm_demoted") return "Normal · PM demoted";
+  if (entry.priority_reason === "urgent_limit_reached") return "Normal · Urgent limit reached";
+  return entry.priority === "urgent" ? "Urgent" : "Normal";
+}
+
 function issueRowSecondaryItems({ entry, work, attention, primary }) {
   const items = [];
   if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
@@ -219,6 +225,10 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
       key: "queue",
       label: `Queue ${entry.queue_position}${terminal ? ` · ${terminal}` : ""}${entry.queued_by ? ` · ${entry.queued_by}` : ""}`,
     });
+    if (entry.priority === "urgent" || entry.priority_reason === "pm_demoted" ||
+        entry.priority_reason === "urgent_limit_reached") {
+      items.push({ kind: "chip", key: "queue-priority", label: issueQueuePriorityLabel(entry) });
+    }
   }
   if (work?.pr_number) {
     const prState = String(work.pr_state || "").trim();
@@ -2727,8 +2737,13 @@ export function createKnowledgeKanbanSurface({
       function queueProjectedEntry(entry) {
         if (!Array.isArray(issueMonitorStatus.terminal_queue)) return entry;
         const index = issueMonitorStatus.terminal_queue.findIndex(item => item.number === entry.number);
+        const queued = index < 0 ? null : issueMonitorStatus.terminal_queue[index];
         return { ...entry, queue_position: index < 0 ? null : index + 1,
-          queued_by: index < 0 ? null : issueMonitorStatus.terminal_queue[index].queued_by,
+          queued_by: queued?.queued_by,
+          priority: queued?.priority,
+          priority_reason: queued?.priority_reason,
+          assigned_by: queued?.assigned_by,
+          assigned_at: queued?.assigned_at,
           monitor_state: index >= 0 && (!entry.monitor_state || entry.monitor_state === "queued")
             ? "queued" : index < 0 && entry.monitor_state === "queued" ? null : entry.monitor_state };
       }
@@ -3480,8 +3495,13 @@ export function createKnowledgeKanbanSurface({
         }
         header.appendChild(status);
         if (entry.queued_by) {
-          const source = entry.queued_by === "auto-refill" ? "Auto-refill" : "Operator";
+          const source = entry.queued_by === "auto-refill" ? "Auto-refill"
+            : entry.queued_by === "urgent" ? "Urgent label" : "Operator";
           header.appendChild(createNode("div", "issue-detail-provenance", `Queued by: ${source}`));
+        }
+        if (queue) {
+          header.appendChild(createNode("div", "issue-detail-priority", `Priority: ${issueQueuePriorityLabel(entry)}`));
+          header.appendChild(createNode("div", "issue-detail-priority-assignment", `Priority assigned by: ${entry.assigned_by || "Unknown"} · Assigned at: ${entry.assigned_at || "Not observed"}`));
         }
         header.appendChild(renderIssueDetailActions(context));
         detailPane.appendChild(header);

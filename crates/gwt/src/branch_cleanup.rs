@@ -84,13 +84,11 @@ impl BranchCleanupOperationStore {
         Self::default()
     }
 
-    /// Remember the latest progress for `operation_id`. Untagged operations
-    /// (an older frontend that does not send `operation_id`) are not tracked:
-    /// there is no key a reconnecting client could ask for.
+    /// Remember the latest progress for `operation_id`.
     pub fn record_progress(
         &self,
         id: &str,
-        operation_id: Option<&str>,
+        operation_id: &str,
         progress: &BranchCleanupProgressEntry,
     ) {
         self.store(
@@ -104,7 +102,7 @@ impl BranchCleanupOperationStore {
     pub fn record_result(
         &self,
         id: &str,
-        operation_id: Option<&str>,
+        operation_id: &str,
         results: &[BranchCleanupResultEntry],
     ) {
         self.store(
@@ -166,15 +164,7 @@ impl BranchCleanupOperationStore {
         }
     }
 
-    fn store(
-        &self,
-        id: &str,
-        operation_id: Option<&str>,
-        snapshot: BranchCleanupOperationSnapshot,
-    ) {
-        let Some(operation_id) = operation_id else {
-            return;
-        };
+    fn store(&self, id: &str, operation_id: &str, snapshot: BranchCleanupOperationSnapshot) {
         let mut operations = self
             .operations
             .lock()

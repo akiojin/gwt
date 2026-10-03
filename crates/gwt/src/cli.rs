@@ -36,6 +36,7 @@ pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
 pub mod operation_catalog;
+pub(crate) mod operation_warnings;
 mod pane;
 pub(crate) mod perf;
 pub mod permission_readiness;

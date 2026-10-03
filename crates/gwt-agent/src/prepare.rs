@@ -6924,6 +6924,9 @@ mod tests {
     /// runner launch (the fallback route after installed-runner discovery).
     /// Its probe must carry the actual executable version to the report so
     /// downstream readiness decisions do not rely on the `latest` alias.
+    /// Windows never probes bunx; its contract is covered by
+    /// `windows_latest_bunx_launch_uses_exact_npx_plan_version_evidence`.
+    #[cfg(not(windows))]
     #[test]
     fn healthy_latest_package_runner_report_carries_probe_version_evidence() {
         const SECRET: &str = "latest-package-version-sentinel-31481";
@@ -6964,16 +6967,16 @@ mod tests {
 
     /// Issue #3481 AC-2: the npx fallback probe runs the same package spec that
     /// will be launched, so its evidence is the authoritative snapshot too.
+    #[cfg(not(windows))]
     #[test]
     fn latest_npx_fallback_report_carries_probe_version_evidence() {
         let temp = tempdir().expect("tempdir");
         let mut config = sample_codex_latest_bunx_launch_config(temp.path());
         let mut probe_calls = 0;
-        let fallback = if cfg!(windows) { "npx.cmd" } else { "npx" };
 
         let report = resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            fallback.to_string(),
+            "npx".to_string(),
             None,
             |kind, _command, _args, _env, _remove_env, _cwd| {
                 probe_calls += 1;
@@ -7004,6 +7007,7 @@ mod tests {
     /// version must not synthesize evidence. The absent snapshot is what lets
     /// the consumer choose its diagnosable fallback instead of trusting the
     /// alias string.
+    #[cfg(not(windows))]
     #[test]
     fn latest_package_runner_without_semver_output_reports_no_version_evidence() {
         let temp = tempdir().expect("tempdir");
@@ -7031,6 +7035,7 @@ mod tests {
     /// Issue #3481 AC-3/AC-4: when no runner can be proven, the alias must not
     /// stand in for the missing discovery. The launch fails closed instead of
     /// producing a readiness snapshot from the selector string.
+    #[cfg(not(windows))]
     #[test]
     fn latest_package_runner_missing_binary_fails_closed_without_version_evidence() {
         let temp = tempdir().expect("tempdir");
@@ -7051,6 +7056,81 @@ mod tests {
             error.contains("@openai/codex@latest"),
             "the failure must name the package spec it could not prove: {error}"
         );
+    }
+
+    /// Issue #3481 AC-2 on Windows: a `bunx` launch never probes bunx; it
+    /// switches to the exact npx.cmd plan, whose resolved metadata version is
+    /// the version evidence.
+    #[cfg(windows)]
+    #[test]
+    fn windows_latest_bunx_launch_uses_exact_npx_plan_version_evidence() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+        let npx = temp.path().join("node").join("npx.cmd");
+        let mut kinds = Vec::new();
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                kinds.push(kind);
+                match kind {
+                    HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                        stdout: "\"0.133.0\"".to_string(),
+                        ..HostRunnerProbeOutcome::success()
+                    },
+                    HostRunnerProbeKind::Package => HostRunnerProbeOutcome::success(),
+                    HostRunnerProbeKind::Direct | HostRunnerProbeKind::Runner => {
+                        panic!("Windows official-provider launches never probe bunx")
+                    }
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("exact npx.cmd plan");
+
+        assert_eq!(
+            kinds,
+            vec![HostRunnerProbeKind::Metadata, HostRunnerProbeKind::Package]
+        );
+        assert!(report.switched_to_fallback);
+        assert_eq!(report.version_output.as_deref(), Some("0.133.0"));
+        let plan = report.resolved_package_plan.expect("resolved package plan");
+        assert_eq!(plan.runner_executable, npx.display().to_string());
+        assert_eq!(
+            plan.package_prefix,
+            vec!["--yes".to_string(), "@openai/codex@0.133.0".to_string()]
+        );
+        assert_eq!(
+            config.args.last().map(String::as_str),
+            Some("--no-alt-screen")
+        );
+    }
+
+    /// Issue #3481 AC-3/AC-4 on Windows: without an npx.cmd runner the launch
+    /// fails closed before any probe instead of falling back to bunx.
+    #[cfg(windows)]
+    #[test]
+    fn windows_latest_bunx_launch_without_npx_cmd_fails_closed_before_probing() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+        let original = format!("{config:?}");
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| {
+                panic!("no probe may run without npx.cmd")
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect_err("a launch without npx.cmd must fail closed");
+
+        assert!(error.contains("@openai/codex"), "{error}");
+        assert!(error.contains("never fall back to bunx"), "{error}");
+        assert_eq!(format!("{config:?}"), original);
     }
 
     #[cfg(windows)]
@@ -7076,6 +7156,15 @@ mod tests {
             .env_vars
             .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
         config.remove_env.push("REMOVE_SENTINEL".to_string());
+        // Keep the post-timeout cache lookup away from the host's real caches.
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            temp.path().join("empty-npm-cache").display().to_string(),
+        );
+        config.env_vars.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            temp.path().join("empty-bun-cache").display().to_string(),
+        );
         let original = format!("{config:?}");
         let mut probe_calls = 0;
         let mut repair_calls = 0;
@@ -7116,7 +7205,8 @@ mod tests {
         assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("npx"));
         assert!(error.contains("@anthropic-ai/claude-code@2.1.210"));
-        assert!(error.contains("timed out after npm cache repair"));
+        assert!(error.contains("after npm cache repair"), "{error}");
+        assert!(error.contains("not in the local package cache"), "{error}");
         assert!(!error.contains("must-not-leak"));
     }
 
@@ -9826,6 +9916,10 @@ fi
         config.env_vars.insert(
             "npm_config_cache".to_string(),
             temp.path().join("empty-npm-cache").display().to_string(),
+        );
+        config.env_vars.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            temp.path().join("empty-bun-cache").display().to_string(),
         );
 
         let error = resolve_host_runner_health_checked_with_probe_and_repair(

@@ -5124,6 +5124,33 @@ impl AppRuntime {
                 .project_root
                 .clone()
         });
+        let project_root = project_root_path.display().to_string();
+        let title = config.display_name.clone();
+        let resume_title = workspace_resume_context
+            .as_ref()
+            .and_then(WorkspaceResumeContext::purpose_title);
+        let purpose_title = if resume_title.is_some() {
+            resume_title
+        } else {
+            agent_launch_purpose_title(
+                &project_root_path,
+                config.linked_issue_number,
+                config.branch.as_deref(),
+                &issue_link_cache_dir,
+            )
+            .map_err(|error| {
+                let message = error.to_string();
+                if let Some(context) = self.project_context_for_root(&project_root_path) {
+                    self.proxy
+                        .for_project(context)
+                        .send(UserEvent::WorkspaceStateLoadFailed {
+                            project_root: project_root_path.clone(),
+                            error: crate::workspace_state_load_error(&project_root_path, error),
+                        });
+                }
+                message
+            })?
+        };
         let prepared_manual_launch_claim = claim_prepared_manual_successor_launch(
             &self.sessions_dir,
             &project_root_path,
@@ -5132,19 +5159,6 @@ impl AppRuntime {
         let tab = self
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
-        let project_root = project_root_path.display().to_string();
-        let title = config.display_name.clone();
-        let purpose_title = workspace_resume_context
-            .as_ref()
-            .and_then(WorkspaceResumeContext::purpose_title)
-            .or_else(|| {
-                agent_launch_purpose_title(
-                    &project_root_path,
-                    config.linked_issue_number,
-                    config.branch.as_deref(),
-                    &issue_link_cache_dir,
-                )
-            });
         let window = match placement {
             AgentWindowPlacement::Centered(bounds) => {
                 tab.workspace

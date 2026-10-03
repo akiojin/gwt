@@ -52,6 +52,7 @@ pub(crate) mod path_filter;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
+pub mod pm_conversation;
 pub mod pm_registry;
 pub mod preset;
 pub mod process;
@@ -221,7 +222,8 @@ pub use launch_wizard::{
     load_agent_options, AgentOption, AgentSetupAffordance, AgentSetupKind, DockerWizardContext,
     LaunchTargetKind, LaunchWizardAction, LaunchWizardAgentSetupView, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHolderDecisionView, LaunchWizardHydration,
-    LaunchWizardIssueMonitorPoolImpactView, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
+    LaunchWizardIssueMonitorPoolImpactView, LaunchWizardIssueMonitorPoolSetView,
+    LaunchWizardIssueMonitorPoolView, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
     LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
     LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardProgressStepView,
     LaunchWizardQuickStartView, LaunchWizardStartMethodKind, LaunchWizardStartMethodView,
@@ -267,6 +269,7 @@ pub use protocol::{
     UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
     WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView,
     WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceStateNoticeKind,
+    WorkspaceStateNoticeView, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

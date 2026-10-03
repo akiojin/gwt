@@ -446,6 +446,11 @@ impl DisconnectServer {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Windows sockets accepted from a nonblocking listener
+                        // inherit nonblocking mode; reads must block up to the timeout.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("disconnect stream blocking");
                         stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
                             .expect("disconnect stream timeout");
@@ -528,6 +533,11 @@ impl ApplyThenDisconnectServer {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Windows sockets accepted from a nonblocking listener
+                        // inherit nonblocking mode; reads must block up to the timeout.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("apply-then-disconnect stream blocking");
                         stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
                             .expect("apply-then-disconnect stream timeout");

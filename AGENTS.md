@@ -159,7 +159,7 @@
 > 🚨 **Draft PR は廃止する（ユーザー裁定 2026-09-16）。PR は常に Ready で作成し、auto-merge を有効にする。**
 
 - **Draft PR を作成しない。** `pr.create` は常に非 draft で行い、既存の Draft を見つけたら `pr.ready` で Ready 化する。「まだ途中だから Draft」という運用は行わない。
-- **すべての PR に `auto-merge` を有効にする。** CI が緑になった時点で着地させる。配信の可否は CI の必須チェック 9 件が判定する。
+- **すべての PR に `auto-merge` を有効にする。** CI が緑になった時点で着地させる。配信の可否は CI の必須チェック（一覧は下の「Merge queue」節）が判定する。
 - この裁定により、**配信可否の唯一のゲートは CI になる。** 「未完了だから Draft に留める」という緩衝は無くなるので、**PR のスコープを最初から単独で配信可能な大きさに切ること**が以前より重要になる。大きすぎる変更は 1 本の PR に詰めず分割する。
 - 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。残件がある場合は PR 本文に後続タスクとして明記し、**Draft に倒すのではなく follow-up Issue を立てる。**
 - PR 作成前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了を確認する。**これは Ready 化の条件ではなく PR 作成の条件になった。**
@@ -171,6 +171,31 @@
 - GUI / フロントエンド変更では、`browser-check` による checkout + fresh HOME の隔離起動を使い、実 Chromium の headed E2E で dark / light 両テーマ、console / page error ゼロ、変更した機能の挙動を検証する。`verify.run` の `params.headed_e2e_commands` に `params.commands` 内の Playwright コマンドを完全一致で指定する。gwtd が `--headed` と組込 reporter を付加し、両テーマの実測 PASS 件数を記録する。script 経由の場合は追加の Playwright 引数を転送できること。
 - 自動実行の UI Ready Gate は、同じ fresh 検証記録にある実測 headed PASS 証跡も必須とする。`Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)` は **`User Verification Result` とは別の行に**記録し、自己申告の pass のみを証跡としない。console / page error と機能 assertion は E2E 自体で確認する。
 - Gate を満たさない場合は Draft のまま維持するか、Ready 化せず No Action として報告する。
+
+### Merge queue（develop の着地経路、Issue #4872）
+
+develop への着地は GitHub merge queue を通す（ユーザー裁定 2026-10-02）。`strict` な branch protection は 1 本着地するたびに残りの全 PR を `BEHIND` に戻すため、着地が CI 1 周あたり 1 本に律速されていた。merge queue は「最新 base でテスト済みの変更だけが着地する」保証を保ったまま、その再同期と再テストを GitHub 側が引き受ける。
+
+- **workflow 側の契約:** develop 向け PR を判定する workflow（`test.yml` / `lint.yml` / `build.yml`）は `merge_group` でも同じジョブを同じ条件で走らせる。必須チェックが `merge_group` で報告されないとキュー内で永久に pending になり、何も着地しなくなる。イベント名で skip したジョブは Success として数えられるため、`pull_request` 限定の条件も置かない。`crates/gwt/tests/ci_concurrency_contract_test.rs` が固定する。
+- **必須チェック（2026-10-02 実測、11 件）:** `Commit Message Lint` / `Clippy & Rustfmt` / `Test (Rust)` / `Build` / `Test (Python runner)` / `Test (Rust, Windows)` / `Cargo Deny (advisories + sources)` / `Check (Windows)` / `Check (macOS)` / `Test (Windows agent launch)` / `Flake detection (changed test targets)`。現在値は `gh api repos/akiojin/gwt/branches/develop/protection --jq '.required_status_checks.contexts'` で読む。
+- **必須チェックを追加・改名するときの順序:** 先にその job（`merge_group` でも走るもの）を develop に着地させ、その後で branch protection の contexts を変える。逆順にすると、全 PR とキューが報告されない check を待って止まる。
+- **有効化の順序:** (1) `merge_group` トリガを持つ workflow を develop に着地させる → (2) 着地を確認する（`git grep -n merge_group origin/develop -- .github/workflows`）→ (3) branch protection の「Require merge queue」を有効にする。(3) はリポジトリ設定の変更であり、エージェントは行わない。
+- **キューの設定値（UI にしか無い状態にしないための記録）:**
+
+  | 項目 | 値 | 理由 |
+  | --- | --- | --- |
+  | Merge method | Merge commit | repo は merge commit のみ許可しており、着地間隔の計測も `git log --merges` に依存する |
+  | Only merge non-failing pull requests（grouping strategy） | 有効（ALLGREEN） | 各エントリが自分の merge group で緑になることを要求する。無効だと先頭が緑なら途中の赤が着地しうる |
+  | Build concurrency | 3 | CI 1 周で複数本を着地させる。1 エントリごとに全ジョブが走るため、runner 枠の枯渇（#4119）を避けて控えめに始め、実測で調整する |
+  | Minimum / maximum group size | 1 / 5 | 待ち合わせで着地を遅らせない |
+  | Status check timeout | 120 分 | ジョブ単体の上限（`Test (Rust workspace)` の 110 分）より長くする |
+  | Required status checks | 上記 11 件のまま | キューの導入で必須チェックを緩めない |
+
+- **現在の状態の読み方:** `gh api graphql -f query='query{repository(owner:"akiojin",name:"gwt"){mergeQueue(branch:"develop"){id}}}'` が `null` ならキューは無効、id を返せば有効。設定値を変えたらこの表も更新する。
+- **有効化直後に確認すること:** `strict`（Require branches to be up to date）を残したまま `BEHIND` の PR がキューに入れるかは未実測である。入れない場合は `strict` を外す（最新 base でのテストはキューが担うので保証は変わらない）。確認せずに「update-branch 不要」と運用を切り替えない。
+- **キュー有効時の運用（上の確認が済んでから）:** `BEHIND` は base 同期のやり直しを意味しなくなる。PR の必須チェックが緑で auto-merge が armed なら GitHub がキューへ入れ、最新 base 上で再テストして着地させる。キューから外された PR は「最新 base の上で赤」なので、同期し直すのではなく失敗した check を直す。
+- **`pr.list` での見分け方（AC-4）:** non-Draft の `BEHIND` 行（および mergeability が `UNKNOWN` で `BEHIND` として保持されうる行）には `merge_queue`（`enabled` / `position` / `state`）が載る。`enabled: true` の行は `default_action` が `leave:` で始まり operation を持たないので、`pr.update_branch` を打たない（キュー内の PR へ push するとキューから外れる）。`merge_queue` キーが無い行は「不明」であり「キュー無し」ではない。
+- **切り戻し:** 「Require merge queue」を無効にすれば従来の `strict` 運用へ戻る。workflow の `merge_group` トリガはキューが無ければ発火しないので、戻す必要はない。
 
 ## 開発ワークフロー
 
@@ -300,7 +325,7 @@
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`
 - テスト: `cargo nextest run -p gwt-core -p gwt --all-features --test-threads=1`（`cargo install cargo-nextest --locked --version 0.9.146` で導入）。`.config/nextest.toml` により単一テストを120秒で失敗させ、後続を継続する。doctest は `cargo test --workspace --all-features --doc`。同一process内の競合調査・nightly flake検出には従来の `cargo test` を使うが、per-test timeoutは適用されない。
-- このrepoの canonical matrix は上記nextestコマンドを明示 `verify.plan` に登録する。汎用deriveはcargo testを導出するため、そのまま流用しない。test-gh-guard付きbinaryの復旧用に `cargo build -p gwt --bin gwtd` を最後に含める。
+- Windows の canonical matrix は `verify.plan` の derive を使用する。この repo の `profile.gwt-verify` を検出すると、既存の package / target 選択を保って nextest（`--profile gwt-verify --retries 0`）と必要な doctest を導出する。実 Git / process fixture は専用 group 内で直列、純粋 unit は並列に実行し、`verify.run` の証跡に JUnit と遅いテスト上位20件を保存する。非 Windows は上記 nextest コマンドを明示登録する。test-gh-guard 付き binary の復旧用に `cargo build -p gwt --bin gwtd` を最後に含める。
 - カバレッジ: `node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features` の後に `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"` と `... 80 --scope-exclude "crates/(gwt-core|gwt)/"`（CI の coverage.yml と同一）。`cargo llvm-cov` を直接呼ぶと、raw profile の切り詰めがテスト失敗と区別できない FAIL になる（Issue #4628）
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`

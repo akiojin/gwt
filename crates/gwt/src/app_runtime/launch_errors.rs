@@ -160,6 +160,10 @@ impl AppRuntime {
             gwt::LaunchWizardAction::RunAgentSetup => "run_agent_setup",
             gwt::LaunchWizardAction::Submit => "submit",
             gwt::LaunchWizardAction::GotoStep { .. } => "goto_step",
+            gwt::LaunchWizardAction::AddAgentSettingsSet => "add_agent_settings_set",
+            gwt::LaunchWizardAction::RemoveAgentSettingsSet { .. } => "remove_agent_settings_set",
+            gwt::LaunchWizardAction::MoveAgentSettingsSet { .. } => "move_agent_settings_set",
+            gwt::LaunchWizardAction::SelectAgentSettingsSet { .. } => "select_agent_settings_set",
         }
     }
 

@@ -1119,8 +1119,7 @@ impl AppRuntime {
         // some other reason and the text is stale.
         let quota_notice = self
             .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
-            .filter(|notice| self.released_provider_quota_notices.get(&id) != Some(notice))
-            .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
+            .filter(|notice| self.released_provider_quota_notices.get(&id) != Some(notice));
         match quota_notice.as_ref() {
             Some(notice) => {
                 let recorded_at =
@@ -1485,13 +1484,8 @@ impl AppRuntime {
             .entry(window_id.to_string())
             .or_insert_with(|| super::ProviderQuotaCandidate { first_seen: now })
             .first_seen;
-        // Issue #3923 AC-3: the poller reading the account as usable
-        // contradicts the screen, so the settle window alone must not promote
-        // the notice. The candidate stays pending: a later poller reading can
-        // still corroborate it, and the notice leaving the screen abandons it.
-        if self.provider_reports_healthy_for_pane(agent_id.as_deref(), window_id) {
-            return Vec::new();
-        }
+        // Issue #4908: telemetry cannot override a refusal. A live notice
+        // still needs corroboration or the existing settle window below.
         let corroborated = agent_id.as_deref().is_some_and(|agent_id| {
             gwt::issue_monitor::provider_limit_reached_for_agent(
                 agent_id,
@@ -1515,26 +1509,6 @@ impl AppRuntime {
         )
         .with_poller(agent_id.as_deref(), &self.provider_usage_accounts);
         self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref(), evidence)
-    }
-
-    /// Issue #3923 AC-3: whether the usage poller currently contradicts a
-    /// quota notice on `window_id`'s screen. Logged when it does, because the
-    /// suppressed hold is itself the diagnosis of a stale notice.
-    fn provider_reports_healthy_for_pane(&self, agent_id: Option<&str>, window_id: &str) -> bool {
-        let healthy = agent_id.is_some_and(|agent_id| {
-            gwt::issue_monitor::provider_reports_healthy_for_agent(
-                agent_id,
-                &self.provider_usage_accounts,
-            )
-        });
-        if healthy {
-            tracing::info!(
-                window_id = %window_id,
-                agent_id = ?agent_id,
-                "provider limit notice on screen but the usage poller reads the account as usable; not holding (Issue #3923)"
-            );
-        }
-        healthy
     }
 
     /// Latch the block, project the pane as waiting, and tell the Monitor the

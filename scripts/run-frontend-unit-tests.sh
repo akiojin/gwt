@@ -24,6 +24,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/agents-surface.test.mjs \
   crates/gwt/web/__tests__/terminal-text-preview.test.mjs \
   crates/gwt/web/__tests__/pm-launcher.test.mjs \
+  crates/gwt/web/__tests__/pm-chat.test.mjs \
   crates/gwt/web/__tests__/pm-settings-panel.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
   crates/gwt/web/__tests__/board-lane.test.mjs \
@@ -72,6 +73,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/issue-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \
+  crates/gwt/web/__tests__/workspace-state-notice.test.mjs \
   crates/gwt/web/__tests__/ui-trace-profiler.test.mjs \
   crates/gwt/web/__tests__/ui-trace-wiring.test.mjs \
   crates/gwt/web/__tests__/interaction-guard.test.mjs \

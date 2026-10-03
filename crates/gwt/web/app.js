@@ -55,6 +55,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       // Issue #3365 — render-key exception safety + degradation visibility.
       import { createWorkspaceRenderSync } from "/issue-render-sync.js";
       import { createRenderDegradationBanner } from "/render-degradation-banner.js";
+      import { createWorkspaceStateNotice } from "/workspace-state-notice.js";
       import { createUpdateCtaController } from "/update-cta.js";
       // SPEC-2356 Anshin Addendum (FR-040): the in-app attention toaster ships
       // alongside the away-only desktop notifier in the same module.
@@ -172,6 +173,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
+      import { createPmChat } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -577,6 +579,10 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           appendRenderKeyPart(parts, windowData?.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, windowData?.agent_id || "");
+          appendRenderKeyPart(parts, "session_id");
+          appendRenderKeyPart(parts, windowData?.session_id || "");
+          appendRenderKeyPart(parts, "is_pm");
+          appendRenderKeyPart(parts, Boolean(windowData?.is_pm));
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, windowData?.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");
@@ -938,12 +944,19 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         }
         if ((message.kind === "terminal_input" || message.kind === "pane_send_input")
           && !activeProjectKey()) {
+          connectionOverlay.reportInputDropped();
           return "unavailable";
         }
         if (socket && socket.readyState === WebSocket.OPEN
           && socketProjectKey === activeProjectKey()) {
           socket.send(JSON.stringify(message));
           return "sent";
+        }
+        // Keystrokes depend on the program's current prompt. Never replay
+        // them after reconnecting into a potentially different prompt (#4941).
+        if (message.kind === "terminal_input" || message.kind === "pane_send_input") {
+          connectionOverlay.reportInputDropped();
+          return "unavailable";
         }
         // Acknowledgements describe this connection's observed revision; a
         // restarted server may reuse revision numbers. Never queue them.
@@ -1168,13 +1181,24 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
       // WebSocket bridge is down — a tiny status-strip label alone reads as
       // a frozen app when every click needs the socket.
-      const connectionOverlay = createConnectionOverlay({ document });
+      const connectionOverlay = createConnectionOverlay({
+        document,
+        onInputDropped: (reconnected) => alertsToasts.push({
+          id: "terminal-input-dropped",
+          level: "warn",
+          title: reconnected ? "Connection restored" : "Input not sent",
+          message: reconnected
+            ? "Input typed while disconnected was discarded and was not resent. Retype it when ready."
+            : "Input typed while disconnected was discarded. Retype it after reconnecting.",
+        }),
+      });
 
       // Issue #3365 — persistent notice for render/receive failures that the
       // resilient paths below swallow (dispatcher warn-and-continue, per-window
       // sync isolation). Console-only reporting left the user with a silently
       // stale minimap / window list until reload.
       const renderDegradationBanner = createRenderDegradationBanner({ document });
+      const workspaceStateNotice = createWorkspaceStateNotice({ document, send });
 
       // Issue #3365 — owns renderedWorkspaceWindowsKey's lifecycle: the key is
       // committed only after a fully clean per-window sync, so a degraded
@@ -1304,6 +1328,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
+        requestVisiblePmConversations();
       }
 
       function handleSocketMessage(event) {
@@ -1376,6 +1401,11 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       function handleSocketClose() {
+        for (const [windowId, view] of pmChatViews) {
+          view.pendingSessions.length = 0;
+          view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
+          view.controller.update({ availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." });
+        }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
@@ -5343,7 +5373,80 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         return parts.join("");
       }
 
+      const pmChatViews = new Map();
+
+      function disposePmChat(windowId) {
+        const view = pmChatViews.get(windowId);
+        if (!view) return;
+        view.controller.dispose();
+        view.body.classList.remove("pm-conversation-body");
+        // Return the terminal nodes to their original body when PM ownership ends.
+        view.body.append(...view.logHost.childNodes);
+        view.logHost.remove();
+        view.root.remove();
+        pmChatViews.delete(windowId);
+      }
+
+      function syncPmChat(windowData, element) {
+        const eligible = windowData.is_pm && presetSurface(windowData.preset) === "terminal";
+        let view = pmChatViews.get(windowData.id);
+        if (!eligible) {
+          disposePmChat(windowData.id);
+          return;
+        }
+        if (view) {
+          if (view.sessionId !== windowData.session_id) {
+            view.sessionId = windowData.session_id;
+            view.controller.setSession(windowData.session_id);
+            requestVisiblePmConversations();
+          }
+          return;
+        }
+        const body = element.querySelector(".window-body");
+        const terminalRoot = body.querySelector(".terminal-root");
+        if (!terminalRoot) return;
+        const root = document.createElement("div");
+        const logHost = document.createElement("div");
+        logHost.className = "pm-conversation-log";
+        logHost.append(terminalRoot);
+        const overlay = body.querySelector(".terminal-overlay");
+        if (overlay) logHost.append(overlay);
+        body.classList.add("pm-conversation-body");
+        body.append(root, logHost);
+        view = { root, body, logHost, sessionId: windowData.session_id, pendingSessions: [] };
+        view.controller = createPmChat({
+          document, root, windowId: windowData.id, sessionId: windowData.session_id,
+          send: (message) => {
+            const result = send(message);
+            if (result === "sent") view.pendingSessions.push(view.sessionId);
+            return result;
+          },
+          onLogVisibility: (visible) => {
+            logHost.hidden = !visible;
+            if (!visible) requestVisiblePmConversations();
+            if (visible) requestAnimationFrame(() => {
+              scheduleTerminalFit(windowData.id, false);
+              activateTerminalOnReveal(windowData.id);
+            });
+          },
+        });
+        pmChatViews.set(windowData.id, view);
+        requestVisiblePmConversations();
+      }
+
+      function requestVisiblePmConversations() {
+        if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
+        for (const windowData of activeWorkspace()?.windows || []) {
+          const view = pmChatViews.get(windowData.id);
+          if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
+            send({ kind: "load_pm_conversation", id: windowData.id });
+          }
+        }
+      }
+      window.setInterval(requestVisiblePmConversations, 5000);
+
       function mountWindowBody(windowData, element) {
+        disposePmChat(windowData.id);
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
         const surface = presetSurface(windowData.preset);
@@ -5788,6 +5891,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             renderedAgentKanbanBodyKeys.set(windowData.id, nextAgentKanbanBodyKey);
           }
         }
+        syncPmChat(windowData, element);
         // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
         // to the canvas without changing its preset, so `mountWindowBody` does not
         // run again. Reclaim the live terminal into this window's own body.
@@ -5954,6 +6058,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
                 isolate("remove_window", visibility.removed, (windowId) => {
                   const element = windowMap.get(windowId);
                   if (!element) return;
+                  disposePmChat(windowId);
                   const runtime = terminalMap.get(windowId);
                   if (runtime && runtime.activationFrame !== null) {
                     cancelAnimationFrame(runtime.activationFrame);
@@ -6214,6 +6319,9 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             projectPageMetadata.update(event.aggregate);
             break;
           }
+          case "workspace_state_notice":
+            workspaceStateNotice.receive(event.notice);
+            break;
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
@@ -6309,6 +6417,27 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
+          case "pm_conversation": {
+            const view = pmChatViews.get(event.id);
+            if (view && event.session_id === view.sessionId) view.controller.update(event.snapshot);
+            break;
+          }
+          case "pane_send_result": {
+            let view = pmChatViews.get(event.window_id);
+            // A pane removed before submit has no window ID in its rejection.
+            // Only an unambiguous failure may unlock a pending PM draft.
+            if (!event.window_id && event.ok === false) {
+              const pending = (activeWorkspace()?.windows || [])
+                .map(windowData => pmChatViews.get(windowData.id))
+                .filter(candidate => candidate?.pendingSessions.length);
+              if (pending.length === 1) view = pending[0];
+            }
+            if (view && view.pendingSessions.length) {
+              const sentSession = view.pendingSessions.shift();
+              if (sentSession === view.sessionId) view.controller.handleSendResult(event);
+            }
+            break;
+          }
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);

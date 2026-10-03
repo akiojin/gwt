@@ -13,7 +13,6 @@ pub mod custom;
 pub mod detect;
 pub mod environment;
 pub mod launch;
-pub mod migration;
 pub mod permission_mode;
 pub mod prepare;
 pub mod presets;
@@ -54,7 +53,6 @@ pub use launch::{
     ExecutionLaunchIntent, HostBunxCacheFastPath, LaunchConfig, ManualLaunchRuntimeEvidence,
     ManualLaunchRuntimeProof, ManualLaunchSuccessorPredecessor, ResolvedRunner,
 };
-pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use permission_mode::{
     decide as decide_permission_mode, provider_key, provider_skip_mapping,
     redecide_for_materialized_launch, validate_materialized_launch, PermissionLaunchSource,
@@ -115,8 +113,7 @@ pub use session::{
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,
-    migrate_and_load_stored_custom_agents, save_stored_custom_agents_to_path, StoredCustomAgent,
-    DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
+    save_stored_custom_agents_to_path, StoredCustomAgent, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
 };
 pub use types::{
     builtin_agent_descriptor_for_command, builtin_agent_descriptors, resolve_agent_id, AgentColor,

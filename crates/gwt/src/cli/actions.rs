@@ -9,8 +9,14 @@ use crate::cli::{CliEnv, CliParseError};
 pub enum ActionsCommand {
     /// `actions.logs`.
     Logs { run_id: u64 },
-    /// `actions.job_logs`.
-    JobLogs { job_id: u64 },
+    /// `actions.job_logs`. Issue #4849: `failed_only` returns only the lines
+    /// around failure markers (`FAILED`, `panicked at`, `error:`, `error[E`,
+    /// `##[error]`) with `context_lines` of context on each side.
+    JobLogs {
+        job_id: u64,
+        failed_only: bool,
+        context_lines: usize,
+    },
     /// `actions.rerun` (Issue #3515): re-run a failed run or a single failed
     /// job without pushing a throwaway commit to retrigger CI.
     Rerun { target: ActionsRerunTarget },
@@ -40,8 +46,28 @@ pub(super) fn parse(args: &[String]) -> Result<ActionsCommand, CliParseError> {
         Some("job-logs") => {
             super::expect_flag(it.next(), "--job")?;
             let job_id = super::parse_required_number(it.next())?;
+            let mut failed_only = false;
+            let mut context_lines = DEFAULT_FAILURE_CONTEXT_LINES;
+            while let Some(flag) = it.peek().map(|arg| arg.as_str()) {
+                match flag {
+                    "--failed-only" => {
+                        it.next();
+                        failed_only = true;
+                    }
+                    "--context" => {
+                        it.next();
+                        context_lines =
+                            clamp_failure_context_lines(super::parse_required_number(it.next())?);
+                    }
+                    _ => break,
+                }
+            }
             super::ensure_no_remaining_args(it)?;
-            Ok(ActionsCommand::JobLogs { job_id })
+            Ok(ActionsCommand::JobLogs {
+                job_id,
+                failed_only,
+                context_lines,
+            })
         }
         Some("rerun") => {
             let target = match it.next().map(String::as_str) {
@@ -79,16 +105,31 @@ pub(super) fn run<E: CliEnv>(
             let log = env
                 .fetch_actions_run_log(run_id)
                 .map_err(super::io_as_api_error)?;
+            // Issue #4849: colour codes never reach the caller.
+            let log = strip_ansi_escapes(&log);
             out.push_str(&log);
             if !log.ends_with('\n') {
                 out.push('\n');
             }
             0
         }
-        ActionsCommand::JobLogs { job_id } => {
+        ActionsCommand::JobLogs {
+            job_id,
+            failed_only,
+            context_lines,
+        } => {
             let log = env
                 .fetch_actions_job_log(job_id)
                 .map_err(super::io_as_api_error)?;
+            // Issue #4849 AC-1: GitHub job logs carry the runner's ANSI colour
+            // codes (every cargo test job); they are stripped here, server
+            // side, so no caller has to handle them.
+            let log = strip_ansi_escapes(&log);
+            let log = if failed_only {
+                failure_view(&log, context_lines)
+            } else {
+                log
+            };
             out.push_str(&log);
             if !log.ends_with('\n') {
                 out.push('\n');
@@ -103,6 +144,126 @@ pub(super) fn run<E: CliEnv>(
         }
     };
     Ok(code)
+}
+
+/// Issue #4849 AC-2: context on each side of a failure marker by default.
+pub(crate) const DEFAULT_FAILURE_CONTEXT_LINES: usize = 5;
+const MAX_FAILURE_CONTEXT_LINES: usize = 50;
+/// Lines of tail shown when `failed_only` finds no marker, so the caller
+/// still sees how the job ended.
+const FAILURE_VIEW_FALLBACK_TAIL_LINES: usize = 40;
+
+pub(crate) fn clamp_failure_context_lines(requested: u64) -> usize {
+    usize::try_from(requested)
+        .unwrap_or(MAX_FAILURE_CONTEXT_LINES)
+        .min(MAX_FAILURE_CONTEXT_LINES)
+}
+
+/// Issue #4849 AC-1: drop terminal escape sequences from a log.
+///
+/// Handles the forms GitHub runner logs actually contain: CSI (`ESC [ … <final>`,
+/// colour `m`, erase `K`, cursor moves), OSC (`ESC ] … BEL` / `ESC ] … ESC \`),
+/// and two-byte `ESC <char>` sequences. Text outside escapes is kept
+/// byte-for-byte; a lone `ESC` without a recognised introducer is dropped.
+pub(crate) fn strip_ansi_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                // Parameter / intermediate bytes 0x30–0x3F / 0x20–0x2F, then a
+                // final byte 0x40–0x7E.
+                for next in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                let mut previous = '\0';
+                for next in chars.by_ref() {
+                    if next == '\x07' || (previous == '\x1b' && next == '\\') {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            // nF (`ESC ( B` charset selection): intermediates 0x20–0x2F,
+            // then one final byte 0x30–0x7E.
+            Some(next) if ('\x20'..='\x2f').contains(&next) => {
+                for next in chars.by_ref() {
+                    if !('\x20'..='\x2f').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // Fp / Fs / Fe two-byte escapes (`ESC =`, `ESC 7`, `ESC M`, …).
+            Some(next) if ('\x30'..='\x5f').contains(&next) => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Issue #4849 AC-2: whether a log line marks a failure worth reading.
+fn is_failure_marker(line: &str) -> bool {
+    line.contains("FAILED")
+        || line.contains("panicked at")
+        || line.contains("error:")
+        || line.contains("error[E")
+        || line.contains("##[error]")
+}
+
+/// Issue #4849 AC-2: only the lines around failure markers, each block
+/// separated by `--`, so a red job can be read without the whole log. Without
+/// any marker the last [`FAILURE_VIEW_FALLBACK_TAIL_LINES`] lines are shown
+/// after a note saying no marker was found.
+pub(crate) fn failure_view(log: &str, context_lines: usize) -> String {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !is_failure_marker(line) {
+            continue;
+        }
+        let start = index.saturating_sub(context_lines);
+        let end = (index + context_lines).min(lines.len().saturating_sub(1));
+        match ranges.last_mut() {
+            // Overlapping or adjacent windows merge into one block.
+            Some((_, last_end)) if start <= *last_end + 1 => *last_end = (*last_end).max(end),
+            _ => ranges.push((start, end)),
+        }
+    }
+    if ranges.is_empty() {
+        let start = lines.len().saturating_sub(FAILURE_VIEW_FALLBACK_TAIL_LINES);
+        let mut out = format!(
+            "no failure marker (FAILED / panicked at / error: / error[E / ##[error]) in {} lines; last {} lines follow\n",
+            lines.len(),
+            lines.len() - start
+        );
+        for line in &lines[start..] {
+            out.push_str(line);
+            out.push('\n');
+        }
+        return out;
+    }
+    let mut out = String::new();
+    for (block, (start, end)) in ranges.iter().enumerate() {
+        if block > 0 {
+            out.push_str("--\n");
+        }
+        for (offset, line) in lines[*start..=*end].iter().enumerate() {
+            out.push_str(&format!("{:>6}: {line}\n", start + offset + 1));
+        }
+    }
+    out
 }
 
 /// Human-readable name of a rerun target, used in every refusal message.
@@ -277,11 +438,15 @@ pub(super) fn fetch_actions_job_log_via_gh(
 ) -> io::Result<String> {
     let endpoint = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
     let hub = gwt_core::process_console::global();
+    // Issue #4849 AC-1: current `gh` refuses to print a response that carries
+    // terminal escape sequences unless told otherwise, and a job log with
+    // colour codes is exactly that. The sequences are stripped by the caller
+    // before anything leaves the operation.
     let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
-        &["api", endpoint.as_str()],
+        &["api", "--allow-escape-sequences", endpoint.as_str()],
         gwt_core::process_console::SpawnOptions::new(format!("gh api {endpoint}"))
             .current_dir(repo_path),
     )?;
@@ -312,6 +477,99 @@ mod tests {
     fn actions_family_parse_directly_handles_logs() {
         let cmd = parse(&[s("logs"), s("--run"), s("101")]).expect("parse actions family command");
         assert_eq!(cmd, ActionsCommand::Logs { run_id: 101 });
+    }
+
+    /// Issue #4849 AC-1/AC-3: a job log with ANSI colour codes and a FAILED
+    /// block comes back clean, and the failures view carries the panic line.
+    #[test]
+    fn issue_4849_job_logs_strip_ansi_and_offer_a_failures_view() {
+        let fixture = concat!(
+            "2026-10-01T00:00:00Z \x1b[?25l\x1b[1mcargo test\x1b[0m\n",
+            "running 3 tests\n",
+            "test a::passes ... \x1b[32mok\x1b[0m\n",
+            "test b::fails ... \x1b[31mFAILED\x1b[0m\n",
+            "test c::passes ... \x1b[32mok\x1b[0m\n",
+            "\n",
+            "failures:\n",
+            "\n",
+            "---- b::fails stdout ----\n",
+            "thread 'b::fails' panicked at crates/x/src/lib.rs:10:5:\n",
+            "assertion failed: left == right\x1b[K\n",
+            "\x1b]8;;https://example.invalid\x07link\x1b]8;;\x07\n",
+            "line 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\n",
+            "##[error]Process completed with exit code 101.\n",
+            "line 22\n",
+        );
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_job_log(7, fixture);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            ActionsCommand::JobLogs {
+                job_id: 7,
+                failed_only: false,
+                context_lines: DEFAULT_FAILURE_CONTEXT_LINES,
+            },
+            &mut out,
+        )
+        .expect("job logs with colour codes succeed");
+        assert_eq!(code, 0);
+        assert!(
+            !out.contains('\x1b'),
+            "no escape sequence leaves the operation: {out:?}"
+        );
+        assert!(out.contains("test b::fails ... FAILED\n"), "{out}");
+        assert!(out.contains("assertion failed: left == right\n"), "{out}");
+        assert!(out.contains("link\n"), "OSC hyperlink text is kept: {out}");
+        assert!(out.contains("cargo test\n"), "{out}");
+        assert_eq!(out.lines().count(), fixture.lines().count());
+
+        let mut focused = String::new();
+        run(
+            &mut env,
+            ActionsCommand::JobLogs {
+                job_id: 7,
+                failed_only: true,
+                context_lines: 1,
+            },
+            &mut focused,
+        )
+        .expect("failures view");
+        assert!(!focused.contains('\x1b'), "{focused:?}");
+        assert!(focused.contains("test b::fails ... FAILED"), "{focused}");
+        assert!(
+            focused.contains("panicked at crates/x/src/lib.rs:10:5"),
+            "the panic line is in the failures view: {focused}"
+        );
+        assert!(focused.contains("##[error]Process completed"), "{focused}");
+        assert!(
+            !focused.contains("line 16"),
+            "lines far from any marker are left out: {focused}"
+        );
+        assert!(focused.contains("--\n"), "blocks are separated: {focused}");
+        assert!(focused.lines().count() < out.lines().count());
+    }
+
+    /// Issue #4849 AC-2: a log without any marker still shows its tail, and
+    /// the escape stripper handles the forms GitHub logs contain.
+    #[test]
+    fn issue_4849_failure_view_without_markers_shows_the_tail_and_stripper_forms() {
+        let view = failure_view("one\ntwo\nthree\n", 5);
+        assert!(view.starts_with("no failure marker"), "{view}");
+        assert!(view.ends_with("one\ntwo\nthree\n"), "{view}");
+
+        assert_eq!(
+            strip_ansi_escapes("\x1b[31;1mred\x1b[0m plain"),
+            "red plain"
+        );
+        assert_eq!(strip_ansi_escapes("a\x1b[2K\x1b[1Gb"), "ab");
+        assert_eq!(strip_ansi_escapes("x\x1b]0;title\x1b\\y"), "xy");
+        assert_eq!(strip_ansi_escapes("p\x1b(Bq\x1b=r"), "pqr");
+        assert_eq!(strip_ansi_escapes("no escapes"), "no escapes");
+        assert_eq!(clamp_failure_context_lines(500), MAX_FAILURE_CONTEXT_LINES);
+        assert_eq!(clamp_failure_context_lines(3), 3);
     }
 
     #[test]

@@ -315,6 +315,28 @@ pub struct LaunchWizardIssueMonitorPoolImpactView {
     pub resulting_summary: String,
 }
 
+/// Issue #4911: the Agent Settings sets of the Issue Monitor settings form, in
+/// launch order. Absent for every other wizard.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardIssueMonitorPoolView {
+    /// The set the form is editing.
+    pub active_index: usize,
+    pub sets: Vec<LaunchWizardIssueMonitorPoolSetView>,
+    /// Why no further set can be added; `None` while `＋` is available.
+    pub add_disabled_reason: Option<String>,
+    /// Why a set cannot be removed; `None` while `−` is available.
+    pub remove_disabled_reason: Option<String>,
+    /// The `launch_profile_summary` the Monitor will report after the save.
+    pub resulting_summary: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardIssueMonitorPoolSetView {
+    pub agent_id: String,
+    /// Read-only rows for a set the form is not editing.
+    pub summary: Vec<LaunchWizardSummaryView>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardProgressStepView {
     pub key: String,
@@ -377,8 +399,6 @@ pub struct LaunchWizardView {
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
     pub show_fast_mode: bool,
-    /// Legacy Codex-only compatibility field for older frontend payloads.
-    pub show_codex_fast_mode: bool,
     /// SPEC-3152: render the Hermes launch-options section (provider / model /
     /// profile / advanced) in the Settings form.
     pub show_hermes_options: bool,
@@ -399,6 +419,10 @@ pub struct LaunchWizardView {
     /// the save writes before committing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_monitor_pool_impact: Option<LaunchWizardIssueMonitorPoolImpactView>,
+    /// Issue #4911: filled by the app runtime when this wizard is the Issue
+    /// Monitor settings form, which edits every Agent Settings set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_monitor_pool: Option<LaunchWizardIssueMonitorPoolView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
@@ -434,8 +458,6 @@ pub struct LaunchWizardView {
     pub primary_action_enabled: bool,
     pub progress_steps: Vec<LaunchWizardProgressStepView>,
     pub fast_mode: bool,
-    /// Legacy Codex-only compatibility field for older frontend payloads.
-    pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
@@ -1084,6 +1106,22 @@ pub enum LaunchWizardAction {
     /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ直接移動する。
     GotoStep {
         phase: WizardPhase,
+    },
+    /// Issue #4911: the Issue Monitor Agent Settings form holds an ordered
+    /// list of sets, one per launch candidate. The list lives in the app
+    /// runtime next to the saved pool, so the runtime handles these four and
+    /// the wizard state ignores them.
+    AddAgentSettingsSet,
+    RemoveAgentSettingsSet {
+        index: usize,
+    },
+    MoveAgentSettingsSet {
+        index: usize,
+        to: usize,
+    },
+    /// Open another set in the form; the open one is kept as edited.
+    SelectAgentSettingsSet {
+        index: usize,
     },
 }
 

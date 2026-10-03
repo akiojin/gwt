@@ -90,6 +90,36 @@ and basic `gwt.exe` launch evidence.
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
+### Upgrade floor
+
+The upgrade floor for retiring one-shot migrations is **v9.72.1**, the latest
+release on 2026-08-03 UTC (60 days before the 2026-10-02 change). For an older
+installation, first install [v9.106.0](https://github.com/akiojin/gwt/releases/tag/v9.106.0),
+open your projects to run their retained migrations, then install the new version.
+Back up your gwt configuration and project state before upgrading.
+
+Legacy Claude Code backend rows are an exception: no released startup path ran
+their automatic migration. **旧 backend 設定は自動移行されません。Settings で provider を再登録してください**
+(Old backend settings are not migrated automatically; re-register the provider in
+Settings → Agent Backends.) Copy the endpoint, API key and model from the old
+entry, then select the built-in Claude Code agent with the registered backend.
+The old configuration remains readable and is not rewritten or deleted on launch.
+
+Migrations introduced after this floor remain supported, including Session schema
+5, PM scratch relocation, work-item projection rebuild v2 and ProjectKey migration.
+The usage `window_minutes` contract and the Workspace projection backfill associated
+with open SPEC #2359 are also retained. Importing old HOME / Workspace state from
+`workspace/current.json` and `work_items.json` remains a data-protection exception
+until startup can safely diagnose unsupported layouts before creating new state.
+The coordination event import and discussion import also remain supported: they
+serve the current recovery and session-specific Stop contracts. The obsolete agent
+identity reset is retired; startup preserves saved purpose and focus values and
+leaves `agent_identity.migration.json` unchanged (or absent).
+
+The embedded frontend uses the current Fast mode fields and requires an operation
+ID for cleanup requests. Reload older open tabs after upgrading; saved Fast mode
+preferences are retained.
+
 ## Requirements
 
 - `git` available in `PATH`
@@ -370,12 +400,23 @@ between its body and acceptance criteria and its agent's read-only output.
 the board the full width or restores the detail pane; columns scroll horizontally
 instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
 
-Open GitHub Issues remain in Backlog until explicitly queued or added by enabled
-auto-refill. Queue membership authorizes the monitor to consider an Issue; normal
+Open GitHub Issues remain in Backlog until explicitly queued, added by enabled
+auto-refill, or admitted with an `urgent` label. Queue membership authorizes the monitor to consider an Issue; normal
 readiness, claim, and capacity checks still apply. `Launch now` on a row opens the
 launch flow, which creates the `work/issue-N` branch/worktree at launch time and
 starts the agent with `gwt-execute #N`. Failed launches remain visible on their
 Issue rows.
+
+Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
+even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
+Issues lead the queue in assignment order by default, without changing the saved
+normal order or `max_active`. Set the head limit with
+`issue.monitor.queue.urgent_limit` (`limit: 0` disables priority, not membership).
+Overflow follows normal order. `issue.monitor.queue.demote` (`number`) persistently
+returns an Issue to normal priority, overriding its urgent label across scans and
+restarts. Queue cards and details distinguish urgent, overflow, and demotion;
+`issue.monitor.queue.list` and `issue.monitor.status` include the reason and
+observed GitHub label actor/time. Missing audit data is shown as unknown.
 
 Agents and automation can inspect the queue with `issue.monitor.status` and
 change membership/order with `issue.monitor.queue.push`,
@@ -403,11 +444,19 @@ every idle row, and `dry_run: true` reports the targets without touching
 anything. `issue.monitor.profiles` reads the launch
 candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
 candidates the Monitor launches each Issue with the first eligible candidate
-(rate-limit holds, the usage threshold, and `prefer_for` routing decide
-eligibility; the exact rules are specified in SPEC
+(rate-limit holds and `prefer_for` routing decide eligibility; a provider
+leaves the pool when it refuses a launch, not when a usage reading predicts it
+will; the exact rules are specified in SPEC
 [#3914](https://github.com/akiojin/gwt/issues/3914)), so one rate-limited
-provider no longer stops the queue. Saving Agent settings for a second provider
-in the GUI appends it to the same pool. All operations accept an optional
+provider no longer stops the queue. `issue.monitor.status` reports each
+provider's latest usage reading under `provider_usage`, or why there is none.
+Every rate-limit refusal immediately holds its provider. If all candidates
+are held, the queue resumes at the earliest known reset; if every reset is
+unknown, `needs_human_fleet` reports `launch_candidates_exhausted` instead
+of periodically retrying. In the GUI, the Issue Monitor settings form
+(`⚙ Settings`) lists the same pool as Agent Settings sets: `＋` adds a set, `−`
+removes one, the arrows reorder them, and the saved order is the launch order.
+All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.

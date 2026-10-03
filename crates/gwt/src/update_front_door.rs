@@ -13,6 +13,10 @@ pub enum UpdateApplyAdmission {
 }
 
 impl UpdateApplyAdmission {
+    pub fn accepts_discovery(&self) -> bool {
+        !matches!(self, Self::Committing)
+    }
+
     pub fn begin_resolution(&mut self) -> bool {
         if !matches!(self, Self::Idle) {
             return false;
@@ -221,6 +225,34 @@ fn pending_manifest_covers(latest: &str) -> bool {
     gwt_core::update::load_pending_update_manifest()
         .map(|m| m.version == latest)
         .unwrap_or(false)
+}
+
+/// Invalidate a staged older release before announcing its replacement.
+/// Same-version discovery (including Later) leaves the staged update intact.
+pub fn discard_superseded_pending_update(latest: &str) -> Result<Option<String>, String> {
+    let Some(manifest) = gwt_core::update::load_pending_update_manifest() else {
+        return Ok(None);
+    };
+    if !gwt_core::update::pending_version_is_newer(latest, &manifest.version) {
+        return Ok(None);
+    }
+    // The semver comparison above also validates the version before using it
+    // as a directory name. Remove only this release's managed download tree.
+    let directory = gwt_core::paths::gwt_updates_dir().join(format!(
+        "v{}",
+        manifest.version.trim().trim_start_matches('v')
+    ));
+    match std::fs::remove_dir_all(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to remove superseded update: {error}")),
+    }
+    gwt_core::update::clear_pending_update_manifest()?;
+    gwt_core::update::log_update_event(
+        "pending_superseded",
+        &[("version", &manifest.version), ("latest", latest)],
+    );
+    Ok(Some(manifest.version))
 }
 
 trait UpdateApplyOps {
@@ -1018,10 +1050,13 @@ mod apply_admission_tests {
     #[test]
     fn update_apply_admission_coalesces_requests_and_commits_once() {
         let mut admission = UpdateApplyAdmission::default();
+        assert!(admission.accepts_discovery());
         assert!(admission.begin_resolution());
+        assert!(admission.accepts_discovery());
         // Restart now, legacy toast, and automatic drain share this admission.
         assert!(!admission.begin_resolution());
         assert!(admission.begin_commit());
+        assert!(!admission.accepts_discovery());
         assert!(!admission.begin_commit());
         assert!(!admission.begin_resolution());
     }

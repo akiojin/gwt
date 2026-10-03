@@ -2,3 +2,24 @@
 [profile.default]
 fail-fast = false
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Issue #4822: local Windows canonical verification opts into this profile.
+# Bound process pressure while allowing pure units to overlap fixture work.
+[profile.gwt-verify]
+retries = 0
+test-threads = 4
+
+[profile.gwt-verify.junit]
+path = "junit.xml"
+
+[test-groups.git-process]
+max-threads = 1
+
+# These modules create repositories, processes, or host/daemon fixtures.
+# Keep the policy scoped to the local profile; CI retains its own schedule.
+[[profile.gwt-verify.overrides]]
+platform = 'cfg(windows)'
+# Match fixture modules, not workspace package identities: CI also loads this file
+# in the standalone timeout fixture. Integration tests share the process group.
+filter = 'kind(test) | test(/^(blob|branch|branch_protection|commit|diff|gh_rest|issue|merge_conflict|merged_branch_prune|merged_pr_sync|pr_status|refs|release_status|repository|board_remote_roots|coordination|index|migration|paths|repo_hash|workspace_projection|cli|agent_project_state|app_runtime|branch_cleanup|daemon_runtime|daemon_supervisor|index_search|index_worker|issue_cache|issue_monitor_settlement|issue_monitor_worker|knowledge_bridge|launch_wizard|managed_assets|pm_registry|process|recovery_delivery|recovery_delivery_tests|start_work|test_guard|worktree)::/)'
+test-group = "git-process"

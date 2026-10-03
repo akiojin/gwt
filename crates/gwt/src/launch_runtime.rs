@@ -49,6 +49,32 @@ fn launch_worktree_materialization_lock_path(main_repo_path: &Path, branch_name:
         .join(format!("{repo_hash}-{}.lock", &branch_digest[..16]))
 }
 
+/// Causal test boundary: reports each lock path a resolver found contended,
+/// so a test can wait for "the resolver is blocked on this lock" instead of
+/// inferring it from elapsed time (SPEC #4740).
+#[cfg(test)]
+mod materialization_lock_contention {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{mpsc, Mutex},
+    };
+
+    static OBSERVERS: Mutex<Vec<mpsc::Sender<PathBuf>>> = Mutex::new(Vec::new());
+
+    pub(super) fn observe() -> mpsc::Receiver<PathBuf> {
+        let (tx, rx) = mpsc::channel();
+        OBSERVERS.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+        rx
+    }
+
+    pub(super) fn notify(lock_path: &Path) {
+        OBSERVERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|tx| tx.send(lock_path.to_path_buf()).is_ok());
+    }
+}
+
 fn with_launch_worktree_materialization_lock<T>(
     main_repo_path: &Path,
     branch_name: &str,
@@ -79,7 +105,11 @@ fn with_launch_worktree_materialization_lock<T>(
                 lock_path.display()
             )
         })?;
-    gwt_core::operation_deadline::lock_exclusive(&lock).map_err(|error| {
+    gwt_core::operation_deadline::lock_exclusive_with_observer(&lock, || {
+        #[cfg(test)]
+        materialization_lock_contention::notify(&lock_path);
+    })
+    .map_err(|error| {
         format!(
             "failed to acquire launch materialization lock {} for branch {branch_name}: {error}",
             lock_path.display()
@@ -1294,6 +1324,7 @@ mod tests {
     fn sample_exact_windows_npx_launch_config() -> gwt_agent::LaunchConfig {
         let mut config = sample_versioned_launch_config();
         config.tool_version = Some("2.1.210".to_string());
+        config.tool_version_selector = Some("2.1.210".to_string());
         config.args = vec![
             "@anthropic-ai/claude-code@2.1.210".to_string(),
             "--print".to_string(),
@@ -1571,14 +1602,16 @@ mod tests {
         );
         let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
         fs::create_dir_all(&lock_dir).expect("lock dir");
+        let lock_path = lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16]));
         let lock = fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16])))
+            .open(&lock_path)
             .expect("lock file");
         gwt_core::operation_deadline::lock_exclusive(&lock).expect("hold materialization lock");
+        let contention = materialization_lock_contention::observe();
 
         let (tx, rx) = std::sync::mpsc::channel();
         let repo_for_thread = repo.clone();
@@ -1599,13 +1632,33 @@ mod tests {
             tx.send((result, working_dir)).expect("send result");
         });
 
-        match rx.recv_timeout(Duration::from_millis(500)) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            other => panic!("resolver ignored the same-branch materialization lock: {other:?}"),
+        // Wait for the causal event "the resolver found our lock contended",
+        // not for an elapsed time (SPEC #4740). A resolver that finishes
+        // first ignored the lock. HANG_GUARD only bounds a wedged test.
+        let guard_expiry = std::time::Instant::now() + gwt_core::deadline_budget::HANG_GUARD;
+        loop {
+            if contention.try_iter().any(|path| path == lock_path) {
+                break;
+            }
+            if let Ok(outcome) = rx.try_recv() {
+                panic!("resolver ignored the same-branch materialization lock: {outcome:?}");
+            }
+            assert!(
+                std::time::Instant::now() < guard_expiry,
+                "resolver never reached the materialization lock"
+            );
+            // test-hygiene: allow-short-duration polling interval; ordering comes from the contention event
+            std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(
+            rx.try_recv().is_err(),
+            "resolver must stay blocked while the lock is held"
+        );
         fs2::FileExt::unlock(&lock).expect("release materialization lock");
+        // The resolver's post-lock work (origin fetch, base freshness) is real
+        // git I/O, so completion is bounded only by HANG_GUARD.
         let (result, working_dir) = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(gwt_core::deadline_budget::HANG_GUARD)
             .expect("resolver completes after lock release");
         result.expect("existing worktree is reusable");
         assert!(working_dir

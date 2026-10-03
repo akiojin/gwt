@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 ## [9.108.0] - 2026-10-02
 
+### Upgrade Notes
+
+- **migration:** 一回限り移行の upgrade floor は v9.72.1（2026-08-03 UTC、変更日の60日前）。古い環境は先に v9.106.0 で各プロジェクトを開いてから更新してください。旧 Claude Code backend 行の未使用の自動移行は廃止しました。旧 backend 設定は自動移行されません。Settings で provider を再登録してください。旧設定は保持されます。
+- **frontend:** 旧 Fast mode wire フィールドと operation ID のない cleanup 互換処理を廃止します。更新前から開いているタブは再読み込みしてください。保存済み設定と cleanup の再接続処理は保持します。
+- **migration:** 旧 agent identity reset を廃止し、保存済みの目的・進捗と既存 marker を保持します。旧 HOME / Workspace、coordination、discussion の取り込みはデータ保護と現用契約のため維持します。
+
 ### Bug Fixes
 
 - **test:** Daemon起動予算とatomic公開テストの負荷依存を除く

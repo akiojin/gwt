@@ -46,7 +46,9 @@ pub mod workspace_projection;
 pub mod workspace_projection_migration;
 pub mod worktree_hash;
 
-pub use error::{GwtError, JsonDecodeKind, Result};
+pub use error::{
+    GwtError, JsonDecodeKind, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind,
+};
 
 #[cfg(test)]
 mod canonical_naming_tests {

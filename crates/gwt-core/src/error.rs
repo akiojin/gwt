@@ -1,5 +1,48 @@
 //! Error types for gwt-core.
 
+/// A failed persisted Workspace read is distinct from an absent state file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceStateLoadErrorKind {
+    Io,
+    Malformed,
+    IncompatibleSchema,
+}
+
+/// Serializable diagnostic retained by the GUI while writes remain disabled.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
+#[error("Workspace state load failed at {path}: {message}")]
+pub struct WorkspaceStateLoadError {
+    pub path: std::path::PathBuf,
+    pub kind: WorkspaceStateLoadErrorKind,
+    pub message: String,
+}
+
+impl WorkspaceStateLoadError {
+    pub fn io(path: &std::path::Path, error: std::io::Error) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            kind: WorkspaceStateLoadErrorKind::Io,
+            message: error.to_string(),
+        }
+    }
+
+    pub fn json(path: &std::path::Path, error: serde_json::Error) -> Self {
+        let kind = match error.classify() {
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                WorkspaceStateLoadErrorKind::Malformed
+            }
+            serde_json::error::Category::Data => WorkspaceStateLoadErrorKind::IncompatibleSchema,
+            serde_json::error::Category::Io => WorkspaceStateLoadErrorKind::Io,
+        };
+        Self {
+            path: path.to_path_buf(),
+            kind,
+            message: error.to_string(),
+        }
+    }
+}
+
 /// Whether JSON cannot be parsed at all or is valid JSON produced by an
 /// incompatible schema. Recovery may replace only malformed data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +63,9 @@ impl std::fmt::Display for JsonDecodeKind {
 /// Unified error type for all gwt operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GwtError {
+    /// Existing Workspace state could not be read safely.
+    #[error(transparent)]
+    WorkspaceStateLoad(#[from] WorkspaceStateLoadError),
     /// I/O error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
