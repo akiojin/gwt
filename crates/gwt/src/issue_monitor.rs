@@ -2343,6 +2343,14 @@ pub enum MonitorFailureKind {
     ReclaimLoop,
     /// The launched process exited before it could report anything useful.
     LaunchProcessExit,
+    /// Issue #4918 AC-4: gwt could not pre-trust the worktree's Codex hooks, so
+    /// the launch aborted rather than stop at `Hooks need review`.
+    ///
+    /// Classified rather than left `Unclassified` because it is a property of
+    /// the host's hook state, not of the Issue: it hits every launch in the
+    /// fleet at once, and an operator reading N unclassified rows cannot see
+    /// that. On 2026-10-03 it held four rows whose messages were byte-identical.
+    HookTrust,
     /// Nothing recognisable. Read `error_message`.
     Unclassified,
 }
@@ -2368,6 +2376,14 @@ impl MonitorFailureKind {
         if message.contains("Process exited with status") {
             return Self::LaunchProcessExit;
         }
+        // Issue #4918 AC-4: both the abort and the registrar's own refusal, so
+        // the kind does not depend on which side reported first.
+        if message.contains("Codex hook trust is incomplete")
+            || message.contains("Codex hook trust registration failed")
+            || message.contains("Hooks need review")
+        {
+            return Self::HookTrust;
+        }
         Self::Unclassified
     }
 
@@ -2379,6 +2395,7 @@ impl MonitorFailureKind {
             Self::GenerationConflict => "generation_conflict",
             Self::ReclaimLoop => "reclaim_loop",
             Self::LaunchProcessExit => "launch_process_exit",
+            Self::HookTrust => "hook_trust",
             Self::Unclassified => "unclassified",
         }
     }
@@ -2819,6 +2836,30 @@ pub enum IssueMonitorRequeueOutcome {
     /// No failure is holding this issue. Nothing was changed, and reporting a
     /// recovery would tell the operator the state moved when it did not.
     NotHeld,
+}
+
+/// Issue #4918 AC-3: the retry backoff an operator recovery cleared, with the
+/// floor and the counters it removed.
+///
+/// Reported verbatim rather than summarized: the operator is overriding the
+/// ladder's own pacing decision, so the reply has to say which floor and which
+/// attempt count were discarded, or a recovery that cleared nothing reads the
+/// same as one that cleared an hour of backoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueMonitorClearedRetryHold {
+    /// The persisted attempt counter before the reset.
+    pub attempts_before: u32,
+    /// The cap that counter was measured against.
+    pub max_attempts: u32,
+    /// The retry floor that was in force, when one was.
+    pub retry_not_before: Option<String>,
+    /// Why the floor was set, for the holds that name a cause.
+    pub hold_reason: Option<String>,
+    /// The provider that owned the floor, for an account-wide quota hold.
+    pub hold_provider: Option<String>,
+    /// What the previous attempt failed with, so the operator's own reason can
+    /// be read against the failure it was overriding.
+    pub last_failure_message: Option<String>,
 }
 
 /// SPEC-3431 FR-033: marks an inbox error as a deliberate stop rather than a
@@ -3591,6 +3632,14 @@ pub struct IssueMonitorAgentStatus {
     /// still read empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_surge: Option<IssueMonitorFailureSurge>,
+    /// Issue #4918 AC-4: the launch failures behind a `retry_backoff` stall.
+    ///
+    /// Present only while at least one queued row is held by the retry ladder,
+    /// so an empty queue and a paced one both read as absent. See
+    /// [`IssueMonitorLaunchFailures`] for why this is not folded into
+    /// `stall_reason` or `failure_surge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_failures: Option<IssueMonitorLaunchFailures>,
     /// Issue #4249 FR-004: the one gate keeping the queue from launching, or
     /// `null` when a launch is admissible. Always serialized, so a missing
     /// field means a publisher that predates it and reads as `unknown`.
@@ -3655,6 +3704,75 @@ pub struct IssueMonitorFailureSurge {
     /// taking the fleet down, or are these unrelated?".
     pub by_kind: BTreeMap<String, usize>,
 }
+
+/// Issue #4918 AC-4: why the queue's rows are in retry backoff, when they are.
+///
+/// Deliberately its own field rather than a refinement of `stall_reason`, and
+/// not a projection onto `last_error`.
+///
+/// `stall_reason` answers one gate for the whole queue, and answers
+/// `retry_backoff` identically for "the ladder is pacing one retry" and "every
+/// launch in the fleet is aborting on the same host fault". `failure_surge`
+/// does not cover it either: a row the ladder released is `queued`, not
+/// `launch_failed`, so the surge's share test never sees it. On 2026-10-03 the
+/// PM needed four operations — `issue.monitor.status`, `errors.list`,
+/// `hook.doctor`, `pane.read` — to tell those apart, and only the last named
+/// the cause; `last_error` was meanwhile occupied by an unrelated per-issue
+/// message, the same reason `scan_stall` is its own field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchFailures {
+    /// Queued rows whose retry floor has not elapsed at status time. This is
+    /// the count that distinguishes a saturated fleet from a failing one: with
+    /// `stall_reason: retry_backoff` and `held: 0` the queue is paced, with
+    /// `held: 4` four launches failed.
+    pub held: usize,
+    /// Rows whose persisted attempt counter reached `max_attempts`. They retry
+    /// on the cap-length floor and never escalate again, so they are the rows
+    /// an operator has to decide about.
+    pub exhausted: usize,
+    /// The held rows counted by [`MonitorFailureKind::slug`], so one read
+    /// answers "is one mechanism holding the fleet, or are these unrelated?".
+    pub by_kind: BTreeMap<String, usize>,
+    /// The held rows themselves, ascending by Issue number.
+    pub rows: Vec<IssueMonitorLaunchFailureRow>,
+    /// The failure message every held row carries, when they all carry the same
+    /// one. A shared message is the signature of a host fault rather than of N
+    /// independent failures, and it is the single most useful line to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_message: Option<String>,
+    /// The earliest floor among the held rows — when the queue next moves on
+    /// its own. Absent only when every held row is held by an exhausted counter
+    /// with no floor left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<String>,
+}
+
+/// Issue #4918 AC-4: one queued row held out of admission by the retry ladder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchFailureRow {
+    pub issue_number: u64,
+    /// The cause kind, classified from `message`.
+    pub kind: String,
+    /// Attempts spent, against the cap they are measured by.
+    pub attempts: u32,
+    pub max_attempts: u32,
+    /// Attempts charged to infrastructure rather than to the agent. Equal to
+    /// `attempts` when nothing about the work itself has failed yet.
+    pub non_agent_attempts: u32,
+    /// The floor in force, when one is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_not_before: Option<String>,
+    /// Verbatim. The classifier is a convenience, never a replacement: an
+    /// `unclassified` row is read here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Issue #4918 AC-4: the most held rows listed individually.
+///
+/// The counts and `by_kind` stay exact past this; only `rows` is capped, so a
+/// fleet-wide fault is still reported as one even when it holds every row.
+pub const LAUNCH_FAILURE_ROWS_CAP: usize = 12;
 
 /// Issue #4207 AC-5: the fewest failed rows that can be a fleet problem.
 ///
@@ -11567,9 +11685,88 @@ impl IssueMonitorState {
         })
     }
 
+    /// Issue #4918 AC-4: the queued rows the retry ladder is holding at `now`,
+    /// with the cause kind of each.
+    ///
+    /// Reads the ladder's own record rather than the inbox row's
+    /// `error_message`, because the row's copy is wiped the moment the retry
+    /// launches (Issue #4161 AC-6) while `last_failure_message` survives — and
+    /// a digest that empties itself exactly when a retry is in flight would be
+    /// absent for every reader who arrives mid-cycle.
+    fn launch_failures_at(&self, now: &str) -> Option<IssueMonitorLaunchFailures> {
+        let max_attempts = self.autonomous_tuning.max_attempts;
+        let mut rows = Vec::new();
+        let mut by_kind = BTreeMap::<String, usize>::new();
+        let mut exhausted = 0usize;
+        let mut next_retry_at: Option<&str> = None;
+        for item in &self.inbox {
+            let issue_number = item.issue.number;
+            // Only rows the ladder is holding out of admission. A `launched`
+            // row is not waiting on a retry, and a failed row belongs to
+            // `failure_surge` and `needs_human`.
+            if item.state != MonitorInboxState::Queued || self.retry_ready(issue_number, now) {
+                continue;
+            }
+            let Some(record) = self.autonomous_records.get(&issue_number) else {
+                continue;
+            };
+            let message = record
+                .last_failure_message
+                .clone()
+                .or_else(|| item.error_message.clone());
+            let kind = message.as_deref().map_or(
+                MonitorFailureKind::Unclassified,
+                MonitorFailureKind::classify,
+            );
+            *by_kind.entry(kind.slug().to_string()).or_default() += 1;
+            if record.attempts >= max_attempts {
+                exhausted += 1;
+            }
+            if let Some(floor) = record.retry_not_before.as_deref() {
+                if next_retry_at.is_none_or(|earliest| floor < earliest) {
+                    next_retry_at = Some(floor);
+                }
+            }
+            rows.push(IssueMonitorLaunchFailureRow {
+                issue_number,
+                kind: kind.slug().to_string(),
+                attempts: record.attempts,
+                max_attempts,
+                non_agent_attempts: record.non_agent_attempts,
+                retry_not_before: record.retry_not_before.clone(),
+                message,
+            });
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        let held = rows.len();
+        // One message shared by every held row is the signature of a host
+        // fault. Computed before the cap so a fleet-wide fault still reports
+        // its message when it holds more rows than the cap lists.
+        let shared_message = rows
+            .first()
+            .and_then(|row| row.message.clone())
+            .filter(|first| {
+                rows.iter()
+                    .all(|row| row.message.as_deref() == Some(first.as_str()))
+            });
+        rows.sort_by_key(|row| row.issue_number);
+        rows.truncate(LAUNCH_FAILURE_ROWS_CAP);
+        Some(IssueMonitorLaunchFailures {
+            held,
+            exhausted,
+            by_kind,
+            rows,
+            shared_message,
+            next_retry_at: next_retry_at.map(str::to_string),
+        })
+    }
+
     fn agent_status_without_scan_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         let failure_surge = self.failure_surge();
+        let launch_failures = self.launch_failures_at(now);
         let stall_reason = self.stall_reason_at(now);
         IssueMonitorAgentStatus {
             // Issue #4413: this is the live driver talking about itself. Only
@@ -11735,6 +11932,7 @@ impl IssueMonitorState {
             spotlight: None,
             build_artifact_gc: None,
             failure_surge,
+            launch_failures,
             stall_reason,
             gui_action: stall_reason
                 .and_then(IssueMonitorStallReason::gui_action)
@@ -16654,6 +16852,87 @@ impl IssueMonitorState {
         outcome
     }
 
+    /// Issue #4918 AC-3: take a row the retry ladder is holding as a requeue
+    /// target, and report the floor and the attempt count that were discarded.
+    ///
+    /// Two gaps, both of which left a retry-held row with no operator recovery:
+    ///
+    /// A row in the ladder is `Queued` with a future `retry_not_before` and is
+    /// *not* a member of `failed_issues`, so [`Self::requeue_failed_issue`] and
+    /// every other recovery that resolves a failure hold answers `NotHeld`.
+    ///
+    /// And [`Self::clear_retry_hold`] (Issue #3616 AC-5), which `launch_now`
+    /// calls, drops the hold fields but leaves `attempts` where the ladder left
+    /// them. A row at the cap therefore re-escalates on its very next failure
+    /// instead of getting the fresh bounded cycle a released failure hold gets
+    /// — [`Self::release_held_failure`] resets the count for exactly this
+    /// reason, and the ladder had no equivalent.
+    ///
+    /// Spends no attempt: nothing about the work failed, an operator decided
+    /// the hold was wrong.
+    ///
+    /// Returns `None` when neither a floor nor an exhausted counter is in
+    /// force. Answering "released" for an admissible row would tell the
+    /// operator the state moved when it did not — the contract
+    /// [`IssueMonitorRequeueOutcome::NotHeld`] keeps.
+    pub fn release_retry_hold_for_operator(
+        &mut self,
+        issue_number: u64,
+        now: &str,
+    ) -> Option<IssueMonitorClearedRetryHold> {
+        let max_attempts = self.autonomous_tuning.max_attempts;
+        let record = self.autonomous_records.get(&issue_number)?;
+        let cleared = IssueMonitorClearedRetryHold {
+            attempts_before: record.attempts,
+            max_attempts,
+            retry_not_before: record.retry_not_before.clone(),
+            hold_reason: record.retry_hold_reason.clone(),
+            hold_provider: record.retry_hold_provider.clone(),
+            last_failure_message: record.last_failure_message.clone(),
+        };
+        // Either gate AC-3 names is enough on its own: a floor that has not
+        // elapsed, or a counter that reached the cap. A row whose floor already
+        // elapsed and whose counter is below the cap is admissible, and the
+        // scan is the thing holding it.
+        let floor_in_force =
+            cleared.retry_not_before.is_some() && !self.retry_ready(issue_number, now);
+        let attempts_exhausted = cleared.attempts_before >= max_attempts;
+        if !floor_in_force && !attempts_exhausted {
+            return None;
+        }
+        self.clear_retry_hold(issue_number);
+        let record = self.autonomous_record_mut(issue_number);
+        record.attempts = 0;
+        record.non_agent_attempts = 0;
+        // The ladder writes the failure onto the row so a queued row still
+        // shows why it is waiting (Issue #3967 AC-4). Once the floor is gone
+        // that text describes an attempt nobody is waiting on any more, and a
+        // queued row carrying a failure message is exactly what made these rows
+        // read as failed; the audit below keeps it.
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.error_message = None;
+        }
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number} retry hold released by operator (attempts {}/{} reset{})",
+                cleared.attempts_before,
+                max_attempts,
+                cleared
+                    .retry_not_before
+                    .as_deref()
+                    .map(|floor| format!(", floor {floor} discarded"))
+                    .unwrap_or_default()
+            ),
+        );
+        Some(cleared)
+    }
+
     /// Publish a release the Monitor issued on its own and return the issue to
     /// the queue. Callers have already refused live launches and unheld rows.
     fn release_failed_issue_hold(
@@ -19154,6 +19433,7 @@ mod tests {
                 idle_window_counts: BTreeMap::new(),
                 review_windows: Vec::new(),
                 failure_surge: None,
+                launch_failures: None,
                 stall_reason: Some(IssueMonitorStallReason::GuiDisconnected),
                 gui_action: Some("Open the gwt window for this project".to_string()),
             }
@@ -23152,6 +23432,218 @@ mod tests {
             monitor.active_count(),
             1,
             "the live launch keeps its slot when a stale window reports"
+        );
+    }
+
+    /// Issue #4918 AC-3: a row the retry ladder is holding has to be a requeue
+    /// target.
+    ///
+    /// The ladder releases the launch and leaves the row `Queued` with a floor,
+    /// so it is not in `failed_issues` and `requeue_failed_issue` answers
+    /// `NotHeld`. Every operator recovery therefore refused it, and the only
+    /// remaining action was to wait out a backoff whose cause was already gone.
+    #[test]
+    fn an_operator_requeue_releases_a_retry_floor_and_names_what_it_discarded() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_autonomous_failure(
+            42,
+            "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review`",
+            "2026-10-03T00:00:00Z",
+        );
+        let now = "2026-10-03T00:00:10Z";
+        assert!(
+            !monitor.retry_ready(42, now),
+            "the ladder must be holding the row for this test to mean anything"
+        );
+        assert_eq!(
+            monitor.requeue_failed_issue(42, "cause fixed", now),
+            IssueMonitorRequeueOutcome::NotHeld,
+            "a retry-held row is not a failure hold — that is the gap AC-3 closes"
+        );
+
+        let cleared = monitor
+            .release_retry_hold_for_operator(42, now)
+            .expect("a floor in force is a releasable hold");
+
+        assert!(monitor.retry_ready(42, now), "the floor must be gone");
+        assert!(
+            cleared.retry_not_before.is_some(),
+            "the reply must name the floor it discarded, got {cleared:?}"
+        );
+        assert_eq!(
+            cleared.last_failure_message.as_deref(),
+            Some(
+                "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review`"
+            ),
+            "the operator's reason has to be readable against the failure it overrode"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "the release spends no attempt and starts one fresh bounded cycle"
+        );
+    }
+
+    /// Issue #4918 AC-3: an admissible row is not a hold.
+    ///
+    /// Reporting a release for a row nothing was holding is the same false
+    /// "it moved" that [`IssueMonitorRequeueOutcome::NotHeld`] exists to avoid.
+    #[test]
+    fn an_operator_requeue_refuses_a_row_no_retry_hold_is_holding() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_autonomous_failure(42, "transient", "2026-10-03T00:00:00Z");
+
+        assert!(
+            monitor
+                .release_retry_hold_for_operator(42, "2026-10-03T06:00:00Z")
+                .is_none(),
+            "an elapsed floor with attempts below the cap is admissible, not held"
+        );
+    }
+
+    /// Issue #4918 AC-3: the attempt counter is what `clear_retry_hold` leaves
+    /// behind.
+    ///
+    /// `launch_now` already drops the hold fields (Issue #3616 AC-5), so a row
+    /// at the cap relaunches — and then re-escalates on its very next failure,
+    /// because `attempts >= max_attempts` still holds. A released failure hold
+    /// resets the count for exactly this reason; the ladder had no equivalent.
+    #[test]
+    fn releasing_an_exhausted_retry_hold_resets_the_count_that_clear_retry_hold_keeps() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let max = monitor.autonomous_tuning.max_attempts;
+        for _ in 0..max {
+            monitor.record_autonomous_failure(42, "host fault", "2026-10-03T00:00:00Z");
+            monitor.complete_active_launch_at(42, "tab-1::agent-1", "2026-10-03T00:00:01Z");
+        }
+        assert!(
+            monitor.attempt_count(42) >= max,
+            "the row must be at the cap, got {}",
+            monitor.attempt_count(42)
+        );
+
+        // The pre-existing primitive: the hold goes, the counter stays.
+        assert!(monitor.clear_retry_hold(42));
+        assert!(
+            monitor.attempt_count(42) >= max,
+            "clear_retry_hold deliberately does not touch the counter"
+        );
+
+        let cleared = monitor
+            .release_retry_hold_for_operator(42, "2026-10-03T00:00:02Z")
+            .expect("an exhausted counter is a releasable hold on its own");
+
+        assert_eq!(cleared.attempts_before, max);
+        assert_eq!(cleared.max_attempts, max);
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "the row must start a fresh bounded cycle, not resume a spent one"
+        );
+    }
+
+    /// Issue #4918 AC-4: `stall_reason: retry_backoff` answers the same for a
+    /// paced retry and for a fleet whose every launch is aborting.
+    ///
+    /// Four rows held by one byte-identical host fault took four operations to
+    /// diagnose, and only `pane.read` named the cause. One read answers it now.
+    #[test]
+    fn launch_failures_names_the_cause_behind_a_retry_backoff_stall() {
+        const MESSAGE: &str =
+            "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review`";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        let candidates = [issue(41), issue(42)];
+        scan_queued_candidates(&mut monitor, &candidates, "2026-10-03T00:00:00Z");
+        for number in [41, 42] {
+            monitor.complete_active_launch_at(number, "tab-1::agent-1", "2026-10-03T00:00:00Z");
+            monitor.record_autonomous_failure(number, MESSAGE, "2026-10-03T00:00:00Z");
+        }
+
+        let now = "2026-10-03T00:00:10Z";
+        let status = monitor.agent_status_at(now);
+        assert_eq!(
+            status.stall_reason,
+            Some(IssueMonitorStallReason::RetryBackoff),
+            "the gate the PM sees today"
+        );
+        let failures = status
+            .launch_failures
+            .expect("a retry_backoff stall must say what failed");
+
+        assert_eq!(failures.held, 2, "both rows are held by the ladder");
+        assert_eq!(
+            failures.by_kind.get("hook_trust").copied(),
+            Some(2),
+            "the cause kind must be named, not left unclassified: {:?}",
+            failures.by_kind
+        );
+        assert_eq!(
+            failures.shared_message.as_deref(),
+            Some(MESSAGE),
+            "one message on every held row is the signature of a host fault"
+        );
+        assert!(
+            failures.next_retry_at.is_some(),
+            "the reader needs to know when the queue moves on its own"
+        );
+        assert_eq!(
+            failures
+                .rows
+                .iter()
+                .map(|row| row.issue_number)
+                .collect::<Vec<_>>(),
+            vec![41, 42]
+        );
+    }
+
+    /// Issue #4918 AC-4: a queue nothing is holding reports no failures, so the
+    /// field's presence is itself the signal.
+    #[test]
+    fn launch_failures_is_absent_while_nothing_is_held_by_the_ladder() {
+        let monitor = launched_monitor(42, "tab-1::agent-1");
+
+        assert!(
+            monitor
+                .agent_status_at("2026-10-03T00:00:00Z")
+                .launch_failures
+                .is_none(),
+            "a launched row is not waiting on a retry"
+        );
+    }
+
+    /// Issue #4918 AC-4: the hook-trust abort is a host-wide fault, so it is
+    /// classified rather than left for the reader to recognize in N identical
+    /// unclassified messages.
+    #[test]
+    fn hook_trust_failures_classify_from_either_side_that_reports_them() {
+        for message in [
+            "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for /repo/.codex/hooks.json:stop:1:0",
+            "Codex hook trust registration failed for worktree /repo (config /home/.codex/config.toml): command mismatch",
+            "Codex would stop this launch on `Hooks need review`",
+        ] {
+            assert_eq!(
+                MonitorFailureKind::classify(message),
+                MonitorFailureKind::HookTrust,
+                "unclassified would hide a fleet-wide fault: {message}"
+            );
+        }
+        assert_eq!(
+            MonitorFailureKind::classify("something else entirely"),
+            MonitorFailureKind::Unclassified,
+            "the classifier must stay narrow"
         );
     }
 

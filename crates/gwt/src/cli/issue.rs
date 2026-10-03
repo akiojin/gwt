@@ -2316,7 +2316,7 @@ fn run_monitor_requeue<E: CliEnv>(
         out.push('\n');
         return Ok(1);
     }
-    let (prefs, (outcome, released_hold)) =
+    let (prefs, (outcome, released_hold, cleared_retry)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
@@ -2324,7 +2324,19 @@ fn run_monitor_requeue<E: CliEnv>(
             );
             let outcome = monitor.requeue_failed_issue(number, reason, &now);
             let not_held = matches!(outcome, crate::IssueMonitorRequeueOutcome::NotHeld);
-            let released_hold = if not_held && monitor.clear_completion_hold(number) {
+            // Issue #4918 AC-3: a retry floor holds the row without a failure
+            // hold, so it reaches here as `NotHeld`. Tried before the holds
+            // below because it is the only one that also resets the attempt
+            // counter, and a row can carry both a floor and a stale closure
+            // record — clearing the floor is what admits it.
+            let cleared_retry = if not_held {
+                monitor.release_retry_hold_for_operator(number, &now)
+            } else {
+                None
+            };
+            let released_hold = if cleared_retry.is_some() {
+                Some("retry_backoff")
+            } else if not_held && monitor.clear_completion_hold(number) {
                 Some("completion")
             } else if not_held && monitor.reopened_issue_awaits_rescan(number) {
                 // Issue #4770: the scan that observed the close already dropped
@@ -2341,7 +2353,7 @@ fn run_monitor_requeue<E: CliEnv>(
                 monitor.terminal_queue_push(&[number], "operator", &now);
                 *prefs = monitor.prefs();
             }
-            Ok((outcome, released_hold))
+            Ok((outcome, released_hold, cleared_retry))
         })
         .map_err(io_as_api_error)?;
 
@@ -2377,6 +2389,18 @@ fn run_monitor_requeue<E: CliEnv>(
                         "status": "requeued",
                         "reason": reason,
                         "released_hold": released_hold,
+                        // Issue #4918 AC-3: name the floor and the counter that
+                        // were discarded. Without them a recovery that threw
+                        // away the cap-length backoff reads identically to one
+                        // that lifted a closure record.
+                        "cleared_retry_hold": cleared_retry.as_ref().map(|cleared| serde_json::json!({
+                            "attempts_before": cleared.attempts_before,
+                            "max_attempts": cleared.max_attempts,
+                            "retry_not_before": cleared.retry_not_before,
+                            "hold_reason": cleared.hold_reason,
+                            "hold_provider": cleared.hold_provider,
+                            "last_failure_message": cleared.last_failure_message,
+                        })),
                         "released_at": now,
                         "scan_requested": delivery.scan_requested,
                         "scan_delivery": delivery.scan_delivery,
@@ -7659,6 +7683,7 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
             stall_reason: None,
             gui_action: None,
             idle_windows: Vec::new(),
@@ -7741,6 +7766,7 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
             stall_reason: None,
             gui_action: None,
             idle_windows: Vec::new(),
@@ -7874,6 +7900,7 @@ mod tests {
                 issue_cache: None,
                 review_windows: Vec::new(),
                 failure_surge: None,
+                launch_failures: None,
                 stall_reason: None,
                 gui_action: None,
                 idle_windows: Vec::new(),
@@ -7947,6 +7974,7 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
             stall_reason: None,
             gui_action: None,
             idle_windows: Vec::new(),
@@ -10331,6 +10359,7 @@ mod tests {
             build_artifact_gc: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
             stall_reason: None,
             gui_action: None,
             issue_cache: None,
