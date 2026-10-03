@@ -3376,7 +3376,7 @@ const REPLACE_RETRY_MAX_TOTAL: Duration = Duration::from_millis(500);
 /// worth. UserPromptSubmit runs its whole hook under a 200ms deadline, so the
 /// schedule starts at 1ms and stops at whatever budget the caller has left.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn replace_retry_delays(budget: Duration) -> impl Iterator<Item = Duration> {
+pub(crate) fn replace_retry_delays(budget: Duration) -> impl Iterator<Item = Duration> {
     let mut remaining = budget;
     let mut delay = Duration::from_millis(1);
     std::iter::from_fn(move || {
@@ -3393,7 +3393,7 @@ fn replace_retry_delays(budget: Duration) -> impl Iterator<Item = Duration> {
 /// The retry budget for one atomic replace: whatever the ambient operation
 /// deadline leaves, capped so a caller without a deadline still gives up.
 #[cfg_attr(any(not(windows), test), allow(dead_code))]
-fn replace_retry_budget() -> Duration {
+pub(crate) fn replace_retry_budget() -> Duration {
     let ceiling = REPLACE_RETRY_MAX_TOTAL;
     match crate::operation_deadline::current() {
         Some(deadline) => deadline

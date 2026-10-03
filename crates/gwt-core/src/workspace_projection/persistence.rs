@@ -2119,10 +2119,8 @@ fn discover_pending_workspace_state_transaction_coordinators(
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
-            let bytes = match fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
+            let Some(bytes) = read_discovered_transaction_coordinator(&path)? else {
+                continue;
             };
             match serde_json::from_slice::<PendingWorkspaceStateTransactionRouting>(&bytes) {
                 Ok(routing) => {
@@ -2143,6 +2141,65 @@ fn discover_pending_workspace_state_transaction_coordinators(
     coordinator_paths.sort();
     coordinator_paths.dedup();
     Ok(coordinator_paths)
+}
+
+/// Read one coordinator found by the directory scan; `None` once it is gone.
+///
+/// The global coordinator directory is shared by every Workspace transaction
+/// on the host, so the scan routinely meets markers that another transaction
+/// is removing right now. A marker that disappears is already treated as
+/// absent. On Windows a marker that is mid-removal — deleted while some other
+/// handle (a sibling scan, an antivirus scanner) still has it open — first sits
+/// in a delete-pending state in which every open fails with
+/// `ERROR_ACCESS_DENIED` (os error 5). Failing the whole transaction on that
+/// aborted an unrelated Work write. The read is retried on the same bounded
+/// schedule the atomic replace uses, so the marker resolves to gone (or to
+/// readable bytes) once the last handle closes, while a denial that persists
+/// past the budget is still reported.
+// Only the Windows build has a retrying arm; elsewhere every arm returns.
+#[cfg_attr(not(windows), allow(clippy::never_loop))]
+fn read_discovered_transaction_coordinator(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    #[cfg(windows)]
+    let mut delays =
+        crate::coordination::replace_retry_delays(crate::coordination::replace_retry_budget());
+    loop {
+        match fs::read(path) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            #[cfg(windows)]
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                let Some(delay) = delays.next() else {
+                    return Err(error);
+                };
+                #[cfg(test)]
+                coordinator_read_retry_hook::run();
+                std::thread::sleep(delay);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Test seam: runs once when a coordinator read is about to be retried, so a
+/// test can release the handle that keeps a marker delete-pending at exactly
+/// that point instead of racing a timer.
+#[cfg(all(test, windows))]
+mod coordinator_read_retry_hook {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn set(hook: impl FnOnce() + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn run() {
+        if let Some(hook) = HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
 }
 
 fn workspace_state_file_fingerprint(path: &Path) -> Result<String> {

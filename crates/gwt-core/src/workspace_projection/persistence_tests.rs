@@ -14507,3 +14507,82 @@ fn execution_pr_metadata_ignores_a_stale_work_of_another_owner_and_session() {
     assert_eq!(containers("current-work"), vec![container]);
     assert_eq!(containers("stale-work"), vec![bare]);
 }
+
+/// The CI flake behind `session_bound_board_origin_without_target_container_remains_board_only`:
+/// another transaction's coordinator in the shared global directory was being
+/// deleted while a second handle still had it open. Windows keeps such a file
+/// listed but delete-pending, every open fails with os error 5, and the scan
+/// used to abort an unrelated Work write with `PermissionDenied`.
+#[cfg(windows)]
+#[test]
+fn coordinator_scan_waits_out_a_foreign_marker_pending_delete() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = crate::test_support::ScopedGwtHome::set(temp.path().join("home"));
+    let coordinator_dir =
+        crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+    fs::create_dir_all(&coordinator_dir).expect("create global coordinator dir");
+    let marker = coordinator_dir.join("foreign-transaction.json");
+    fs::write(&marker, br#"{"foreign":true}"#).expect("seed foreign coordinator");
+
+    // Delete the marker with classic (non-POSIX) disposition through a handle
+    // that stays open: Windows keeps it listed but delete-pending until that
+    // handle closes, exactly the state the CI scan met.
+    let holder = delete_pending_marker_handle(&marker);
+    let direct = fs::read(&marker).expect_err("a delete-pending marker cannot be opened");
+    assert_eq!(direct.raw_os_error(), Some(5), "{direct:?}");
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let released_by_hook = released.clone();
+    coordinator_read_retry_hook::set(move || {
+        drop(holder);
+        released_by_hook.set(true);
+    });
+
+    let found = discover_pending_workspace_state_transaction_coordinators(&[temp
+        .path()
+        .join("state/works.json")])
+    .expect("a marker mid-removal must not fail the scan");
+
+    assert!(
+        found.is_empty(),
+        "a removed foreign marker is absent: {found:?}"
+    );
+    assert!(
+        released.get(),
+        "the scan must have met the delete-pending marker and retried"
+    );
+    assert!(
+        !marker.exists(),
+        "the marker is gone once its last handle closes"
+    );
+}
+
+#[cfg(windows)]
+fn delete_pending_marker_handle(path: &Path) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{GENERIC_READ, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let file = fs::OpenOptions::new()
+        .access_mode(DELETE.0 | GENERIC_READ.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .open(path)
+        .expect("open marker for deletion");
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: the handle is owned by `file`, which outlives the call, and the
+    // buffer is a correctly sized FILE_DISPOSITION_INFO.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileDispositionInfo,
+            std::ptr::from_ref(&disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    }
+    .expect("mark marker delete-pending");
+    file
+}

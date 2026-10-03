@@ -24645,6 +24645,10 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        // The fixed origin maps every run to the same issue cache root; a
+        // private gwt home keeps another run's issue #77 entry out of view.
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         assert_eq!(detect_owner_kind_evidence(dir.path(), 77), None);
 
