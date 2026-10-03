@@ -86,8 +86,9 @@ fn manual_generation_operation_id(
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     binding: &gwt_agent::ExecutionBindingIdentity,
     predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+    attempts: &[gwt::cli::execution_state::ContinuationAttempt],
 ) -> String {
-    manual_holder_operation_id(
+    let base = manual_holder_operation_id(
         &format!(
             "{}:{}:{}:{}",
             owner.kind.as_str(),
@@ -96,7 +97,22 @@ fn manual_generation_operation_id(
             binding.ledger_head_hash
         ),
         predecessor_kind,
-    )
+    );
+    let mut operation_id = base.clone();
+    // A new user launch advances only past a durably cancelled operation.
+    // Deriving its identity from that candidate preserves retries across Host
+    // restarts; Prepared/Activated operations still replay their exact request.
+    while let Some(attempt) = attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == operation_id)
+    {
+        if attempt.status != gwt::cli::execution_state::ContinuationAttemptStatus::Aborted {
+            break;
+        }
+        operation_id = format!("{base}:retry:{}", attempt.candidate_generation_id);
+    }
+    operation_id
 }
 
 fn manual_successor_stable_component(prefix: &str, operation_id: &str) -> String {
@@ -4602,7 +4618,12 @@ impl AppRuntime {
             return Ok(super::ManualLaunchGenerationDisposition::Prepare(
                 super::ManualLaunchPreparation {
                     owner,
-                    operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+                    operation_id: manual_generation_operation_id(
+                        owner,
+                        &current,
+                        predecessor_kind,
+                        &ledger.continuation_attempts,
+                    ),
                     expected_binding: current,
                     expected_session: None,
                     expected_runtime: None,
@@ -4699,7 +4720,12 @@ impl AppRuntime {
         };
         let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
         let intent = super::ManualLaunchHolderIntent {
-            operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+            operation_id: manual_generation_operation_id(
+                owner,
+                &current,
+                predecessor_kind,
+                &ledger.continuation_attempts,
+            ),
             fingerprint,
             owner,
             predecessor,
@@ -6097,11 +6123,13 @@ mod manual_successor_identity_tests {
             owner,
             &binding,
             gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+            &[],
         );
         let after_runtime_replacement = manual_generation_operation_id(
             owner,
             &binding,
             gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+            &[],
         );
 
         assert_eq!(before_runtime_replacement, after_runtime_replacement);
