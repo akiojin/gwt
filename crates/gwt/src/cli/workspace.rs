@@ -9720,19 +9720,22 @@ pub(crate) mod tests {
         stale.branch = Some("work/foreign".to_string());
         stale.worktree_path = Some(project_root.join("work").join("foreign"));
         projection.agents.push(stale);
-        let legacy_current = gwt_core::paths::gwt_project_dir_for_repo_path(&project_root)
-            .join("workspace/current.json");
-        std::fs::create_dir_all(legacy_current.parent().expect("legacy current parent"))
-            .expect("create legacy current parent");
+        let canonical_current =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
+        std::fs::create_dir_all(
+            canonical_current
+                .parent()
+                .expect("canonical current parent"),
+        )
+        .expect("create canonical current parent");
         std::fs::write(
-            &legacy_current,
+            &canonical_current,
             serde_json::to_vec_pretty(&projection).expect("serialize stale projection row"),
         )
-        .expect("save legacy stale projection row");
+        .expect("save canonical stale projection row");
 
         let paths = [
-            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
-            legacy_current,
+            canonical_current,
             gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
             gwt_core::paths::gwt_repo_local_work_events_path(&worktree),
             worktree.join(".gitattributes"),
@@ -10402,7 +10405,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_docker_legacy_missing_work_without_migration() {
+    fn workspace_ensure_rejects_docker_legacy_layout_without_mutation() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -10441,9 +10444,9 @@ pub(crate) mod tests {
                 boundary: None,
             },
         )
-        .expect_err("Docker legacy recovery must fail before migration");
+        .expect_err("Docker legacy layout must require an intermediate upgrade");
 
-        assert!(error.to_string().contains("cannot recover a missing Work"));
+        assert!(error.to_string().contains("v9.106.0"));
         assert_eq!(
             std::fs::read(&legacy_current).expect("legacy current after refusal"),
             legacy_bytes
@@ -10748,7 +10751,7 @@ pub(crate) mod tests {
         lifecycle: WorkspaceLifecycleStage,
     ) {
         let project_dir = scan_root.join(hash);
-        let workspace_dir = project_dir.join("workspace");
+        let workspace_dir = project_dir.join("project-state");
         std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
         let mut projection = WorkspaceProjection::default_for_project(&project_dir);
         projection.id = id.to_string();
@@ -10851,7 +10854,7 @@ pub(crate) mod tests {
         assert_eq!(code, 0);
         assert!(out.contains("DRY-RUN: archive=1 delete=0 skip=0"));
         // dry-run should not mutate lifecycle_stage
-        let projection_path = tmp.path().join("stale-hash/workspace/current.json");
+        let projection_path = tmp.path().join("stale-hash/project-state/current.json");
         let loaded =
             gwt_core::workspace_projection::load_workspace_projection_from_path(&projection_path)
                 .expect("load")
@@ -10885,7 +10888,7 @@ pub(crate) mod tests {
         assert_eq!(code, 0);
         assert!(out.contains("APPLIED: archive=1"));
 
-        let projection_path = tmp.path().join("stale-hash/workspace/current.json");
+        let projection_path = tmp.path().join("stale-hash/project-state/current.json");
         let loaded =
             gwt_core::workspace_projection::load_workspace_projection_from_path(&projection_path)
                 .expect("load")
@@ -10926,7 +10929,7 @@ pub(crate) mod tests {
         assert!(out.contains("APPLIED: archive=1"));
 
         let keep = gwt_core::workspace_projection::load_workspace_projection_from_path(
-            &tmp.path().join("keep-hash/workspace/current.json"),
+            &tmp.path().join("keep-hash/project-state/current.json"),
         )
         .expect("load keep")
         .expect("present");
@@ -10936,7 +10939,7 @@ pub(crate) mod tests {
             "id filter must leave non-matching workspaces untouched",
         );
         let take = gwt_core::workspace_projection::load_workspace_projection_from_path(
-            &tmp.path().join("take-hash/workspace/current.json"),
+            &tmp.path().join("take-hash/project-state/current.json"),
         )
         .expect("load take")
         .expect("present");
