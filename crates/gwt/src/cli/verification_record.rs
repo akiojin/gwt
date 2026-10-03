@@ -2945,6 +2945,13 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
     {
         return None;
     }
+    gwtd_artifact_restore_command(worktree)
+}
+
+fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
+    if cfg!(windows) {
+        return None;
+    }
     let manifest =
         |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
     let workspace = manifest(&worktree.join("Cargo.toml"))?;
@@ -2968,6 +2975,25 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
         return None;
     }
     Some("cargo build -p gwt --bin gwtd")
+}
+
+/// Deferred admission has no run record. Keep recovery (including failures)
+/// in its diagnostic, without presenting the unexecuted matrix as evidence.
+fn restore_gwtd_after_deferral(worktree: &Path, host: &VerificationHost) -> String {
+    let Some(command) = gwtd_artifact_restore_command(worktree) else {
+        return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
+    };
+    // Restore this checkout's operational path, even when Cargo's environment
+    // or user configuration points ordinary builds at another target directory.
+    let command = format!("{command} --target-dir target");
+    match execute_command_with_isolation(worktree, &command, true, None, host, None) {
+        Ok((0, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
+        Ok((code, _, output)) => format!(
+            "gwtd artifact restoration: failed (`{command}`, exit {code}); \
+             restore from the checkout root before GitHub operations: {output}"
+        ),
+        Err(error) => format!("gwtd artifact restoration: failed (`{command}`): {error}"),
+    }
 }
 
 /// Assemble once for both local and daemon launches (Issue #4830).
@@ -5209,8 +5235,12 @@ pub(super) fn run<E: CliEnv>(
                     out.push_str(&format!(
                         "verify: scope — heavy; `{heavy}` needs the host to itself\n"
                     ));
-                    let granted =
-                        crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
+                    let granted = crate::cli::verification_lease::admission::admit(
+                        env,
+                        &worktree,
+                        max_wait,
+                        || restore_gwtd_after_deferral(&worktree, &host),
+                    )?;
                     out.push_str(&granted.summary());
                     out.push('\n');
                     Some(granted)
@@ -6188,6 +6218,17 @@ mod tests {
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
+        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit);
+        assert!(
+            recovery.contains("gwtd artifact restoration: failed"),
+            "{recovery}"
+        );
+        assert!(
+            recovery.contains("cargo build -p gwt --bin gwtd"),
+            "{recovery}"
+        );
+        assert!(recovery.contains("gwtd.rs"), "{recovery}");
+        assert_eq!(load(dir.path()).unwrap().unwrap(), persisted);
     }
 
     // Re-entered in child processes so this regression also runs on Windows.
