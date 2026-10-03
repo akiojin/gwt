@@ -62299,11 +62299,24 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     let fixture_root = tempdir().expect("fixture tempdir");
     let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
 
-    // Both copies exist on disk in a real worktree: the workspace-home copy is
-    // written by the launch refresh, the worktree-local copy is tracked content
-    // refreshed by the `Both`-mode managed-asset writers.
-    gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
-        .expect("refresh managed codex hooks");
+    // A worktree created by an older launch keeps its portable local command
+    // while the current launch targets workspace-home discovery.
+    {
+        let _old_bin =
+            gwt_skills::settings_local::ScopedHookBin::set(gwt_skills::CANONICAL_HOOK_BIN);
+        gwt_skills::generate_codex_hooks_for_mode(
+            &worktree,
+            gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+        )
+        .expect("seed old local hooks");
+    }
+    let materialization = gwt::refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        &gwt_agent::AgentId::Codex,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        false,
+    )
+    .expect("refresh launch assets");
 
     let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&worktree)
@@ -62318,7 +62331,7 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
         &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
-        None,
+        materialization.hook_bin.as_deref(),
     )
     .expect("launch trust registration must succeed")
     .expect("Codex host launch registers trust");
