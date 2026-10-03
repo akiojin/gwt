@@ -946,6 +946,11 @@ pub struct IssueMonitorPrefs {
     /// Issue #4037 AC-4: the update drain, if raised. Absent in pre-#4037 prefs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_drain: Option<IssueMonitorUpdateDrain>,
+    /// Issue #4918 AC-5: the candidate pool's degradation to one provider, as
+    /// first observed. Durable because the fact AC-5 asks for is *when* it
+    /// degraded, and nothing else in the state remembers that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_pool_degradation: Option<IssueMonitorCandidatePoolDegradation>,
     /// Issue #3964 AC-4: the last stranded-generation reclaim result, kept
     /// durable so a reader that rebuilds the monitor from prefs (no live
     /// daemon) still sees it.
@@ -1167,6 +1172,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_hold_releases: BTreeMap::new(),
             provider_quota_accounts: BTreeMap::new(),
             update_drain: None,
+            candidate_pool_degradation: None,
             generation_reclaim: None,
             duplicate_launch_refusals: Vec::new(),
             launched_issues: Vec::new(),
@@ -3632,6 +3638,10 @@ pub struct IssueMonitorAgentStatus {
     /// still read empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_surge: Option<IssueMonitorFailureSurge>,
+    /// Issue #4918 AC-5: the candidate pool's degradation to one provider and
+    /// when it started. Present only while the degradation holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_pool_degradation: Option<IssueMonitorCandidatePoolDegradation>,
     /// Issue #4918 AC-4: the launch failures behind a `retry_backoff` stall.
     ///
     /// Present only while at least one queued row is held by the retry ladder,
@@ -3703,6 +3713,42 @@ pub struct IssueMonitorFailureSurge {
     /// [`MonitorFailureKind::slug`], so one read answers "is one mechanism
     /// taking the fleet down, or are these unrelated?".
     pub by_kind: BTreeMap<String, usize>,
+}
+
+/// Issue #4918 AC-5: the candidate pool has degraded to a single eligible
+/// provider, and when it did.
+///
+/// `launch_profile_candidates` already lets a reader *derive* this at read
+/// time: count the entries without a `held_until`. AC-5 asks for the fact at
+/// the moment it happened, which a derivation cannot give — a reader who
+/// arrives after the hold resets sees a healthy pool and no trace that every
+/// launch in between ran on one provider. The pool going to one is also what
+/// turns the next hold into a full stop, so the interval is the thing worth
+/// recording.
+///
+/// `since` is preserved while the degradation holds, exactly as
+/// [`IssueMonitorUpdateDrain::since`] is: a re-observation of the same
+/// degraded pool must not restart its clock, or the duration a reader needs is
+/// always one scan interval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorCandidatePoolDegradation {
+    /// When the pool was first observed degraded to this provider.
+    pub since: String,
+    /// The one provider still eligible to launch.
+    pub provider: String,
+    /// Candidates configured in the pool, degraded ones included.
+    pub pool: usize,
+    /// The candidates that are not eligible, with the hold that excludes each.
+    pub excluded: Vec<IssueMonitorCandidatePoolExclusion>,
+}
+
+/// Issue #4918 AC-5: one pool candidate that cannot currently launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorCandidatePoolExclusion {
+    pub agent_id: String,
+    /// The provider hold's reset instant, when the hold names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_until: Option<String>,
 }
 
 /// Issue #4918 AC-4: why the queue's rows are in retry backoff, when they are.
@@ -4450,6 +4496,8 @@ pub struct IssueMonitorState {
     /// shares its admission gate with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     update_drain: Option<IssueMonitorUpdateDrain>,
+    /// Issue #4918 AC-5: the pool's degradation to one provider, as first seen.
+    candidate_pool_degradation: Option<IssueMonitorCandidatePoolDegradation>,
     /// Issue #3964 AC-4: last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
@@ -6702,6 +6750,7 @@ impl IssueMonitorState {
             provider_quota_failures: BTreeMap::new(),
             provider_quota_accounts: BTreeMap::new(),
             update_drain: None,
+            candidate_pool_degradation: None,
             generation_reclaim: None,
             duplicate_launch_refusals: BTreeMap::new(),
             launched_windows: BTreeMap::new(),
@@ -6778,6 +6827,7 @@ impl IssueMonitorState {
         state.provider_quota_accounts = normalize_provider_keyed(&prefs.provider_quota_accounts);
         state.enforce_provider_quota_hold_releases();
         state.update_drain = prefs.update_drain.clone();
+        state.candidate_pool_degradation = prefs.candidate_pool_degradation.clone();
         state.generation_reclaim = prefs.generation_reclaim;
         state.duplicate_launch_refusals = prefs
             .duplicate_launch_refusals
@@ -6940,6 +6990,7 @@ impl IssueMonitorState {
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
             provider_quota_accounts: self.provider_quota_accounts.clone(),
             update_drain: self.update_drain.clone(),
+            candidate_pool_degradation: self.candidate_pool_degradation.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
             duplicate_launch_refusals: self.duplicate_launch_refusals.values().cloned().collect(),
             launched_issues: self
@@ -9535,6 +9586,11 @@ impl IssueMonitorState {
         // Issue #4037: the drain is raised and cleared through controls that
         // commit to disk, so disk owns it like the other config switches.
         self.update_drain = disk.update_drain.clone();
+        // Issue #4918 AC-5: a cross-process rebase must not restart `since`, so
+        // the disk copy wins whenever it has an observation at all.
+        if disk.candidate_pool_degradation.is_some() {
+            self.candidate_pool_degradation = disk.candidate_pool_degradation.clone();
+        }
         self.auto_close_merged_issues = disk.auto_close_merged_issues;
         self.auto_apply_updates = disk.auto_apply_updates;
         self.effect_authority_epoch = disk.effect_authority_epoch;
@@ -11398,6 +11454,92 @@ impl IssueMonitorState {
         self.update_drain = None;
     }
 
+    /// Issue #4918 AC-5: the candidate pool's degradation to one provider, as
+    /// first observed.
+    pub fn candidate_pool_degradation(&self) -> Option<&IssueMonitorCandidatePoolDegradation> {
+        self.candidate_pool_degradation.as_ref()
+    }
+
+    /// Issue #4918 AC-5: record, at the moment it happens, that the candidate
+    /// pool has degraded to a single eligible provider.
+    ///
+    /// Called from the scan so the observation is anchored to a real admission
+    /// decision rather than to whenever a reader happens to look. `since` is
+    /// preserved across re-observations of the same degraded provider — a pool
+    /// re-observed every scan interval must not report a one-interval
+    /// degradation forever.
+    ///
+    /// A pool configured with one candidate is not a degradation: nothing was
+    /// lost, and reporting it would make the field fire permanently for every
+    /// single-provider project. Eligibility here is provider holds only, which
+    /// is what this state knows; the usage threshold is applied at selection
+    /// time against live usage the Monitor does not persist, so a pool this
+    /// reports as healthy can still select nothing. `stall_reason` remains the
+    /// authority on whether a launch is admissible.
+    pub fn observe_candidate_pool_at(
+        &mut self,
+        now: &str,
+    ) -> Option<&IssueMonitorCandidatePoolDegradation> {
+        let pool = self.launch_profiles.len();
+        if pool < 2 {
+            self.candidate_pool_degradation = None;
+            return None;
+        }
+        let parsed_now = parse_rfc3339_utc(now);
+        let mut eligible = Vec::new();
+        let mut excluded = Vec::new();
+        for profile in &self.launch_profiles {
+            let held_until = parsed_now.and_then(|at| {
+                let provider = normalize_issue_monitor_provider(&profile.agent_id)?;
+                hold_reset_after(&self.provider_quota_holds, &provider, at).map(str::to_string)
+            });
+            // An unparseable clock cannot establish a hold, so it fails open —
+            // the same direction `retry_ready` fails, and the alternative is
+            // reporting a degradation caused by a clock glitch.
+            let held = parsed_now.is_some()
+                && normalize_issue_monitor_provider(&profile.agent_id).is_some_and(|provider| {
+                    self.provider_quota_holds.contains_key(&provider) && held_until.is_some()
+                });
+            if held {
+                excluded.push(IssueMonitorCandidatePoolExclusion {
+                    agent_id: profile.agent_id.clone(),
+                    held_until,
+                });
+            } else {
+                eligible.push(profile.agent_id.clone());
+            }
+        }
+        let [provider] = eligible.as_slice() else {
+            self.candidate_pool_degradation = None;
+            return None;
+        };
+        let since = self
+            .candidate_pool_degradation
+            .as_ref()
+            .filter(|previous| previous.provider == *provider)
+            .map_or_else(|| now.to_string(), |previous| previous.since.clone());
+        let first_observation = since == now;
+        self.candidate_pool_degradation = Some(IssueMonitorCandidatePoolDegradation {
+            since,
+            provider: provider.clone(),
+            pool,
+            excluded,
+        });
+        if first_observation {
+            // The ring is lossy, which is why the durable record above exists;
+            // this is for a reader already watching the notices.
+            self.push_autonomous_notice(
+                "warn",
+                0,
+                format!(
+                    "launch candidate pool degraded to a single provider ({provider}); {} of {pool} candidates are held",
+                    pool - 1
+                ),
+            );
+        }
+        self.candidate_pool_degradation.as_ref()
+    }
+
     pub fn status_view(&self) -> IssueMonitorStatusView {
         let now = format_rfc3339_utc(chrono::Utc::now());
         self.status_view_with_quota_hold(&now, self.provider_quota_hold_at(&now))
@@ -11933,6 +12075,7 @@ impl IssueMonitorState {
             build_artifact_gc: None,
             failure_surge,
             launch_failures,
+            candidate_pool_degradation: self.candidate_pool_degradation.clone(),
             stall_reason,
             gui_action: stall_reason
                 .and_then(IssueMonitorStallReason::gui_action)
@@ -18864,6 +19007,9 @@ pub fn scan_issue_monitor_candidates(
     monitor.last_scan_at = Some(now.to_string());
     monitor.last_error = None;
     monitor.launch_auth_required = false;
+    // Issue #4918 AC-5: anchored to the scan, so the recorded instant is a real
+    // admission decision rather than whenever a reader happened to look.
+    monitor.observe_candidate_pool_at(now);
     monitor.closure_held.clear();
     // Accept closure revisions before retiring membership; a stale Closed row
     // cannot discard work whose newer Reopened revision is already durable.
@@ -19434,6 +19580,7 @@ mod tests {
                 review_windows: Vec::new(),
                 failure_surge: None,
                 launch_failures: None,
+                candidate_pool_degradation: None,
                 stall_reason: Some(IssueMonitorStallReason::GuiDisconnected),
                 gui_action: Some("Open the gwt window for this project".to_string()),
             }
@@ -23644,6 +23791,130 @@ mod tests {
             MonitorFailureKind::classify("something else entirely"),
             MonitorFailureKind::Unclassified,
             "the classifier must stay narrow"
+        );
+    }
+
+    /// Issue #4918 AC-5: the pool going to one provider is recorded when it
+    /// happens, and keeps the instant it happened.
+    ///
+    /// `launch_profile_candidates` lets a reader derive the degradation at read
+    /// time, which is exactly what AC-5 says is not enough: once the hold
+    /// resets the pool reads healthy and nothing says every launch in between
+    /// ran on one provider.
+    #[test]
+    fn a_pool_degraded_to_one_provider_records_when_it_degraded_and_keeps_that_instant() {
+        let degraded = |holds: BTreeMap<String, String>| {
+            IssueMonitorState::with_prefs(
+                IssueMonitorConfig::default(),
+                IssueMonitorPrefs {
+                    launch_profiles: vec![
+                        test_launch_profile("codex"),
+                        test_launch_profile("claude"),
+                    ],
+                    provider_quota_holds: holds,
+                    ..IssueMonitorPrefs::default()
+                },
+            )
+        };
+
+        let mut healthy = degraded(BTreeMap::new());
+        assert!(
+            healthy
+                .observe_candidate_pool_at("2026-10-03T00:00:00Z")
+                .is_none(),
+            "a pool with two eligible candidates is not degraded"
+        );
+
+        let mut monitor = degraded(BTreeMap::from([(
+            "claude".to_string(),
+            "2026-10-04T00:00:00Z".to_string(),
+        )]));
+        let first = monitor
+            .observe_candidate_pool_at("2026-10-03T01:00:00Z")
+            .cloned()
+            .expect("one held candidate out of two is a degradation");
+        assert_eq!(first.provider, "codex");
+        assert_eq!(first.pool, 2);
+        assert_eq!(first.since, "2026-10-03T01:00:00Z");
+        assert_eq!(
+            first
+                .excluded
+                .iter()
+                .map(|exclusion| exclusion.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude"],
+            "the reader has to know which candidate was lost"
+        );
+
+        let later = monitor
+            .observe_candidate_pool_at("2026-10-03T03:00:00Z")
+            .cloned()
+            .expect("the degradation still holds");
+        assert_eq!(
+            later.since, "2026-10-03T01:00:00Z",
+            "re-observing must not restart the clock, or the duration is always one scan interval"
+        );
+
+        // Past the reset the pool is whole again, and the field says so rather
+        // than keeping a degradation that has ended.
+        assert!(
+            monitor
+                .observe_candidate_pool_at("2026-10-04T01:00:00Z")
+                .is_none(),
+            "an elapsed hold restores the candidate"
+        );
+    }
+
+    /// Issue #4918 AC-5: a project configured with one provider never degraded.
+    ///
+    /// Reporting it would make the field fire permanently for every
+    /// single-provider project, which is the opposite of a signal.
+    #[test]
+    fn a_single_candidate_pool_is_not_reported_as_degraded() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launch_profiles: vec![test_launch_profile("codex")],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+
+        assert!(
+            monitor
+                .observe_candidate_pool_at("2026-10-03T00:00:00Z")
+                .is_none(),
+            "nothing was lost, so nothing degraded"
+        );
+    }
+
+    /// Issue #4918 AC-5: the observation is durable, so a reader that rebuilds
+    /// the monitor from prefs — no live daemon — still sees when it started.
+    #[test]
+    fn a_pool_degradation_survives_the_prefs_round_trip() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launch_profiles: vec![test_launch_profile("codex"), test_launch_profile("claude")],
+                provider_quota_holds: BTreeMap::from([(
+                    "claude".to_string(),
+                    "2026-10-04T00:00:00Z".to_string(),
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor
+            .observe_candidate_pool_at("2026-10-03T01:00:00Z")
+            .expect("degraded");
+
+        let reloaded =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+
+        assert_eq!(
+            reloaded
+                .candidate_pool_degradation()
+                .map(|degradation| degradation.since.as_str()),
+            Some("2026-10-03T01:00:00Z"),
+            "the instant is the fact AC-5 asks for; it has to survive the process"
         );
     }
 
