@@ -492,13 +492,13 @@ fn issue_monitor_candidate(
 /// `## 受け入れ基準` block; the assembled section is appended so the Monitor
 /// sees the same block regardless of where it is stored. A body-resident
 /// section is already inside `body`, so nothing is duplicated.
-fn acceptance_source_text(body: &str, entry: &CacheEntry) -> String {
+pub(crate) fn acceptance_source_text(body: &str, spec_body: &gwt_github::SpecBody) -> String {
     let spec = SectionName("spec".to_string());
     let comment_resident = matches!(
-        entry.spec_body.sections_index.0.get(&spec),
+        spec_body.sections_index.0.get(&spec),
         Some(gwt_github::SectionLocation::Comments(_))
     );
-    match entry.spec_body.sections.get(&spec) {
+    match spec_body.sections.get(&spec) {
         Some(content) if comment_resident && !content.trim().is_empty() => {
             format!("{body}\n\n{content}")
         }
@@ -702,7 +702,7 @@ where
             // the `spec` section lives; a comment-resident block must reach
             // the acceptance classifier too.
             let body = issue.body.as_deref().unwrap_or(&entry.snapshot.body);
-            issue.body = Some(acceptance_source_text(body, entry));
+            issue.body = Some(acceptance_source_text(body, &entry.spec_body));
         }
         candidates.push(issue_monitor_candidate(issue, readiness));
     }
@@ -2134,7 +2134,7 @@ pub fn load_cached_issue_monitor_candidates(
             let (readiness, body) = if is_spec {
                 (
                     spec_cache_entry_readiness(&entry),
-                    acceptance_source_text(&entry.snapshot.body, &entry),
+                    acceptance_source_text(&entry.snapshot.body, &entry.spec_body),
                 )
             } else {
                 (
