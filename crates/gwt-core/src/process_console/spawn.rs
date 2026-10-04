@@ -177,6 +177,30 @@ pub fn spawn_logged_blocking(
     runtime.block_on(spawn_logged(hub, kind, program, args, options))
 }
 
+/// Capture a `gh` child whose quota accounting is owned by the caller.
+///
+/// Reuses the normal guard, process resolution, absolute operation deadline,
+/// and tree cleanup, without spending or reconciling the GitHub budget twice.
+/// Captured text is returned verbatim and is not forwarded to the Console.
+pub fn capture_gh_blocking(
+    program: impl Into<OsString>,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    options: SpawnOptions,
+) -> std::io::Result<SpawnOutput> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(spawn_logged_inner(
+        &ProcessConsoleHub::new(),
+        ProcessKind::Gh,
+        program,
+        args,
+        options.forward_output(false),
+        crate::operation_deadline::current(),
+        false,
+    ))
+}
+
 /// Synchronous wrapper around [`spawn_logged_with_deadline`].
 pub fn spawn_logged_blocking_with_deadline(
     hub: &ProcessConsoleHub,
@@ -203,7 +227,7 @@ pub async fn spawn_logged(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
 ) -> std::io::Result<SpawnOutput> {
-    spawn_logged_inner(hub, kind, program, args, options, None).await
+    spawn_logged_inner(hub, kind, program, args, options, None, true).await
 }
 
 /// Spawn a logged child under one absolute deadline.
@@ -219,7 +243,7 @@ pub async fn spawn_logged_with_deadline(
     options: SpawnOptions,
     deadline: Instant,
 ) -> std::io::Result<SpawnOutput> {
-    spawn_logged_inner(hub, kind, program, args, options, Some(deadline)).await
+    spawn_logged_inner(hub, kind, program, args, options, Some(deadline), true).await
 }
 
 async fn spawn_logged_inner(
@@ -229,6 +253,7 @@ async fn spawn_logged_inner(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
     deadline: Option<Instant>,
+    manage_gh_quota: bool,
 ) -> std::io::Result<SpawnOutput> {
     #[cfg(any(test, feature = "test-support"))]
     let has_ready_hook =
@@ -261,7 +286,8 @@ async fn spawn_logged_inner(
     // "network error" reports until its measured reset passes. Issue #3928
     // AC-1: the window another process persisted counts too, so a fresh
     // gwtd does not re-spawn into the secondary limit the last one just hit.
-    let gh_quota = matches!(kind, ProcessKind::Gh).then(|| gh_arg_strings(args));
+    let gh_quota =
+        (manage_gh_quota && matches!(kind, ProcessKind::Gh)).then(|| gh_arg_strings(args));
     if let Some(args) = &gh_quota {
         let ledger = crate::github_budget::BudgetLedger::global();
         let now = chrono::Utc::now();
@@ -628,6 +654,7 @@ async fn probe_rate_limit(
         // The probe must not outlive its caller's operation budget: a scan
         // stage that already ran out of time cannot afford one more spawn.
         deadline,
+        true,
     ))
     .await
     .ok()?;

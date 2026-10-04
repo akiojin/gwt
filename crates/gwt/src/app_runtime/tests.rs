@@ -49542,6 +49542,71 @@ fn list_issue_monitor_uncertain_and_legacy_daemon_reads_preserve_display() {
 }
 
 #[test]
+fn list_issue_monitor_without_daemon_never_scans_remote_for_cold_or_stale_cache() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            terminal_queue_auto_refill: true,
+            terminal_queue_auto_refill_limit: 1,
+            ..Default::default()
+        },
+    )
+    .expect("enable cached candidate admission");
+    let tab = sample_project_tab("active", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    for stale in [false, true] {
+        if stale {
+            Cache::new(issue_cache_root(&repo))
+                .write_snapshot(&sample_issue_snapshot(
+                    43,
+                    "Cached issue",
+                    &["bug"],
+                    "Body",
+                    "2026-07-21T00:00:00Z",
+                ))
+                .expect("stale cache");
+        }
+        reset_local_issue_monitor_remote_scan_count();
+        let events = runtime.list_issue_monitor_events_with_reader(
+            &runtime.test_context(),
+            "client-1",
+            |_| Ok(None),
+        );
+        assert_eq!(
+            local_issue_monitor_remote_scan_count(),
+            0,
+            "List must remain local even when stale={stale}"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })));
+        let items = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::IssueMonitorInbox { items } => Some(items),
+                _ => None,
+            })
+            .expect("local inbox");
+        assert_eq!(items.len(), usize::from(stale));
+    }
+}
+
+#[test]
 fn issue_monitor_control_error_targets_its_owner_and_drops_ownerless_notifications() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
@@ -50686,12 +50751,16 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     reset_local_issue_monitor_remote_scan_count();
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.local_issue_monitor_events_with_policy(
+        &runtime.test_context(),
+        Some("client-1"),
+        super::IssueMonitorScanPolicy::Scan,
+        |_| {},
+    );
     assert_eq!(
         local_issue_monitor_remote_scan_count(),
         1,
-        "the explicit List action proves the remote-scan test probe is live"
+        "the full scan worker policy proves the remote-scan test probe is live"
     );
 
     let status = events
@@ -50768,8 +50837,12 @@ fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.local_issue_monitor_events_with_policy(
+        &runtime.test_context(),
+        Some("client-1"),
+        super::IssueMonitorScanPolicy::Scan,
+        |_| {},
+    );
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -50859,8 +50932,12 @@ fn app_runtime_full_issue_monitor_cache_fallback_does_not_migrate_legacy_failure
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.local_issue_monitor_events_with_policy(
+        &runtime.test_context(),
+        Some("client-1"),
+        super::IssueMonitorScanPolicy::Scan,
+        |_| {},
+    );
 
     let inbox = events
         .iter()
