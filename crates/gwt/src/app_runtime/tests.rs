@@ -48223,8 +48223,14 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.issue_monitor_fallback_commit_timeout = super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+    super::reset_local_issue_monitor_fallback_commit_count();
 
-    let started = Instant::now();
+    // The prefs lock is held for the whole synchronous call, so the call can
+    // only return by giving up on the lock at the fallback commit deadline.
+    // Assert that outcome directly instead of timing the call: a wall-clock
+    // bound here also measured the fallback projection (Git/cache reads, its
+    // own 1 s budget) that runs before the 250 ms commit deadline starts, and
+    // failed on a loaded Windows host (SPEC #4740).
     let events = runtime.issue_monitor_launch_failed_result_events(
         42,
         "launch failed",
@@ -48236,7 +48242,28 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     );
     FileExt::unlock(&lock).expect("release prefs lock");
 
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        super::local_issue_monitor_fallback_commit_count(),
+        0,
+        "a lock-timed-out fallback must not commit"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, .. }
+                if message.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER)
+                    && message.contains("file lock")
+                    && message.contains("operation=issue_monitor_prefs")
+        )),
+        "the fallback must fail on the prefs lock deadline, not another error: {:?}",
+        events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::IssueMonitorToast { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
     assert!(fs::read_dir(prefs_path.parent().expect("prefs parent"))
         .expect("read prefs parent")
