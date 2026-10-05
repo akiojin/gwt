@@ -135,7 +135,15 @@ pub fn generate_codex_hooks_for_mode(
     worktree: &Path,
     mode: CodexHookDiscoveryMode,
 ) -> io::Result<()> {
-    for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
+    let mut paths = codex_hooks_paths_for_codex_discovery(worktree, mode);
+    // Launch trust inspects both discovery locations. Refresh an older copy
+    // that is already present so it cannot retain a previous generated command.
+    for path in codex_hooks_paths_for_codex_discovery(worktree, CodexHookDiscoveryMode::Both) {
+        if path.exists() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    for hooks_path in paths {
         generate_hook_config_at_path(&hooks_path, ManagedHookTarget::Codex)?;
     }
     Ok(())
@@ -2310,6 +2318,42 @@ mod tests {
             !root_checkout.join(".codex/hooks.json").exists(),
             "old Codex mode must not create the workspace-home hook path"
         );
+    }
+
+    #[test]
+    fn generate_codex_hooks_refreshes_existing_local_copy_before_workspace_home_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        let gitdir = repo.join("project.git/worktrees/linked");
+        let worktree = repo.join("work/linked");
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        {
+            let _old_bin = ScopedHookBin::set(CANONICAL_HOOK_BIN);
+            generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal)
+                .unwrap();
+        }
+
+        let current_bin = dir.path().join("bin/gwtd").display().to_string();
+        let _current_bin = ScopedHookBin::set(&current_bin);
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorkspaceHome).unwrap();
+        let report = crate::register_codex_managed_hook_trust_for_mode_with_expected_bin(
+            &worktree,
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            Some(&current_bin),
+        )
+        .unwrap();
+        assert!(
+            report.untrusted_gwt_hooks.is_empty(),
+            "an existing local copy must migrate before launch trust: {report:?}"
+        );
+        assert_eq!(report.trusted_entries.len(), 10);
     }
 
     #[test]

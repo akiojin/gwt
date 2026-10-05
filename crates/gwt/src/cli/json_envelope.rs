@@ -1697,10 +1697,39 @@ fn discuss_proposal(
     action: DiscussEnvelopeAction,
 ) -> Result<CliCommand, CliParseError> {
     let proposal = required_string(params, "proposal")?;
+    let target = if matches!(
+        &action,
+        DiscussEnvelopeAction::Resolve
+            | DiscussEnvelopeAction::Park
+            | DiscussEnvelopeAction::Reject
+    ) {
+        let title = optional_string(params, "title")?;
+        let origin_session = optional_string(params, "origin_session")?;
+        if origin_session.is_some() && title.is_none() {
+            return Err(CliParseError::MissingFlag("title"));
+        }
+        for (flag, value) in [
+            ("title", title.as_deref()),
+            ("origin_session", origin_session.as_deref()),
+        ] {
+            if lookup(params, flag).is_some() && value.is_none() {
+                return Err(CliParseError::InvalidValue {
+                    flag,
+                    reason: "must not be empty",
+                });
+            }
+        }
+        title.map(|title| crate::discussion_resume::ProposalTarget {
+            title,
+            origin_session,
+        })
+    } else {
+        None
+    };
     let action = match action {
-        DiscussEnvelopeAction::Resolve => super::DiscussAction::Resolve { proposal },
-        DiscussEnvelopeAction::Park => super::DiscussAction::Park { proposal },
-        DiscussEnvelopeAction::Reject => super::DiscussAction::Reject { proposal },
+        DiscussEnvelopeAction::Resolve => super::DiscussAction::Resolve { proposal, target },
+        DiscussEnvelopeAction::Park => super::DiscussAction::Park { proposal, target },
+        DiscussEnvelopeAction::Reject => super::DiscussAction::Reject { proposal, target },
         DiscussEnvelopeAction::ClearNextQuestion => {
             super::DiscussAction::ClearNextQuestion { proposal }
         }
@@ -5993,6 +6022,17 @@ mod tests {
                 parse(&envelope("verify.adjudicate", params)).is_err(),
                 "invalid adjudication input must fail closed"
             );
+        }
+    }
+
+    #[test]
+    fn discuss_status_rejects_empty_explicit_target_fields() {
+        for params in [
+            json!({"proposal": "Proposal A", "title": " "}),
+            json!({"proposal": "Proposal A", "title": "History", "origin_session": " "}),
+            json!({"proposal": "Proposal A", "origin_session": "session-other"}),
+        ] {
+            assert!(parse(&envelope("discuss.park", params)).is_err());
         }
     }
 

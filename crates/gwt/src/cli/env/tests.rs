@@ -670,6 +670,109 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
 }
 
 #[test]
+fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home =
+        crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
+    let stable_hook_bin = temp
+        .path()
+        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
+    write_executable_fixture(&stable_hook_bin, "test binary");
+    let _hook_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
+    gwt_skills::generate_codex_hooks(temp.path()).unwrap();
+    let hooks_path = temp.path().join(".codex/hooks.json");
+    let mut hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
+        serde_json::json!("gwtd hook event SessionStart");
+    fs::write(&hooks_path, serde_json::to_string(&hooks).unwrap()).unwrap();
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "schema_version": 1,
+        "operation": "hook.doctor",
+        "params": {}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    // Join the decoded issue strings: serializing the array would JSON-escape
+    // Windows `\` separators and hide the trust key from a substring match.
+    let issues = doctor["health"]["issues"]
+        .as_array()
+        .expect("health issues array")
+        .iter()
+        .map(|issue| issue.as_str().expect("health issue string"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        issues.contains("Codex hook trust") && issues.contains("stored_hash=<missing>"),
+        "doctor must expose persisted trust failures: {issues}"
+    );
+    assert!(issues.contains("hook.register_codex_managed_hook_trust"));
+    // The trust key uses the shared derivation (native separators), not a
+    // hand-built `/` path, so the expectation holds on Windows too.
+    let session_start_key = format!(
+        "{}:session_start:0:0",
+        gwt_skills::codex_hook_trust_key_path(&hooks_path)
+            .expect("derive Codex hook trust key")
+            .display()
+    );
+    assert!(
+        issues.contains(&session_start_key),
+        "doctor must name the mismatched trust key {session_start_key}: {issues}"
+    );
+    assert!(issues.contains("command mismatch") && issues.contains("expected_command="));
+    assert!(issues.contains("actual_command=`gwtd hook event SessionStart`"));
+    assert!(!codex_home.join("config.toml").exists());
+}
+
+#[test]
+fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("project");
+    let gitdir = repo.join("project.git/worktrees/linked");
+    let worktree = repo.join("work/linked");
+    fs::create_dir_all(&gitdir).unwrap();
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .unwrap();
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home =
+        crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
+    gwt_skills::generate_codex_hooks_for_mode(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    )
+    .unwrap();
+    assert!(repo.join(".codex/hooks.json").exists());
+    assert!(!worktree.join(".codex").exists());
+    let mut env = TestEnv::new(worktree);
+    env.stdin = serde_json::json!({
+        "schema_version": 1, "operation": "hook.doctor", "params": {}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
+    assert!(!codex_home.join("config.toml").exists());
+}
+
+#[test]
 fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
     let _env_lock = crate::env_test_lock()
         .lock()
@@ -677,6 +780,9 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
     let _runtime_path =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home =
+        crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
     let stable_hook_bin = temp
         .path()
         .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
@@ -709,7 +815,17 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
-    assert_eq!(doctor["health"]["status"].as_str(), Some("self_healed"));
+    let guarantee = doctor["repair_guarantee"].as_str().unwrap_or_default();
+    assert!(
+        guarantee.contains("managed hook configuration")
+            && guarantee.contains("launch success require separate verification"),
+        "repair must state its configuration-only guarantee: {guarantee}"
+    );
+    assert_eq!(doctor["health"]["status"].as_str(), Some("needs_attention"));
+    assert!(doctor["health"]["issues"]
+        .to_string()
+        .contains("stored_hash=<missing>"));
+    assert!(!codex_home.join("config.toml").exists());
 }
 
 #[test]

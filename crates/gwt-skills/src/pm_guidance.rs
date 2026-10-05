@@ -1238,8 +1238,11 @@ Do not ask agents to acquire a manual lease for these operations.
   An agent with a `waiting` declaration is waiting, not stuck; do not stop
   it on `last_activity_at` alone.
 - `verify.run` owns admission and its bounded wait. Status reports waiting
-  runs under `pending`; a `deferred` result means no verification record
-  was written. Use the reported holder and wait reason to arbitrate a
+  runs under `pending`. A `deferred` result from the first command's admission
+  timeout writes no verification record; a timeout after at least one command
+  ran writes an incomplete, non-PASS deferred record that retains the completed
+  commands' results; a retry reruns the entire matrix (no partial resume).
+  Use the reported holder and wait reason to arbitrate a
   retry. There is no manual acquire loop or fixed retry schedule.
 - A holder with no live verification workload is a lease-lifecycle fault,
   not evidence that all builds must be serialized. Report its run / PID
@@ -2542,6 +2545,9 @@ mod tests {
             // on a busy host; a deferred agent is retrying, not stuck.
             "`deferred`",
             "`pending`",
+            "first command's admission",
+            "incomplete, non-PASS deferred record",
+            "no partial resume",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

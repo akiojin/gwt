@@ -2799,7 +2799,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // I/O, and an unreadable record fails closed to `stuck_unknown`.
     let idle_settlements = window_snapshot
         .map(|_| {
-            gwt::issue_monitor_worker::read_execution_settlements(
+            gwt::issue_monitor_worker::read_execution_observations(
                 project_root,
                 &monitor.execution_settlement_issue_numbers(),
             )
@@ -5627,19 +5627,6 @@ impl AppRuntime {
         }))
     }
 
-    pub(crate) fn finalize_issue_monitor_window_close_in_background(
-        project_root: &Path,
-        target: &gwt::IssueMonitorStopTarget,
-        commit_timeout: std::time::Duration,
-    ) -> WindowCloseMonitorResult {
-        Self::finalize_issue_monitor_window_close_classified_in_background(
-            project_root,
-            target,
-            commit_timeout,
-            gwt::IssueMonitorFailureClass::Unknown,
-        )
-    }
-
     pub(crate) fn finalize_issue_monitor_window_close_classified_in_background(
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
@@ -5681,69 +5668,6 @@ impl AppRuntime {
             }
             Err(error) => WindowCloseMonitorResult::Failed(error),
         }
-    }
-
-    /// Reconcile monitor-owned windows against a memory-only canvas snapshot.
-    /// The caller must run this on a blocking worker: prefs reads, daemon
-    /// publication, and the exact-CAS local fallback all perform I/O.
-    fn finalize_issue_monitor_vanished_windows_in_background(
-        project_root: &Path,
-        live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
-        observed_at: &str,
-        commit_timeout: std::time::Duration,
-    ) -> Vec<String> {
-        if live_windows_per_tab.is_empty() {
-            return Vec::new();
-        }
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let prefs = match gwt::load_issue_monitor_prefs(&prefs_path) {
-            Ok(prefs) => prefs,
-            Err(error) => {
-                return vec![format!(
-                    "Issue Monitor vanished-window reconciliation could not read prefs: {error}"
-                )]
-            }
-        };
-        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-        let targets = live_windows_per_tab
-            .iter()
-            .flat_map(|(tab_id, live_window_ids)| {
-                monitor.vanished_launched_windows(tab_id, live_window_ids, observed_at)
-            })
-            .filter_map(|window_id| {
-                let issue_number = monitor.launched_window_issue(&window_id)?;
-                Some(gwt::IssueMonitorStopTarget {
-                    issue_number,
-                    claim_id: monitor.live_claim_id(issue_number),
-                    delivery_id: monitor.pending_launch_delivery_id(issue_number),
-                    window_id: Some(window_id),
-                })
-            })
-            .collect::<Vec<_>>();
-        if !targets.is_empty() {
-            tracing::info!(
-                windows = ?targets
-                    .iter()
-                    .filter_map(|target| target.window_id.as_deref())
-                    .collect::<Vec<_>>(),
-                "releasing issue monitor launches whose agent window no longer exists"
-            );
-        }
-        targets
-            .iter()
-            .filter_map(|target| {
-                match Self::finalize_issue_monitor_window_close_in_background(
-                    project_root,
-                    target,
-                    commit_timeout,
-                ) {
-                    WindowCloseMonitorResult::Failed(error) => Some(error.to_string()),
-                    WindowCloseMonitorResult::Noop
-                    | WindowCloseMonitorResult::Published
-                    | WindowCloseMonitorResult::LocalFallback(_) => None,
-                }
-            })
-            .collect()
     }
 
     fn commit_local_issue_monitor_window_close(
@@ -7111,16 +7035,11 @@ impl AppRuntime {
         let worker_expected_project_tab_id = expected_project_tab_id.to_string();
         let worker_now = now.to_string();
         let issue_client_factory = self.issue_client_factory.clone();
-        let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let vanished_window_failures =
-                    Self::finalize_issue_monitor_vanished_windows_in_background(
-                        &worker_project_root,
-                        &live_windows_per_tab,
-                        &worker_now,
-                        fallback_commit_timeout,
-                    );
+                // Issue #4244: automatic disappearance belongs to the scan
+                // classifier, which retains pending/live bindings and returns
+                // pane-close requests with its materialized completion.
                 // Issue #3883: the scan owns the re-adoption, so it happens
                 // inside the same authority-gated transaction that persists
                 // the scan rather than in a fork of its own.
@@ -7136,7 +7055,7 @@ impl AppRuntime {
                     &worker_now,
                     &issue_client_factory,
                 );
-                (outcome, vanished_window_failures)
+                (outcome, Vec::new())
             }))
             .map_err(|panic| {
                 let detail = panic
