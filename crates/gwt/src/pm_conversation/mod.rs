@@ -160,10 +160,17 @@ struct SourceStamp {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    /// Volume serial number and NTFS file index. Timestamps alone cannot
+    /// distinguish a same-length replacement made within one clock tick.
+    #[cfg(windows)]
+    identity: Option<(u32, u64)>,
 }
 
 impl SourceStamp {
-    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+    fn from_file(
+        #[cfg_attr(not(windows), allow(unused_variables))] file: &std::fs::File,
+        metadata: &std::fs::Metadata,
+    ) -> Self {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
         Self {
@@ -174,6 +181,8 @@ impl SourceStamp {
             device: metadata.dev(),
             #[cfg(unix)]
             inode: metadata.ino(),
+            #[cfg(windows)]
+            identity: windows_file_identity(file),
         }
     }
 
@@ -185,8 +194,59 @@ impl SourceStamp {
         if self.device != previous.device || self.inode != previous.inode {
             return true;
         }
+        #[cfg(windows)]
+        if self.identity != previous.identity {
+            return true;
+        }
         false
     }
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &std::fs::File) -> Option<(u32, u64)> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WindowsFileTime {
+        low_date_time: u32,
+        high_date_time: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WindowsByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: WindowsFileTime,
+        last_access_time: WindowsFileTime,
+        last_write_time: WindowsFileTime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            file: *mut std::ffi::c_void,
+            information: *mut WindowsByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let mut information = WindowsByHandleFileInformation::default();
+    // SAFETY: `file` owns a valid Windows handle for the duration of the call,
+    // and `information` is writable storage matching the Win32 structure.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) };
+    (succeeded != 0).then(|| {
+        (
+            information.volume_serial_number,
+            (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low),
+        )
+    })
 }
 
 struct CachedConversation {
@@ -267,7 +327,7 @@ impl PmConversationReader {
     ) -> PmConversationSnapshot {
         use std::io::{Read, Seek, SeekFrom};
         let stamp = match file.metadata() {
-            Ok(metadata) => SourceStamp::from_metadata(&metadata),
+            Ok(metadata) => SourceStamp::from_file(&file, &metadata),
             Err(_) => {
                 self.cached = None;
                 return key.unavailable("The conversation store is not readable.");

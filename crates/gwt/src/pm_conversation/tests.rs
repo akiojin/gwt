@@ -384,6 +384,41 @@ fn reader_resets_for_truncation_replacement_and_same_length_rewrite() {
     assert_eq!(reader.read_for_session(&session).messages[0].text, "C");
 }
 
+/// Coarse filesystem clocks (e.g. a 15.6 ms Windows tick) can give a
+/// same-length replacement the exact length and timestamps of the file it
+/// replaces; only the file identity tells the generations apart.
+#[test]
+fn reader_resets_for_replacement_with_identical_length_and_timestamps() {
+    let _env = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", home.path());
+    let dir = home.path().join("projects/project");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("conversation.jsonl");
+    let content = |text: &str| lines(&[claude_message("u", "user", json!(text))]);
+    std::fs::write(&path, content("A")).unwrap();
+    let mut session = Session::new(Path::new("/work/project"), "pm", AgentId::ClaudeCode);
+    session.agent_session_id = Some("conversation".to_owned());
+    let mut reader = PmConversationReader::default();
+    assert_eq!(reader.read_for_session(&session).messages[0].text, "A");
+    let original = std::fs::metadata(&path).unwrap();
+    let replacement = dir.join("replacement");
+    std::fs::write(&replacement, content("B")).unwrap();
+    let times = std::fs::FileTimes::new().set_modified(original.modified().unwrap());
+    #[cfg(windows)]
+    let times = std::os::windows::fs::FileTimesExt::set_created(times, original.created().unwrap());
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    assert_eq!(reader.read_for_session(&session).messages[0].text, "B");
+}
+
 #[test]
 fn reader_does_not_reuse_another_identity_home_or_source() {
     let _env = gwt_core::test_support::env_lock()
