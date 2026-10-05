@@ -447,6 +447,9 @@ impl LocalPackageCacheRoot {
 }
 
 fn launch_env_value(env_vars: &HashMap<String, String>, key: &str) -> Option<String> {
+    // Preserve the nonempty, case-insensitive lookup and host fallback used
+    // by cache discovery and probe-sharing keys. Child environment overlays
+    // use runner_probe_environment separately to honor native key semantics.
     env_vars
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
