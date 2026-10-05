@@ -214,6 +214,21 @@ impl AgentDetector {
         cmd: &mut std::process::Command,
         timeout: Duration,
     ) -> Result<Option<String>, String> {
+        // Mapping and environment fixtures observe child exit and stdout EOF;
+        // their verdict must not depend on the production deadline (#5044).
+        #[cfg(all(test, unix))]
+        if tests::COMPLETED_VERSION_PROBE.with(std::cell::Cell::get) {
+            let output = cmd
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .map_err(|error| error.to_string())?;
+            if !output.status.success() {
+                return Ok(None);
+            }
+            let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            return Ok((!raw.is_empty()).then_some(raw));
+        }
         let mut child = cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -287,6 +302,34 @@ fn which_in_env(command: &str, env: &[(&str, &OsStr)]) -> which::Result<PathBuf>
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    thread_local! {
+        pub(super) static COMPLETED_VERSION_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[cfg(unix)]
+    struct ScopedCompletedVersionProbe {
+        previous: bool,
+        _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+
+    #[cfg(unix)]
+    impl ScopedCompletedVersionProbe {
+        fn new() -> Self {
+            Self {
+                previous: COMPLETED_VERSION_PROBE.with(|mode| mode.replace(true)),
+                _thread: std::marker::PhantomData,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ScopedCompletedVersionProbe {
+        fn drop(&mut self) {
+            COMPLETED_VERSION_PROBE.with(|mode| mode.set(self.previous));
+        }
+    }
+
     #[test]
     fn detect_all_returns_vec() {
         // Should not panic; returns whatever is installed
@@ -305,18 +348,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn detection_uses_launch_path_cwd_and_environment_removals() {
-        use std::os::unix::fs::PermissionsExt;
+        let _completed_probe = ScopedCompletedVersionProbe::new();
         let temp = tempfile::tempdir().unwrap();
         for (directory, version) in [("old", "2.1.153"), ("new", "2.1.156")] {
             let bin = temp.path().join(directory);
             std::fs::create_dir(&bin).unwrap();
             let executable = bin.join("claude");
-            std::fs::write(
+            gwt_core::test_support::write_executable_script(
                 &executable,
-                format!("#!/bin/sh\nprintf '{version}%s\\n' \"${{HOME-}}\"\n"),
+                &format!("#!/bin/sh\nprintf '{version}%s\\n' \"${{HOME-}}\"\n"),
             )
             .unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
             let detected = AgentDetector::detect_by_command_with_environment(
                 "claude",
                 &HashMap::from([("PATH".into(), directory.into())]),
@@ -387,36 +429,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn detect_by_command_maps_grok_build_and_version() {
-        use std::os::unix::fs::PermissionsExt;
-
+        let _completed_probe = ScopedCompletedVersionProbe::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let executable = temp.path().join("grok");
-        std::fs::write(&executable, "#!/bin/sh\nprintf '1.0.3\\n'\n")
-            .expect("write Grok Build fixture");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("read Grok Build fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions)
-            .expect("make Grok Build fixture executable");
+        gwt_core::test_support::write_executable_script(
+            &executable,
+            "#!/bin/sh\nprintf '1.0.3\\n'\n",
+        )
+        .expect("write Grok Build fixture");
         // The fixture PATH is injected into the probe only; the process PATH
         // stays untouched so parallel `sh` / `git` spawns keep resolving
         // (Issue #3895).
-        // Like the absolute-path test below, tolerate transient spawn failures
-        // under load (e.g. EAGAIN on fork; issues #3339 and #4708).
-        let detected = (0..8)
-            .find_map(|_| {
-                AgentDetector::detect_by_command_in_env(
-                    "grok",
-                    &[("PATH", temp.path().as_os_str())],
-                )
-                .or_else(|| {
-                    // test-hygiene: allow-short-duration Retry pacing only; no elapsed-time assertion.
-                    std::thread::sleep(Duration::from_millis(20));
-                    None
-                })
-            })
-            .expect("Grok Build fixture must be detected");
+        let detected =
+            AgentDetector::detect_by_command_in_env("grok", &[("PATH", temp.path().as_os_str())])
+                .expect("Grok Build fixture must be detected");
 
         assert_eq!(detected.agent_id, AgentId::GrokBuild);
         assert_eq!(detected.version.as_deref(), Some("1.0.3"));
@@ -455,8 +481,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn detect_by_command_bounds_a_hanging_version_probe() {
-        use std::os::unix::fs::PermissionsExt;
-
         // Issue #4884: the fixture's sleep is what the assertion below reads as
         // "the bound never engaged", so it is named rather than repeated.
         const HANG_SECONDS: u64 = 30;
@@ -464,13 +488,14 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let executable = temp.path().join("agy");
-        std::fs::write(&executable, format!("#!/bin/sh\nsleep {HANG_SECONDS}\n"))
-            .expect("write hanging fixture");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("chmod fixture");
+        // Issue #5032: do not let sibling forks inherit a writable script FD.
+        // `sleep` must resolve independently of the fixture-only PATH; exec
+        // also lets the probe reap the sleeper without leaving a descendant.
+        gwt_core::test_support::write_executable_script(
+            &executable,
+            &format!("#!/bin/sh\nexec /bin/sleep {HANG_SECONDS}\n"),
+        )
+        .expect("write hanging fixture");
 
         // The fixture PATH is injected into the probe only; the process PATH
         // stays untouched so parallel `sh` / `git` spawns keep resolving
@@ -484,6 +509,12 @@ mod tests {
         assert_eq!(detected.agent_id, AgentId::Antigravity);
         assert_eq!(detected.path, executable);
         assert_eq!(detected.version, None);
+        // A fixture that exits early must not pass as a bounded hanging probe.
+        assert!(
+            elapsed >= VERSION_PROBE_TIMEOUT,
+            "the hanging fixture must reach the probe deadline: \
+             took {elapsed:?}, bound is {VERSION_PROBE_TIMEOUT:?}"
+        );
         // Issue #4884: assert the property, not the latency. What this test is
         // for is that detection stops waiting on a probe that never returns —
         // the bound engaged. `VERSION_PROBE_TIMEOUT + 3s` stood here, which

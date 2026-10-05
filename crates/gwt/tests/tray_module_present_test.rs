@@ -15,6 +15,15 @@ const TRAY_LOCK: &str = include_str!("../src/cli/tray/lock.rs");
 const OPEN_CLI: &str = include_str!("../src/cli/open.rs");
 
 #[test]
+fn startup_tray_contract_does_not_pin_transitive_dependency_versions() {
+    let startup_test = include_str!("startup_tray_performance.rs");
+    assert!(
+        !startup_test.contains("Cargo.lock"),
+        "startup metrics and native menu contracts must survive dependency updates"
+    );
+}
+
+#[test]
 fn tray_event_loop_does_not_wait_for_project_bootstrap() {
     let startup = MAIN_RS.split_once("fn main()").expect("main entry").1;
     let before_loop = startup
