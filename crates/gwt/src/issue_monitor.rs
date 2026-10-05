@@ -3667,7 +3667,7 @@ pub struct IssueMonitorAgentStatus {
     /// releases it. Present only under `stall_reason: max_active_saturated`.
     ///
     /// That gate is the one a reader cannot diagnose from the counts alone:
-    /// [`IssueMonitor::occupied_slot_count`] is implementation launches *plus*
+    /// `occupied_slot_count` is implementation launches *plus*
     /// review windows, and no other field says which of the two holds a given
     /// slot or how to free one. Without this breakdown a PM reads
     /// `occupied == max_active`, concludes the accounting is stale, and raises
@@ -3680,7 +3680,7 @@ pub struct IssueMonitorAgentStatus {
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorSlotOccupancy {
-    /// [`IssueMonitor::occupied_slot_count`] at the time of the snapshot.
+    /// `occupied_slot_count` at the time of the snapshot.
     pub occupied: usize,
     /// The configured budget the occupancy is measured against.
     pub max_active: usize,
@@ -17013,7 +17013,7 @@ impl IssueMonitorState {
     /// calls, drops the hold fields but leaves `attempts` where the ladder left
     /// them. A row at the cap therefore re-escalates on its very next failure
     /// instead of getting the fresh bounded cycle a released failure hold gets
-    /// — [`Self::release_held_failure`] resets the count for exactly this
+    /// — `release_held_failure` resets the count for exactly this
     /// reason, and the ladder had no equivalent.
     ///
     /// Spends no attempt: nothing about the work failed, an operator decided
