@@ -9914,6 +9914,13 @@ fn bootstrap_app(
     if let Err(error) = gwt::cli::hook::prepare_front_door_for_path(startup_dir) {
         eprintln!("gwt front door preparation: {error}");
     }
+    // Run shared config maintenance on this bootstrap worker, outside the
+    // native event loop and under the same lock used by agent launches.
+    match gwt::managed_assets::garbage_collect_shared_codex_hook_trust() {
+        Ok(removed) if removed > 0 => tracing::info!(removed, "collected missing Codex hook trust"),
+        Ok(_) => {}
+        Err(error) => eprintln!("gwt Codex hook trust collection: {error}"),
+    }
     let mut pending = PendingApp(Some(AppRuntime::new(
         proxy,
         pty_writers,

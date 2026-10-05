@@ -22,6 +22,7 @@ const INFRASTRUCTURE_FAILURE: &str = "execution infrastructure failure: verifica
 pub enum RunStatus {
     Running,
     Interrupted,
+    Deferred,
 }
 
 /// Absent on completed (including legacy) records. An unfinished record is
@@ -92,9 +93,12 @@ pub(super) fn previous_external_terminations(
         return Ok(None);
     }
     let count = record.lifecycle.as_ref().and_then(|lifecycle| {
-        (lifecycle.status == RunStatus::Interrupted)
-            .then_some(lifecycle.external_terminations)
-            .flatten()
+        matches!(
+            lifecycle.status,
+            RunStatus::Interrupted | RunStatus::Deferred
+        )
+        .then_some(lifecycle.external_terminations)
+        .flatten()
     });
     if count.is_some_and(|count| count >= 2) {
         return Err(io::Error::other(INFRASTRUCTURE_FAILURE));
@@ -492,6 +496,14 @@ mod tests {
         );
         assert!(!interrupted.all_passed && !interrupted.plan_covered);
         assert!(integrity_ok(&interrupted));
+
+        record.lifecycle = Some(RunLifecycle::running(token));
+        record.lifecycle.as_mut().unwrap().status = RunStatus::Deferred;
+        save(dir.path(), &record).unwrap();
+        let deferred = load(dir.path()).unwrap().unwrap();
+        settle_interrupted(dir.path(), &record.record_id, token, true).unwrap();
+        settle_interrupted(dir.path(), &record.record_id, token, false).unwrap();
+        assert_eq!(load(dir.path()).unwrap().unwrap(), deferred);
 
         record.lifecycle = None;
         record.all_passed = true;
