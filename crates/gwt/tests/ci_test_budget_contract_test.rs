@@ -303,6 +303,7 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
             < job.find("ci-windows-tests.mjs run ").unwrap()
     );
     assert!(job.contains("ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget"));
+    assert!(job.contains("ci-windows-tests.mjs run gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact"));
 }
 
 /// Issue #4134 AC-1: the three-pass determinism loop is the single most
