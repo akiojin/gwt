@@ -1086,20 +1086,10 @@ fn spawn_workspace_projection_reload(
     spawner: &app_runtime::BlockingTaskSpawner,
     proxy: app_runtime::AppEventProxy,
     context: app_runtime::ProjectContext,
-    imported_from: Option<PathBuf>,
 ) {
     let proxy = proxy.for_project(context.clone());
     spawner.spawn(move || {
-        if let Some(mut event) = load_workspace_projection_user_event(&context.project_root) {
-            if let UserEvent::WorkspaceProjectionLoaded {
-                imported_from: source,
-                ..
-            } = &mut event
-            {
-                if source.is_none() {
-                    *source = imported_from;
-                }
-            }
+        if let Some(event) = load_workspace_projection_user_event(&context.project_root) {
             proxy.send(event);
         }
     });
@@ -1107,15 +1097,13 @@ fn spawn_workspace_projection_reload(
 
 fn load_workspace_projection_user_event(project_root: &Path) -> Option<UserEvent> {
     let loaded = (|| {
-        let imported_from =
-            gwt_core::workspace_projection::pending_legacy_workspace_state_import(project_root)?;
         // Both canonical files belong to the same writer admission boundary.
         gwt_core::workspace_projection::load_workspace_work_items(project_root)?;
         let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)?;
-        Ok::<_, gwt_core::error::GwtError>((projection, imported_from))
+        Ok::<_, gwt_core::error::GwtError>(projection)
     })();
     match loaded {
-        Ok((mut projection, imported_from)) => {
+        Ok(mut projection) => {
             // This helper runs on the watcher thread or a blocking runtime
             // worker. Materialize the linked-Issue fallback here so the Tao
             // handler never reopens issue-cache files while applying the
@@ -1139,7 +1127,6 @@ fn load_workspace_projection_user_event(project_root: &Path) -> Option<UserEvent
             Some(UserEvent::WorkspaceProjectionLoaded {
                 project_root: project_root.to_path_buf(),
                 projection: projection.map(Box::new),
-                imported_from,
             })
         }
         Err(error) => Some(UserEvent::WorkspaceStateLoadFailed {
@@ -1365,7 +1352,6 @@ fn spawn_active_work_projection_refresh(
             view: None,
             completed: false,
             load_error: None,
-            imported_from: None,
         });
         let _ = proxy.send_event(UserEvent::ActiveWorkProjectionRefreshed {
             project_root,
@@ -1556,9 +1542,15 @@ fn daemon_broadcast_user_event(
     }
 
     match gwt::runtime_daemon_events::decode_runtime_daemon_event(channel, payload, current_pid)? {
-        gwt::runtime_daemon_events::RuntimeDaemonEvent::Output { id, data } => {
-            Some(UserEvent::DaemonRuntimeOutput { id, data })
-        }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Output {
+            id,
+            data,
+            preview_text,
+        } => Some(UserEvent::DaemonRuntimeOutput {
+            id,
+            data,
+            preview_text,
+        }),
         gwt::runtime_daemon_events::RuntimeDaemonEvent::Status { id, status, detail } => {
             Some(UserEvent::DaemonRuntimeStatus { id, status, detail })
         }
@@ -1863,6 +1855,7 @@ enum UserEvent {
     DaemonRuntimeOutput {
         id: String,
         data: Vec<u8>,
+        preview_text: Option<String>,
     },
     RuntimeStatus {
         id: String,
@@ -1968,7 +1961,6 @@ enum UserEvent {
     WorkspaceProjectionLoaded {
         project_root: PathBuf,
         projection: Option<Box<gwt_core::workspace_projection::WorkspaceProjection>>,
-        imported_from: Option<PathBuf>,
     },
     WorkspaceStateLoadFailed {
         project_root: PathBuf,
@@ -2730,7 +2722,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_state_legacy_import_is_delivered_as_information() {
+    fn workspace_state_legacy_layout_is_refused_without_mutation() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
         let project_root = temp.path().join("repo");
@@ -2744,14 +2736,16 @@ mod tests {
         fs::write(&legacy, &bytes).unwrap();
 
         match super::load_workspace_projection_user_event(&project_root) {
-            Some(UserEvent::WorkspaceProjectionLoaded {
-                imported_from: Some(source),
-                projection: Some(_),
-                ..
-            }) => assert_eq!(source, legacy),
-            other => panic!("expected a legacy import notice, got {other:?}"),
+            Some(UserEvent::WorkspaceStateLoadFailed { error, .. }) => {
+                assert_eq!(error.path, legacy);
+                assert!(error.message.contains("v9.106.0"));
+            }
+            other => panic!("expected a legacy layout error, got {other:?}"),
         }
         assert_eq!(fs::read(&legacy).unwrap(), bytes);
+        let canonical = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
+        assert!(!canonical.exists());
+        assert!(!canonical.with_file_name("works.json").exists());
     }
 
     #[test]
@@ -2764,7 +2758,6 @@ mod tests {
             super::load_workspace_projection_user_event(&project_root),
             Some(UserEvent::WorkspaceProjectionLoaded {
                 projection: None,
-                imported_from: None,
                 ..
             })
         ));
@@ -2817,8 +2810,12 @@ mod tests {
     #[test]
     fn daemon_broadcast_runtime_payloads_map_to_non_republishing_user_events() {
         let project_root = Path::new("/tmp/gwt-project");
-        let output_payload =
-            gwt::runtime_daemon_events::runtime_output_payload("tab-1::shell-1", b"hello", 42);
+        let output_payload = gwt::runtime_daemon_events::runtime_output_payload(
+            "tab-1::shell-1",
+            b"hello",
+            42,
+            Some("  live\n\nlast"),
+        );
         let status_payload = gwt::runtime_daemon_events::runtime_status_payload(
             "tab-1::shell-1",
             WindowProcessStatus::Error,
@@ -2851,9 +2848,14 @@ mod tests {
             project_root,
             99,
         ) {
-            Some(UserEvent::DaemonRuntimeOutput { id, data }) => {
+            Some(UserEvent::DaemonRuntimeOutput {
+                id,
+                data,
+                preview_text,
+            }) => {
                 assert_eq!(id, "tab-1::shell-1");
                 assert_eq!(data, b"hello");
+                assert_eq!(preview_text.as_deref(), Some("  live\n\nlast"));
             }
             other => panic!("unexpected runtime output event: {other:?}"),
         }
@@ -4340,6 +4342,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: std::collections::HashMap::new(),
@@ -10860,8 +10863,8 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::RuntimeApprovalSettle { id, token }) => {
                 clients.dispatch(app.handle_runtime_approval_settle(&id, token));
             }
-            Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data }) => {
-                let events = app.handle_daemon_runtime_output(id, data);
+            Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data, preview_text }) => {
+                let events = app.handle_daemon_runtime_output(id, data, preview_text);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeStatus {
@@ -10995,15 +10998,14 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
                 if let Some(context) = app.project_context_for_root(&project_root) {
-                    spawn_workspace_projection_reload(&app.blocking_tasks, app.proxy.clone(), context, None);
+                    spawn_workspace_projection_reload(&app.blocking_tasks, app.proxy.clone(), context);
                 }
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionLoaded {
                 project_root,
                 projection,
-                imported_from,
             }) => {
-                let mut events = app.handle_workspace_state_loaded(&project_root, imported_from);
+                let mut events = app.handle_workspace_state_loaded(&project_root);
                 if let Some(projection) = projection {
                     events.extend(app.handle_workspace_projection_changed_events(&project_root, &projection));
                 }
