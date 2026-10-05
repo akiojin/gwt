@@ -1238,10 +1238,22 @@ Do not ask agents to acquire a manual lease for these operations.
   An agent with a `waiting` declaration is waiting, not stuck; do not stop
   it on `last_activity_at` alone.
 - `verify.run` owns admission and its bounded wait. Status reports waiting
-  runs under `pending`. A `deferred` result from the first command's admission
-  timeout writes no verification record; a timeout after at least one command
-  ran writes an incomplete, non-PASS deferred record that retains the completed
-  commands' results; a retry reruns the entire matrix (no partial resume).
+  runs under `pending`. A timeout in the first remaining command's admission
+  writes no replacement record and preserves any predecessor; a later timeout
+  writes an incomplete, non-PASS deferred record retaining completed results.
+  Retry with the identical full requested matrix, never a caller-built subset.
+  Automatic resume requires valid admission-deferred evidence and exact matches
+  for owner, session, execution authority digest, verification plan content hash,
+  source fingerprint, requested commands (including order and duplicates), and
+  headed_e2e_commands. Every preceding result must have raw PASS and no termination signal.
+  Failed, killed, crashed, unreadable or mismatched records start a fresh run;
+  registered plan/context mismatches still require `verify.plan`.
+  Resume references the immutable predecessor by record id/content hash, keeps
+  the original start timestamp (`started_at`), and copies measured per-command
+  headed/nextest/admission evidence. Run outstanding Light commands first,
+  preserve Heavy commands' original relative order, and keep artifact restoration last.
+  The full registered matrix and required headed Chromium evidence in dark/light
+  must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
   Use the reported holder and wait reason to arbitrate a
   retry. There is no manual acquire loop or fixed retry schedule.
 - A holder with no live verification workload is a lease-lifecycle fault,
@@ -2531,6 +2543,7 @@ mod tests {
 
     /// Issue #3868 AC-30: the heavy-verification wait procedure is defined on
     /// the PM side too, so a waiting agent is arbitrated rather than killed.
+    /// Issue #5035: retries preserve the exact matrix and deferred provenance.
     #[test]
     fn contract_defines_the_heavy_verification_wait_and_arbitration() {
         let body = body();
@@ -2545,12 +2558,23 @@ mod tests {
             // on a busy host; a deferred agent is retrying, not stuck.
             "`deferred`",
             "`pending`",
-            "first command's admission",
+            "first remaining command's admission",
             "incomplete, non-PASS deferred record",
-            "no partial resume",
+            "identical full requested matrix",
+            "execution authority digest",
+            "verification plan content hash",
+            "headed_e2e_commands",
+            "raw PASS and no termination signal",
+            "immutable predecessor",
+            "original start timestamp",
+            "Light commands first",
+            "artifact restoration last",
+            "Overall: PASS",
+            "required headed Chromium evidence",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
+        assert!(!body.contains("no partial resume"));
     }
 
     #[test]
