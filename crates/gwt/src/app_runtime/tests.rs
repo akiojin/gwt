@@ -31306,6 +31306,18 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
         .expect("legacy managed-hook fixture must be valid JSON");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
     let expected_hook_bin = missing_pin.display().to_string();
+    let resolution_context = || {
+        format!(
+            "expected={expected_hook_bin:?}, selected={:?}, thread_override={:?}, \
+             GWT_HOOK_BIN={:?}, GWT_BIN_PATH={:?}, PATH={:?}",
+            gwt::managed_assets::managed_hook_bin(),
+            gwt_skills::settings_local::hook_bin_override(),
+            std::env::var_os("GWT_HOOK_BIN"),
+            std::env::var_os("GWT_BIN_PATH"),
+            std::env::var_os("PATH"),
+        )
+    };
+    let before_heal = resolution_context();
     let mut health_input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worktree);
     health_input.runtime_state_path = None;
     health_input.expected_hook_bin = Some(expected_hook_bin.clone());
@@ -31330,8 +31342,9 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
             .issues
             .iter()
             .any(|issue| issue.starts_with("managed hook runtime guard missing:")),
-        "{:?}",
-        healed_health.issues
+        "{:?}; before: {before_heal}; after: {}",
+        healed_health.issues,
+        resolution_context()
     );
     assert!(
         !healed_health.issues.is_empty()
@@ -31339,8 +31352,9 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
                 .issues
                 .iter()
                 .all(|issue| issue.starts_with("managed hook binary missing:")),
-        "{:?}",
-        healed_health.issues
+        "{:?}; before: {before_heal}; after: {}",
+        healed_health.issues,
+        resolution_context()
     );
 
     // A second pass over the converged file must be a no-op: the guard issue is
