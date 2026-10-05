@@ -1231,10 +1231,22 @@ Nextest runs each test in a separate process, times out a test after 120 seconds
 Only canonical `verify.run` acquires the host-wide verification lease.
 Register the verification matrix with `verify.plan`, then run it with
 `verify.run`; it acquires and releases the lease for each Heavy command.
-Light commands can overlap other runs. A deferred result from the first command's
-admission timeout writes no verification record; a timeout after at least one
-command ran writes an incomplete, non-PASS deferred record that retains the
-completed commands' results; a retry reruns the entire matrix (no partial resume).
+Light commands can overlap other runs and outstanding Light commands run before
+Heavy commands. Heavy commands retain their relative order; gwt artifact
+restoration runs last. An admission timeout before the first remaining command
+starts preserves any predecessor without writing a replacement record. Later
+timeouts retain completed results in an incomplete, non-PASS deferred record.
+
+Retry with the same full requested matrix and headed E2E nominations. `verify.run`
+automatically resumes only a valid admission-deferred record with identical
+owner, session, execution authority, plan content hash, source fingerprint and
+requested commands. All preceding commands must have passed without a signal.
+Other records, including failed, killed and crashed runs, start fresh; a
+registered plan mismatch still requires `verify.plan`. Resumed evidence refers
+to its immutable predecessor by id/hash and retains its original start time and
+per-command headed E2E, nextest and admission evidence. The full matrix and
+required headed Chromium results in dark/light must pass before Overall PASS
+or Ready.
 Inspect the holder before retrying:
 
 ```bash
