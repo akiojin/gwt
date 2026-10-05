@@ -378,6 +378,15 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
+**Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
+ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
+大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
+維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
+設定欄には保存済みラベルと除外件数・Issue 番号を表示します。自動化からは
+`issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。
+`issue.monitor.status` は `allowed_labels`、`label_excluded_count`、
+`label_excluded_issues` を返します。
+
 open な GitHub Issue は、明示的な追加、有効な Auto-refill、または `urgent` ラベルによる投入
 まで Backlog に留まります。キューへの所属は Monitor の実行候補になる条件であり、
 準備状態・claim・同時実行数のチェックは引き続き適用されます。行の `Launch now` は
