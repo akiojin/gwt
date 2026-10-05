@@ -8152,6 +8152,7 @@ mod tests {
             candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -8238,6 +8239,7 @@ mod tests {
             candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -8375,6 +8377,7 @@ mod tests {
                 candidate_pool_degradation: None,
                 stall_reason: None,
                 gui_action: None,
+                slot_occupancy: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -8452,6 +8455,7 @@ mod tests {
             candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -10856,6 +10860,7 @@ mod tests {
             candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             issue_cache: None,
         };
 

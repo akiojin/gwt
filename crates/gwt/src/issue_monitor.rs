@@ -3663,6 +3663,61 @@ pub struct IssueMonitorAgentStatus {
     /// only when no JSON operation can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gui_action: Option<String>,
+    /// Issue #5047 AC-8: what holds each `max_active` slot, and which operation
+    /// releases it. Present only under `stall_reason: max_active_saturated`.
+    ///
+    /// That gate is the one a reader cannot diagnose from the counts alone:
+    /// [`IssueMonitor::occupied_slot_count`] is implementation launches *plus*
+    /// review windows, and no other field says which of the two holds a given
+    /// slot or how to free one. Without this breakdown a PM reads
+    /// `occupied == max_active`, concludes the accounting is stale, and raises
+    /// `max_active` — which hands the new slot to the next review dispatch
+    /// instead of the queue head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_occupancy: Option<IssueMonitorSlotOccupancy>,
+}
+
+/// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorSlotOccupancy {
+    /// [`IssueMonitor::occupied_slot_count`] at the time of the snapshot.
+    pub occupied: usize,
+    /// The configured budget the occupancy is measured against.
+    pub max_active: usize,
+    /// One entry per occupied slot, implementation launches first.
+    pub occupants: Vec<IssueMonitorSlotOccupant>,
+}
+
+/// Issue #5047 AC-8: one occupied `max_active` slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorSlotOccupant {
+    pub kind: IssueMonitorSlotOccupantKind,
+    pub issue_number: u64,
+    /// The JSON operation that releases this slot. Naming it here is the point
+    /// of the field: the release differs by kind, and for a review window it is
+    /// `issue.monitor.review_verdict` rather than anything launch-shaped, which
+    /// is not inferable from the counts.
+    pub release_operation: String,
+}
+
+/// Issue #5047 AC-8: which kind of agent holds a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorSlotOccupantKind {
+    /// An implementation launch, tracked by `active_launches`.
+    Implementation,
+    /// An independent review window (Issue #4117), which runs its own agent.
+    Review,
+}
+
+impl IssueMonitorSlotOccupantKind {
+    /// The JSON operation that releases a slot held by this kind.
+    pub fn release_operation(self) -> &'static str {
+        match self {
+            Self::Implementation => "issue.monitor.stop",
+            Self::Review => "issue.monitor.review_verdict",
+        }
+    }
 }
 
 /// Issue #4249 FR-004 / AC-5: which admission gate holds the Issue Monitor
@@ -11924,6 +11979,13 @@ impl IssueMonitorState {
             gui_action: stall_reason
                 .and_then(IssueMonitorStallReason::gui_action)
                 .map(str::to_string),
+            // Issue #5047 AC-8: only this gate needs the breakdown, and only
+            // this gate can be acted on from it.
+            slot_occupancy: matches!(
+                stall_reason,
+                Some(IssueMonitorStallReason::MaxActiveSaturated)
+            )
+            .then(|| self.slot_occupancy()),
         }
     }
 
@@ -12721,6 +12783,35 @@ impl IssueMonitorState {
     /// Issue #4117: live independent review windows, ordered by Issue.
     pub fn review_windows(&self) -> Vec<IssueMonitorReviewWindow> {
         self.review_windows.values().cloned().collect()
+    }
+
+    /// Issue #5047 AC-8: the `max_active` budget broken down by occupant, for
+    /// `stall_reason: max_active_saturated` only.
+    ///
+    /// Returned unconditionally here and gated at the one call site, so a
+    /// caller that wants the breakdown outside that gate can still ask.
+    fn slot_occupancy(&self) -> IssueMonitorSlotOccupancy {
+        use IssueMonitorSlotOccupantKind as Kind;
+        let occupant = |kind: Kind, issue_number: u64| IssueMonitorSlotOccupant {
+            kind,
+            issue_number,
+            release_operation: kind.release_operation().to_string(),
+        };
+        let occupants = self
+            .active_issue_numbers()
+            .into_iter()
+            .map(|issue_number| occupant(Kind::Implementation, issue_number))
+            .chain(
+                self.review_windows
+                    .values()
+                    .map(|window| occupant(Kind::Review, window.issue_number)),
+            )
+            .collect();
+        IssueMonitorSlotOccupancy {
+            occupied: self.occupied_slot_count(),
+            max_active: self.config.max_active.max(1),
+            occupants,
+        }
     }
 
     /// Issue #4117 AC-2: `max_active` slots in use — implementation launches
@@ -19548,6 +19639,7 @@ mod tests {
                 candidate_pool_degradation: None,
                 stall_reason: Some(IssueMonitorStallReason::GuiDisconnected),
                 gui_action: Some("Open the gwt window for this project".to_string()),
+                slot_occupancy: None,
             }
         );
     }
@@ -22216,6 +22308,111 @@ mod tests {
 
     /// Issue #4249 AC-5 / T-124..T-127: `stall_reason` names the one gate
     /// holding the queue, and agrees with the claim planner the scan runs.
+    /// Issue #5047 AC-8: under `max_active_saturated`, the snapshot names what
+    /// holds each slot and which operation releases it.
+    ///
+    /// The regression this pins is a PM reading `occupied == max_active` with
+    /// no way to tell an implementation launch from a review window. The counts
+    /// alone led to raising `max_active` five times in one day, each time
+    /// handing the new slot to the next review dispatch. No real window is
+    /// created here: the two occupant kinds are assembled directly.
+    #[test]
+    fn slot_occupancy_names_each_occupant_and_its_release_operation() {
+        let now = "2026-10-05T15:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
+
+        // One implementation launch and one review window fill `max_active: 2`.
+        monitor.active_launches.push(42);
+        monitor.review_windows.insert(
+            99,
+            IssueMonitorReviewWindow {
+                issue_number: 99,
+                pr_number: 5022,
+                dispatched_at: now.to_string(),
+                window_id: None,
+            },
+        );
+
+        let status = monitor.agent_status_at(now);
+        assert_eq!(
+            status.stall_reason,
+            Some(IssueMonitorStallReason::MaxActiveSaturated),
+            "two occupants against max_active 2 is the gate this test is about"
+        );
+        let occupancy = status
+            .slot_occupancy
+            .expect("max_active_saturated must carry the breakdown");
+        assert_eq!(occupancy.occupied, 2);
+        assert_eq!(occupancy.max_active, 2);
+        assert_eq!(
+            occupancy
+                .occupants
+                .iter()
+                .map(|slot| (
+                    slot.kind,
+                    slot.issue_number,
+                    slot.release_operation.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    IssueMonitorSlotOccupantKind::Implementation,
+                    42,
+                    "issue.monitor.stop"
+                ),
+                (
+                    IssueMonitorSlotOccupantKind::Review,
+                    99,
+                    "issue.monitor.review_verdict"
+                ),
+            ],
+            "a review window is released by recording a verdict, not by stopping a launch"
+        );
+    }
+
+    /// Issue #5047 AC-8: the breakdown is absent when the queue is not held by
+    /// this gate, so its presence alone identifies the saturated case.
+    #[test]
+    fn slot_occupancy_is_absent_when_the_gate_is_not_max_active() {
+        let now = "2026-10-05T15:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 4,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 4,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+
+        let status = monitor.agent_status_at(now);
+        assert_ne!(
+            status.stall_reason,
+            Some(IssueMonitorStallReason::MaxActiveSaturated)
+        );
+        assert!(status.slot_occupancy.is_none());
+    }
+
     #[test]
     fn stall_reason_names_the_gate_that_holds_the_queue_and_agrees_with_admission() {
         let now = "2026-09-28T03:00:00Z";
