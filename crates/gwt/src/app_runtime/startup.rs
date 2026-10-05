@@ -828,15 +828,10 @@ impl AppRuntime {
             };
             let proxy = self.proxy.for_project(context);
             let inventory = startup_inventories.get(&tab.project_root).cloned();
-            // Capture legacy provenance before these retained migrations import
-            // it. A later watcher sees only the canonical files. Stop the writer
-            // chain on a load failure; malformed Works may still recover through
+            // Stop the writer chain on a load failure. Legacy layouts require
+            // an intermediate upgrade; malformed Works may still recover through
             // the complete-source intake below (Issue #4925).
             let prepared = (|| {
-                let imported_from =
-                    gwt_core::workspace_projection::pending_legacy_workspace_state_import(
-                        &tab.project_root,
-                    )?;
                 gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now)?;
                 // SPEC-2359 US-39 and W-16: schema backfill and legacy mega-item
                 // decomposition precede intake/reconcile, preserving their order.
@@ -846,30 +841,10 @@ impl AppRuntime {
                 gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
                     &tab.project_root,
                 )?;
-                Ok::<_, gwt_core::GwtError>(imported_from)
+                Ok::<_, gwt_core::GwtError>(())
             })();
             match prepared {
-                Ok(Some(imported_from)) => {
-                    if let Some(mut event) =
-                        crate::load_workspace_projection_user_event(&tab.project_root)
-                    {
-                        let ready = if let crate::UserEvent::WorkspaceProjectionLoaded {
-                            imported_from: captured,
-                            ..
-                        } = &mut event
-                        {
-                            *captured = Some(imported_from);
-                            true
-                        } else {
-                            false
-                        };
-                        proxy.send(event);
-                        if !ready {
-                            continue;
-                        }
-                    }
-                }
-                Ok(None) => {}
+                Ok(()) => {}
                 Err(error) => {
                     let error = crate::workspace_state_load_error(&tab.project_root, error);
                     let can_rebuild = error.kind
