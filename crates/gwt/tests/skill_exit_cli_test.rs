@@ -139,7 +139,7 @@ fn discuss_resolve_flips_active_proposal_to_chosen() {
     let code = dispatch_json(
         &mut env,
         "discuss.resolve",
-        serde_json::json!({"proposal": "Proposal A"}),
+        serde_json::json!({"proposal": "Proposal A", "title": "Hook-driven resume"}),
     );
     assert_eq!(code, 0);
     let updated = std::fs::read_to_string(canonical_discussions_path(&dir)).unwrap();
@@ -165,7 +165,7 @@ fn discuss_resolve_rejects_incomplete_evidence_gate() {
     let code = dispatch_json(
         &mut env,
         "discuss.resolve",
-        serde_json::json!({"proposal": "Proposal A"}),
+        serde_json::json!({"proposal": "Proposal A", "title": "Evidence gap"}),
     );
     assert_eq!(code, 2);
     let updated = std::fs::read_to_string(&discussion_path).unwrap();
@@ -198,7 +198,7 @@ fn discuss_resolve_rejects_incomplete_depth_gate() {
     let code = dispatch_json(
         &mut env,
         "discuss.resolve",
-        serde_json::json!({"proposal": "Proposal A"}),
+        serde_json::json!({"proposal": "Proposal A", "title": "Depth gap"}),
     );
     assert_eq!(code, 2);
     let updated = std::fs::read_to_string(&discussion_path).unwrap();
@@ -221,7 +221,7 @@ fn discuss_park_and_reject_follow_the_same_pattern() {
         let code = dispatch_json(
             &mut env,
             &format!("discuss.{action}"),
-            serde_json::json!({"proposal": "Proposal B"}),
+            serde_json::json!({"proposal": "Proposal B", "title": "WIP"}),
         );
         assert_eq!(code, 0, "action={action} should exit 0");
         let body = std::fs::read_to_string(canonical_discussions_path(&dir)).unwrap();

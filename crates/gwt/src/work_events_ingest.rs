@@ -3095,6 +3095,38 @@ mod tests {
     }
 
     #[test]
+    fn legacy_home_state_prevents_ingest_rebuild_from_readable_events() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_shard(&repo, "evt-legacy-layout", "work-legacy-layout");
+        let legacy =
+            gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace/work_items.json");
+        let bytes = br#"{"updated_at":"2026-08-12T07:00:00Z","work_items":[]}"#;
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, bytes).unwrap();
+        let works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+        let state = works.with_file_name("work-events-intake.json");
+
+        let result = ingest_project_work_events_paths(&repo, &works, &state);
+
+        assert!(
+            !result.projection_rebuilt,
+            "legacy layout must not trigger recovery"
+        );
+        assert!(!result.changed());
+        let error = result.load_error.expect("legacy layout must be reported");
+        assert_eq!(error.path, legacy);
+        assert!(error.message.contains("v9.106.0"));
+        assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
+        assert!(!works.exists());
+        assert!(!works.with_file_name("current.json").exists());
+        assert!(!state.exists());
+    }
+
+    #[test]
     fn unreadable_current_state_prevents_startup_ingest_writes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());

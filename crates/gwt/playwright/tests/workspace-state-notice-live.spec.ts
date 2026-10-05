@@ -1,6 +1,6 @@
-import { mkdir, readFile, realpath, rename, rmdir } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, rename, rmdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
@@ -40,6 +40,49 @@ test.describe("Workspace state diagnostics", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
   test.setTimeout(90_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
+
+  test("retired HOME layout is preserved and shows the upgrade path after reconnect", async ({ page }, testInfo) => {
+    await withLiveGwtBackendLock(BASE, testInfo, async () => {
+      const statePath = await isolatedStatePath();
+      const legacyDir = join(dirname(dirname(statePath)), "workspace");
+      const legacyPath = join(legacyDir, "current.json");
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => {
+        if (message.type() === "error") errors.push(message.text());
+      });
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await expect(page.locator("#close-project-button")).toBeVisible();
+      const original = await readFile(statePath);
+      // Exclusive mkdir prevents overwriting any pre-existing legacy fixture.
+      await mkdir(legacyDir);
+      let moved = false;
+      try {
+        await rename(statePath, legacyPath);
+        moved = true;
+        await sendLiveGwtEvent(page, { kind: "retry_workspace_state_load" });
+        const banner = page.locator('.workspace-state-notice[role="alert"]');
+        await expect(banner).toContainText(join("workspace", "current.json"));
+        const displayedPath = (await banner.locator("span").textContent())!.split(": ")[0];
+        expect(await realpath(displayedPath)).toBe(legacyPath);
+        await expect(banner).toContainText("v9.106.0");
+        await page.reload();
+        await expect(banner).toContainText("v9.72.1");
+        await banner.getByRole("button", { name: "Retry", exact: true }).click();
+        await expect(banner).toContainText("no longer imported");
+        await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
+        await page.screenshot({ path: join(CHECK_HOME, `retired-home-${testInfo.project.name}.png`), fullPage: true });
+        expect(await readFile(legacyPath)).toEqual(original);
+        await expect(access(statePath)).rejects.toThrow();
+      } finally {
+        if (moved) await rename(legacyPath, statePath);
+        await rmdir(legacyDir);
+        if (!page.isClosed()) await sendLiveGwtEvent(page, { kind: "retry_workspace_state_load" });
+      }
+      await expect(page.locator(".workspace-state-notice")).toHaveCount(0);
+      expect(errors).toEqual([]);
+    });
+  });
 
   test("real read failure names the file, survives reconnect, and Retry reloads repaired state", async ({ page }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {

@@ -57,6 +57,7 @@ pub enum RuntimeDaemonEvent {
     Output {
         id: String,
         data: Vec<u8>,
+        preview_text: Option<String>,
     },
     Status {
         id: String,
@@ -80,6 +81,8 @@ struct RuntimeOutputPayload {
     source_pid: u32,
     id: String,
     data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,11 +191,17 @@ struct IssueMonitorPayload {
     project_store: Option<ProjectStoreIdentity>,
 }
 
-pub fn runtime_output_payload(id: &str, data: &[u8], source_pid: u32) -> Value {
+pub fn runtime_output_payload(
+    id: &str,
+    data: &[u8],
+    source_pid: u32,
+    preview_text: Option<&str>,
+) -> Value {
     serde_json::to_value(RuntimeOutputPayload {
         source_pid,
         id: id.to_string(),
         data_base64: general_purpose::STANDARD.encode(data),
+        preview_text: preview_text.map(str::to_owned),
     })
     .expect("runtime output payload serializes")
 }
@@ -272,6 +281,7 @@ pub fn decode_runtime_daemon_event(
             Some(RuntimeDaemonEvent::Output {
                 id: payload.id,
                 data,
+                preview_text: payload.preview_text,
             })
         }
         RUNTIME_STATUS_CHANNEL => {
@@ -363,18 +373,29 @@ mod tests {
 
     #[test]
     fn runtime_output_payload_round_trips_and_ignores_same_process() {
-        let payload = runtime_output_payload("tab-1::shell-1", b"hello", 42);
+        let payload = runtime_output_payload("tab-1::shell-1", b"hello", 42, None);
 
         assert_eq!(
             decode_runtime_daemon_event(RUNTIME_OUTPUT_CHANNEL, payload.clone(), 99),
             Some(RuntimeDaemonEvent::Output {
                 id: "tab-1::shell-1".to_string(),
                 data: b"hello".to_vec(),
+                preview_text: None,
             })
         );
         assert_eq!(
             decode_runtime_daemon_event(RUNTIME_OUTPUT_CHANNEL, payload, 42),
             None
+        );
+    }
+
+    #[test]
+    fn terminal_preview_daemon_payload_preserves_optional_text() {
+        let payload =
+            runtime_output_payload("tab-1::shell-1", b"hello", 42, Some("  indented\n\nlast"));
+        let event = decode_runtime_daemon_event(RUNTIME_OUTPUT_CHANNEL, payload, 99).unwrap();
+        assert!(
+            matches!(event, RuntimeDaemonEvent::Output { preview_text: Some(text), .. } if text == "  indented\n\nlast")
         );
     }
 
