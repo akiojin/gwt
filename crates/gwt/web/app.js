@@ -6615,6 +6615,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           case "knowledge_entries":
           case "knowledge_search_results":
           case "knowledge_detail":
+          case "terminal_preview":
             applyKnowledgeReceiveEvent(event);
             break;
           // SPEC-3064 Phase 3 (E6e): profile state and rendering live in

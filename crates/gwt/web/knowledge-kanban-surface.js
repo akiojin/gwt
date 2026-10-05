@@ -628,6 +628,7 @@ export function createKnowledgeKanbanSurface({
   resolveSurfaceError = () => {},
 }) {
       const knowledgeBridgeStateMap = new Map();
+      const terminalPreviewText = new Map();
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
       // is re-broadcast constantly, so only a CHANGED text is a new event) and
       // remember which of the two sources changed last for the summary line.
@@ -1538,6 +1539,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function clearKnowledgeBridgeState(windowId) {
+        terminalPreviewText.delete(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
         if (state?.reportedError) {
           // FR-017: a closed window's load error is no longer actionable.
@@ -2772,6 +2774,44 @@ export function createKnowledgeKanbanSurface({
             ? "Nothing will launch until an issue is queued." : `No ${phase} items`));
           for (const entry of items) {
             const row = renderIssueRow(windowId, state, entry);
+            if (phase === "active") {
+              const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+              const agents = work?.agents || [];
+              const windows = getWorkspaceWindows?.() || [];
+              const inlineIds = new Set(issuePreviewWindowsForIssue(windows, windowId, entry.number)
+                .map(target => target.id));
+              for (const target of windows) {
+                if (!target.agent_id || target.preset === "pm" ||
+                    !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
+                if (target.placement?.kind === "issue_preview" && !inlineIds.has(target.id)) continue;
+                const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
+                const belongs = Number.isFinite(linked)
+                  ? linked === entry.number
+                  : agents.some(agent => agent.window_id === target.id ||
+                    (target.session_id && agent.session_id === target.session_id));
+                if (!belongs) continue;
+                if (!row.classList.contains("has-live-output")) {
+                  row.querySelector(".issue-agent-status")?.remove();
+                  row.classList.add("has-live-output");
+                }
+                const output = renderIssueAgentStatusRow(windowId, state, entry,
+                  target.placement?.kind === "issue_preview"
+                    ? { inlineWindow: target } : { canvasWindow: target });
+                output.classList.add("issue-card-output");
+                output.setAttribute("role", "group");
+                const title = windowDisplayTitle?.(target) || target.title || target.id;
+                output.setAttribute("aria-label", `Read-only live output: ${title}`);
+                output.querySelector(".issue-agent-status-output")?.remove();
+                const label = output.querySelector(".issue-agent-status-meta");
+                label.classList.add("issue-card-output-label");
+                label.textContent = `Read-only · ${label.textContent}`;
+                const screen = createNode("div", "issue-card-output-screen");
+                screen.appendChild(createNode("pre", "issue-card-output-text",
+                  terminalPreviewText.get(target.id) ?? "Waiting for output"));
+                output.appendChild(screen);
+                row.appendChild(output);
+              }
+            }
             if (phase === "backlog" || phase === "queued") {
               const selection = createNode("label", "issue-queue-select");
               const checkbox = createNode("input");
@@ -4519,6 +4559,17 @@ export function createKnowledgeKanbanSurface({
       // moved verbatim from app.js; the case arms in app.js delegate here.
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
+          case "terminal_preview": {
+            terminalPreviewText.set(event.id, event.text);
+            for (const element of windowMap.values()) {
+              for (const output of element.querySelectorAll(".issue-card-output")) {
+                if (output.dataset.windowId === event.id) {
+                  output.querySelector("pre").textContent = event.text;
+                }
+              }
+            }
+            break;
+          }
           case "knowledge_entries": {
             const state = knowledgeBridgeStateMap.get(event.id);
             if (
