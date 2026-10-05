@@ -33663,6 +33663,12 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         );
     }
     let _path = prepend_tool_parent_to_path(&fake_codex);
+    let mut settings = Settings::default();
+    pin_launch_agents(
+        &mut settings,
+        fake_codex.parent().expect("fixture directory"),
+    );
+    write_profile_config(&temp.path().join("profile-config.toml"), &settings);
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "legacy-codex",
@@ -33678,6 +33684,18 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         .clone();
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let codex_id = combined_window_id("tab-1", "legacy-codex");
+    let (spawn_env, _) = runtime
+        .active_profile_spawn_env()
+        .expect("launch environment")
+        .with_project_root(&repo)
+        .into_parts();
+    for (command, expected) in [("codex", &fake_codex), ("claude", &fake_claude)] {
+        assert_eq!(
+            which::which_in(command, spawn_env.get("PATH"), &repo).expect("fixture CLI"),
+            *expected,
+            "direct presets must launch the long-lived fixture"
+        );
+    }
 
     runtime.restart_window_events(&codex_id);
     runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds);
