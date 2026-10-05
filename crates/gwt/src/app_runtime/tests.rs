@@ -442,7 +442,6 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
         ]),
         remove_env: Vec::new(),
         cwd: None,
-        pending_tool_runtime_migration: None,
         resource_policy: None,
     };
 
@@ -1715,36 +1714,17 @@ fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
     prepend_tool_parent_to_path(fake_gh)
 }
 
-/// Issue #3972: fixture `npx` / `bunx` that answer `--version` instantly.
-///
-/// A `version = "latest"` launch rewrites the command to the host package
-/// runner and health-checks it under a five-second budget before spawning the
-/// provider. Left unpinned, a test spawns whatever `npx` is on the host `PATH`;
-/// on a loaded machine that misses the budget, aborts the launch with `npx
-/// package-runner probe timed out`, and fails a test that was asserting
-/// something else entirely.
-fn write_fixture_package_runners(temp_root: &Path) -> PathBuf {
-    let bin = write_fixture_runners(temp_root, &["npx", "bunx"]);
-    #[cfg(windows)]
-    fs::write(
-        bin.join("npm.cmd"),
-        "@echo off\r\necho \"1.2.3\"\r\nexit /b 0\r\n",
-    )
-    .expect("write sibling npm metadata fixture");
-    bin
-}
-
-/// The fixture `npx` / `bunx` shared by the whole test binary.
-///
-/// Every runtime fixture pins its launch `PATH` at these, so they are written
-/// once per process rather than once per test — creating executables is the
-/// expensive part on Windows, and hundreds of tests build a runtime fixture
-/// without ever launching anything.
-fn shared_fixture_package_runner_bin() -> &'static Path {
+/// Installed-agent fixtures shared by runtime tests. Each answers version
+/// probes locally, so launch health checks never depend on host installations.
+fn shared_fixture_agent_bin() -> &'static Path {
     static SHARED: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
     let (_dir, bin) = SHARED.get_or_init(|| {
-        let dir = tempdir().expect("shared fixture runner tempdir");
-        let bin = write_fixture_package_runners(dir.path());
+        let dir = tempdir().expect("shared fixture agent tempdir");
+        let commands = gwt_agent::builtin_agent_descriptors()
+            .iter()
+            .map(|descriptor| descriptor.command)
+            .collect::<Vec<_>>();
+        let bin = write_fixture_runners(dir.path(), &commands);
         (dir, bin)
     });
     bin
@@ -1759,33 +1739,23 @@ fn write_fixture_runners(temp_root: &Path, names: &[&str]) -> PathBuf {
         {
             let runner = bin.join(format!("{name}.cmd"));
             fs::write(&runner, "@echo off\r\necho 1.2.3\r\nexit /b 0\r\n")
-                .expect("write fixture package runner");
+                .expect("write fixture runner");
         }
         #[cfg(not(windows))]
         {
             let runner = bin.join(name);
             fs::write(&runner, "#!/bin/sh\nprintf '1.2.3\\n'\nexit 0\n")
-                .expect("write fixture package runner");
+                .expect("write fixture runner");
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
-                .expect("chmod fixture package runner");
+                .expect("chmod fixture runner");
         }
     }
     bin
 }
 
-/// Declare that this launch's `PATH` is already pinned to fixture executables,
-/// so the Issue #3972 guard lets its package-runner health probe run.
-fn mark_fixture_package_runner_sandbox(config: &mut gwt_agent::LaunchConfig) {
-    config.env_vars.insert(
-        gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
-        "1".to_string(),
-    );
-}
-
-/// Prepend fixture runners named `names` to one launch config's `PATH` and
-/// declare the Issue #3972 sandbox, so its runner health check answers from the
-/// fixture instead of whatever is installed on the host.
+/// Prepend fixture executables to the launch environment so version probes
+/// answer from the fixture instead of the host.
 fn pin_config_fixture_runners(
     config: &mut gwt_agent::LaunchConfig,
     temp_root: &Path,
@@ -1801,13 +1771,10 @@ fn pin_config_fixture_runners(
         "PATH".to_string(),
         joined.to_str().expect("UTF-8 launch PATH").to_string(),
     );
-    mark_fixture_package_runner_sandbox(config);
 }
 
-/// Point one launch's `PATH` at fixture package runners and declare the
-/// Issue #3972 sandbox. Scoped to the profile config rather than the process
-/// environment, so parallel tests keep their own `PATH` (Issue #3895).
-fn pin_launch_package_runners(settings: &mut Settings, runner_bin: &Path) {
+/// Pin a launch profile to fixture executables without mutating process PATH.
+fn pin_launch_agents(settings: &mut Settings, runner_bin: &Path) {
     let mut paths = vec![runner_bin.to_path_buf()];
     if let Some(existing) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&existing));
@@ -1820,41 +1787,28 @@ fn pin_launch_package_runners(settings: &mut Settings, runner_bin: &Path) {
             "PATH",
             joined.to_str().expect("UTF-8 launch PATH"),
         )
-        .expect("pin launch PATH to fixture package runners");
-    settings
-        .profiles
-        .set_env_var(
-            "default",
-            gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER,
-            "1",
-        )
-        .expect("declare the fixture package-runner sandbox");
+        .expect("pin launch PATH to fixture agents");
 }
 
-/// Write the profile config a monitor-fixture launch reads, with fixture
-/// package runners pinned (Issue #3972) plus any per-test environment.
-fn pin_monitor_fixture_package_runners(
+/// Write the profile config a monitor fixture reads, with installed-agent
+/// fixtures pinned plus its per-test environment.
+fn pin_monitor_fixture_agents(
     fixture: &MonitorRelaunchFixture,
     temp_root: &Path,
     extra_env: &[(&str, &str)],
 ) {
-    pin_runtime_package_runners(&fixture.runtime, temp_root, extra_env);
+    pin_runtime_agents(&fixture.runtime, temp_root, extra_env);
 }
 
-/// Write the profile config one runtime's launches read, with fixture package
-/// runners pinned (Issue #3972) plus any per-test environment.
-///
-/// Call this from every test that drives a real launch. Without it the launch
-/// health-checks whatever `npx` / `bunx` the machine happens to have, which is
-/// invisible on a developer box with the provider CLI installed (the direct
-/// probe succeeds and returns early) and fails on CI, where the fallback runs.
-fn pin_runtime_package_runners(runtime: &AppRuntime, temp_root: &Path, extra_env: &[(&str, &str)]) {
+/// Pin runtime launches to installed-agent fixtures and per-test environment.
+fn pin_runtime_agents(runtime: &AppRuntime, temp_root: &Path, extra_env: &[(&str, &str)]) {
     let mut settings = Settings::default();
-    let runner_bin = write_fixture_package_runners(temp_root);
-    // Monitor launches prefer installed providers; keep their version evidence
-    // hermetic without shadowing provider fixtures in unrelated runtime tests.
-    write_fixture_runners(temp_root, &["codex", "claude"]);
-    pin_launch_package_runners(&mut settings, &runner_bin);
+    let commands = gwt_agent::builtin_agent_descriptors()
+        .iter()
+        .map(|descriptor| descriptor.command)
+        .collect::<Vec<_>>();
+    let runner_bin = write_fixture_runners(temp_root, &commands);
+    pin_launch_agents(&mut settings, &runner_bin);
     for (key, value) in extra_env {
         settings
             .profiles
@@ -4268,16 +4222,12 @@ fn sample_runtime_with_events(
     let log_dir = temp_root.join("logs");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     fs::create_dir_all(&log_dir).expect("create log dir");
-    // Issue #3972: any test that drives a real launch from this runtime
-    // health-checks the host package runner before spawning a provider, and on
-    // a loaded host that check misses its five-second budget. Pin the launch
-    // PATH to the shared fixture runners so the whole class is hermetic instead
-    // of depending on which provider CLIs happen to be installed on the machine
-    // running the suite. Tests that pre-write their own profile config keep it.
+    // Keep launch health checks independent of host provider installations.
+    // Tests that pre-write their own profile config keep it.
     let profile_config_path = temp_root.join("profile-config.toml");
     if !profile_config_path.exists() {
         let mut settings = Settings::default();
-        pin_launch_package_runners(&mut settings, shared_fixture_package_runner_bin());
+        pin_launch_agents(&mut settings, shared_fixture_agent_bin());
         write_profile_config(&profile_config_path, &settings);
     }
     let launch_wizard_cache =
@@ -4341,7 +4291,6 @@ fn sample_runtime_with_events(
         daemon_supervisor: Arc::new(gwt::daemon_supervisor::DaemonSupervisor::disabled()),
         pending_continue_work: HashMap::new(),
         pending_fresh_execution_launches: HashMap::new(),
-        pending_tool_runtime_migrations: HashMap::new(),
 
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_restore_log: None,
@@ -8476,7 +8425,6 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
             env: HashMap::new(),
             remove_env: Vec::new(),
             cwd: Some(temp.path().to_path_buf()),
-            pending_tool_runtime_migration: None,
             resource_policy: None,
         },
         "session-1".to_string(),
@@ -15215,7 +15163,6 @@ fn issue_monitor_review_launch_completion(
             env: HashMap::new(),
             remove_env: Vec::new(),
             cwd: Some(repo.to_path_buf()),
-            pending_tool_runtime_migration: None,
             resource_policy: None,
         },
         session_id.to_string(),
@@ -15416,7 +15363,6 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             session_id.to_string(),
@@ -15598,7 +15544,6 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             session_id.to_string(),
@@ -17646,46 +17591,6 @@ fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
 }
 
 #[test]
-fn legacy_tool_runtime_migration_commits_only_from_authenticated_session_start() {
-    let launch_source = include_str!("launch.rs");
-    let async_start = launch_source
-        .find("pub(crate) fn spawn_agent_window_async(")
-        .expect("async launch preparation function");
-    let launch_end = launch_source[async_start..]
-        .find("#[path = \"agent_launch_stage_tests.rs\"]")
-        .map(|offset| async_start + offset)
-        .expect("production launch implementation boundary");
-    let async_launch = &launch_source[async_start..launch_end];
-    assert!(
-        !async_launch.contains("persist_lazy_tool_runtime_provenance_migration("),
-        "pre-spawn preparation must stage, not persist, legacy provenance"
-    );
-    assert!(
-        async_launch.contains("pending_lazy_tool_runtime_provenance_migration("),
-        "the exact plan must be carried to the authenticated commit boundary"
-    );
-
-    let runtime_event_source = include_str!("runtime_events.rs");
-    let session_start = runtime_event_source
-        .find("event.source_event.as_deref() == Some(\"SessionStart\")")
-        .expect("SessionStart dispatch");
-    let dispatch = &runtime_event_source[session_start..];
-    let migration = dispatch
-        .find("finalize_tool_runtime_migration_session_start")
-        .expect("provenance migration finalizer");
-    let fresh = dispatch
-        .find("finalize_fresh_execution_launch_session_start")
-        .expect("fresh execution finalizer");
-    let continuation = dispatch
-        .find("finalize_continue_work_session_start")
-        .expect("continue work finalizer");
-    assert!(
-        migration < fresh && migration < continuation,
-        "provenance must commit or fail closed before route lifecycle activation"
-    );
-}
-
-#[test]
 fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_authority() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -18476,205 +18381,6 @@ fn persisted_session_with_legacy_version_selector_restores_the_resolved_executab
         );
         assert_eq!(config.tool_version, None, "{command}");
     }
-}
-
-#[test]
-fn persisted_session_launch_config_restores_path_independent_tool_runtime_provenance() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut session =
-        gwt_agent::Session::new(temp.path(), "work/issue-3456", gwt_agent::AgentId::Codex);
-    session.tool_version = Some("latest".to_string());
-    session.tool_runtime_provenance = Some(gwt_agent::ToolRuntimeProvenance {
-        schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-        official_package: "@openai/codex".to_string(),
-        requested_selector: "latest".to_string(),
-        resolved_exact_version: "0.116.0".to_string(),
-        runner_kind: gwt_agent::ToolRuntimeRunnerKind::Npx,
-        resolution_reason: gwt_agent::ToolRuntimeResolutionReason::RequestedSelector,
-    });
-
-    let config = super::launch_config_from_persisted_session(&session);
-
-    assert_eq!(
-        config.tool_runtime_provenance,
-        session.tool_runtime_provenance
-    );
-    assert_eq!(
-        config.tool_runtime_source_session_id.as_deref(),
-        Some(session.id.as_str())
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_success() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (mut runtime, recorded_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-
-    let mut source = gwt_agent::Session::new(&repo, "work/issue-3456", gwt_agent::AgentId::Codex);
-    source.tool_version = Some("latest".to_string());
-    source.save(&runtime.sessions_dir).expect("save source");
-    let source_path = runtime.sessions_dir.join(format!("{}.toml", source.id));
-    let source_bytes = fs::read(&source_path).expect("read source bytes");
-
-    let launch_effect_id = "effect-phase75-metadata-failure";
-    let delivery_id = format!("launch:{launch_effect_id}");
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
-        enabled: true,
-        ..gwt::IssueMonitorConfig::default()
-    });
-    monitor.record_candidate(gwt::IssueMonitorIssue {
-        number: 3456,
-        title: "Windows official-provider metadata failure".to_string(),
-        labels: Vec::new(),
-        state: gwt::IssueMonitorIssueState::Open,
-        body: None,
-        url: None,
-        readiness: gwt::IssueMonitorReadiness::NotApplicable,
-        updated_at: None,
-    });
-    monitor.terminal_queue_push(&[3456], "operator", "2026-08-05T00:00:00Z");
-    assert!(monitor.apply_confirmed_claim(
-        3456,
-        "claim-phase75-metadata-failure",
-        "host/session",
-        launch_effect_id,
-        "2026-08-05T00:00:00Z",
-    ));
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        &monitor.prefs(),
-    )
-    .expect("seed durable launch delivery");
-
-    let missing_npx = temp.path().join("missing-runner").join("npx.cmd");
-    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .working_dir(repo.clone())
-        .branch("work/issue-3456")
-        .version("latest")
-        .tool_runtime_source_session_id(source.id.clone())
-        .build();
-    config.command = missing_npx.display().to_string();
-    config.args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
-    config.tool_version = Some("latest".to_string());
-    // The runner is pinned to a fixture path that does not exist, so no host
-    // runner is reachable from this launch (Issue #3972).
-    mark_fixture_package_runner_sandbox(&mut config);
-    let initial_events = runtime
-        .spawn_agent_window_with_feedback(
-            "tab-1",
-            config,
-            canvas_bounds(),
-            None,
-            LaunchFeedbackContext {
-                client_id: "client-1".to_string(),
-                title: "Issue Monitor".to_string(),
-                issue_monitor_issue_number: Some(3456),
-                issue_monitor_delivery_id: Some(delivery_id.clone()),
-                issue_monitor_project_root: Some(repo.clone()),
-                issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
-                issue_monitor_autonomous_handoff: None,
-                issue_monitor_autonomous_submit_started: false,
-                issue_monitor_review_dispatch: false,
-            },
-        )
-        .expect("start gated launch");
-    let window_id = initial_events
-        .iter()
-        .find_map(|event| match &event.event {
-            BackendEvent::TerminalStatus { id, status, .. } => {
-                assert_eq!(*status, WindowProcessStatus::Starting);
-                Some(id.clone())
-            }
-            _ => None,
-        })
-        .expect("initial Starting status");
-    assert!(monitor.claim_launch_delivery(
-        3456,
-        &delivery_id,
-        &runtime.issue_monitor_materializer_id,
-        std::process::id(),
-        &window_id,
-        |_| false,
-    ));
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        &monitor.prefs(),
-    )
-    .expect("bind durable launch delivery");
-    assert!(matches!(
-        runtime.issue_monitor_launch_deliveries.get(&delivery_id),
-        Some(super::IssueMonitorLaunchDeliveryState::Materializing { .. })
-    ));
-
-    wait_for_recorded_event("targeted metadata failure", &recorded_events, |events| {
-        events.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::LaunchComplete {
-                    window_id: completed_window,
-                    result,
-                } if completed_window == &window_id && result.is_err()
-            )
-        })
-    });
-    let completion = {
-        let mut events = recorded_events.lock().expect("event log");
-        let index = events
-            .iter()
-            .position(|event| {
-                matches!(
-                    recorded_project_payload(event),
-                    UserEvent::LaunchComplete {
-                        window_id: completed_window,
-                        result,
-                    } if completed_window == &window_id && result.is_err()
-                )
-            })
-            .expect("failed completion");
-        events.remove(index)
-    };
-    let UserEvent::LaunchComplete { result, .. } = into_recorded_project_payload(completion) else {
-        unreachable!("matched launch completion")
-    };
-    let failure_events = runtime.handle_launch_complete(window_id, *result);
-
-    assert!(initial_events.iter().chain(&failure_events).all(|event| {
-        !matches!(
-            &event.event,
-            BackendEvent::TerminalStatus {
-                status: WindowProcessStatus::Running,
-                ..
-            }
-        )
-    }));
-    assert!(matches!(
-        runtime.issue_monitor_launch_deliveries.get(&delivery_id),
-        Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. })
-    ));
-    assert_eq!(
-        fs::read(source_path).expect("read source after failed metadata probe"),
-        source_bytes,
-        "failed metadata resolution must not migrate the source Session"
-    );
-    assert!(recorded_events
-        .lock()
-        .expect("event log")
-        .iter()
-        .all(|event| {
-            !matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_ok())
-        }));
 }
 
 #[derive(Clone, Copy)]
@@ -25142,97 +24848,6 @@ fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predeces
     assert_pending_fresh_execution_was_rolled_back(&fixture);
 }
 
-#[cfg(unix)]
-#[test]
-fn production_host_launch_persists_and_dispatches_checked_latest_runner_fallback() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo-runner-fallback");
-    let bin = temp.path().join("bin");
-    fs::create_dir_all(&repo).expect("create repo");
-    fs::create_dir_all(&bin).expect("create bin");
-    init_repo(&repo);
-    let direct = bin.join("codex");
-    fs::write(
-        &direct,
-        "#!/bin/sh\necho 'vendor binary missing' >&2\nexit 1\n",
-    )
-    .expect("write broken direct runner");
-    fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
-        .expect("chmod broken direct runner");
-    let bunx = bin.join("bunx");
-    fs::write(
-        &bunx,
-        "#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 1\nprintf 'bunx 1.2.3\\n'\n",
-    )
-    .expect("write healthy bunx version fixture");
-    fs::set_permissions(&bunx, fs::Permissions::from_mode(0o755))
-        .expect("chmod bunx availability fixture");
-    let sessions_dir = temp.path().join("sessions");
-    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
-    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .working_dir(&repo)
-        .branch("work/issue-2359")
-        .session_mode(gwt_agent::SessionMode::Continue)
-        .model("gpt-5.6-codex")
-        .skip_permissions(true)
-        .build();
-    config.command = direct.display().to_string();
-    config
-        .env_vars
-        .insert("PATH".to_string(), bin.display().to_string());
-    config
-        .env_vars
-        .insert("HOME".to_string(), temp.path().display().to_string());
-    mark_fixture_package_runner_sandbox(&mut config);
-    let original_args = config.args.clone();
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:45155/internal/hook-live",
-        "ws://127.0.0.1:46255/ws",
-        "ws://127.0.0.1:45155/internal/pane-ws",
-    );
-    let (proxy, events) = AppEventProxy::stub();
-
-    AppRuntime::spawn_agent_window_async(
-        proxy,
-        sessions_dir.clone(),
-        repo.display().to_string(),
-        "tab-1::agent-runner-fallback".to_string(),
-        config,
-        temp.path().join("missing-profile-config.toml"),
-        Some(issuer),
-    );
-
-    let recorded = events.lock().expect("event log");
-    let completion = recorded
-        .iter()
-        .find_map(|event| match event {
-            UserEvent::LaunchComplete { result, .. } => result.as_ref().as_ref().ok(),
-            _ => None,
-        })
-        .expect("successful LaunchComplete event");
-    assert_eq!(completion.0.command, bunx.display().to_string());
-    let package_index = completion
-        .0
-        .args
-        .iter()
-        .position(|arg| arg == "@openai/codex@latest")
-        .expect("latest Codex package prefix");
-    assert_eq!(
-        &completion.0.args[package_index + 1..],
-        original_args.as_slice()
-    );
-    let persisted = gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", completion.1)))
-        .expect("persisted fallback Session");
-    assert_eq!(persisted.launch_command, bunx.display().to_string());
-    assert_eq!(persisted.launch_args, completion.0.args);
-}
-
 #[test]
 fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn() {
     let _env_guard = env_test_lock()
@@ -25780,7 +25395,6 @@ fn production_host_launch_all_runner_failure_leaves_no_session_or_success_dispat
     config
         .env_vars
         .insert("HOME".to_string(), temp.path().display().to_string());
-    mark_fixture_package_runner_sandbox(&mut config);
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:45155/internal/hook-live",
         "ws://127.0.0.1:46255/ws",
@@ -25857,7 +25471,6 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
         ("PATH".to_string(), bin.display().to_string()),
         ("HOME".to_string(), temp.path().display().to_string()),
     ]);
-    mark_fixture_package_runner_sandbox(&mut config);
     let (proxy, events) = AppEventProxy::stub();
 
     let started = std::time::Instant::now();
@@ -28339,7 +27952,6 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
                 ]),
                 remove_env: Vec::new(),
                 cwd: Some(fixture.repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             fixture.candidate_session_id.clone(),
@@ -28871,9 +28483,8 @@ No viable candidates found in PATH \
     assert!(!message.contains("/private/var/folders"));
 }
 
-// SPEC-3151 FR-003 / AS-3: when neither a native `opencode` binary nor a
-// package runner is available, the raw PTY error must be rewritten into an
-// actionable install hint, matching the Antigravity treatment.
+// A missing installed OpenCode binary receives an actionable install hint,
+// matching the Antigravity treatment.
 #[test]
 fn app_runtime_opencode_missing_binary_launch_error_is_actionable() {
     let temp = tempdir().expect("tempdir");
@@ -28905,7 +28516,6 @@ No viable candidates found in PATH \
         .expect("terminal status detail");
     assert!(detail.contains("OpenCode (`opencode`) was not found"));
     assert!(detail.contains("npm i -g opencode-ai"));
-    assert!(detail.contains("bunx/npx"));
     assert!(!detail.contains("No viable candidates found in PATH"));
     assert!(!detail.contains("/private/var/folders"));
 }
@@ -28946,7 +28556,6 @@ No viable candidates found in PATH \
         .expect("launch wizard open error");
     assert!(message.contains("OpenCode (`opencode`) was not found"));
     assert!(message.contains("npm i -g opencode-ai"));
-    assert!(message.contains("bunx/npx"));
     assert!(!message.contains("No viable candidates found in PATH"));
     assert!(!message.contains("/private/var/folders"));
 }
@@ -29144,7 +28753,6 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-issue-42".to_string(),
@@ -29256,7 +28864,6 @@ fn app_runtime_close_finalizer_completes_while_a_live_pty_reader_is_attached() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: test_pane_cwd(),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             None,
@@ -29361,7 +28968,6 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-issue-42".to_string(),
@@ -29871,7 +29477,6 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-1".to_string(),
@@ -29964,7 +29569,6 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-develop".to_string(),
@@ -30068,7 +29672,6 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-projection-failure".to_string(),
@@ -30183,7 +29786,6 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-1".to_string(),
@@ -30282,7 +29884,6 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-unlinked-resume".to_string(),
@@ -30391,7 +29992,6 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-stale-binding".to_string(),
@@ -30634,7 +30234,6 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             "session-issue-3096".to_string(),
@@ -30732,7 +30331,6 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             env: HashMap::new(),
             remove_env: Vec::new(),
             cwd: Some(cwd),
-            pending_tool_runtime_migration: None,
             resource_policy: None,
         }
     };
@@ -33764,7 +33362,6 @@ fn bound_runtime_launch_completion(
             env: HashMap::new(),
             remove_env: Vec::new(),
             cwd: Some(repo.to_path_buf()),
-            pending_tool_runtime_migration: None,
             resource_policy: None,
         },
         session_id.to_string(),
@@ -33987,7 +33584,6 @@ fn unbound_agent_pty_publishes_process_identity_for_session_observation() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             None,
@@ -43562,7 +43158,6 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
         .expect("resume config");
 
     assert_eq!(config.command, "codex");
-    assert_eq!(config.tool_version_selector.as_deref(), Some("installed"));
     assert_eq!(config.branch.as_deref(), Some("work/board-origin"));
     assert_eq!(config.working_dir.as_deref(), Some(repo.as_path()));
     assert_eq!(
@@ -43572,14 +43167,6 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
     assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
     assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(config.reasoning_level.as_deref(), Some("high"));
-    assert_eq!(
-        config.tool_runtime_provenance, session.tool_runtime_provenance,
-        "Board resume must keep the persisted exact package resolution"
-    );
-    assert_eq!(
-        config.tool_runtime_source_session_id.as_deref(),
-        Some("session-origin")
-    );
     assert!(config.skip_permissions);
     assert!(config.codex_fast_mode);
 }
@@ -53266,13 +52853,9 @@ fn monitor_relaunch_fixture_with_settlement(
         holder_window_id,
         delivery_id,
     };
-    // Issue #3972: these sessions carry `tool_version = "latest"`, so every
-    // launch they drive health-checks the host package runner before spawning.
-    // Pin it to a fixture `npx` / `bunx` here so no monitor test — present or
-    // future — can fail on the real runner missing its five-second budget. A
-    // test that rewrites this profile config must go through
-    // `pin_monitor_fixture_package_runners` to keep the pin.
-    pin_monitor_fixture_package_runners(&fixture, &case_root, &[]);
+    // Keep installed-agent probes local to the fixture. Tests that rewrite
+    // this profile must retain the pin through `pin_monitor_fixture_agents`.
+    pin_monitor_fixture_agents(&fixture, &case_root, &[]);
     fixture
 }
 
@@ -53656,10 +53239,7 @@ fn assert_monitor_fresh_successor(result: AgentLaunchResult, fixture: &MonitorRe
     assert_eq!(successor.reasoning_level.as_deref(), Some("high"));
     assert_eq!(successor.agent_id, gwt_agent::AgentId::Codex);
     assert_eq!(successor.tool_version.as_deref(), Some("1.2.3"));
-    assert_eq!(
-        successor.tool_version_selector.as_deref(),
-        Some("installed")
-    );
+    assert!(successor.tool_version_selector.is_none());
     assert!(successor.skip_permissions);
     assert!(!successor.fast_mode);
     assert!(!successor.codex_fast_mode);
@@ -53957,7 +53537,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         true,
     );
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
-    pin_monitor_fixture_package_runners(
+    pin_monitor_fixture_agents(
         &fixture,
         temp.path(),
         &[("GROK_HOME", grok_home.to_str().expect("UTF-8 Grok home"))],
@@ -54453,7 +54033,6 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
         ];
         process.args.extend(provider_args);
     }
-    process.pending_tool_runtime_migration = None;
     fixture.runtime.handle_launch_complete(window_id, result);
     let awaiting_receipt = gwt::load_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
@@ -55112,10 +54691,7 @@ fn app_runtime_monitor_fresh_required_switches_to_current_provider_profile() {
     assert_eq!(successor.model.as_deref(), Some("sonnet"));
     assert_eq!(successor.reasoning_level.as_deref(), Some("low"));
     assert_eq!(successor.tool_version.as_deref(), Some("1.2.3"));
-    assert_eq!(
-        successor.tool_version_selector.as_deref(),
-        Some("installed")
-    );
+    assert!(successor.tool_version_selector.is_none());
     assert!(successor.skip_permissions);
     assert!(!successor.fast_mode);
     assert!(!successor.codex_fast_mode);
@@ -60940,131 +60516,54 @@ fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     assert_eq!(
-        super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.130.0")),
+        super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.130.0")),
         Some(CodexHookDiscoveryMode::WorktreeLocal)
     );
     assert_eq!(
-        super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0-alpha.9")),
+        super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.131.0-alpha.9")),
         Some(CodexHookDiscoveryMode::WorktreeLocal)
     );
     assert_eq!(
-        super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0-alpha.21")),
+        super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.131.0-alpha.21")),
         Some(CodexHookDiscoveryMode::WorkspaceHome)
     );
     assert_eq!(
-        super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0")),
+        super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.131.0")),
         Some(CodexHookDiscoveryMode::WorkspaceHome)
     );
-    // Issue #3481 AC-1: `latest` is an alias, not a capability. It must defer
-    // to the probe evidence for the executable that will actually be spawned,
-    // exactly like `installed` does.
+    // Legacy selector strings are not measured version evidence.
     assert_eq!(
-        super::codex_hook_discovery_mode_from_selected_codex_version(Some("latest")),
+        super::codex_hook_discovery_mode_from_detected_codex_version(Some("latest")),
         None
     );
     assert_eq!(
-        super::codex_hook_discovery_mode_from_selected_codex_version(Some("installed")),
+        super::codex_hook_discovery_mode_from_detected_codex_version(Some("installed")),
         None
     );
 }
 
-/// Issue #3481 AC-1/AC-2/AC-4: the `codex@latest` matrix. The launch-argument
-/// snapshot (`bunx --yes @openai/codex@latest`) and the resume-readiness
-/// decision both read the same runner-probe evidence, and only an absent
-/// snapshot falls back to a diagnosable superset.
+/// A detected version on the launch config determines hook compatibility;
+/// non-Codex agents retain their unconditional mode.
 #[test]
-fn codex_latest_hook_discovery_mode_follows_runner_probe_evidence() {
+fn codex_detected_version_and_other_agents_keep_their_existing_modes() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let mut detected = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(temp.path())
-        .version("latest")
         .build();
-
-    let old = gwt_agent::HostRunnerHealthReport {
-        version_output: Some("0.130.0".to_string()),
-        ..Default::default()
-    };
-    let current = gwt_agent::HostRunnerHealthReport {
-        version_output: Some("0.133.0".to_string()),
-        ..Default::default()
-    };
-    let unparseable = gwt_agent::HostRunnerHealthReport {
-        version_output: Some("unexpected output".to_string()),
-        ..Default::default()
-    };
-
-    assert_eq!(
-        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&old)),
-        CodexHookDiscoveryMode::WorktreeLocal,
-    );
-    assert_eq!(
-        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
-        CodexHookDiscoveryMode::WorkspaceHome,
-    );
-    assert_eq!(
-        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unparseable)),
-        CodexHookDiscoveryMode::Both,
-    );
-    assert_eq!(
-        super::codex_hook_discovery_mode_for_launch_config(&config, None),
-        CodexHookDiscoveryMode::Both,
-    );
-}
-
-/// Issue #3481 AC-2: measured evidence outranks the "we switched to the latest
-/// package, so it must be new" heuristic. A fallback that probed an old Codex
-/// still has to materialize the hooks where that Codex looks for them.
-#[test]
-fn codex_latest_fallback_evidence_outranks_the_fallback_heuristic() {
-    use gwt_skills::CodexHookDiscoveryMode;
-
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .working_dir(temp.path())
-        .version("latest")
-        .build();
-    let report = gwt_agent::HostRunnerHealthReport {
-        switched_to_fallback: true,
-        version_output: Some("codex-cli 0.130.0".to_string()),
-        ..Default::default()
-    };
-
-    assert_eq!(
-        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report)),
-        CodexHookDiscoveryMode::WorktreeLocal,
-    );
-}
-
-/// Issue #3481 AC-4/AC-5: an explicitly pinned version is already the exact
-/// identity of the package that will be materialized, so it stays
-/// selector-derived and never depends on a probe; non-Codex agents keep their
-/// unconditional mode.
-#[test]
-fn codex_explicit_version_and_other_agents_keep_their_existing_modes() {
-    use gwt_skills::CodexHookDiscoveryMode;
-
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let pinned = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .working_dir(temp.path())
-        .version("0.130.0")
-        .build();
+    detected.tool_version = Some("0.130.0".to_string());
     let stale_evidence = gwt_agent::HostRunnerHealthReport {
         version_output: Some("0.133.0".to_string()),
-        ..Default::default()
     };
     assert_eq!(
-        super::codex_hook_discovery_mode_for_launch_config(&pinned, Some(&stale_evidence)),
+        super::codex_hook_discovery_mode_for_launch_config(&detected, Some(&stale_evidence)),
         CodexHookDiscoveryMode::WorktreeLocal,
     );
 
     let claude = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
         .working_dir(temp.path())
-        .version("latest")
         .build();
     assert_eq!(
         super::codex_hook_discovery_mode_for_launch_config(&claude, None),
@@ -61101,15 +60600,12 @@ fn codex_hook_discovery_mode_reuses_canonical_health_evidence() {
         .build();
     let old = gwt_agent::HostRunnerHealthReport {
         version_output: Some("codex-cli 0.130.0".to_string()),
-        ..Default::default()
     };
     let current = gwt_agent::HostRunnerHealthReport {
         version_output: Some("codex-cli 0.133.0".to_string()),
-        ..Default::default()
     };
     let unknown = gwt_agent::HostRunnerHealthReport {
         version_output: Some("unexpected output".to_string()),
-        ..Default::default()
     };
 
     assert_eq!(
@@ -61123,26 +60619,6 @@ fn codex_hook_discovery_mode_reuses_canonical_health_evidence() {
     assert_eq!(
         super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unknown)),
         CodexHookDiscoveryMode::Both,
-    );
-}
-
-#[test]
-fn codex_hook_discovery_mode_treats_latest_fallback_as_workspace_home() {
-    use gwt_skills::CodexHookDiscoveryMode;
-
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .working_dir(temp.path())
-        .build();
-    let report = gwt_agent::HostRunnerHealthReport {
-        switched_to_fallback: true,
-        ..Default::default()
-    };
-
-    assert_eq!(
-        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report)),
-        CodexHookDiscoveryMode::WorkspaceHome,
     );
 }
 
@@ -70776,7 +70252,7 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         let (mut runtime, recorded_events) =
             sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
         let mut settings = Settings::default();
-        pin_launch_package_runners(&mut settings, &runner_bin);
+        pin_launch_agents(&mut settings, &runner_bin);
         settings
             .profiles
             .set_env_var(
@@ -80007,7 +79483,6 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: Some(repo.clone()),
-                    pending_tool_runtime_migration: None,
                     resource_policy: None,
                 },
                 None,

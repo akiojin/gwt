@@ -512,7 +512,7 @@ jobs:
         run: |
           node scripts/ci-windows-tests.mjs run gwt-core test windows_claude_user_agent
           node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent real_bun_global_placeholder_fixture
-          node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent package_runner_resolution_failure_still_emits_an_end_summary
+          node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary
           node scripts/ci-windows-tests.mjs run gwt bin gwt real_bun_global_placeholder_fixture
           node scripts/ci-windows-tests.mjs run gwt bin gwt command_prompt_agent_wrapper
         timeout-minutes: 15
@@ -632,10 +632,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: windows-workspace
         continue-on-error: true
-      # Issue #4134 AC-2: the four provider/selector combinations used to be a
-      # four-way matrix, and every shard paid the same 279s cold build to run
-      # 137s of tests — 1116s of build for 548s of test. The build happens once
-      # here, on its own budget, and the combinations follow in one job.
+      # Build once, then exercise both installed provider commands through
+      # the same direct probe, Session persistence, and ConPTY launch routes.
       - name: Build the deterministic Windows agent launch E2E
         run: cargo test -p gwt --test windows_agent_launch_e2e --no-run
         timeout-minutes: 30
@@ -644,25 +642,20 @@ jobs:
       # else, so run them once before the provider combinations.
       - name: Run Windows agent launch E2E contract tests
         run: cargo test -p gwt --test windows_agent_launch_e2e
-      # The matrix used fail-fast: false so one broken provider could not hide
-      # the others. The loop keeps that: every combination runs, each one is a
-      # collapsible log group, a failing one emits an ::error:: annotation, and
-      # the step fails at the end.
+      # Run both providers even when one fails, retaining native diagnostics.
       - name: Run credential-free deterministic Windows agent launch E2E
         shell: bash
         env:
           GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
         run: |
           status=0
-          for combination in codex/latest codex/exact claude/latest claude/exact; do
-            provider=${combination%/*}
-            selector=${combination#*/}
-            echo "::group::windows agent launch E2E ${combination}"
-            if GWT_WINDOWS_AGENT_PROVIDER="$provider" GWT_WINDOWS_AGENT_SELECTOR="$selector" \
+          for provider in codex claude; do
+            echo "::group::windows installed agent launch E2E ${provider}"
+            if GWT_WINDOWS_AGENT_PROVIDER="$provider" \
               cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture; then
-              echo "ok ${combination}"
+              echo "ok ${provider}/installed"
             else
-              echo "::error::windows agent launch E2E failed for ${combination}"
+              echo "::error::windows agent launch E2E failed for ${provider}/installed"
               status=1
             fi
             echo "::endgroup::"

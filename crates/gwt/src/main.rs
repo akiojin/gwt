@@ -108,19 +108,17 @@ pub(crate) use embedded_server::{
     AgentSessionPrincipal,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
-#[cfg(test)]
-pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback_with_probe, command_matches_runner,
-    install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    prune_orphan_intake_worktrees, resolve_ephemeral_launch_worktree,
-    resolve_launch_worktree_request,
-};
 pub(crate) use launch_runtime::{
     apply_windows_host_shell_wrapper, build_shell_process_launch,
     ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
     install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune,
     plan_orphan_intake_worktree_prune_from_inventory, resolve_launch_worktree,
     resolve_shell_launch_worktree, OrphanIntakePrunePlan,
+};
+#[cfg(test)]
+pub(crate) use launch_runtime::{
+    command_matches_runner, install_launch_gwt_bin_env_with_lookup, prune_orphan_intake_worktrees,
+    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -2410,12 +2408,12 @@ mod tests {
 
     use super::{
         app_state_view_from_parts, apply_agent_frontend_dispatch_outcome,
-        apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
-        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
-        close_window_from_workspace, combined_window_id, current_git_branch,
-        docker_bundle_mounts_for_home, docker_bundle_override_content, event_loop_dispatch_label,
-        frontend_event_kind_label, gui_event_loop_stall_warning, gui_front_door_launch_surface,
-        hook_forward_authorized, install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        apply_windows_host_shell_wrapper, broadcast_runtime_hook_event, build_frontend_sync_events,
+        build_shell_process_launch, close_window_from_workspace, combined_window_id,
+        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        event_loop_dispatch_label, frontend_event_kind_label, gui_event_loop_stall_warning,
+        gui_front_door_launch_surface, hook_forward_authorized,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
         AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
@@ -4300,7 +4298,6 @@ mod tests {
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
-            pending_tool_runtime_migrations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
             project_open_started: None,
@@ -5957,7 +5954,6 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
-                    pending_tool_runtime_migration: None,
                     resource_policy: None,
                 },
                 "session-3".to_string(),
@@ -5987,7 +5983,6 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             }),
         );
@@ -7220,7 +7215,6 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
-                    pending_tool_runtime_migration: None,
                     resource_policy: None,
                 },
                 "session-1".to_string(),
@@ -7259,7 +7253,6 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
-                    pending_tool_runtime_migration: None,
                     resource_policy: None,
                 },
                 "session-2".to_string(),
@@ -7295,7 +7288,6 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             }),
         );
@@ -7313,7 +7305,6 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             }),
         );
@@ -7508,25 +7499,8 @@ mod tests {
         assert!(err.contains("git show-ref --verify refs/heads/feature/missing"));
         assert!(err.contains(&temp.path().display().to_string()));
     }
-    fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
+    fn sample_windows_shell_launch_config() -> gwt_agent::LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .working_dir("E:/gwt/develop")
-            .version("latest")
-            .build();
-        config.command = "bunx".to_string();
-        config.args = vec![
-            "@anthropic-ai/claude-code@latest".to_string(),
-            "--print".to_string(),
-        ];
-        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
-        config.working_dir = Some(PathBuf::from("E:/gwt/develop"));
-        config.runtime_target = LaunchRuntimeTarget::Host;
-        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
-        config
-    }
-
-    fn sample_custom_bunx_launch_config() -> gwt_agent::LaunchConfig {
-        let mut config = AgentLaunchBuilder::new(AgentId::Custom("claude-code-openai".to_string()))
             .working_dir("E:/gwt/develop")
             .build();
         config.command = "bunx".to_string();
@@ -7539,150 +7513,6 @@ mod tests {
         config.runtime_target = LaunchRuntimeTarget::Host;
         config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
         config
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
-        let mut config = sample_versioned_launch_config();
-        config.remove_env = vec!["SECRET".to_string()];
-        let mut probes = Vec::new();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |command, args, _env, remove_env, cwd| {
-                assert_eq!(remove_env, vec!["SECRET".to_string()].as_slice());
-                assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                probes.push((command.to_string(), args));
-                command == "npx"
-            },
-        );
-
-        assert!(changed, "expected bunx failure to switch to npx");
-        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
-        assert_eq!(
-            probes[0],
-            ("bunx".to_string(), vec!["--version".to_string()])
-        );
-        assert_eq!(config.command, "npx");
-        assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--print".to_string(),
-            ]
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_package_runner_fallback_keeps_bunx_when_probe_succeeds() {
-        let mut config = sample_versioned_launch_config();
-        let original_command = config.command.clone();
-        let original_args = config.args.clone();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |_command, _args, _env, _remove_env, _cwd| true,
-        );
-
-        assert!(!changed, "successful bunx probe should keep bunx");
-        assert_eq!(config.command, original_command);
-        assert_eq!(config.args, original_args);
-    }
-
-    #[test]
-    fn host_package_runner_fallback_does_not_probe_or_mutate_custom_bunx() {
-        let mut config = sample_custom_bunx_launch_config();
-        let original = format!("{config:?}");
-        let mut probes = Vec::new();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |command, args, _env, _remove_env, cwd| {
-                assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                probes.push((command.to_string(), args));
-                command == "npx"
-            },
-        );
-
-        assert!(!changed, "Custom Bunx must bypass built-in fallback policy");
-        assert!(probes.is_empty(), "Custom Bunx must not be probed");
-        assert_eq!(
-            format!("{config:?}"),
-            original,
-            "Custom Bunx launch must remain unchanged"
-        );
-    }
-
-    #[test]
-    fn host_runner_health_compatibility_preserves_healthy_direct_command() {
-        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .working_dir("E:/gwt/develop")
-            .version("installed")
-            .build();
-        #[cfg(not(windows))]
-        {
-            config.command = "/opt/gwt-test/claude".to_string();
-        }
-        #[cfg(windows)]
-        {
-            config.command = "C:/gwt-test/claude.exe".to_string();
-        }
-        let original_command = config.command.clone();
-        let original_args = config.args.clone();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |command, args, _env, _remove_env, _cwd| {
-                assert_eq!(command, original_command);
-                assert_eq!(args, vec!["--version".to_string()]);
-                true
-            },
-        );
-
-        assert!(!changed);
-        assert_eq!(config.command, original_command);
-        assert_eq!(config.args, original_args);
-    }
-
-    #[test]
-    fn probe_host_package_runner_times_out_and_returns_false() {
-        #[cfg(target_os = "windows")]
-        let (command, args) = (
-            "cmd",
-            vec!["/C".to_string(), "ping -n 6 127.0.0.1 >NUL".to_string()],
-        );
-        #[cfg(not(target_os = "windows"))]
-        let (command, args) = ("sh", vec!["-c".to_string(), "sleep 5".to_string()]);
-
-        let start = Instant::now();
-        let ok = crate::probe_host_package_runner_with_timeout(
-            command,
-            args,
-            // The "runner" here is a shell fixture, not the host package
-            // runner, so the Issue #3972 guard must let it through — otherwise
-            // this asserts the refusal instead of the timeout it is about.
-            &HashMap::from([(
-                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
-                "1".to_string(),
-            )]),
-            &[],
-            None,
-            Duration::from_millis(100),
-            Duration::from_millis(10),
-        );
-
-        assert!(!ok, "hanging package-runner probe should fail closed");
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "probe timeout should return quickly"
-        );
     }
 
     #[test]
@@ -7826,7 +7656,7 @@ mod tests {
 
     #[test]
     fn command_prompt_agent_wrapper_preserves_spaced_cmd_path() {
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
         config.args = vec![
             "--yes".to_string(),
@@ -7878,7 +7708,7 @@ mod tests {
 
     #[test]
     fn powershell_agent_wrapper_quotes_spaced_path_and_single_quotes() {
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
         config.args = vec!["value's".to_string()];
         config.windows_shell = Some(gwt_agent::WindowsShellKind::PowerShell7);
@@ -9434,7 +9264,7 @@ mod tests {
         )
         .expect("write compose file");
 
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
@@ -9493,7 +9323,7 @@ mod tests {
         )
         .expect("write override file");
 
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());

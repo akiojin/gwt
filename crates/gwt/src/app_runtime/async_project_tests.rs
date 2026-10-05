@@ -136,7 +136,6 @@ fn stale_project_launch_completion_cleans_exact_genesis_without_touching_reopene
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             },
             session_id.to_string(),
