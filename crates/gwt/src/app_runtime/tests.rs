@@ -31306,6 +31306,18 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
         .expect("legacy managed-hook fixture must be valid JSON");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
     let expected_hook_bin = missing_pin.display().to_string();
+    let resolution_context = || {
+        format!(
+            "expected={expected_hook_bin:?}, selected={:?}, thread_override={:?}, \
+             GWT_HOOK_BIN={:?}, GWT_BIN_PATH={:?}, PATH={:?}",
+            gwt::managed_assets::managed_hook_bin(),
+            gwt_skills::settings_local::hook_bin_override(),
+            std::env::var_os("GWT_HOOK_BIN"),
+            std::env::var_os("GWT_BIN_PATH"),
+            std::env::var_os("PATH"),
+        )
+    };
+    let before_heal = resolution_context();
     let mut health_input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worktree);
     health_input.runtime_state_path = None;
     health_input.expected_hook_bin = Some(expected_hook_bin.clone());
@@ -31330,8 +31342,9 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
             .issues
             .iter()
             .any(|issue| issue.starts_with("managed hook runtime guard missing:")),
-        "{:?}",
-        healed_health.issues
+        "{:?}; before: {before_heal}; after: {}",
+        healed_health.issues,
+        resolution_context()
     );
     assert!(
         !healed_health.issues.is_empty()
@@ -31339,8 +31352,9 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
                 .issues
                 .iter()
                 .all(|issue| issue.starts_with("managed hook binary missing:")),
-        "{:?}",
-        healed_health.issues
+        "{:?}; before: {before_heal}; after: {}",
+        healed_health.issues,
+        resolution_context()
     );
 
     // A second pass over the converged file must be a no-op: the guard issue is
@@ -75810,6 +75824,19 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
             ),
         )
     });
+    // The fail-open claim proposal is driven through the issue client. The
+    // default factory would resolve a token from the fake `gh` and call the
+    // real api.github.com, so network latency could burn the scan budget.
+    // An offline fake that has never seen #43 rejects the claim pre-submit,
+    // which deterministically leaves the proposal pending for a retry.
+    let fake_client = Arc::new(FakeIssueClient::new());
+    let issue_client_factory: super::RuntimeIssueClientFactory = Arc::new({
+        let fake_client = Arc::clone(&fake_client);
+        move |_owner, _repo| {
+            let client: Arc<dyn IssueClient> = fake_client.clone();
+            Ok(client)
+        }
+    });
 
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
@@ -75817,7 +75844,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         None,
         None,
         "2026-09-07T07:00:00Z",
-        &super::default_issue_client_factory(),
+        &issue_client_factory,
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
     )
@@ -75831,6 +75858,14 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         pending_claim_issue_numbers(&persisted),
         vec![43],
         "an ordinary probe error within budget stays fail-open"
+    );
+    assert!(
+        fake_client
+            .call_log()
+            .iter()
+            .any(|call| call == "fetch:#43"),
+        "the claim attempt must go through the injected offline client: {:?}",
+        fake_client.call_log()
     );
 }
 
