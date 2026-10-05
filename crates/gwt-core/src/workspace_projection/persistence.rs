@@ -3073,8 +3073,19 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
                     "Session-bound Work terminalization lost its WorkItems projection".to_string(),
                 )
             })?;
-        let locked =
-            resolve_session_bound_terminal_target_locked(&projection, &work_items, target)?;
+        let confirm_work_id = match selection {
+            WorkspaceTerminalTargetSelection::Exact {
+                work_id,
+                policy: ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            } => Some(work_id),
+            _ => None,
+        };
+        let locked = resolve_session_bound_terminal_target_locked(
+            &projection,
+            &work_items,
+            target,
+            confirm_work_id,
+        )?;
         revalidate(&projection, &work_items)?;
         let (work_id, exact_policy) = match (locked, selection) {
             (
@@ -3171,6 +3182,7 @@ fn resolve_session_bound_terminal_target_locked(
     projection: &WorkspaceProjection,
     work_items: &WorkItemsProjection,
     target: &SessionBoundWorkspaceTerminalTarget,
+    confirm_work_id: Option<&str>,
 ) -> Result<LockedSessionBoundTerminalTarget> {
     let Some(agent) = resolve_unambiguous_session_bound_agent(
         projection,
@@ -3180,7 +3192,8 @@ fn resolve_session_bound_terminal_target_locked(
     else {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
     };
-    if agent.affiliation_status != WorkspaceAgentAffiliationStatus::Assigned {
+    let assigned = agent.affiliation_status == WorkspaceAgentAffiliationStatus::Assigned;
+    if !assigned && confirm_work_id.is_none() {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
     }
     if agent.agent_id != target.agent_id {
@@ -3188,11 +3201,28 @@ fn resolve_session_bound_terminal_target_locked(
             "Session-bound Work terminalization agent identity changed before commit".to_string(),
         ));
     }
-    let Some(work_id) = agent
-        .workspace_id
-        .as_deref()
-        .filter(|work_id| !work_id.trim().is_empty())
-    else {
+    let work_id = if assigned {
+        agent
+            .workspace_id
+            .as_deref()
+            .filter(|work_id| !work_id.trim().is_empty())
+    } else {
+        if agent.workspace_id.is_some()
+            || projection
+                .agents
+                .iter()
+                .filter(|agent| agent.session_id == target.session_id)
+                .count()
+                != 1
+        {
+            return Err(GwtError::Other(
+                "Session-bound Work terminal confirmation projection authority became ambiguous"
+                    .to_string(),
+            ));
+        }
+        confirm_work_id
+    };
+    let Some(work_id) = work_id else {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
     };
     if canonical_session_bound_branch(agent.branch.as_deref().unwrap_or_default())

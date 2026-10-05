@@ -17,6 +17,15 @@ use super::{
     OutboundEvent, WindowPreset, WindowProcessStatus,
 };
 
+/// Preserve indentation and interior blank rows; omit only unused screen rows.
+pub(super) fn terminal_preview_text(contents: &str) -> String {
+    let mut lines: Vec<&str> = contents.lines().collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines[lines.len().saturating_sub(3)..].join("\n")
+}
+
 /// Issue #3274: how many trailing non-empty screen lines survive into the
 /// persistent window detail when an agent process errors out.
 const AGENT_ERROR_TAIL_LINES: usize = 3;
@@ -527,9 +536,15 @@ impl AppRuntime {
         &mut self,
         id: String,
         data: Vec<u8>,
+        preview_text: Option<String>,
     ) -> Vec<OutboundEvent> {
-        // Daemon publications describe another process and intentionally keep
-        // their existing wire contract; a local PTY incarnation is neither
+        if self.window_lookup.contains_key(&id) {
+            if let Some(text) = preview_text {
+                self.remote_terminal_previews.insert(id.clone(), text);
+            }
+        }
+        // Daemon publications describe another process; a local PTY
+        // incarnation is neither
         // available nor authoritative for this path.
         self.handle_runtime_output_inner(id, data, false, None)
     }
@@ -556,9 +571,20 @@ impl AppRuntime {
             self.window_last_output_at
                 .insert(id.clone(), chrono::Utc::now());
         }
+        let preview_text = if publish_to_daemon {
+            self.runtimes.get(&id).and_then(|runtime| {
+                runtime
+                    .pane
+                    .lock()
+                    .ok()
+                    .map(|pane| terminal_preview_text(&pane.screen().contents()))
+            })
+        } else {
+            self.remote_terminal_previews.get(&id).cloned()
+        };
         if publish_to_daemon {
             if let Some(tab) = self.tab(&address.tab_id) {
-                publish_runtime_output_change(&tab.project_root, &id, &data);
+                publish_runtime_output_change(&tab.project_root, &id, &data, preview_text.clone());
             }
         }
         let output_id = id.clone();
@@ -566,13 +592,22 @@ impl AppRuntime {
             return Vec::new();
         };
         let mut events = vec![OutboundEvent::project(
-            project_key,
+            project_key.clone(),
             BackendEvent::TerminalOutput {
                 id,
                 data_base64: base64::engine::general_purpose::STANDARD.encode(data),
             },
         )
         .with_terminal_stream_seq(stream_seq)];
+        if let Some(text) = preview_text {
+            events.push(OutboundEvent::project(
+                project_key,
+                BackendEvent::TerminalPreview {
+                    id: output_id.clone(),
+                    text,
+                },
+            ));
+        }
         if publish_to_daemon {
             events.extend(self.observe_codex_directory_trust_prompt_from_screen(&output_id));
             let prompt = self.current_screen_approval_prompt(&output_id);
@@ -2009,6 +2044,7 @@ enum RuntimeDaemonPublish {
         project_root: PathBuf,
         id: String,
         data: Vec<u8>,
+        preview_text: Option<String>,
     },
     Status {
         project_root: PathBuf,
@@ -2142,9 +2178,14 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
             project_root,
             id,
             data,
+            preview_text,
         } => {
-            let payload =
-                gwt::runtime_daemon_events::runtime_output_payload(&id, &data, std::process::id());
+            let payload = gwt::runtime_daemon_events::runtime_output_payload(
+                &id,
+                &data,
+                std::process::id(),
+                preview_text.as_deref(),
+            );
             let result = gwt::daemon_publisher::publish_event(
                 &project_root,
                 gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
@@ -2227,11 +2268,17 @@ fn publish_runtime_daemon_approval_event(publish: RuntimeDaemonApprovalPublish) 
         );
     }
 }
-fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
+fn publish_runtime_output_change(
+    project_root: &Path,
+    id: &str,
+    data: &[u8],
+    preview_text: Option<String>,
+) {
     enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
         project_root: project_root.to_path_buf(),
         id: id.to_string(),
         data: data.to_vec(),
+        preview_text,
     });
 }
 fn publish_runtime_status_change(
@@ -2500,6 +2547,7 @@ mod tests {
                 project_root: project_root.clone(),
                 id: "tab-1::shell-1".to_string(),
                 data: b"first".to_vec(),
+                preview_text: None,
             },
         )
         .is_ok());
@@ -2526,6 +2574,7 @@ mod tests {
                 project_root: project_root.clone(),
                 id: "tab-1::agent-1".to_string(),
                 data: b"flood".to_vec(),
+                preview_text: None,
             },
         )
         .expect("fill output lane");

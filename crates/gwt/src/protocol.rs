@@ -1963,6 +1963,11 @@ pub enum BackendEvent {
         id: String,
         data_base64: String,
     },
+    /// Read-only last three screen rows, independent of terminal sizing.
+    TerminalPreview {
+        id: String,
+        text: String,
+    },
     TerminalSnapshot {
         id: String,
         data_base64: String,
@@ -2873,6 +2878,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "terminal_preview",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "terminal_snapshot",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3359,6 +3369,7 @@ impl BackendEvent {
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
+            BackendEvent::TerminalPreview { .. } => "terminal_preview",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",

@@ -447,6 +447,7 @@ fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
         crate::BackendEvent::TerminalOutput { id, .. } => {
             (None, Some(id.clone()), Some(id.clone()))
         }
+        crate::BackendEvent::TerminalPreview { id, .. } => (Some(id.clone()), None, None),
         crate::BackendEvent::TerminalSnapshot { id, .. } => {
             (Some(id.clone()), None, Some(id.clone()))
         }
@@ -3765,6 +3766,34 @@ mod tests {
             "stale pane-a snapshot is superseded"
         );
         assert!(payloads.iter().any(|payload| payload.contains("b-v1")));
+    }
+
+    #[test]
+    fn terminal_preview_keeps_latest_for_each_of_three_panes() {
+        let policy = crate::protocol::backend_event_policy("terminal_preview")
+            .expect("preview event policy");
+        assert!(
+            !policy.coalesces_on_frontend(),
+            "three panes must not coalesce by kind"
+        );
+        let queue = ClientQueue::default();
+        for (id, text) in [
+            ("a", "old"),
+            ("b", "second"),
+            ("c", "third"),
+            ("a", "latest"),
+        ] {
+            let prepared = prepare_outbound(&BackendEvent::TerminalPreview {
+                id: id.into(),
+                text: text.into(),
+            });
+            assert!(prepared.terminal_pane.is_none());
+            queue.enqueue(&prepared);
+        }
+        let (payloads, _) = drain_all(&queue);
+        assert_eq!(payloads.len(), 3);
+        assert!(payloads.iter().any(|value| value.contains("latest")));
+        assert!(!payloads.iter().any(|value| value.contains("old")));
     }
 
     // SPEC-2359 W-17 (FR-395): disconnect is the last resort, reached only via

@@ -1527,6 +1527,8 @@ pub struct AppRuntime {
     /// delta — an in-place agent restart reusing the same window is fine.
     /// Runtime-only; never persisted.
     pub(crate) window_output_bytes: HashMap<String, u64>,
+    /// Latest parsed preview received from another runtime owner; never persisted.
+    pub(crate) remote_terminal_previews: HashMap<String, String>,
     /// Issue #4608: when each pane last wrote to its terminal. The Monitor's
     /// hook-independent liveness signal (see
     /// `IssueMonitorWindowObservation::last_output_at`). Runtime-only.
@@ -3356,6 +3358,7 @@ impl AppRuntime {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: HashMap::new(),
@@ -10424,6 +10427,12 @@ impl AppRuntime {
                     .map(|status| (id.clone(), status, detail.clone()))
             })
             .collect();
+        let mut terminal_previews: HashMap<String, String> = self
+            .remote_terminal_previews
+            .iter()
+            .filter(|(id, _)| self.project_key_for_window(id) == Some(&context.project_key))
+            .map(|(id, text)| (id.clone(), text.clone()))
+            .collect();
         let mut terminal_snapshots = self
             .runtimes
             .iter()
@@ -10436,7 +10445,13 @@ impl AppRuntime {
                 let (snapshot, seq) = runtime
                     .pane
                     .lock()
-                    .map(|pane| (pane.snapshot_bytes(), pane.output_seq()))
+                    .map(|pane| {
+                        terminal_previews.insert(
+                            id.clone(),
+                            runtime_events::terminal_preview_text(&pane.screen().contents()),
+                        );
+                        (pane.snapshot_bytes(), pane.output_seq())
+                    })
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot, Some(seq)))
             })
@@ -10468,6 +10483,12 @@ impl AppRuntime {
                 .and_then(|state| state.launch_wizard.as_ref())
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
+        );
+        events.splice(
+            1..1,
+            terminal_previews.into_iter().map(|(id, text)| {
+                OutboundEvent::reply(client_id, BackendEvent::TerminalPreview { id, text })
+            }),
         );
         if let Some(event) = self.active_work_projection_reply(client_id, &context.tab_id) {
             events.insert(1, event);
@@ -11153,6 +11174,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
+        self.remote_terminal_previews.remove(window_id);
         self.window_last_output_at.remove(window_id);
         self.window_hook_states.remove(window_id);
         self.clear_runtime_approval_latch_without_status(window_id, true);
