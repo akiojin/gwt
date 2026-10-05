@@ -315,13 +315,19 @@ where
 /// Issue #4131: `Blocked` is reported as `Interrupted` when the Host's Active
 /// reaper wrote it, because that status means the holder died rather than
 /// decided.
-pub fn read_execution_settlements(
+pub fn read_execution_observations(
     project_root: &Path,
     issue_numbers: &[u64],
-) -> BTreeMap<u64, IssueMonitorExecutionSettlement> {
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     use crate::cli::execution_state::{
         diagnose_owner, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
     };
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
+    let worktrees = gwt_git::worktree::WorktreeManager::new(project_root)
+        .list()
+        .unwrap_or_default();
+    let normalized = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     issue_numbers
         .iter()
         .map(|issue_number| {
@@ -332,28 +338,66 @@ pub fn read_execution_settlements(
                     number: *issue_number,
                 },
             );
+            // The holder is not necessarily the only agent in this worktree:
+            // an unbound/manual Session can already have a live exact PTY.
+            let worktree = diagnosis
+                .holder_worktree
+                .as_deref()
+                .map(Path::new)
+                .or_else(|| {
+                    worktrees
+                        .iter()
+                        .find(|worktree| {
+                            worktree.branch.as_deref()
+                                == Some(&format!("work/issue-{issue_number}"))
+                        })
+                        .map(|worktree| worktree.path.as_path())
+                });
+            let belongs_here = |path: &Path, owner: Option<u64>| {
+                worktree.map_or(owner == Some(*issue_number), |target| {
+                    normalized(target) == normalized(path)
+                })
+            };
+            let process_held = inventory
+                .sessions
+                .iter()
+                .any(|session| belongs_here(&session.worktree_path, session.issue_number))
+                || inventory.uncertainties.iter().any(|uncertainty| {
+                    uncertainty
+                        .session_id
+                        .as_deref()
+                        .and_then(|id| {
+                            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                        })
+                        .is_none_or(|session| {
+                            belongs_here(&session.worktree_path, session.linked_issue_number)
+                        })
+                });
+            let process_held = process_held
+                || diagnosis.holder_runtime.as_deref() == Some("live")
+                || (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
+                    && !diagnosis.reclaimable);
             let settlement = match diagnosis.ecr_status {
                 Some(ExecutionControlStatus::Active) if diagnosis.reclaimable => {
                     IssueMonitorExecutionSettlement::Active
                 }
-                // A missing pane is not exit proof: a headless or detached
-                // exact process can still own this generation.
                 Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Unknown,
                 Some(ExecutionControlStatus::Completed) => {
                     IssueMonitorExecutionSettlement::Completed
                 }
-                // Issue #4131: the generation reaper runs earlier in this same
-                // scan, so a holder that an auto-update restart killed reaches
-                // this read already `Blocked` — written for it, not by it.
-                // Reporting that as a settlement made the idle release treat
-                // interrupted work as finished and park the Issue.
                 Some(ExecutionControlStatus::Blocked) if diagnosis.ecr_settled_by_host_reaper => {
                     IssueMonitorExecutionSettlement::Interrupted
                 }
                 Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
                 None => IssueMonitorExecutionSettlement::Unknown,
             };
-            (*issue_number, settlement)
+            (
+                *issue_number,
+                crate::issue_monitor::IssueMonitorExecutionObservation {
+                    settlement,
+                    process_held,
+                },
+            )
         })
         .collect()
 }
@@ -366,7 +410,7 @@ pub fn reconcile_issue_monitor_idle_windows(
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
     let settlements =
-        read_execution_settlements(project_root, &monitor.execution_settlement_issue_numbers());
+        read_execution_observations(project_root, &monitor.execution_settlement_issue_numbers());
     let outcome = monitor.reconcile_idle_windows(&settlements, now);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
         tracing::info!(
@@ -3727,12 +3771,43 @@ mod tests {
         .save(&runtime_path)
         .unwrap();
         assert_eq!(
-            read_execution_settlements(worktree.path(), &[owner.number])
+            read_execution_observations(worktree.path(), &[owner.number])
                 .get(&owner.number)
-                .copied(),
+                .map(|observation| observation.settlement),
             Some(IssueMonitorExecutionSettlement::Unknown),
             "an exact live process must not permit recovery even without a pane"
         );
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        monitor.complete_active_launch_at(42, "tab-1::live", "2026-09-07T04:00:00Z");
+        monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: "2026-09-07T04:10:00Z".to_string(),
+            windows: Vec::new(),
+        });
+        let outcome = reconcile_issue_monitor_idle_windows(
+            &mut monitor,
+            worktree.path(),
+            "2026-09-07T04:10:00Z",
+        );
+        assert!(
+            outcome.released.is_empty(),
+            "the exact agent process is alive"
+        );
+        assert!(outcome.requeued.is_empty());
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
+        assert_eq!(
+            outcome.idle_windows[0].idle_kind.as_str(),
+            "binding_pending"
+        );
+        assert!(monitor
+            .vanished_launched_windows(
+                "tab-1",
+                &Default::default(),
+                "2026-09-07T04:10:00Z",
+                &read_execution_observations(worktree.path(), &[42]),
+            )
+            .is_empty());
         std::fs::remove_file(runtime_path).unwrap();
 
         // What an auto-update restart leaves behind: the holder is gone and
@@ -3740,10 +3815,39 @@ mod tests {
         session.update_status(gwt_agent::AgentStatus::Interrupted);
         session.save(&sessions_dir).unwrap();
 
+        // A different, unbound agent in the same worktree also vetoes recovery.
+        let mut unbound = session.clone();
+        unbound.id = "unbound-live-agent".to_string();
+        unbound.execution_binding = None;
+        unbound.linked_issue_number = None;
+        unbound.update_status(gwt_agent::AgentStatus::Running);
+        unbound.save(&sessions_dir).unwrap();
+        let unbound_path = gwt_agent::runtime_state_path(&sessions_dir, &unbound.id);
+        let mut unbound_runtime =
+            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        unbound_runtime.host_started_at = Some(started_at);
+        unbound_runtime.child_pid = Some(std::process::id());
+        unbound_runtime.child_started_at = Some(started_at);
+        unbound_runtime.save(&unbound_path).unwrap();
+        let observations = read_execution_observations(worktree.path(), &[42]);
         assert_eq!(
-            read_execution_settlements(worktree.path(), &[owner.number])
+            observations[&42].settlement,
+            IssueMonitorExecutionSettlement::Active
+        );
+        assert!(
+            observations[&42].process_held,
+            "inventory retains an unrelated live agent in the target worktree"
+        );
+        assert!(monitor
+            .reconcile_idle_windows(&observations, "2026-09-07T04:10:00Z")
+            .released
+            .is_empty());
+        std::fs::remove_file(unbound_path).unwrap();
+
+        assert_eq!(
+            read_execution_observations(worktree.path(), &[owner.number])
                 .get(&owner.number)
-                .copied(),
+                .map(|observation| observation.settlement),
             Some(IssueMonitorExecutionSettlement::Active),
             "the record is still Active before the reaper runs"
         );
@@ -3771,12 +3875,25 @@ mod tests {
         );
 
         assert_eq!(
-            read_execution_settlements(worktree.path(), &[owner.number])
+            read_execution_observations(worktree.path(), &[owner.number])
                 .get(&owner.number)
-                .copied(),
+                .map(|observation| observation.settlement),
             Some(IssueMonitorExecutionSettlement::Interrupted),
             "the reaper blocked it on the holder's behalf; the work is unfinished"
         );
+        let outcome = reconcile_issue_monitor_idle_windows(
+            &mut monitor,
+            worktree.path(),
+            "2026-09-07T04:10:00Z",
+        );
+        assert_eq!(outcome.requeued, vec![42]);
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .last_failure_message
+            .as_deref()
+            .unwrap()
+            .contains("agent process absent"));
     }
 
     #[test]

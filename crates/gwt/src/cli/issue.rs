@@ -1774,7 +1774,7 @@ fn run_monitor_release_idle<E: CliEnv>(
                 "idle_kind": idle.idle_kind.as_str(),
                 "idle_since": idle.idle_since,
                 "bound": idle.bound,
-                "releasable": idle.idle_kind != crate::IssueMonitorIdleKind::StuckUnknown,
+                "releasable": idle.idle_kind.releasable(),
                 // Issue #4131: releasing this row also puts its Issue back on
                 // the queue, because the execution it was launched for never
                 // settled. The operator should see that before asking.

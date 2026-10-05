@@ -61,9 +61,9 @@ pub struct CodexHookTrustEntry {
 pub struct CodexHookTrustExpectation {
     /// The hooks file in the same form the trust keys use.
     pub hooks_path: PathBuf,
-    /// The fallback binary the generator was allowed to write into this file:
-    /// [`crate::CANONICAL_HOOK_BIN`] for a git-tracked config, the absolute
-    /// install path otherwise (#3567).
+    /// The resolved fallback accepted alongside the exact portable generated
+    /// command. Foreign checkout build outputs retain the generator's path
+    /// ownership restriction (#3567).
     pub expected_gwt_bin: String,
 }
 
@@ -246,16 +246,19 @@ fn scan_codex_hook_trust_from_path(
         return Ok(CodexHookTrustScan::default());
     }
 
-    // #3567: what the generator was allowed to write into THIS file is not
-    // always the binary the caller resolved — a git-tracked config keeps the
-    // canonical portable fallback, and a foreign checkout's build output is
-    // never pinned here. Trust has to expect the same value, or gwt vouches for
-    // nothing and Codex stops the launch on `Hooks need review`.
-    let sanitized_expected_gwt_bin = expected_gwt_bin.map_or_else(
-        || crate::settings_local::managed_hook_bin_for_config_path(hooks_path),
-        |bin| crate::settings_local::sanitize_hook_bin_for_config_path(hooks_path, bin),
-    );
-    let expected_gwt_bin = Some(sanitized_expected_gwt_bin.as_str());
+    // Keep the resolved install as a recognized exact fallback even when a
+    // tracked config now generates the portable form. A foreign checkout's
+    // build output still follows the generator's ownership restriction (#3567).
+    let resolved_gwt_bin =
+        expected_gwt_bin.map_or_else(crate::settings_local::gwt_hook_bin_path, str::to_string);
+    let sanitized_expected_gwt_bin =
+        crate::settings_local::sanitize_hook_bin_for_config_path(hooks_path, &resolved_gwt_bin);
+    let expected_gwt_bin =
+        if crate::settings_local::build_output_owner_root(Path::new(&resolved_gwt_bin)).is_some() {
+            sanitized_expected_gwt_bin.as_str()
+        } else {
+            resolved_gwt_bin.as_str()
+        };
 
     // Issue #4071: Codex derives this key from the hooks path it discovered,
     // normalized but never canonicalized — on Windows that is the plain
@@ -278,7 +281,7 @@ fn scan_codex_hook_trust_from_path(
     let mut scan = CodexHookTrustScan {
         expectations: vec![CodexHookTrustExpectation {
             hooks_path: key_source.clone(),
-            expected_gwt_bin: sanitized_expected_gwt_bin.clone(),
+            expected_gwt_bin: expected_gwt_bin.to_string(),
         }],
         ..CodexHookTrustScan::default()
     };
@@ -316,7 +319,7 @@ fn scan_codex_hook_trust_from_path(
                         command,
                         event_json_name,
                         event_snake_name,
-                        expected_gwt_bin,
+                        Some(expected_gwt_bin),
                     );
                 if generated || is_gwt_hook_transport_command(command) {
                     let expected_command = if generated {
@@ -324,7 +327,7 @@ fn scan_codex_hook_trust_from_path(
                     } else {
                         let commands = expected_generated_gwt_event_commands(
                             event_json_name,
-                            expected_gwt_bin,
+                            Some(expected_gwt_bin),
                         );
                         commands[usize::from(command.starts_with("powershell "))].clone()
                     };
@@ -1481,6 +1484,12 @@ fn is_generated_gwt_event_command(
 ) -> bool {
     expected_generated_gwt_event_commands(event_json_name, expected_gwt_bin)
         .iter()
+        // Existing portable hooks use the canonical fallback even when this
+        // install now generates an absolute fallback. Recognize only the exact
+        // generated wrapper and hash its actual command, never a rewritten one.
+        .chain(
+            codex_event_hook_commands_with_bin(crate::CANONICAL_HOOK_BIN, event_json_name).iter(),
+        )
         .any(|expected| expected == command)
 }
 
@@ -3396,6 +3405,75 @@ mod tests {
             5,
             "container-local registration must accept the exact host-generated fallback path"
         );
+    }
+
+    #[test]
+    fn portable_generated_hooks_register_with_an_absolute_expected_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _pin = crate::settings_local::ScopedHookBin::set(crate::CANONICAL_HOOK_BIN);
+            generate_codex_hooks(dir.path()).unwrap();
+        }
+        let expected = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            dir.path(),
+            Some(crate::CANONICAL_HOOK_BIN),
+        )
+        .unwrap();
+        let report = register_codex_managed_hook_trust_for_mode_with_expected_bin(
+            dir.path(),
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            Some("/installed/GWT/gwtd"),
+        )
+        .unwrap();
+        assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
+        assert_eq!(report.trusted_entries, expected);
+        assert_eq!(report.trusted_entries.len(), 5);
+        // Recognition permits only the exact portable generated wrapper.
+        for command in codex_event_hook_commands_with_bin(crate::CANONICAL_HOOK_BIN, "Stop") {
+            assert!(is_generated_gwt_event_command(
+                &command,
+                "Stop",
+                Some("/installed/GWT/gwtd")
+            ));
+            assert!(!is_generated_gwt_event_command(
+                &format!("{command} ; echo injected"),
+                "Stop",
+                Some("/installed/GWT/gwtd")
+            ));
+        }
+    }
+
+    #[test]
+    fn tracked_absolute_generated_hooks_register_with_the_resolved_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = "/installed/GWT/gwtd";
+        {
+            let _pin = crate::settings_local::ScopedHookBin::set(installed);
+            generate_codex_hooks(dir.path()).unwrap();
+        }
+        let expected =
+            collect_codex_managed_hook_trust_entries_with_expected_bin(dir.path(), Some(installed))
+                .unwrap();
+        for args in [vec!["init", "-q"], vec!["add", "--", ".codex/hooks.json"]] {
+            assert!(gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let report = register_codex_managed_hook_trust_for_mode_with_expected_bin(
+            dir.path(),
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            Some(installed),
+        )
+        .unwrap();
+        assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
+        assert_eq!(report.trusted_entries, expected);
+        assert_eq!(report.trusted_entries.len(), 5);
     }
 
     #[test]
