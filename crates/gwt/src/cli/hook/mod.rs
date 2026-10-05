@@ -580,7 +580,10 @@ pub fn run_daemon_hook<E: CliEnv>(
                         return Ok(2);
                     }
                 },
-                None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+                // The operator supplied a project, not a provider version.
+                // Verify both files just as launch does; otherwise a linked
+                // worktree's local hooks can remain unregistered after success.
+                None => gwt_skills::CodexHookDiscoveryMode::Both,
             };
             // #3967: compare against the binary managed hook generation embeds,
             // resolved the same way materialization resolves it. Guessing here

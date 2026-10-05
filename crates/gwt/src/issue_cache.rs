@@ -10,6 +10,7 @@ use gwt_core::{
     github_budget::{BudgetLedger, ThrottlePolicy},
     github_quota::GitHubQuota,
     paths::gwt_cache_dir,
+    process_console::{capture_gh_blocking, SpawnOptions},
     repo_hash::{compute_repo_hash, RepoHash},
 };
 use gwt_github::{
@@ -360,6 +361,14 @@ pub fn sync_issue_cache_from_remote_with_wait(
                 continue;
             }
             if let Some(delay) = ledger.burst_wait(GitHubQuota::GraphQl, &policy, Utc::now()) {
+                if gwt_core::operation_deadline::ensure_remaining("issue cache pacing")
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|deadline| {
+                        delay >= deadline.saturating_duration_since(std::time::Instant::now())
+                    })
+                {
+                    return Err("operation deadline expired during issue cache pacing".into());
+                }
                 wait(delay);
             }
             fetch_issue_snapshot(repo_path, listed_snapshot.number)?
@@ -509,29 +518,31 @@ pub(crate) fn write_issue_labels_via_gh(
     if labels_to_add.is_empty() && labels_to_remove.is_empty() {
         return Ok(());
     }
-    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
-    // applies the unsandboxed-gh test guard itself.
+    // Preserve the caller-facing unsandboxed-gh denial (Issue #3675 AC-2).
     if let Some(detail) =
         gwt_core::process_console::unsandboxed_gh_denial(&format!("gh issue edit #{issue_number}"))
     {
         return Err(format!("gh issue edit #{issue_number}: {detail}"));
     }
-    let mut command = gwt_core::process::hidden_command(gh_executable());
-    command.args(["issue", "edit", &issue_number.to_string()]);
+    let number = issue_number.to_string();
+    let mut args = vec!["issue", "edit", number.as_str()];
     for label in labels_to_add {
-        command.arg("--add-label").arg(label);
+        args.extend(["--add-label", label]);
     }
     for label in labels_to_remove {
-        command.arg("--remove-label").arg(label);
+        args.extend(["--remove-label", label]);
     }
-    let output = command
-        .current_dir(gh_repo_cwd(repo_path))
-        .output()
-        .map_err(|err| format!("gh issue edit #{issue_number}: {err}"))?;
-    if !output.status.success() {
+    let label = format!("gh issue edit #{issue_number}");
+    let output = capture_gh_blocking(
+        gh_executable(),
+        &args,
+        SpawnOptions::new(&label).current_dir(gh_repo_cwd(repo_path)),
+    )
+    .map_err(|err| format!("{label}: {err}"))?;
+    if !output.success() {
         return Err(format!(
             "gh issue edit #{issue_number}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         ));
     }
     Ok(())
@@ -554,9 +565,8 @@ fn run_gh_issue_command_with_gate(
     args: &[&str],
     label: &str,
 ) -> Result<String, String> {
-    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
-    // applies the unsandboxed-gh test guard itself — before the quota gate,
-    // so a refusal never depends on (or pollutes) quota state.
+    // Issue #3675 AC-2: deny unsandboxed gh before caller-owned quota
+    // accounting, so a refusal never depends on (or pollutes) quota state.
     if let Some(detail) = gwt_core::process_console::unsandboxed_gh_denial(label) {
         return Err(format!("{label}: {detail}"));
     }
@@ -568,25 +578,26 @@ fn run_gh_issue_command_with_gate(
     {
         return Err(format!("{label}: {detail}"));
     }
-    // Issue #3891 AC-3: this burst is the one most worth counting in the
-    // machine-local budget ledger, since it bypasses `spawn_logged`.
+    // Keep caller-owned quota accounting (Issue #3891 AC-3); the capture
+    // wrapper applies the deadline without counting this spawn again.
     let quota = gwt_core::github_quota::classify_gh_args(args);
     ledger.record_spawn_from(quota, &gwt_core::github_budget::spawn_source(args), now);
 
     let cwd = gh_repo_cwd(repo_path);
-    let output = gwt_core::process::hidden_command(gh_executable())
-        .args(args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|err| format!("{label}: {err}"))?;
+    let output = capture_gh_blocking(
+        gh_executable(),
+        args,
+        SpawnOptions::new(label).current_dir(&cwd),
+    )
+    .map_err(|err| format!("{label}: {err}"))?;
 
-    if output.status.success() {
+    if output.success() {
         gate.record_success(quota);
         ledger.clear_block(quota);
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        return Ok(output.stdout);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = output.stderr;
     let detail =
         gwt_core::github_budget::observe_refusal(gate, &ledger, args, &stderr, now, || {
             probe_rate_limit_payload(&cwd)
@@ -603,15 +614,13 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
     if gwt_core::process_console::unsandboxed_gh_denial("gh api rate_limit").is_some() {
         return None;
     }
-    let output = gwt_core::process::hidden_command(gh_executable())
-        .args(gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS)
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    let payload = output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())?;
+    let output = capture_gh_blocking(
+        gh_executable(),
+        gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS,
+        SpawnOptions::new("gh api rate_limit").current_dir(cwd),
+    )
+    .ok()?;
+    let payload = output.success().then_some(output.stdout)?;
     // Issue #3891: share the fresh primary window with every other process.
     if let Some(snapshot) =
         gwt_core::github_budget::parse_rate_limit_probe_all(&payload, chrono::Utc::now())
@@ -1200,7 +1209,7 @@ exit 1\n",
             &fake_gh,
             format!(
                 "@echo off\r\n\
-if /I \"%1 %2 %3\"==\"issue view 42\" (\r\n\
+if /I \"%~1 %~2 %~3\"==\"issue view 42\" (\r\n\
   echo {view_json}\r\n\
   exit /b 0\r\n\
 )\r\n\
@@ -1829,6 +1838,134 @@ exit 1
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (env, fake_gh)
+    }
+
+    #[test]
+    fn cache_pacing_rejects_a_wait_that_cannot_fit_the_scan_deadline() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        git_init(&repo);
+        let log = temp.path().join("gh.log");
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let ledger = BudgetLedger::global();
+        for _ in 0..ThrottlePolicy::default().burst_calls_per_minute {
+            ledger.record_spawn(GitHubQuota::GraphQl, Utc::now());
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
+        let mut waits = Vec::new();
+        let result = sync_issue_cache_from_remote_with_wait(
+            &repo,
+            &temp.path().join("cache"),
+            &mut |delay| waits.push(delay),
+        );
+        assert!(
+            waits.is_empty(),
+            "pacing must not exceed the remaining scan budget"
+        );
+        assert!(result.unwrap_err().contains("deadline expired"));
+        assert_eq!(invocations(&log), vec![LIST_CALL]);
+    }
+
+    #[test]
+    fn cache_refresh_deadline_kills_child_and_preserves_stale_generation() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        git_init(&repo);
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&cache_root).expect("cache");
+        let meta = cache_root.join(ISSUE_CACHE_REFRESH_META_FILE);
+        let old = r#"{"last_full_refresh":"2020-01-01T00:00:00Z","ttl_minutes":15}"#;
+        fs::write(&meta, old).expect("stale metadata");
+        let pid_file = temp.path().join("child.pid");
+        let release = temp.path().join("release");
+        let fake_gh = temp.path().join("fake-gh");
+        gwt_core::test_support::write_executable_script(&fake_gh, &format!(
+            "#!/bin/sh\necho $$ > '{}'\nwhile [ ! -f '{}' ]; do :; done\nprintf 'HTTP/2.0 200 OK\\n\\r\\n[]\\n'\n",
+            pid_file.display(), release.display(),
+        )).expect("fake child");
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+        let ready_pid = pid_file.clone();
+        let error = gwt_core::process_console::spawn::with_spawn_ready_for_tests(
+            Duration::from_secs(1),
+            move || {
+                // Only bound fixture startup; the child deadline starts after
+                // readiness, so a loaded host cannot consume its budget.
+                let startup_deadline = std::time::Instant::now() + Duration::from_secs(15);
+                while fs::read_to_string(&ready_pid)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<i32>().ok())
+                    .is_none()
+                {
+                    assert!(
+                        std::time::Instant::now() < startup_deadline,
+                        "child startup"
+                    );
+                    std::thread::yield_now();
+                }
+            },
+            || {
+                capture_gh_blocking(
+                    &fake_gh,
+                    &[] as &[&str],
+                    SpawnOptions::new("cache deadline"),
+                )
+            },
+        )
+        .expect_err("the hanging child must be cut off at its deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let pid: i32 = fs::read_to_string(pid_file)
+            .expect("child started")
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal zero observes this fixture's exact child; it sends no signal.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child must be reaped");
+        let error = sync_issue_cache_from_remote(&repo, &cache_root)
+            .expect_err("an expired scan must not publish a generation");
+        assert!(error.contains("deadline expired"), "{error}");
+        assert_eq!(fs::read_to_string(meta).unwrap(), old);
+        assert!(issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now()).stale);
+        assert!(
+            !issue_cache_has_entries(&cache_root),
+            "no partial enumeration was published"
+        );
+    }
+
+    #[test]
+    fn cache_gh_routes_reject_an_expired_operation_without_spawning() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let log = temp.path().join("gh.log");
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+        let read = run_gh_issue_command_with_gate(
+            &QuotaGate::default(),
+            temp.path(),
+            &["issue", "view", "42"],
+            "read",
+        )
+        .expect_err("expired read");
+        assert!(read.contains("deadline expired"), "{read}");
+        let write = write_issue_labels_via_gh(temp.path(), 42, &["bug".into()], &[])
+            .expect_err("expired label write");
+        assert!(write.contains("deadline expired"), "{write}");
+        assert!(probe_rate_limit_payload(temp.path()).is_none());
+        assert!(
+            invocations(&log).is_empty(),
+            "no child may start after expiry"
+        );
     }
 
     #[test]

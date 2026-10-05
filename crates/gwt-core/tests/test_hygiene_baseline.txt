@@ -19,7 +19,6 @@ short-wall-clock|crates/gwt-agent/src/codex_shared_state.rs|unpaced_spawns_are_s
 short-wall-clock|crates/gwt-agent/src/detect.rs|detect_by_command_preserves_the_absolute_which_path_off_windows
 short-wall-clock|crates/gwt-agent/src/prepare.rs|assert_completed_runner_probe_reaps_stdio_detached_descendant
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_capture_is_bounded_for_large_unbroken_output
-short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_deadline_includes_pipe_eof_and_kills_descendants
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_ansi_split_secret_launch_environment
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_secret_launch_environment
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_url_environment_value
@@ -263,7 +262,6 @@ unlocked-process-env|crates/gwt/src/cli/update/tests.rs|run_check_only_returns_z
 unlocked-process-env|crates/gwt/src/gui_single_instance.rs|with_force_env
 unlocked-process-env|crates/gwt/src/index_worker.rs|drop
 unlocked-process-env|crates/gwt/src/index_worker.rs|set
-unlocked-process-env|crates/gwt/src/managed_assets.rs|same_path_and_env_var_guard_preserve_previous_values
 unlocked-process-env|crates/gwt/tests/autonomous_live_gh.rs|autonomous_merge_pipeline_executes_through_mock_gh
 unlocked-process-env|crates/gwt/tests/autonomous_live_gh.rs|cleanup
 unlocked-process-env|crates/gwt/tests/board_reminder_hook_test.rs|drop
@@ -271,7 +269,6 @@ unlocked-process-env|crates/gwt/tests/board_reminder_hook_test.rs|set
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|drop
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|set
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|unset
-unlocked-process-env|crates/gwt/tests/gwtd_cli_test.rs|gwtd_hook_register_codex_managed_hook_trust_writes_requested_config
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|drop
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|remove
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|set
