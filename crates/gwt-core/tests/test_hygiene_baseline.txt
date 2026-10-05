@@ -271,7 +271,6 @@ unlocked-process-env|crates/gwt/tests/board_reminder_hook_test.rs|set
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|drop
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|set
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|unset
-unlocked-process-env|crates/gwt/tests/gwtd_cli_test.rs|gwtd_hook_register_codex_managed_hook_trust_writes_requested_config
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|drop
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|remove
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|set

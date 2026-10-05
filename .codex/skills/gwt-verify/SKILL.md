@@ -467,7 +467,8 @@ Issue, so it never reaches this step at all.
 ## Heavy verification serialization (SPEC #3576)
 
 Only canonical `verify.run` acquires the host-wide lease, in-process for
-its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+each Heavy command and releases it immediately afterward. Light commands
+do not hold the lease, even within a mixed matrix. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
 `cargo clippy`, `cargo build`, coverage, direct headed Playwright, and
 pre-push checks do not require a verification lease. Run them directly;
 they do not replace the canonical evidence required for completion.
@@ -480,14 +481,17 @@ lease acquisition loop.
 
 `verify.run` owns its admission and bounded wait through
 `params.max_wait_secs` (default 300, hard cap 1500). While waiting,
-`verify.lease.status` lists the run under `pending`. A `deferred` response
-means admission timed out without a verification record. Inspect the
+`verify.lease.status` lists the run under `pending`. A deferred result from
+the first command's admission timeout writes no verification record; a timeout
+after at least one command ran writes an incomplete, non-PASS deferred record
+that retains the completed commands' results; a retry reruns the entire matrix
+(no partial resume). Inspect the
 reported holder and wait reason, then retry when contention is resolved;
 there is no fixed retry schedule. A deferral is not a spent attempt and
 there is no attempt cap: the refusal keeps your turn reserved
 (`next_turn_reserved: yes`, `queue_position`), so keep rerunning
 `verify.run` (a resident wait) while the holder makes progress. The lease
-is released after every run and a holder's next run queues behind you. A
+is released after every Heavy command and a holder's next command queues behind you. A
 running `verify.run` publishes its progress, so the refusal and
 `verify.lease.status` show `remaining_batches` (commands left in the
 holder's run) and `estimated_remaining_ms`. If a holder persists without a live
@@ -510,22 +514,19 @@ execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
 gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
 Issue, PR, or Board state.
 
-`verify.run` reads `params.commands` before it decides whether to admit at
-all (Issue #4196). A matrix is heavy when any command widens past a single
-target — `--workspace`, `--all`, `--all-features`, `--all-targets`,
-`--exclude`, multiple packages or targets, or glob selectors — and only a
-heavy matrix claims the host lease. Unknown commands and value-taking Cargo
-global options are conservatively heavy; `cargo fmt` and `cargo metadata`
-are light. A matrix
-narrowed to one named target (`--test <name>`, `--bin <name>`,
-`--example <name>`), or to `--lib` of an explicit `-p <crate>`, is light: it
-starts immediately and several worktrees may run one at the same time. Bare
-`--lib` is not narrow — this is a virtual workspace, so with no package it
-builds every default member's lib. The run reports which it acted on as
-`verify: scope — light|heavy`, naming the command that forced a heavy
-classification, so you can tell before starting whether the matrix will
-queue. Splitting a heavy matrix into narrower runs is therefore a real way to
-make progress while another worktree holds the lease.
+`verify.run` classifies each command before admission (Issues #4196 / #4823).
+`--workspace`, `--all`, `--all-targets`, `--exclude`, multiple packages or
+targets, and glob selectors widen scope and remain Heavy. `--all-features`
+alone does not widen scope. A whole-crate test run, including unfiltered
+`-p <crate> --lib`, remains Heavy. One named target (`--test <name>`,
+`--bin <name>`, `--example <name>`), or `-p <crate> --lib` with a test filter,
+is Light. Bare `--lib` is not narrow in a virtual workspace.
+`cargo fmt`, `cargo metadata`, markdownlint, and `cargo doc --no-deps` are
+Light. Unknown commands and value-taking Cargo global options remain
+conservatively Heavy. Environment assignments are unwrapped before classification.
+The run reports its overall scope and the command requiring Heavy admission,
+but Light commands can start while another worktree holds the lease. Several
+worktrees may run Light commands concurrently at their existing normal priority.
 
 ## Stop Conditions
 
