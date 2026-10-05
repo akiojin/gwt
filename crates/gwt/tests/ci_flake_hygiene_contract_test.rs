@@ -22,6 +22,7 @@
 use serde_yaml::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 const ORPHAN_SCRIPT: &str = "scripts/ci-check-orphan-processes.sh";
@@ -260,19 +261,52 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
     );
     assert!(core.get("if").is_none() && core.get("needs").is_none());
     assert!(core.get("continue-on-error").is_none());
+    let strategy = core.get("strategy").expect("five independent Windows runs");
+    assert_eq!(
+        strategy.get("fail-fast").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        strategy.get("max-parallel").and_then(Value::as_u64),
+        Some(5)
+    );
+    let runs: Vec<_> = strategy
+        .get("matrix")
+        .and_then(|matrix| matrix.get("run"))
+        .and_then(Value::as_sequence)
+        .expect("the matrix must schedule exactly five full-suite runs")
+        .iter()
+        .map(Value::as_u64)
+        .collect();
+    assert_eq!(runs, [Some(1), Some(2), Some(3), Some(4), Some(5)]);
     let steps = run_steps(&core);
     let build = index_of_step_running(&steps, "cargo test -p gwt-core --all-features --no-run")
-        .expect("build the complete core suite before the stability loop");
-    let repeat = index_of_step_running(&steps, "1..5 | ForEach-Object")
-        .expect("repeat the complete core suite five times");
+        .expect("build the complete core suite before each stability run");
+    let repeat = index_of_step_running(&steps, "Remove-Item Env:RUST_TEST_THREADS")
+        .expect("each matrix runner must use default test parallelism");
     assert!(build < repeat);
     let run = &steps[repeat].1;
     assert!(run.contains("Remove-Item Env:RUST_TEST_THREADS"));
+    let repeat_step = core
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .unwrap()
+        .iter()
+        .find(|step| step.get("run").and_then(Value::as_str) == Some(run.as_str()))
+        .unwrap();
+    assert_eq!(
+        repeat_step
+            .get("env")
+            .and_then(|env| env.get("CORE_STABILITY_RUN"))
+            .and_then(Value::as_str),
+        Some("${{ matrix.run }}")
+    );
     assert!(
-        run.contains("Write-Host"),
-        "report each iteration in CI logs"
+        run.contains("Write-Host") && run.contains("$env:CORE_STABILITY_RUN"),
+        "report the matrix run number in CI logs"
     );
     assert!(run.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    assert!(!run.contains("1..5") && !run.contains("ForEach-Object"));
     let commands: Vec<_> = run
         .lines()
         .map(str::trim)
@@ -293,11 +327,34 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
 /// rather than letting GitHub treat a skipped dependent job as success.
 #[test]
 fn the_required_windows_check_requires_successful_core_stability() {
-    let windows = job(&test_workflow(), "test-windows-rust");
+    let doc = test_workflow();
+    let regressions = job(&doc, "test-windows-rust");
     assert_eq!(
-        windows.get("needs").and_then(Value::as_str),
-        Some(CORE_STABILITY_JOB)
+        regressions.get("name").and_then(Value::as_str),
+        Some("Test (Windows regressions)")
     );
+    assert!(regressions.get("needs").is_none() && regressions.get("if").is_none());
+    let windows = job(&doc, "test-windows-required");
+    assert_eq!(
+        windows.get("name").and_then(Value::as_str),
+        Some("Test (Rust, Windows)")
+    );
+    assert_eq!(
+        windows.get("runs-on").and_then(Value::as_str),
+        Some("ubuntu-latest")
+    );
+    let needs: Vec<_> = windows
+        .get("needs")
+        .and_then(Value::as_sequence)
+        .expect("the protected check must aggregate both Windows jobs")
+        .iter()
+        .map(|dependency| {
+            dependency
+                .as_str()
+                .expect("job dependency must be a string")
+        })
+        .collect();
+    assert_eq!(needs, [CORE_STABILITY_JOB, "test-windows-rust"]);
     assert_eq!(
         windows.get("if").and_then(Value::as_str),
         Some("${{ always() }}")
@@ -311,11 +368,108 @@ fn the_required_windows_check_requires_successful_core_stability() {
             .and_then(Value::as_str),
         Some("${{ needs.test-windows-core-stability.result }}")
     );
+    assert_eq!(
+        guard
+            .get("env")
+            .and_then(|env| env.get("WINDOWS_RESULT"))
+            .and_then(Value::as_str),
+        Some("${{ needs.test-windows-rust.result }}")
+    );
     let run = guard
         .get("run")
         .and_then(Value::as_str)
         .expect("guard must run");
     assert!(run.contains("echo"), "report the dependency result");
     assert!(run.contains("test \"$CORE_STABILITY_RESULT\" = success"));
+    assert!(run.contains("test \"$WINDOWS_RESULT\" = success"));
     assert!(guard.get("continue-on-error").is_none() && guard.get("if").is_none());
+}
+
+/// SPEC #4821 AC-7: changing one source file must not rerun unrelated unit tests
+/// or mistake a longer test name for an exact match.
+#[test]
+fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
+    let script = read(FLAKE_SCRIPT);
+    let code = script
+        .split_once("# changed-test-selection-begin\n")
+        .expect("the flake script must expose its changed-test selector")
+        .1
+        .split_once("# changed-test-selection-end\n")
+        .expect("the changed-test selector must have an end marker")
+        .0;
+    let repo = tempfile::tempdir().unwrap();
+    let source = repo.path().join("crates/gwt/src");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("changed.rs"),
+        "fn relevant_test() {}\nfn helper() {}\n",
+    )
+    .unwrap();
+    fs::write(source.join("unrelated.rs"), "fn unrelated_test() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=CI fixture",
+                "-c",
+                "user.email=ci@example.invalid",
+            ])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("run git in the isolated fixture");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    fs::write(
+        source.join("changed.rs"),
+        "fn relevant_test() { assert!(true); }\nfn helper() {}\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "change one source file"]);
+    let test_list = repo.path().join("test-list.txt");
+    fs::write(&test_list, "changed::tests::relevant_test: test\nunrelated::tests::unrelated_test: test\nhelper::tests::unrelated_test: test\nchanged::tests::relevant_test_extra: test\n").unwrap();
+    let select = |base: &str| {
+        Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .args(["-c", code, "gwt|lib|", test_list.to_str().unwrap(), base])
+            .current_dir(repo.path())
+            .output()
+            .expect("run the real Python selector")
+    };
+    let selected = select(base.trim());
+    assert!(
+        selected.status.success(),
+        "selector: {}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(selected.stdout).unwrap(),
+        "changed::tests::relevant_test\n"
+    );
+    fs::write(
+        &test_list,
+        "external::first_test: test\nexternal::second_test: test\n",
+    )
+    .unwrap();
+    let unmapped = select(base.trim());
+    assert!(unmapped.status.success());
+    assert_eq!(
+        unmapped.stdout,
+        b"external::first_test\nexternal::second_test\n"
+    );
+    for invalid_base in ["", "missing-base"] {
+        assert!(
+            !select(invalid_base).status.success(),
+            "an unavailable base must fail closed"
+        );
+    }
 }
