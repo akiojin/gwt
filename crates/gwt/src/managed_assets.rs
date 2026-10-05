@@ -270,6 +270,18 @@ pub fn cleanup_worktree_with_codex_project_trust<T>(
     })
 }
 
+/// Collect missing generated hooks in the process-stable shared Codex config.
+/// Relative process homes keep their existing user-owned lifecycle.
+pub fn garbage_collect_shared_codex_hook_trust() -> io::Result<usize> {
+    let Some(config_path) = process_stable_codex_config_path_with(
+        std::env::var_os("CODEX_HOME").as_deref(),
+        dirs::home_dir().as_deref(),
+    ) else {
+        return Ok(0);
+    };
+    gwt_skills::codex_hook_trust::garbage_collect_codex_managed_hook_trust(&config_path, None)
+}
+
 /// Whether a present worktree-local merged hook config contains only
 /// gwt-generated content. Callers may discard such a file at an explicit
 /// lifecycle boundary, but must keep deletions, symlinks/reparse points, and
@@ -2733,6 +2745,29 @@ mod tests {
             std::fs::read_to_string(worktree.join(asset)).unwrap(),
             "original"
         );
+    }
+
+    #[test]
+    fn shared_codex_hook_collection_uses_the_process_home() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let codex_home = dir.path().join("shared-codex");
+        let _codex_home = gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &codex_home);
+        let worktree = tempfile::tempdir().unwrap();
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+        let config = codex_home.join("config.toml");
+        let report =
+            gwt_skills::register_codex_managed_hook_trust(worktree.path(), &config).unwrap();
+        assert!(!report.trusted_entries.is_empty());
+        worktree.close().unwrap();
+
+        assert_eq!(
+            super::garbage_collect_shared_codex_hook_trust().unwrap(),
+            report.trusted_entries.len()
+        );
+        assert_eq!(super::garbage_collect_shared_codex_hook_trust().unwrap(), 0);
     }
 
     #[test]
