@@ -88,7 +88,6 @@ pub(crate) struct ActiveWorkProjectionPrepared {
     pub(crate) profile: ActiveWorkProjectionProfile,
     pub(crate) result: Result<Option<PreparedActiveWorkProjection>, String>,
     pub(crate) load_error: Option<gwt_core::WorkspaceStateLoadError>,
-    pub(crate) imported_from: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -2967,9 +2966,8 @@ fn prepare_active_work_projection(
         .lock_wait_micros
         .saturating_add(cache_lock_wait_micros);
     drop(work_items_cache);
-    // The cache loader also performs the one-time legacy migration while its
-    // project lock is held. Read current.json afterwards so a legacy-only
-    // Recent Project is represented in this first authoritative projection.
+    // Read Current after the cache loader admits the canonical Work state.
+    // Legacy layouts fail the same load boundary instead of creating new state.
     let saved_parse_started = Instant::now();
     let saved_projection_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&input.project_root);
@@ -3920,16 +3918,8 @@ impl AppRuntime {
             })
             .unwrap_or_default();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
-            let mut imported_from = None;
             let mut load_error = None;
-            let result = gwt_core::workspace_projection::pending_legacy_workspace_state_import(
-                &task_project_root,
-            )
-            .and_then(|pending| {
-                imported_from = pending;
-                prepare_active_work_projection(input)
-            })
-            .map_err(|error| {
+            let result = prepare_active_work_projection(input).map_err(|error| {
                 let message = error.to_string();
                 if let gwt_core::error::GwtError::WorkspaceStateLoad(error) = error {
                     load_error = Some(error);
@@ -3952,7 +3942,6 @@ impl AppRuntime {
                     profile,
                     result,
                     load_error,
-                    imported_from,
                 },
             )));
         }) {
@@ -3965,7 +3954,6 @@ impl AppRuntime {
                     profile: fallback_profile,
                     result: Err(error),
                     load_error: None,
-                    imported_from: None,
                 },
             )));
         }
@@ -4078,10 +4066,7 @@ impl AppRuntime {
                     },
                 );
             } else if prepared.result.is_ok() {
-                self.recheck_workspace_state_after_projection(
-                    &prepared.project_root,
-                    prepared.imported_from,
-                );
+                self.recheck_workspace_state_after_projection(&prepared.project_root);
             }
             match prepared.result {
                 Ok(Some(prepared_projection)) => {
@@ -4474,7 +4459,6 @@ impl AppRuntime {
             view,
             completed,
             load_error,
-            imported_from,
         } = refreshed;
         if !completed || !self.project_context_is_current(&context) {
             return Vec::new();
@@ -4482,7 +4466,7 @@ impl AppRuntime {
         if let Some(error) = load_error {
             return self.handle_workspace_state_load_failed(&context.project_root, error);
         }
-        self.recheck_workspace_state_after_projection(&context.project_root, imported_from);
+        self.recheck_workspace_state_after_projection(&context.project_root);
         let mut events = Vec::new();
         {
             let mut cache = self
@@ -4745,22 +4729,15 @@ pub(crate) struct ActiveWorkProjectionRefreshed {
     /// cached projection then stands instead of the rail going blank.
     pub(crate) completed: bool,
     pub(crate) load_error: Option<gwt_core::WorkspaceStateLoadError>,
-    pub(crate) imported_from: Option<PathBuf>,
 }
 
 /// Rebuild one tab's Active Work projection. Runs off the GUI event loop.
 pub(crate) fn run_active_work_projection_refresh(
     job: ActiveWorkProjectionJob,
 ) -> ActiveWorkProjectionRefreshed {
-    let loaded =
-        gwt_core::workspace_projection::pending_legacy_workspace_state_import(&job.project_root)
-            .and_then(|imported_from| {
-                build_active_work_projection(&job).map(|view| (view, imported_from))
-            });
-    let (view, imported_from, load_error) = match loaded {
-        Ok((view, imported_from)) => (view, imported_from, None),
+    let (view, load_error) = match build_active_work_projection(&job) {
+        Ok(view) => (view, None),
         Err(error) => (
-            None,
             None,
             Some(crate::workspace_state_load_error(&job.project_root, error)),
         ),
@@ -4771,7 +4748,6 @@ pub(crate) fn run_active_work_projection_refresh(
         view,
         completed: true,
         load_error,
-        imported_from,
     }
 }
 
