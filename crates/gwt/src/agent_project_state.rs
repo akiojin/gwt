@@ -4292,7 +4292,7 @@ fn resolve_unique_existing_work(
             ));
         }
     }
-    if !agent.is_assigned() {
+    if !agent.is_assigned() && !expected.allow_terminal {
         return Err(workspace_ensure_error(
             session_id,
             "latest canonical Session assignment is Unassigned",
@@ -4304,17 +4304,52 @@ fn resolve_unique_existing_work(
             "canonical Session agent identity does not match the durable Session",
         ));
     }
-    let work_id = agent
-        .workspace_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_items_root);
+    let work_items = load_workspace_work_items_from_path(&work_items_path)
+        .map_err(|error| {
             workspace_ensure_error(
                 session_id,
-                "latest canonical Session assignment has no Work id",
+                &format!("assigned WorkItems projection cannot be read: {error}"),
             )
         })?
-        .to_string();
+        .ok_or_else(|| {
+            workspace_ensure_error(session_id, "assigned WorkItems projection is missing")
+        })?;
+    let work_id = if agent.is_assigned() {
+        agent
+            .workspace_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                workspace_ensure_error(
+                    session_id,
+                    "latest canonical Session assignment has no Work id",
+                )
+            })?
+            .to_string()
+    } else {
+        // A terminal read can use the durable Work's exact Session history.
+        // Never infer an active mutation target or hide a conflicting Work.
+        let mut candidates = work_items.work_items.iter().filter(|item| {
+            item.agents
+                .iter()
+                .any(|reference| reference.session_id == session_id)
+        });
+        let item = candidates.next().ok_or_else(|| {
+            workspace_ensure_error(
+                session_id,
+                "Unassigned Session has no canonical terminal Work",
+            )
+        })?;
+        if agent.workspace_id.is_some() || candidates.next().is_some() || !item.is_terminal() {
+            return Err(workspace_ensure_error(
+                session_id,
+                "Unassigned Session has no unique canonical terminal Work authority",
+            ));
+        }
+        item.id.clone()
+    };
 
     let assigned_branch = agent
         .branch
@@ -4331,18 +4366,6 @@ fn resolve_unique_existing_work(
         ));
     }
 
-    let work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_items_root);
-    let work_items = load_workspace_work_items_from_path(&work_items_path)
-        .map_err(|error| {
-            workspace_ensure_error(
-                session_id,
-                &format!("assigned WorkItems projection cannot be read: {error}"),
-            )
-        })?
-        .ok_or_else(|| {
-            workspace_ensure_error(session_id, "assigned WorkItems projection is missing")
-        })?;
     let matches = work_items
         .work_items
         .iter()
@@ -4492,14 +4515,11 @@ fn workspace_ensure_error(session_id: &str, reason: &str) -> GwtError {
 const WORKSPACE_ENSURE_REMEDY: &str =
     "run workspace.ensure for this Session before retrying workspace.update";
 
-/// Issue #4693: a Work whose execution container collides with another Work is
-/// the one refusal `workspace.ensure` cannot clear — it succeeds and reports
-/// `already-assigned`, and the next `workspace.update` is refused again. The
-/// operation that detaches the losing container ref is `workspace.work_prune`,
-/// and only the PM runs it. Two measured cases (2026-09-24 #4693 vs #2359,
-/// 2026-09-25 #4685 vs #4119) differ in whether the prune can act at all, so
-/// the text says what to do when it cannot rather than promising a fix.
-const WORK_PRUNE_REMEDY: &str = "this is not cleared by workspace.ensure — ask the PM to run workspace.work_prune (dry_run first; the losing ref appears under detach_candidates). If the other Work's owner Issue is still open the prune may skip it, and the bookkeeping cannot be recovered: deliver without workspace.update and report it";
+/// Issues #4693/#3853: validate canonical ownership before retrying a container
+/// conflict. Host ensure can heal proven foreign refs; the PM can inspect a
+/// scoped prune. Open owners do not gate that detach pass. Without a matching
+/// candidate, neither operation may invent a winning Work authority.
+const WORK_PRUNE_REMEDY: &str = "do not retry workspace.ensure without validating canonical container ownership for the assigned Work — ask the PM to run workspace.work_prune with ids restricted to the conflicting Work ID (dry_run=true; check detach_candidates before applying). Open owner Issues do not block foreign-ref detach. If there is no matching detach candidate, inspect execution.status recovery_probes and ask the PM to resolve the authority conflict; deliver without workspace.update and report it";
 
 fn workspace_ensure_error_with_remedy(session_id: &str, reason: &str, remedy: &str) -> GwtError {
     mutation_error(format!(
@@ -4708,12 +4728,9 @@ fn fill_option_path(target: &mut Option<PathBuf>, source: Option<&Path>) -> bool
 mod tests {
     use super::*;
 
-    /// Issue #4693 AC-1 / AC-4: every target-resolution refusal used to append
-    /// the same remedy, so an agent could not tell "run workspace.ensure and it
-    /// will clear" from "workspace.ensure already succeeded and this will not
-    /// clear". The container-ambiguity refusal is the measured case of the
-    /// second kind (#4693 vs #2359 on 2026-09-24, #4685 vs #4119 on 2026-09-25),
-    /// and it must not point at the operation that demonstrably does not fix it.
+    /// Issues #4693/#3853: container ambiguity must not repeat the default
+    /// ensure remedy. Canonical ownership and scoped detach candidates prove
+    /// recovery; an open owner does not prevent foreign-ref detach.
     #[test]
     fn container_ambiguity_refusal_does_not_point_at_workspace_ensure() {
         let ambiguous = workspace_ensure_error_with_remedy(
@@ -4728,16 +4745,32 @@ mod tests {
             "the ambiguity refusal must name the operation that clears it: {message}"
         );
         assert!(
-            message.contains("not cleared by workspace.ensure"),
-            "the ambiguity refusal must say the default remedy does not apply: {message}"
+            message.contains("do not retry workspace.ensure without validating"),
+            "the ambiguity refusal must require authority proof before retrying ensure: {message}"
         );
         assert!(
             message.contains("detach_candidates"),
             "the ambiguity refusal must say where the losing ref shows up: {message}"
         );
         assert!(
-            message.contains("owner Issue is still open"),
-            "the ambiguity refusal must cover the case the prune cannot act on: {message}"
+            message.contains("assigned Work work-a") && message.contains("Work work-b"),
+            "the ambiguity refusal must identify both Work authorities: {message}"
+        );
+        assert!(
+            message.contains("canonical container ownership")
+                && message.contains("ids restricted to the conflicting Work ID")
+                && message.contains("dry_run=true"),
+            "the ambiguity refusal must validate authority before a scoped prune: {message}"
+        );
+        assert!(
+            message.contains("Open owner Issues do not block foreign-ref detach")
+                && !message.contains("owner Issue is still open the prune may skip"),
+            "open-owner close skips must not hide the existing detach recovery: {message}"
+        );
+        assert!(
+            message.contains("no matching detach candidate")
+                && message.contains("execution.status recovery_probes"),
+            "unproven authority must retain a fail-closed PM recovery: {message}"
         );
         assert!(
             !message.contains(WORKSPACE_ENSURE_REMEDY),

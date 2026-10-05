@@ -4377,6 +4377,7 @@ fn sample_runtime_with_events(
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
+        remote_terminal_previews: HashMap::new(),
         window_last_output_at: HashMap::new(),
         window_hook_states: HashMap::new(),
         window_approval_waiting: HashMap::new(),
@@ -41502,7 +41503,8 @@ fn app_runtime_remote_approval_overlay_enters_clears_and_reenters() {
         .insert(window_id.clone(), WindowProcessStatus::Running);
 
     let entered = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
-    let raw_output = runtime.handle_daemon_runtime_output(window_id.clone(), b"partial".to_vec());
+    let raw_output =
+        runtime.handle_daemon_runtime_output(window_id.clone(), b"partial".to_vec(), None);
     let duplicate = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
     let cleared = runtime.handle_daemon_runtime_approval_wait_state(&window_id, false);
     let reentered = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
@@ -41773,9 +41775,17 @@ fn app_runtime_directory_trust_prompt_is_inert_for_unowned_codex_window() {
 
     assert_eq!(
         events.len(),
-        1,
-        "unowned output remains ordinary terminal output"
+        2,
+        "unowned output only emits terminal output and its read-only preview"
     );
+    assert!(matches!(
+        events[0].event,
+        BackendEvent::TerminalOutput { .. }
+    ));
+    assert!(matches!(
+        events[1].event,
+        BackendEvent::TerminalPreview { .. }
+    ));
     assert!(
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
             .map_or(true, |prefs| prefs.failed_issues.is_empty())
@@ -81984,4 +81994,68 @@ mod incarnation_claiming {
             "a counter that cannot promise a successor must panic, not hand out a reused value"
         );
     }
+}
+
+#[test]
+fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    runtime.runtimes[&id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"old\r\n  indented\r\n\r\nlast\r\n");
+    let live = runtime.handle_runtime_output(id.clone(), b"last".to_vec());
+    let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
+    for events in [live, sync] {
+        let preview = events
+            .iter()
+            .map(|event| serde_json::to_value(&event.event).unwrap())
+            .find(|event| event["kind"] == "terminal_preview")
+            .expect("preview event");
+        assert_eq!(preview["id"], id);
+        assert_eq!(preview["text"], "  indented\n\nlast");
+    }
+}
+
+#[test]
+fn terminal_preview_remote_reconnect_retains_only_received_values() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "agent-1");
+    let unknown = runtime.handle_daemon_runtime_output(id.clone(), b"bytes".to_vec(), None);
+    assert!(!unknown
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalPreview { .. })));
+    let live = runtime.handle_daemon_runtime_output(
+        id.clone(),
+        b"bytes".to_vec(),
+        Some("  remote\n\nlast".into()),
+    );
+    let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
+    for events in [live, sync] {
+        assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text == "  remote\n\nlast")));
+    }
+    let cleared =
+        runtime.handle_daemon_runtime_output(id.clone(), b"clear".to_vec(), Some(String::new()));
+    assert!(cleared.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text.is_empty())));
+    runtime.remove_window_state_tracking(&id);
+    assert!(!runtime.remote_terminal_previews.contains_key(&id));
 }

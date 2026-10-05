@@ -1542,9 +1542,15 @@ fn daemon_broadcast_user_event(
     }
 
     match gwt::runtime_daemon_events::decode_runtime_daemon_event(channel, payload, current_pid)? {
-        gwt::runtime_daemon_events::RuntimeDaemonEvent::Output { id, data } => {
-            Some(UserEvent::DaemonRuntimeOutput { id, data })
-        }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Output {
+            id,
+            data,
+            preview_text,
+        } => Some(UserEvent::DaemonRuntimeOutput {
+            id,
+            data,
+            preview_text,
+        }),
         gwt::runtime_daemon_events::RuntimeDaemonEvent::Status { id, status, detail } => {
             Some(UserEvent::DaemonRuntimeStatus { id, status, detail })
         }
@@ -1849,6 +1855,7 @@ enum UserEvent {
     DaemonRuntimeOutput {
         id: String,
         data: Vec<u8>,
+        preview_text: Option<String>,
     },
     RuntimeStatus {
         id: String,
@@ -2803,8 +2810,12 @@ mod tests {
     #[test]
     fn daemon_broadcast_runtime_payloads_map_to_non_republishing_user_events() {
         let project_root = Path::new("/tmp/gwt-project");
-        let output_payload =
-            gwt::runtime_daemon_events::runtime_output_payload("tab-1::shell-1", b"hello", 42);
+        let output_payload = gwt::runtime_daemon_events::runtime_output_payload(
+            "tab-1::shell-1",
+            b"hello",
+            42,
+            Some("  live\n\nlast"),
+        );
         let status_payload = gwt::runtime_daemon_events::runtime_status_payload(
             "tab-1::shell-1",
             WindowProcessStatus::Error,
@@ -2837,9 +2848,14 @@ mod tests {
             project_root,
             99,
         ) {
-            Some(UserEvent::DaemonRuntimeOutput { id, data }) => {
+            Some(UserEvent::DaemonRuntimeOutput {
+                id,
+                data,
+                preview_text,
+            }) => {
                 assert_eq!(id, "tab-1::shell-1");
                 assert_eq!(data, b"hello");
+                assert_eq!(preview_text.as_deref(), Some("  live\n\nlast"));
             }
             other => panic!("unexpected runtime output event: {other:?}"),
         }
@@ -4326,6 +4342,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: std::collections::HashMap::new(),
@@ -10846,8 +10863,8 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::RuntimeApprovalSettle { id, token }) => {
                 clients.dispatch(app.handle_runtime_approval_settle(&id, token));
             }
-            Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data }) => {
-                let events = app.handle_daemon_runtime_output(id, data);
+            Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data, preview_text }) => {
+                let events = app.handle_daemon_runtime_output(id, data, preview_text);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeStatus {
