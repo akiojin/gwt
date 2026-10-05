@@ -23484,9 +23484,38 @@ mod tests {
             ledger.current_effective_status(),
             Some(ExecutionControlStatus::Active)
         );
+        let record = load(dir.path()).unwrap().unwrap();
+        assert_eq!(record.primary_session_id, "session-adopting");
+        assert!(integrity_ok(&record));
+        assert_eq!(record.transfers.len(), 1);
+        let stop = crate::cli::hook::execution_control_stop_check::handle_with_input(
+            dir.path(),
+            "{}",
+            Some("session-adopting"),
+        );
+        let crate::cli::hook::HookOutput::StopBlock { reason } = stop else {
+            panic!("an active transferred execution must still gate Stop: {stop:?}");
+        };
+        assert!(!reason.contains("integrity validation"), "{reason}");
+        let diagnosis = diagnose(dir.path(), Some("session-adopting"));
+        assert_eq!(diagnosis.ecr_status, ExecutionDiagnosisState::Active);
         assert_eq!(
-            load(dir.path()).unwrap().unwrap().primary_session_id,
-            "session-adopting"
+            diagnosis
+                .recovery_probes
+                .iter()
+                .find(|probe| probe.operation == "execution.repair")
+                .and_then(|probe| probe.reason.as_deref()),
+            Some("execution_repair_not_corrupt")
+        );
+        let error = repair_corrupt_execution(
+            dir.path(),
+            "session-adopting",
+            "a legitimate transfer needs no corruption repair",
+        )
+        .expect_err("healthy transferred authority must refuse corruption repair");
+        assert!(
+            error.to_string().contains("execution_repair_not_corrupt"),
+            "{error}"
         );
     }
 
@@ -28022,6 +28051,15 @@ exit 1
             assert!(!diagnosis
                 .available_recoveries
                 .contains(&"execution.repair".to_string()));
+            let stop = crate::cli::hook::execution_control_stop_check::handle_with_input(
+                dir.path(),
+                "{}",
+                Some("repair-session"),
+            );
+            let crate::cli::hook::HookOutput::StopBlock { reason } = stop else {
+                panic!("healthy active authority must still gate Stop: {stop:?}");
+            };
+            assert!(!reason.contains("integrity validation"), "{reason}");
             let error = repair_corrupt_execution(
                 dir.path(),
                 "repair-session",
