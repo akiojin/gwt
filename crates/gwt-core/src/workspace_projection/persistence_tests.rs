@@ -6476,6 +6476,132 @@ fn exact_terminal_compatibility_preserves_split_root_legacy_terminal_bytes() {
 }
 
 #[test]
+fn exact_terminal_confirmation_accepts_unassigned_done_without_writes() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let target = SessionBoundWorkspaceTerminalTarget {
+        project_state_root: fixture.target.project_state_root.clone(),
+        work_event_root: fixture.target.work_event_root.clone(),
+        session_id: fixture.target.session_id.clone(),
+        branch_identity: fixture.target.branch_identity.clone(),
+        worktree_identity: fixture.target.worktree_identity.clone(),
+        owner: fixture.target.owner.clone(),
+        agent_id: fixture.target.agent_id.clone(),
+    };
+    emit_workspace_terminal_event_for_exact_resolved_work_target(
+        &target,
+        T812_TARGET_WORK_ID,
+        WorkCloseKind::Done,
+        ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+        Utc::now(),
+        |_, _| Ok(()),
+    )
+    .expect("seed canonical Done Work");
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    let agent = current
+        .latest_agent_for_session_mut(T812_SESSION_ID)
+        .expect("canonical Session");
+    agent.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
+    agent.workspace_id = None;
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("save Unassigned Session");
+    let close_path =
+        gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root);
+    let state_before = fixture.state_bytes();
+    let close_before = fs::read(&close_path).expect("snapshot close ledger");
+
+    assert_eq!(
+        emit_workspace_terminal_event_for_resolved_work_target(
+            &target,
+            WorkCloseKind::Done,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .expect("ordinary terminalization keeps Unassigned as NoTarget"),
+        WorkspaceTerminalEventOutcome::NoTarget
+    );
+    assert!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .expect("confirm exact Done Work after Session became Unassigned"),
+        WorkspaceTerminalEventOutcome::AlreadyMatching
+    );
+    assert_eq!(fixture.state_bytes(), state_before);
+    assert_eq!(
+        fs::read(&close_path).expect("read preserved close ledger"),
+        close_before
+    );
+
+    current
+        .latest_agent_for_session_mut(T812_SESSION_ID)
+        .expect("canonical Session")
+        .workspace_id = Some(T812_TARGET_WORK_ID.to_string());
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("save contradictory Unassigned Session");
+    let state_before = fixture.state_bytes();
+    assert!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .is_err()
+    );
+    assert_eq!(fixture.state_bytes(), state_before);
+
+    let agent = current
+        .latest_agent_for_session_mut(T812_SESSION_ID)
+        .expect("canonical Session");
+    agent.workspace_id = None;
+    let duplicate = agent.clone();
+    current.agents.push(duplicate);
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("save duplicate Unassigned Session");
+    let state_before = fixture.state_bytes();
+    assert!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .is_err()
+    );
+    assert_eq!(fixture.state_bytes(), state_before);
+    assert_eq!(
+        fs::read(&close_path).expect("read preserved close ledger after refusals"),
+        close_before
+    );
+}
+
+#[test]
 fn exact_terminal_confirmation_rejects_unprojected_or_unsupported_close_ledger() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
