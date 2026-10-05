@@ -2100,37 +2100,46 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(CoordinatorError::Io(err)),
         };
-        // Read through the existing handle under a shared lock. Another
-        // sweeper may hold an exclusive probe: keep an ordinary waiter visible
-        // without attempting a Windows range-locked read. An unreadable queue
-        // reservation still fails closed so its FIFO position cannot be skipped.
-        match fs2::FileExt::try_lock_shared(&file) {
-            Ok(()) => {}
-            Err(err) if !is_reservation && is_contended(&err) => {
-                live.push(LiveRegistration {
-                    registration: None,
-                    locked: true,
-                });
-                continue;
+        // UUID registrations stay on this inode. Read under a shared lock;
+        // another sweeper's exclusive probe keeps the waiter visible without
+        // attempting a Windows range-locked read. Reservations are refreshed
+        // by replacing their fixed path, so read them only after the probe.
+        let registration = if is_reservation {
+            None
+        } else {
+            match fs2::FileExt::try_lock_shared(&file) {
+                Ok(()) => {}
+                Err(err) if is_contended(&err) => {
+                    live.push(LiveRegistration {
+                        registration: None,
+                        locked: true,
+                    });
+                    continue;
+                }
+                Err(err) => return Err(CoordinatorError::Io(err)),
             }
-            Err(err) => return Err(CoordinatorError::Io(err)),
-        }
-        let mut raw = Vec::new();
-        file.read_to_end(&mut raw)?;
-        let registration = match serde_json::from_slice::<Registration>(&raw) {
-            Ok(registration) => Some(registration),
-            Err(_) if !is_reservation => None,
-            Err(err) => return Err(CoordinatorError::Io(io_invalid(err))),
+            let mut raw = Vec::new();
+            file.read_to_end(&mut raw)?;
+            fs2::FileExt::unlock(&file)?;
+            serde_json::from_slice::<Registration>(&raw).ok()
         };
-        fs2::FileExt::unlock(&file)?;
         #[cfg(test)]
         tests::after_registration_snapshot(&path);
 
-        // The snapshot does not establish current liveness. Probe afterward,
-        // and keep that lock until cleanup finishes so a waiter cannot become
+        // A waiter's snapshot does not establish current liveness. Probe
+        // afterward and keep its lock through cleanup so it cannot become
         // live between the probe and removal.
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
+                let registration = if is_reservation {
+                    // Windows forbids reading through a second handle while
+                    // this one owns the range. Preserve the reservation's
+                    // path read so a completed atomic refresh is observed.
+                    fs2::FileExt::unlock(&file)?;
+                    read_registration(&path)?
+                } else {
+                    registration
+                };
                 if let Some(entry) = &registration {
                     if entry.outlives(now)
                         || (is_reservation
@@ -2169,7 +2178,11 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
             }
             Err(err) if is_contended(&err) => {
                 live.push(LiveRegistration {
-                    registration,
+                    registration: if is_reservation {
+                        read_registration(&path)?
+                    } else {
+                        registration
+                    },
                     locked: true,
                 });
             }
@@ -2254,6 +2267,33 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert!(live[0].locked);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn reservation_refreshed_after_snapshot_survives_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::verification("repo", "reservation");
+        let path = coordinator.heavy_reservation_path(&key);
+        let mut registration = heavy_queue_entry(
+            &coordinator.heavy_pending_dir(),
+            &key.file_stem(),
+            JobPriority::Background,
+        )
+        .unwrap();
+        registration.reserved_until_ms = Some(0);
+        write_json_atomic(&path, &registration).unwrap();
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                coordinator
+                    .reserve_heavy(&key, JobPriority::Background, HANG_GUARD, None)
+                    .unwrap();
+            }));
+        });
+
+        let live = sweep_live_registrations(path.parent().unwrap()).unwrap();
+        assert_eq!(live.len(), 1, "a refreshed reservation must remain live");
+        assert!(path.exists(), "the refresh must survive the sweep");
     }
 
     fn open(root: &Path) -> IndexCoordinator {
