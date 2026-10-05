@@ -228,7 +228,7 @@ pub(super) fn github_remote_owner_and_repo(
     parse_github_remote_url(output.stdout.trim())
 }
 
-fn parse_github_remote_url(remote_url: &str) -> Option<(String, String)> {
+pub(in crate::cli) fn parse_github_remote_url(remote_url: &str) -> Option<(String, String)> {
     let path = remote_url
         .strip_prefix("https://github.com/")
         .or_else(|| remote_url.strip_prefix("http://github.com/"))
@@ -242,6 +242,174 @@ fn parse_github_remote_url(remote_url: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
+fn select_pr_fork_url(
+    base: &serde_json::Value,
+    candidates: &[serde_json::Value],
+    owner: &str,
+) -> io::Result<String> {
+    let network_id = repository_network_id(base)?;
+    let mut matched = None;
+    for candidate in candidates {
+        if repository_network_id(candidate)? != network_id {
+            continue;
+        }
+        let full_name = candidate["full_name"].as_str().unwrap_or_default();
+        let (actual_owner, name) = full_name.split_once('/').unwrap_or(("", ""));
+        if !actual_owner.eq_ignore_ascii_case(owner)
+            || name.is_empty()
+            || name.contains('/')
+            || !candidate["owner"]["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(owner))
+        {
+            return Err(io::Error::other(
+                "PR fork resolution returned a mismatched repository owner",
+            ));
+        }
+        let url = candidate["clone_url"].as_str().unwrap_or_default();
+        if !url.starts_with("https://github.com/")
+            || !parse_github_remote_url(url).is_some_and(|(url_owner, url_name)| {
+                url_owner.eq_ignore_ascii_case(actual_owner) && url_name.eq_ignore_ascii_case(name)
+            })
+        {
+            return Err(io::Error::other(
+                "PR fork resolution cannot prove the repository clone URL",
+            ));
+        }
+        if matched.replace(url.to_string()).is_some() {
+            return Err(io::Error::other("PR fork resolution is ambiguous: multiple repositories match the requested owner and target network"));
+        }
+    }
+    matched.ok_or_else(|| io::Error::other("PR fork resolution found no accessible repository for the requested owner in the target network"))
+}
+
+fn repository_network_id(repository: &serde_json::Value) -> io::Result<u64> {
+    let id = match repository["fork"].as_bool() {
+        Some(true) => repository["source"]["id"].as_u64(),
+        Some(false) => repository["id"].as_u64(),
+        None => None,
+    };
+    id.filter(|id| *id != 0).ok_or_else(|| {
+        io::Error::other("PR fork resolution cannot prove the repository network identity")
+    })
+}
+
+/// Resolve `owner:branch` against the target's actual network, including renamed
+/// and indirect forks. GraphQL `Repository.forks` only lists direct forks, so
+/// enumerate the requested owner's forks and compare REST's root `source.id`.
+pub fn resolve_pr_fork_url_via_gh(
+    repo_slug: &str,
+    repo_path: &Path,
+    owner: &str,
+) -> io::Result<String> {
+    let fetch_repository = |slug: &str| -> io::Result<serde_json::Value> {
+        let (repo_owner, name) = slug
+            .split_once('/')
+            .filter(|(repo_owner, name)| {
+                !repo_owner.is_empty() && !name.is_empty() && !name.contains('/')
+            })
+            .ok_or_else(|| {
+                io::Error::other("PR fork resolution received an invalid repository identity")
+            })?;
+        let endpoint = format!(
+            "repos/{}/{}",
+            encode_path_segment(repo_owner),
+            encode_path_segment(name)
+        );
+        let output = run_gh_in(
+            "gh api PR fork repository",
+            Some(repo_path),
+            ["api", endpoint.as_str()],
+        )?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "PR fork resolution: {}",
+                output.stderr.trim()
+            )));
+        }
+        serde_json::from_str(&output.stdout).map_err(io::Error::other)
+    };
+    let base = fetch_repository(repo_slug)?;
+    repository_network_id(&base)?;
+    let root = if base["fork"] == true {
+        &base["source"]
+    } else {
+        &base
+    };
+    // An owner cannot own both a network root and a fork of that same network.
+    if root["owner"]["login"]
+        .as_str()
+        .is_some_and(|login| login.eq_ignore_ascii_case(owner))
+    {
+        return select_pr_fork_url(&base, std::slice::from_ref(root), owner);
+    }
+    let query = "query($owner:String!,$endCursor:String){repositoryOwner(login:$owner){login repositories(first:100,after:$endCursor,isFork:true,ownerAffiliations:[OWNER]){nodes{nameWithOwner} pageInfo{hasNextPage endCursor}}}}";
+    let output = run_gh_in(
+        "gh api PR fork owner repositories",
+        Some(repo_path),
+        [
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-f",
+            &format!("query={query}"),
+            "-f",
+            &format!("owner={owner}"),
+        ],
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "PR fork resolution: {}",
+            output.stderr.trim()
+        )));
+    }
+    let pages: Vec<serde_json::Value> =
+        serde_json::from_str(&output.stdout).map_err(io::Error::other)?;
+    let mut candidates = Vec::new();
+    for page in pages {
+        let repository_owner = &page["data"]["repositoryOwner"];
+        if page
+            .get("errors")
+            .is_some_and(|errors| errors.as_array().is_none_or(|errors| !errors.is_empty()))
+            || !repository_owner["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(owner))
+        {
+            return Err(io::Error::other(
+                "PR fork resolution could not read the exact requested owner",
+            ));
+        }
+        let nodes = repository_owner["repositories"]["nodes"]
+            .as_array()
+            .ok_or_else(|| {
+                io::Error::other("PR fork resolution returned an incomplete repository list")
+            })?;
+        for node in nodes {
+            let slug = node["nameWithOwner"].as_str().ok_or_else(|| {
+                io::Error::other("PR fork resolution returned a repository without its exact name")
+            })?;
+            if !slug
+                .split_once('/')
+                .is_some_and(|(actual_owner, _)| actual_owner.eq_ignore_ascii_case(owner))
+            {
+                return Err(io::Error::other(
+                    "PR fork resolution returned a repository owned by another account",
+                ));
+            }
+            let candidate = fetch_repository(slug)?;
+            if !candidate["full_name"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(slug))
+            {
+                return Err(io::Error::other("PR fork repository identity changed during resolution; retry against its current name"));
+            }
+            candidates.push(candidate);
+        }
+    }
+    select_pr_fork_url(&base, &candidates, owner)
+}
+
 pub fn create_pr_via_gh(
     repo_slug: &str,
     repo_path: &std::path::Path,
@@ -250,6 +418,8 @@ pub fn create_pr_via_gh(
     let mut args = vec![
         "pr".to_string(),
         "create".to_string(),
+        "--repo".to_string(),
+        repo_slug.to_string(),
         "--base".to_string(),
         request.base.clone(),
         "--title".to_string(),
@@ -287,6 +457,32 @@ pub fn create_pr_via_gh(
         .ok_or_else(|| io::Error::other(format!("gh pr create: invalid PR URL: {url}")))?;
     gwt_git::pr_status::fetch_pr_status(repo_slug, number)
         .map_err(|err| io::Error::other(err.to_string()))
+}
+
+pub fn fetch_pr_head_sha_via_gh(
+    repo_slug: &str,
+    repo_path: &Path,
+    number: u64,
+) -> io::Result<Option<String>> {
+    let endpoint = format!("repos/{repo_slug}/pulls/{number}");
+    let output = run_gh_in(
+        "gh pr head comparison",
+        Some(repo_path),
+        ["api", endpoint.as_str()],
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "PR head comparison read failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&output.stdout).map_err(io::Error::other)?;
+    Ok(value
+        .pointer("/head/sha")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.is_empty())
+        .map(str::to_string))
 }
 
 /// Edit a PR's title / body / labels via the REST API rather than `gh pr edit`.
@@ -1158,6 +1354,47 @@ pub fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn fork_repository(name: &str, source_id: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": 22,
+            "full_name": format!("contributor/{name}"),
+            "owner": { "login": "contributor" },
+            "fork": true,
+            "source": { "id": source_id },
+            "clone_url": format!("https://github.com/contributor/{name}.git")
+        })
+    }
+
+    #[test]
+    fn fork_resolution_accepts_renamed_fork_in_exact_network() {
+        let base = serde_json::json!({ "id": 7, "fork": true, "source": { "id": 1 } });
+        let unrelated = fork_repository("gwt", 99);
+        let renamed = fork_repository("my-renamed-fork", 1);
+        assert_eq!(
+            super::select_pr_fork_url(&base, &[unrelated, renamed], "contributor").unwrap(),
+            "https://github.com/contributor/my-renamed-fork.git"
+        );
+    }
+
+    #[test]
+    fn fork_resolution_refuses_unrelated_same_name_repository() {
+        let base = serde_json::json!({ "id": 1, "fork": false });
+        assert!(
+            super::select_pr_fork_url(&base, &[fork_repository("gwt", 99)], "contributor").is_err()
+        );
+    }
+
+    #[test]
+    fn fork_resolution_refuses_ambiguous_network_identity() {
+        let base = serde_json::json!({ "id": 1, "fork": false });
+        assert!(super::select_pr_fork_url(
+            &base,
+            &[fork_repository("gwt", 1), fork_repository("renamed", 1)],
+            "contributor"
+        )
+        .is_err());
+    }
+
     #[test]
     fn current_pr_fallback_rejects_foreign_fork() {
         crate::cli::test_support::with_fake_gh("foreign-fork-fallback", |repo| {

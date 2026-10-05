@@ -75,6 +75,7 @@ pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
+pub use pr::head_check::HeadCheck as PrHeadCheck;
 pub use pr::types::{
     LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
     PrReviewThread, PrReviewThreadComment, PrUpdateBranchOutcome, PrUpdateBranchResult,
