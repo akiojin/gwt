@@ -6478,7 +6478,10 @@ impl AppRuntime {
         self.local_issue_monitor_events_with_policy(
             context,
             Some(client_id),
-            IssueMonitorScanPolicy::Scan,
+            // Issue #4963: the GUI list only projects local state. Remote
+            // enumeration belongs to the scheduled worker, even for a cold
+            // or stale cache; a deadline alone would still stall this loop.
+            IssueMonitorScanPolicy::CacheOnly,
             |_| {},
         )
     }
