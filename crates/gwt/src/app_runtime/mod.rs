@@ -2,9 +2,101 @@ use super::*;
 use std::time::Instant;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+#[derive(Default)]
+pub(crate) struct AppEventQueue {
+    foreground: std::collections::VecDeque<UserEvent>,
+    background: std::collections::VecDeque<UserEvent>,
+    foreground_run: usize,
+    wake_pending: bool,
+    closed: bool,
+}
+
+impl AppEventQueue {
+    fn close(&mut self) -> Self {
+        let discarded = std::mem::take(self);
+        self.closed = true;
+        discarded
+    }
+
+    fn prepend(&mut self, events: Vec<UserEvent>) {
+        for event in events.into_iter().rev() {
+            if user_event_is_foreground(&event) {
+                self.foreground.push_front(event);
+            } else {
+                self.background.push_front(event);
+            }
+        }
+    }
+
+    pub(crate) fn push_back(
+        &mut self,
+        event: UserEvent,
+    ) -> Result<(), Box<tao::event_loop::EventLoopClosed<UserEvent>>> {
+        if self.closed {
+            return Err(Box::new(tao::event_loop::EventLoopClosed(event)));
+        }
+        if user_event_is_foreground(&event) {
+            self.foreground.push_back(event);
+        } else {
+            self.background.push_back(event);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pop_front(&mut self) -> Option<UserEvent> {
+        // Bound the foreground burst so continuous input cannot starve runtime output.
+        let event = if !self.foreground.is_empty()
+            && (self.background.is_empty() || self.foreground_run < 8)
+        {
+            self.foreground_run = (self.foreground_run + 1).min(8);
+            self.foreground.pop_front()
+        } else {
+            self.foreground_run = 0;
+            self.background.pop_front()
+        };
+        if self.is_empty() {
+            self.foreground_run = 0;
+        }
+        event
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.foreground.is_empty() && self.background.is_empty()
+    }
+}
+
+fn user_event_is_foreground(event: &UserEvent) -> bool {
+    match event {
+        UserEvent::ProjectCompletion { event, .. } => user_event_is_foreground(event),
+        UserEvent::Frontend { event, .. } => !matches!(
+            event,
+            FrontendEvent::ArrangeWindows { .. }
+                | FrontendEvent::UpdateWindowGeometry { .. }
+                | FrontendEvent::LoadKnowledgeBridge { .. }
+        ),
+        UserEvent::AgentFrontend { .. }
+        | UserEvent::FreshExecutionReadyResend { .. }
+        | UserEvent::CommitAgentSelfClose { .. }
+        | UserEvent::PmConversationLoaded { .. }
+        | UserEvent::MenuEvent(_)
+        | UserEvent::QuitApp { .. }
+        | UserEvent::StartupReady
+        | UserEvent::StartupStopped => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod priority_events_tests;
+
+pub struct AppEventDelivery {
+    proxy: EventLoopProxy<UserEvent>,
+    pending: Mutex<AppEventQueue>,
+}
+
 #[derive(Clone)]
 pub enum AppEventProxy {
-    Real(EventLoopProxy<UserEvent>),
+    Real(Arc<AppEventDelivery>),
     Project {
         context: Box<ProjectContext>,
         inner: Box<AppEventProxy>,
@@ -22,25 +114,148 @@ impl AppEventProxy {
     }
 
     pub(crate) fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        Self::Real(proxy)
+        Self::Real(Arc::new(AppEventDelivery {
+            proxy,
+            pending: Mutex::new(AppEventQueue::default()),
+        }))
     }
 
     pub(crate) fn send(&self, event: UserEvent) {
+        let _ = self.send_event(event);
+    }
+
+    pub(crate) fn send_event(
+        &self,
+        event: UserEvent,
+    ) -> Result<(), Box<tao::event_loop::EventLoopClosed<UserEvent>>> {
         match self {
-            Self::Project { context, inner } => {
-                inner.send(UserEvent::ProjectCompletion {
-                    context: (**context).clone(),
-                    event: Box::new(event),
-                });
-            }
-            Self::Real(proxy) => {
-                let _ = proxy.send_event(event);
+            Self::Project { context, inner } => inner.send_event(UserEvent::ProjectCompletion {
+                context: (**context).clone(),
+                event: Box::new(event),
+            }),
+            Self::Real(delivery) => {
+                let mut pending = delivery.pending.lock().expect("app event queue");
+                let foreground = user_event_is_foreground(&event);
+                pending.push_back(event)?;
+                if !pending.wake_pending {
+                    pending.wake_pending = true;
+                    if delivery
+                        .proxy
+                        .send_event(UserEvent::DrainAppEvents)
+                        .is_err()
+                    {
+                        // Return this sender's event, regardless of any earlier backlog.
+                        let rejected = if foreground {
+                            pending.foreground.pop_back()
+                        } else {
+                            pending.background.pop_back()
+                        }
+                        .expect("newly queued event");
+                        let discarded = pending.close();
+                        drop(pending);
+                        drop(discarded);
+                        return Err(Box::new(tao::event_loop::EventLoopClosed(rejected)));
+                    }
+                }
+                Ok(())
             }
             #[cfg(test)]
             Self::Stub(events) => {
                 if let Ok(mut events) = events.lock() {
                     events.push(event);
                 }
+                Ok(())
+            }
+        }
+    }
+
+    /// Reject further delivery and release queued handoffs while their cleanup
+    /// spawner is still alive. Payload destructors must run outside the mutex.
+    pub(crate) fn close(&self) {
+        match self {
+            Self::Real(delivery) => {
+                let discarded = delivery.pending.lock().expect("app event queue").close();
+                drop(discarded);
+            }
+            Self::Project { inner, .. } => inner.close(),
+            #[cfg(test)]
+            Self::Stub(events) => {
+                let discarded = std::mem::take(&mut *events.lock().expect("stub app events"));
+                drop(discarded);
+            }
+        }
+    }
+
+    /// Replay events observed before a worker completed before later pending
+    /// events. The batch keeps arrival order within each priority lane.
+    pub(crate) fn prepend_events(&self, events: Vec<UserEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        match self {
+            Self::Project { context, inner } => inner.prepend_events(
+                events
+                    .into_iter()
+                    .map(|event| UserEvent::ProjectCompletion {
+                        context: (**context).clone(),
+                        event: Box::new(event),
+                    })
+                    .collect(),
+            ),
+            Self::Real(delivery) => {
+                let mut pending = delivery.pending.lock().expect("app event queue");
+                if pending.closed {
+                    return;
+                }
+                pending.prepend(events);
+                if !pending.wake_pending {
+                    pending.wake_pending = true;
+                    if delivery
+                        .proxy
+                        .send_event(UserEvent::DrainAppEvents)
+                        .is_err()
+                    {
+                        let discarded = pending.close();
+                        drop(pending);
+                        drop(discarded);
+                    }
+                }
+            }
+            #[cfg(test)]
+            Self::Stub(recorded) => {
+                recorded
+                    .lock()
+                    .expect("stub app events")
+                    .splice(0..0, events);
+            }
+        }
+    }
+
+    /// The OS queue carries only coalesced wakes; choose a pending event here,
+    /// where frontend requests can overtake already queued background work.
+    pub(crate) fn take_next(&self) -> Option<UserEvent> {
+        match self {
+            Self::Real(delivery) => {
+                let mut pending = delivery.pending.lock().expect("app event queue");
+                let next = pending.pop_front();
+                pending.wake_pending = !pending.is_empty();
+                if pending.wake_pending
+                    && delivery
+                        .proxy
+                        .send_event(UserEvent::DrainAppEvents)
+                        .is_err()
+                {
+                    let discarded = pending.close();
+                    drop(pending);
+                    drop(discarded);
+                }
+                next
+            }
+            Self::Project { inner, .. } => inner.take_next(),
+            #[cfg(test)]
+            Self::Stub(events) => {
+                let mut events = events.lock().expect("stub app events");
+                (!events.is_empty()).then(|| events.remove(0))
             }
         }
     }
@@ -263,6 +478,8 @@ struct RuntimeStopThreads {
     status_thread: Option<JoinHandle<()>>,
 }
 
+mod issue_monitor_delivery_ack;
+pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
@@ -318,6 +535,7 @@ pub use knowledge::{KnowledgeLoadRequest, KnowledgeSearchRequest, ProjectIndexSe
 pub(crate) use launch::AgentLaunchCompletion;
 #[cfg(test)]
 pub(crate) use launch::AgentLaunchRuntimeContext;
+pub(crate) use launch::PreparedAgentLaunch;
 #[cfg(test)]
 use launch::{
     codex_hook_discovery_mode_for_launch_config,
@@ -1352,6 +1570,9 @@ pub struct AppRuntime {
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
+    pub(crate) pending_launch_delivery_acks:
+        HashMap<String, issue_monitor_delivery_ack::PendingLaunchDeliveryAck>,
+    pub(crate) pending_launch_completions: HashMap<String, launch::PendingLaunchCompletion>,
     /// SPEC #3200 FR-052: daemon launch requests are at-least-once deliveries.
     /// Remember materialization and terminal ACK state by delivery id so a
     /// replay never creates a second agent window and can re-ACK after a
@@ -1622,7 +1843,7 @@ pub struct AppRuntime {
     pub(crate) attachment_uploads: AttachmentUploadStore,
     /// Async writer that flushes session/workspace snapshots off the event
     /// loop thread (Issue #2694 Phase B).
-    pub(crate) persist_dispatcher: persist_dispatcher::PersistDispatcher,
+    pub(crate) persist_dispatcher: Arc<persist_dispatcher::PersistDispatcher>,
     /// SPEC-2009 amendment: per-window selected worktree root for File Tree
     /// windows. Reset every time the user reopens the picker, so this is a
     /// transient in-memory map and is not persisted with the session state.
@@ -3236,7 +3457,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn new(
-        proxy: EventLoopProxy<UserEvent>,
+        proxy: AppEventProxy,
         pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
         blocking_tasks: BlockingTaskSpawner,
@@ -3279,7 +3500,8 @@ impl AppRuntime {
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
         let launch_wizard_cache = LaunchWizardMemoryCache::load(&sessions_dir);
 
-        let persist_dispatcher = persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
+        let persist_dispatcher =
+            Arc::new(persist_dispatcher::PersistDispatcher::new(&blocking_tasks));
         pty_io::initialize_process_window_close_finalizer()?;
         let mut app = Self {
             tabs,
@@ -3309,7 +3531,7 @@ impl AppRuntime {
             log_dir,
             project_log_router: None,
             project_log_scopes: HashMap::new(),
-            proxy: AppEventProxy::new(proxy),
+            proxy,
             blocking_tasks,
             sessions_dir,
             launch_wizard_cache,
@@ -3323,6 +3545,8 @@ impl AppRuntime {
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             pending_launch_feedback_contexts: HashMap::new(),
+            pending_launch_delivery_acks: HashMap::new(),
+            pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
@@ -4079,6 +4303,13 @@ impl AppRuntime {
         project_root: &Path,
         payload: serde_json::Value,
     ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        Self::publish_issue_monitor_control_owned(project_root, payload)
+    }
+
+    fn publish_issue_monitor_control_owned(
+        project_root: &Path,
+        payload: serde_json::Value,
+    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
         let payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "control",
             payload,
@@ -4146,6 +4377,7 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     fn persist_issue_monitor_delivery_workspace(
         &self,
         project_root: &Path,
@@ -4182,20 +4414,20 @@ impl AppRuntime {
     }
 
     fn mark_issue_monitor_launch_delivery_materialized(
-        &self,
         project_root: &Path,
+        materializer_id: &str,
+        fallback_timeout: std::time::Duration,
         issue_number: u64,
         delivery_id: &str,
         materializer_window_id: &str,
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let materializer_id = self.issue_monitor_materializer_id.clone();
-        let publication = self.publish_issue_monitor_control(
+        let publication = Self::publish_issue_monitor_control_owned(
             project_root,
             serde_json::json!({
                 "launch_delivery_materialized": {
                     "issue_number": issue_number,
                     "delivery_id": delivery_id,
-                    "materializer_id": materializer_id.clone(),
+                    "materializer_id": materializer_id,
                     "materializer_window_id": materializer_window_id,
                 }
             }),
@@ -4213,21 +4445,26 @@ impl AppRuntime {
                 Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
                     delivery.issue_number == issue_number
                         && delivery.delivery_id == delivery_id
-                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
+                        && delivery.materializer_id.as_deref() == Some(materializer_id)
                         && delivery.materialized_window_id.as_deref()
                             == Some(materializer_window_id)
                 }))
             }
-            Err(error) if error.allows_local_fallback() => self
-                .commit_local_issue_monitor_control_for_project(project_root, |monitor| {
-                    monitor.mark_launch_delivery_materialized(
-                        issue_number,
-                        delivery_id,
-                        &materializer_id,
-                        materializer_window_id,
-                    )
-                })
-                .map(|(_monitor, accepted)| accepted),
+            Err(error) if error.allows_local_fallback() => {
+                Self::commit_local_issue_monitor_control_with_timeout(
+                    project_root,
+                    fallback_timeout,
+                    |monitor| {
+                        monitor.mark_launch_delivery_materialized(
+                            issue_number,
+                            delivery_id,
+                            materializer_id,
+                            materializer_window_id,
+                        )
+                    },
+                )
+                .map(|(_monitor, accepted)| accepted)
+            }
             Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
                 Ok(false)
             }
@@ -4236,20 +4473,20 @@ impl AppRuntime {
     }
 
     fn mark_issue_monitor_launch_delivery_workspace_durable(
-        &self,
         project_root: &Path,
+        materializer_id: &str,
+        fallback_timeout: std::time::Duration,
         issue_number: u64,
         delivery_id: &str,
         materializer_window_id: &str,
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let materializer_id = self.issue_monitor_materializer_id.clone();
-        let publication = self.publish_issue_monitor_control(
+        let publication = Self::publish_issue_monitor_control_owned(
             project_root,
             serde_json::json!({
                 "launch_delivery_workspace_durable": {
                     "issue_number": issue_number,
                     "delivery_id": delivery_id,
-                    "materializer_id": materializer_id.clone(),
+                    "materializer_id": materializer_id,
                     "materializer_window_id": materializer_window_id,
                 }
             }),
@@ -4267,21 +4504,26 @@ impl AppRuntime {
                 Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
                     delivery.issue_number == issue_number
                         && delivery.delivery_id == delivery_id
-                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
+                        && delivery.materializer_id.as_deref() == Some(materializer_id)
                         && delivery.workspace_durable_window_id.as_deref()
                             == Some(materializer_window_id)
                 }))
             }
-            Err(error) if error.allows_local_fallback() => self
-                .commit_local_issue_monitor_control_for_project(project_root, |monitor| {
-                    monitor.mark_launch_delivery_workspace_durable(
-                        issue_number,
-                        delivery_id,
-                        &materializer_id,
-                        materializer_window_id,
-                    )
-                })
-                .map(|(_monitor, accepted)| accepted),
+            Err(error) if error.allows_local_fallback() => {
+                Self::commit_local_issue_monitor_control_with_timeout(
+                    project_root,
+                    fallback_timeout,
+                    |monitor| {
+                        monitor.mark_launch_delivery_workspace_durable(
+                            issue_number,
+                            delivery_id,
+                            materializer_id,
+                            materializer_window_id,
+                        )
+                    },
+                )
+                .map(|(_monitor, accepted)| accepted)
+            }
             Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
                 Ok(false)
             }
@@ -4296,68 +4538,32 @@ impl AppRuntime {
         window_id: &str,
         delivery_id: Option<&str>,
     ) -> Vec<OutboundEvent> {
-        let Some(delivery_id) = delivery_id else {
-            return self.issue_monitor_launch_succeeded_delivery_events(
-                project_root,
-                issue_number,
-                window_id,
-                None,
-            );
-        };
-        self.issue_monitor_launch_deliveries.insert(
-            delivery_id.to_string(),
-            IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
-                window_id: window_id.to_string(),
-            },
-        );
-        match self.mark_issue_monitor_launch_delivery_materialized(
+        self.queue_issue_monitor_launch_delivery_ack(
             project_root,
             issue_number,
-            delivery_id,
             window_id,
-        ) {
-            Ok(true) => {}
-            Ok(false) => return Vec::new(),
-            Err(error) => {
-                return self.issue_monitor_control_error_events(
-                    Some(project_root),
-                    None,
-                    error,
-                    "mark-launch-delivery-materialized",
-                    Some(issue_number),
-                )
-            }
-        };
-        if let Err(error) = self.persist_issue_monitor_delivery_workspace(project_root, window_id) {
-            return self.issue_monitor_control_error_events(
-                Some(project_root),
-                None,
-                error,
-                "persist-launch-delivery-window",
-                Some(issue_number),
-            );
-        }
-        match self.mark_issue_monitor_launch_delivery_workspace_durable(
+            delivery_id,
+            true,
+            None,
+        )
+    }
+
+    pub(crate) fn issue_monitor_answer_launch_completed_delivery_events(
+        &mut self,
+        project_root: &Path,
+        issue_number: u64,
+        window_id: &str,
+        delivery_id: Option<&str>,
+        handoff_id: &str,
+    ) -> Vec<OutboundEvent> {
+        self.queue_issue_monitor_launch_delivery_ack(
             project_root,
             issue_number,
-            delivery_id,
             window_id,
-        ) {
-            Ok(true) => self.issue_monitor_launch_succeeded_delivery_events(
-                project_root,
-                issue_number,
-                window_id,
-                Some(delivery_id),
-            ),
-            Ok(false) => Vec::new(),
-            Err(error) => self.issue_monitor_control_error_events(
-                Some(project_root),
-                None,
-                error,
-                "mark-launch-delivery-workspace-durable",
-                Some(issue_number),
-            ),
-        }
+            delivery_id,
+            true,
+            Some(handoff_id),
+        )
     }
 
     pub(crate) fn handle_issue_monitor_answer_delivery_complete(
@@ -4420,16 +4626,14 @@ impl AppRuntime {
                 .into_iter()
                 .collect();
         }
-        let mut events = self.issue_monitor_launch_completed_delivery_events(
+        let mut events = self.issue_monitor_answer_launch_completed_delivery_events(
             &project_root,
             issue_number,
             &holder_window_id,
             delivery_id.as_deref(),
+            &handoff_id,
         );
-        let semantic_receipt_already_settled = delivery_id.as_deref().is_some_and(|delivery_id| {
-            self.autonomous_answer_receipt_settled_delivery(&project_root, delivery_id, &handoff_id)
-        });
-        if delivery_id.is_none() || semantic_receipt_already_settled {
+        if delivery_id.is_none() {
             self.issue_monitor_launch_deliveries
                 .remove(&local_delivery_key);
         }
@@ -4449,8 +4653,7 @@ impl AppRuntime {
         events
     }
 
-    pub(crate) fn autonomous_answer_receipt_settled_delivery(
-        &self,
+    fn autonomous_answer_receipt_settled_delivery(
         project_root: &Path,
         delivery_id: &str,
         handoff_id: &str,
@@ -4866,34 +5069,13 @@ impl AppRuntime {
         window_id: &str,
         delivery_id: Option<&str>,
     ) -> Vec<OutboundEvent> {
-        if let Some(delivery_id) = delivery_id {
-            self.issue_monitor_launch_deliveries.insert(
-                delivery_id.to_string(),
-                IssueMonitorLaunchDeliveryState::Launched {
-                    window_id: window_id.to_string(),
-                },
-            );
-        }
-        let stale_window =
-            self.issue_monitor_failed_window_read_only(project_root, issue_number, window_id);
-        let mut launched = serde_json::json!({
-            "issue_number": issue_number,
-            "window_id": window_id,
-        });
-        if let Some(delivery_id) = delivery_id {
-            launched["delivery_id"] = serde_json::json!(delivery_id);
-        }
-        let publication = self.publish_issue_monitor_control(
-            project_root,
-            serde_json::json!({ "launched": launched }),
-        );
-        self.issue_monitor_launch_succeeded_result_events_with_stale(
+        self.queue_issue_monitor_launch_delivery_ack(
             project_root,
             issue_number,
             window_id,
             delivery_id,
-            publication,
-            stale_window,
+            false,
+            None,
         )
     }
 
@@ -4920,6 +5102,7 @@ impl AppRuntime {
         )
     }
 
+    #[cfg(test)]
     fn issue_monitor_launch_succeeded_result_events_with_stale(
         &mut self,
         project_root: &Path,
@@ -4984,6 +5167,7 @@ impl AppRuntime {
         events
     }
 
+    #[cfg(test)]
     fn issue_monitor_failed_window_read_only(
         &self,
         project_root: &Path,
@@ -6112,11 +6296,26 @@ impl AppRuntime {
         (gwt::IssueMonitorState, T),
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
     > {
+        Self::commit_local_issue_monitor_control_with_timeout(
+            project_root,
+            self.issue_monitor_fallback_commit_timeout,
+            mutation,
+        )
+    }
+
+    fn commit_local_issue_monitor_control_with_timeout<T>(
+        project_root: &Path,
+        fallback_timeout: std::time::Duration,
+        mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
+    ) -> Result<
+        (gwt::IssueMonitorState, T),
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + self.issue_monitor_fallback_commit_timeout,
+            std::time::Instant::now() + fallback_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -11014,6 +11213,8 @@ impl AppRuntime {
 
     pub(crate) fn register_window(&mut self, tab_id: &str, raw_id: &str) {
         let window_id = combined_window_id(tab_id, raw_id);
+        self.invalidate_launch_delivery_ack(&window_id);
+        self.pending_launch_completions.remove(&window_id);
         self.window_lookup.insert(
             window_id.clone(),
             WindowAddress {
@@ -11179,6 +11380,8 @@ impl AppRuntime {
     }
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
+        self.invalidate_launch_delivery_ack(window_id);
+        self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
         self.remote_terminal_previews.remove(window_id);
