@@ -30,6 +30,7 @@ const CHANGES_JOB: &str = "changes";
 const RUST_TEST_JOB: &str = "test";
 const FLAKE_JOB: &str = "flake-detection";
 const TARGETS_OUTPUT: &str = "flake_targets";
+const CORE_STABILITY_JOB: &str = "test-windows-core-stability";
 
 /// SPEC #4551 plan: "N = 20, 対象は変更されたクレートの test target のみ, 毎 PR".
 const REQUIRED_FLAKE_RUNS: u32 = 20;
@@ -246,4 +247,75 @@ fn both_gate_scripts_are_executable() {
             );
         }
     }
+}
+
+/// SPEC #4740 AC-8: startup readiness is fixed; restore the complete core
+/// suite on native Windows without serializing, filtering, or retrying it.
+#[test]
+fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallelism() {
+    let core = job(&test_workflow(), CORE_STABILITY_JOB);
+    assert_eq!(
+        core.get("runs-on").and_then(Value::as_str),
+        Some("windows-latest")
+    );
+    assert!(core.get("if").is_none() && core.get("needs").is_none());
+    assert!(core.get("continue-on-error").is_none());
+    let steps = run_steps(&core);
+    let build = index_of_step_running(&steps, "cargo test -p gwt-core --all-features --no-run")
+        .expect("build the complete core suite before the stability loop");
+    let repeat = index_of_step_running(&steps, "1..5 | ForEach-Object")
+        .expect("repeat the complete core suite five times");
+    assert!(build < repeat);
+    let run = &steps[repeat].1;
+    assert!(run.contains("Remove-Item Env:RUST_TEST_THREADS"));
+    assert!(
+        run.contains("Write-Host"),
+        "report each iteration in CI logs"
+    );
+    assert!(run.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    let commands: Vec<_> = run
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("cargo test"))
+        .collect();
+    assert_eq!(commands, ["cargo test -p gwt-core --all-features"]);
+    assert!(!run.contains("--test-threads"));
+    assert!(core
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .unwrap()
+        .iter()
+        .all(|step| step.get("continue-on-error").is_none()
+            || step.get("uses").and_then(Value::as_str) == Some("Swatinem/rust-cache@v2")));
+}
+
+/// A failed or skipped stability job must fail the existing protected check,
+/// rather than letting GitHub treat a skipped dependent job as success.
+#[test]
+fn the_required_windows_check_requires_successful_core_stability() {
+    let windows = job(&test_workflow(), "test-windows-rust");
+    assert_eq!(
+        windows.get("needs").and_then(Value::as_str),
+        Some(CORE_STABILITY_JOB)
+    );
+    assert_eq!(
+        windows.get("if").and_then(Value::as_str),
+        Some("${{ always() }}")
+    );
+    let guard = &windows.get("steps").and_then(Value::as_sequence).unwrap()[0];
+    assert_eq!(guard.get("shell").and_then(Value::as_str), Some("bash"));
+    assert_eq!(
+        guard
+            .get("env")
+            .and_then(|env| env.get("CORE_STABILITY_RESULT"))
+            .and_then(Value::as_str),
+        Some("${{ needs.test-windows-core-stability.result }}")
+    );
+    let run = guard
+        .get("run")
+        .and_then(Value::as_str)
+        .expect("guard must run");
+    assert!(run.contains("echo"), "report the dependency result");
+    assert!(run.contains("test \"$CORE_STABILITY_RESULT\" = success"));
+    assert!(guard.get("continue-on-error").is_none() && guard.get("if").is_none());
 }

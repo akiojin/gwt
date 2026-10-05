@@ -48223,8 +48223,14 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.issue_monitor_fallback_commit_timeout = super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+    super::reset_local_issue_monitor_fallback_commit_count();
 
-    let started = Instant::now();
+    // The prefs lock is held for the whole synchronous call, so the call can
+    // only return by giving up on the lock at the fallback commit deadline.
+    // Assert that outcome directly instead of timing the call: a wall-clock
+    // bound here also measured the fallback projection (Git/cache reads, its
+    // own 1 s budget) that runs before the 250 ms commit deadline starts, and
+    // failed on a loaded Windows host (SPEC #4740).
     let events = runtime.issue_monitor_launch_failed_result_events(
         42,
         "launch failed",
@@ -48236,7 +48242,28 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     );
     FileExt::unlock(&lock).expect("release prefs lock");
 
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        super::local_issue_monitor_fallback_commit_count(),
+        0,
+        "a lock-timed-out fallback must not commit"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, .. }
+                if message.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER)
+                    && message.contains("file lock")
+                    && message.contains("operation=issue_monitor_prefs")
+        )),
+        "the fallback must fail on the prefs lock deadline, not another error: {:?}",
+        events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::IssueMonitorToast { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
     assert!(fs::read_dir(prefs_path.parent().expect("prefs parent"))
         .expect("read prefs parent")
@@ -62299,11 +62326,24 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     let fixture_root = tempdir().expect("fixture tempdir");
     let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
 
-    // Both copies exist on disk in a real worktree: the workspace-home copy is
-    // written by the launch refresh, the worktree-local copy is tracked content
-    // refreshed by the `Both`-mode managed-asset writers.
-    gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
-        .expect("refresh managed codex hooks");
+    // A worktree created by an older launch keeps its portable local command
+    // while the current launch targets workspace-home discovery.
+    {
+        let _old_bin =
+            gwt_skills::settings_local::ScopedHookBin::set(gwt_skills::CANONICAL_HOOK_BIN);
+        gwt_skills::generate_codex_hooks_for_mode(
+            &worktree,
+            gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+        )
+        .expect("seed old local hooks");
+    }
+    let materialization = gwt::refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        &gwt_agent::AgentId::Codex,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        false,
+    )
+    .expect("refresh launch assets");
 
     let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&worktree)
@@ -62318,7 +62358,7 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
         &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
-        None,
+        materialization.hook_bin.as_deref(),
     )
     .expect("launch trust registration must succeed")
     .expect("Codex host launch registers trust");
@@ -66906,6 +66946,15 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
                 issue_number: 42,
                 window_id: "tab-1::agent-24".to_string(),
             }],
+            launch_confirmations: std::collections::BTreeMap::from([(
+                42,
+                gwt::issue_monitor::IssueMonitorLaunchConfirmation {
+                    window_id: "tab-1::agent-24".to_string(),
+                    claim_id: None,
+                    delivery_id: None,
+                    confirmed_at: "2026-08-17T08:55:00Z".to_string(),
+                },
+            )]),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
@@ -66920,7 +66969,27 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
         WindowProcessStatus::Running,
     );
     let (mut runtime, _recorded) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        sample_runtime_with_events(temp.path(), vec![tab.clone()], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T08:59:59Z");
+    tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued registration-pending worker")();
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .launched_issues
+            .len(),
+        1,
+        "a scheduled disappearance must wait for registration"
+    );
+
+    // A new observer after the grace boundary must still reclaim a dead slot.
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 

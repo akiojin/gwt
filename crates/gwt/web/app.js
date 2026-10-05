@@ -296,7 +296,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           }
           runtime.terminal.write(text, onWritten);
         },
-        canWrite: canRefreshTerminalViewport,
+        // Hidden Agents tabs still feed the shared buffer used by Issue previews.
+        canWrite: (windowId) => (agentsHost && agentsSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
@@ -2763,7 +2764,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
         const workspaceWindow = workspaceWindowById(windowId);
-        if (agentsHost && agentsSurface?.contains(windowId)) return true;
+        if (agentsHost && agentsSurface?.contains(windowId)) return agentsSurface.isVisible(windowId);
         if (agentsHost === stage.closest(".canvas-area")) return false;
         if (splitSurfaces?.isOpen() && !isOffCanvasPlacement(workspaceWindow)) {
           return splitSurfaces.containsWindow(windowId);
@@ -3881,6 +3882,10 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       function focusWindowLocally(windowId) {
+        if (agentsHost && agentsSurface?.contains(windowId)) {
+          splitSurfaces?.focusSurface("agents");
+          if (!agentsSurface.isVisible(windowId)) agentsSurface.reveal(windowId);
+        }
         splitSurfaces?.focusWindow(windowId);
         const targetElement = windowMap.get(windowId);
         if (focusedId === windowId && targetElement?.classList.contains("focused")) {
@@ -4413,18 +4418,19 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
-      // pending buffered content. Idempotent and gated on
-      // `canRefreshTerminalViewport(windowId)` so we never flip
-      // `isReady = true` while the runtime element is still hidden —
-      // doing so would let later `writeOutput` calls bypass the
-      // deferredWrites buffer and render against xterm's default 80×24
-      // grid before fit ever had a chance to populate cell metrics.
+      // pending buffered content. Hidden windows wait for reveal; Agents tab
+      // panels keep their layout box and can fit before selection. Every path
+      // still waits for real dimensions before releasing deferred writes.
       function completeInitialFitHandshake(windowId) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || runtime.isReady) {
           return;
         }
-        if (!canRefreshTerminalViewport(windowId)) {
+        // Agents tab panels retain a real layout box while hidden, so their
+        // first fit can feed a visible Issue mirror without selecting the tab.
+        // Ordinary hidden windows still wait for reveal; the box guard below
+        // keeps every first write behind a fit to actual dimensions.
+        if (!(agentsHost && agentsSurface?.contains(windowId)) && !canRefreshTerminalViewport(windowId)) {
           // Still hidden; wait for the next reveal. The hidden →
           // visible transition handler (scheduleTerminalFocusActivation)
           // will call back into this helper.
@@ -7606,12 +7612,15 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           }
           createTerminalRuntime(id, root);
         },
-        sendInput: sendPaneInput,
         onFocus: focusWindowLocally,
         onLayout: () => requestAnimationFrame(() => {
           if (!agentsHost) return;
           for (const id of terminalMap.keys()) {
-            if (agentsSurface.contains(id)) scheduleTerminalFit(id, true);
+            if (agentsSurface.isVisible(id)) {
+              terminalOutputBatcher.schedulePending(id);
+              completeInitialFitHandshake(id);
+              scheduleTerminalFit(id, true);
+            }
           }
         }),
       });
@@ -7640,7 +7649,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       window.addEventListener("resize", () => {
         if (!splitSurfaces.isOpen() && !agentsHost) return;
         for (const id of windowMap.keys()) {
-          if (splitSurfaces.containsWindow(id) || (agentsHost && agentsSurface.contains(id))) scheduleTerminalFit(id, true);
+          if (splitSurfaces.containsWindow(id) || (agentsHost && agentsSurface.isVisible(id))) scheduleTerminalFit(id, true);
         }
       });
       installSurfaceRail(document, { openSurface });

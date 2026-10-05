@@ -434,10 +434,49 @@ jobs:
           retention-days: 14
         timeout-minutes: 5
 
+  # SPEC #4740 AC-8: AC-7 separated process readiness from fixture deadlines.
+  # Prove the complete core suite is stable at native Windows default
+  # parallelism; keep the selective regression runner below unchanged.
+  test-windows-core-stability:
+    name: Windows core stability (five runs)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: windows-workspace
+        continue-on-error: true
+      - name: Build the complete core suite before repetition
+        run: cargo test -p gwt-core --all-features --no-run
+        timeout-minutes: 30
+      - name: Repeat gwt-core at default parallelism five times
+        shell: pwsh
+        run: |
+          Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
+          Write-Host "logical processors: $([Environment]::ProcessorCount)"
+          1..5 | ForEach-Object {
+            Write-Host "default-parallel core run $_ of 5"
+            cargo test -p gwt-core --all-features
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        timeout-minutes: 30
+
   test-windows-rust:
     name: Test (Rust, Windows)
+    needs: test-windows-core-stability
+    if: ${{ always() }}
     runs-on: windows-latest
     steps:
+      - name: Require all five core stability runs
+        shell: bash
+        env:
+          CORE_STABILITY_RESULT: ${{ needs.test-windows-core-stability.result }}
+        run: |
+          echo "Windows core stability: $CORE_STABILITY_RESULT"
+          test "$CORE_STABILITY_RESULT" = success
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:

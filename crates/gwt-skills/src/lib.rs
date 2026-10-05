@@ -25,7 +25,8 @@ pub use codex_home::{
 };
 pub use codex_hook_trust::{
     codex_hook_trust_key_path, collect_codex_managed_hook_trust_entries,
-    collect_codex_managed_hook_trust_entries_for_mode, register_codex_managed_hook_trust,
+    collect_codex_managed_hook_trust_entries_for_mode,
+    inspect_codex_managed_hook_trust_for_mode_with_expected_bin, register_codex_managed_hook_trust,
     register_codex_managed_hook_trust_for_mode,
     register_codex_managed_hook_trust_for_mode_with_expected_bin,
     register_codex_managed_project_trust, revoke_codex_managed_project_trust,
