@@ -1145,9 +1145,18 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 ホスト全体の verification lease を取得するのは canonical `verify.run`
 だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
 各 Heavy コマンドの実行時に取得・解放し、Light コマンドは他の run と並行できます。
-最初のコマンドの取得待機が時間切れになると、新しい記録を作らず `deferred` を返します。
+未実行の Light を先に進め、Heavy の相対順序を保ち、gwt の成果物復旧は最後に実行します。
+残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
-再試行では行列全体を再実行します。再試行前に保持者を確認してください。
+
+再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
+execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、
+先行コマンドがすべて signal なしで成功した、有効な admission-deferred 記録だけを自動再開します。
+失敗・強制終了・クラッシュ・不一致などの記録では新しく実行し、登録 plan の不一致は
+引き続き `verify.plan` の再登録が必要です。再開した証跡は不変の先行記録を id/hash で参照し、
+元の開始時刻とコマンドごとの headed E2E・nextest・admission 証跡を保持します。
+行列全体と必要な headed Chromium の dark/light 証跡が成功するまでは Overall PASS や Ready にはなりません。
+再試行前に保持者を確認してください。
 
 ```bash
 gwtd <<'JSON'
