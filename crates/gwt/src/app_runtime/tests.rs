@@ -48157,6 +48157,55 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     assert_eq!(persisted.pending_effects, journal);
 }
 
+#[test]
+fn app_runtime_allowed_labels_fallback_persists_without_changing_mode() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    for labels in [
+        serde_json::json!(["Server", "backend"]),
+        serde_json::json!([]),
+    ] {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "set_issue_monitor_allowed_labels",
+            "allowed_labels": labels,
+        }))
+        .expect("allowed labels event");
+        assert!(!runtime
+            .handle_frontend_event("client-1".to_string(), event)
+            .is_empty());
+        let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(saved.enabled && saved.autonomous_mode);
+        let saved = serde_json::to_value(saved).expect("serialize prefs");
+        assert_eq!(
+            saved
+                .get("allowed_labels")
+                .cloned()
+                .unwrap_or(serde_json::json!([])),
+            labels
+        );
+    }
+}
+
 // SPEC #3165 TQ-9: the row's "Add to queue" action is the user's way to put an
 // Issue into this terminal's implementation queue. It is the requested feature's
 // main direction — "remove" is only its counterpart — so the GUI must reach

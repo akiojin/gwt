@@ -394,6 +394,7 @@ pub(super) fn run<E: CliEnv>(
         } => run_monitor_question_answer(env, project_root.as_deref(), &handoff_id, &answer, out)?,
         IssueCommand::MonitorConfigSet {
             project_root,
+            allowed_labels,
             enabled,
             autonomous_mode,
             max_active,
@@ -404,6 +405,7 @@ pub(super) fn run<E: CliEnv>(
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
+            allowed_labels.as_deref(),
             enabled,
             autonomous_mode,
             max_active,
@@ -653,9 +655,10 @@ fn merge_board_escalations_into_needs_human(
     status
         .active_launches
         .retain(|issue_number| !closed_issue_numbers.contains(issue_number));
-    status
-        .needs_human
-        .retain(|issue_number| !closed_issue_numbers.contains(issue_number));
+    status.needs_human.retain(|issue_number| {
+        !closed_issue_numbers.contains(issue_number)
+            && !status.label_excluded_issues.contains(issue_number)
+    });
     status
         .inbox
         .retain(|item| !closed_issue_numbers.contains(&item.issue_number));
@@ -669,9 +672,13 @@ fn merge_board_escalations_into_needs_human(
     for issue_number in escalated {
         // Issue #3602: Board is immutable coordination history, while
         // `needs_human` is a current-action projection. Suppress only when the
-        // canonical cache positively proves Closed; missing/corrupt cache data
-        // deliberately fails open so an unverified escalation is never hidden.
-        if closed_issue_numbers.contains(&issue_number) {
+        // canonical cache positively proves Closed or the scan positively
+        // identifies an owner outside the configured admission labels.
+        // Missing/corrupt cache data otherwise deliberately fails open so an
+        // unverified escalation is never hidden.
+        if closed_issue_numbers.contains(&issue_number)
+            || status.label_excluded_issues.contains(&issue_number)
+        {
             continue;
         }
         if !status.needs_human.contains(&issue_number) {
@@ -729,15 +736,16 @@ fn run_monitor_status<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
-    output["urgent_queue"] = serde_json::to_value(
-        prefs.urgent_queue.projection(
-            prefs
-                .terminal_queues
-                .get(&crate::process::current_hostname())
-                .unwrap_or(&crate::issue_monitor::IssueMonitorTerminalQueue::default()),
-        ),
-    )
-    .expect("urgent queue serializes");
+    let mut effective_queue = prefs
+        .terminal_queues
+        .get(&crate::process::current_hostname())
+        .cloned()
+        .unwrap_or_default();
+    effective_queue
+        .entries
+        .retain(|entry| !status.label_excluded_issues.contains(&entry.number));
+    output["urgent_queue"] = serde_json::to_value(prefs.urgent_queue.projection(&effective_queue))
+        .expect("urgent queue serializes");
     output["active_session_count"] = serde_json::json!(inventory.sessions.len());
     output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
     output["session_observation"] = serde_json::json!({
@@ -3030,6 +3038,7 @@ fn issue_monitor_stop_refusal_detail(mismatch: crate::IssueMonitorStopMismatch) 
 #[allow(clippy::too_many_arguments)]
 fn apply_monitor_config_set(
     prefs: &mut crate::IssueMonitorPrefs,
+    allowed_labels: Option<&[String]>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
@@ -3040,6 +3049,7 @@ fn apply_monitor_config_set(
     caller_is_resident_pm: bool,
 ) -> io::Result<()> {
     validate_monitor_config_set(
+        allowed_labels,
         enabled,
         autonomous_mode,
         max_active,
@@ -3051,6 +3061,9 @@ fn apply_monitor_config_set(
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    if let Some(allowed_labels) = allowed_labels {
+        candidate.set_allowed_labels(allowed_labels.to_vec());
+    }
     if let Some(enabled) = enabled {
         candidate
             .set_enabled_with_effect_revocation(enabled)
@@ -3107,6 +3120,7 @@ pub(crate) fn apply_update_drain(
 
 #[allow(clippy::too_many_arguments)]
 fn validate_monitor_config_set(
+    allowed_labels: Option<&[String]>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
@@ -3122,7 +3136,8 @@ fn validate_monitor_config_set(
             crate::IssueMonitorLaunchProfileSwitchError::InvalidAgent.to_string(),
         ));
     }
-    if enabled.is_none()
+    if allowed_labels.is_none()
+        && enabled.is_none()
         && autonomous_mode.is_none()
         && max_active.is_none()
         && auto_close_merged_issues.is_none()
@@ -3165,6 +3180,7 @@ fn validate_monitor_config_set(
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    allowed_labels: Option<&[String]>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
@@ -3179,6 +3195,7 @@ fn run_monitor_config_set<E: CliEnv>(
     // fallback below cannot disagree about who the caller is.
     let caller_is_resident_pm = super::pm::caller_is_registered_pm(&project_root);
     validate_monitor_config_set(
+        allowed_labels,
         enabled,
         autonomous_mode,
         max_active,
@@ -3209,6 +3226,7 @@ fn run_monitor_config_set<E: CliEnv>(
         "control",
         serde_json::json!({
             "config_set": {
+                "allowed_labels": allowed_labels,
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
@@ -3234,6 +3252,7 @@ fn run_monitor_config_set<E: CliEnv>(
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             apply_monitor_config_set(
                 prefs,
+                allowed_labels,
                 enabled,
                 autonomous_mode,
                 max_active,
@@ -3252,6 +3271,7 @@ fn run_monitor_config_set<E: CliEnv>(
     .map_err(io_as_api_error)?;
     out.push_str(
         &serde_json::json!({
+            "allowed_labels": prefs.allowed_labels,
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": prefs.max_active_agents.max(1),
@@ -8010,6 +8030,94 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_status_keeps_label_excluded_escalations_and_urgent_entries_quiet() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        let cache = Cache::new(cache_root.clone());
+        for number in [1, 2, 3] {
+            cache
+                .write_snapshot(&IssueSnapshot {
+                    number: IssueNumber(number),
+                    title: format!("Issue {number}"),
+                    body: "## Acceptance Criteria\n\n- [ ] AC-1: Deliver the change.\n".to_string(),
+                    labels: vec![
+                        if number == 1 { "Server" } else { "Client" }.to_string(),
+                        "urgent".to_string(),
+                    ],
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new("2026-10-06T00:00:00Z"),
+                    comments: Vec::new(),
+                })
+                .expect("cache issue");
+        }
+        for number in [1, 2] {
+            let escalation = gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Claude Code",
+                gwt_core::coordination::BoardEntryKind::Blocked,
+                "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+                None,
+                None,
+                vec![],
+                vec![number.to_string()],
+            );
+            gwt_core::coordination::post_entry(&repo, escalation).expect("post escalation");
+        }
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 3,
+                    window_id: "tab-1::running".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.terminal_queue_push(&[1, 2], "operator", "2026-10-06T00:00:00Z");
+        let candidates =
+            crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
+                .expect("cached candidates");
+        crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-10-06T00:00:00Z");
+        monitor.set_allowed_labels(vec!["Server".to_string()]);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).expect("seed prefs");
+        let before = std::fs::read(&path).expect("prefs bytes");
+        let mut direct = monitor.agent_status();
+        direct.needs_human = vec![1, 2];
+        merge_board_escalations_into_needs_human(&repo, &mut direct);
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).expect("status");
+        let status: serde_json::Value = serde_json::from_str(&out).expect("status JSON");
+        let urgent_numbers = status["urgent_queue"]["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|entry| entry["number"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(status["active_launches"], serde_json::json!([3]));
+        assert_eq!(direct.active_launches, vec![3]);
+        assert_eq!(std::fs::read(&path).expect("prefs after status"), before);
+        assert_eq!(
+            (
+                direct.needs_human,
+                status["needs_human"].clone(),
+                urgent_numbers,
+                status["urgent_queue"]["urgent_count"].clone()
+            ),
+            (
+                vec![1],
+                serde_json::json!([1]),
+                vec![1],
+                serde_json::json!(1)
+            )
+        );
+    }
+
+    #[test]
     fn issue_monitor_status_attributes_errors_to_the_requested_project() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -8281,6 +8389,9 @@ mod tests {
             max_active: 1,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -8334,6 +8445,9 @@ mod tests {
             max_active: 1,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -8472,6 +8586,9 @@ mod tests {
                 max_active: 1,
                 enabled: true,
                 gui_status: None,
+                allowed_labels: Vec::new(),
+                label_excluded_count: 0,
+                label_excluded_issues: Vec::new(),
                 autonomous_mode: true,
                 auto_apply_updates: None,
                 auto_apply_updates_effective: None,
@@ -8584,6 +8701,9 @@ mod tests {
             max_active: 1,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -8788,6 +8908,9 @@ mod tests {
                 // projection, and `active_launches` is whatever preferences
                 // still record — both facts ship with the numbers.
                 "source": "degraded_cache",
+                "allowed_labels": [],
+                "label_excluded_count": 0,
+                "label_excluded_issues": [],
                 "stall_reason": "unknown",
                 "project_root": std::fs::canonicalize(&repo).expect("canonical project"),
                 "active_launches_incomplete": true,
@@ -9539,6 +9662,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo.clone()),
                 enabled: None,
                 autonomous_mode: None,
@@ -9570,6 +9694,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo),
                 enabled: None,
                 autonomous_mode: None,
@@ -9612,6 +9737,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo),
                 enabled: Some(false),
                 autonomous_mode: Some(false),
@@ -9637,6 +9763,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
                 autonomous_mode: None,
@@ -10018,6 +10145,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorConfigSet {
+                    allowed_labels: None,
                     project_root: Some(repo.clone()),
                     enabled,
                     autonomous_mode,
@@ -10102,6 +10230,7 @@ mod tests {
             let result = run(
                 &mut env,
                 IssueCommand::MonitorConfigSet {
+                    allowed_labels: None,
                     project_root: Some(repo.clone()),
                     enabled,
                     autonomous_mode,
@@ -10954,6 +11083,9 @@ mod tests {
             max_active: 3,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -12289,6 +12421,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo.clone()),
                 enabled: None,
                 autonomous_mode: None,
@@ -12330,6 +12463,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo),
                 enabled: None,
                 autonomous_mode: None,

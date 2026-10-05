@@ -2950,6 +2950,9 @@ mod tests {
         let wire = serde_json::to_value(&events[0].event).expect("toast wire");
         assert_eq!(wire["notification_transition"], "needs_human");
         let status = gwt::IssueMonitorStatusView {
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
