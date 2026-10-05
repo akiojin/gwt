@@ -29,7 +29,7 @@ def inventory(data):
     return result
 
 
-def durations(xml):
+def durations(xml, phase):
     result = {}
     for suite in ET.fromstring(xml).iter("testsuite"):
         for test in suite.findall("testcase"):
@@ -37,7 +37,7 @@ def durations(xml):
             if key in result:
                 raise ValueError(f"duplicate JUnit test: {key}")
             if any(test.find(tag) is not None for tag in ("failure", "error", "skipped", "rerun", "flakyFailure", "flakyError")):
-                raise ValueError(f"JUnit contains failed, retried or skipped test: {key}")
+                raise ValueError(f"{phase}: JUnit contains failed, retried or skipped test: {key}")
             seconds = float(test.attrib["time"])
             if not math.isfinite(seconds) or seconds < 0:
                 raise ValueError(f"invalid JUnit duration: {key}")
@@ -65,7 +65,7 @@ def compare(before_list, after_list, before_xml, after_xml):
     if before_inventory != after_inventory:
         raise ValueError("before/after inventory or ignored status differs")
     expected = {key for key, ignored in before_inventory.items() if not ignored}
-    before, after = durations(before_xml), durations(after_xml)
+    before, after = durations(before_xml, "before"), durations(after_xml, "after")
     if set(before) != expected or set(after) != expected:
         raise ValueError("JUnit executed set differs from non-ignored inventory")
     return {

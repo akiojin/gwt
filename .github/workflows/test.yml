@@ -492,6 +492,9 @@ jobs:
       - name: Build Windows regression targets once
         run: node scripts/ci-windows-tests.mjs build default
         timeout-minutes: 30
+      - name: Run targeted issue cache refresh regression
+        run: node scripts/ci-windows-tests.mjs run gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact
+        timeout-minutes: 15
       - name: Run managed hook self-heal regressions
         shell: bash
         run: |
