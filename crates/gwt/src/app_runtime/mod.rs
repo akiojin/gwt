@@ -8688,7 +8688,6 @@ impl AppRuntime {
                     &self.blocking_tasks,
                     self.proxy.clone(),
                     context.clone(),
-                    None,
                 );
                 Vec::new()
             }
