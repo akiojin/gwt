@@ -469,6 +469,9 @@ jobs:
           if ($failures -ne 0) { exit 1 }
         timeout-minutes: 15
       - name: Repeat gwt-core at default parallelism five times
+        # Run the deterministic unit regression even if the integration
+        # measurement above records an intermittent failure.
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue

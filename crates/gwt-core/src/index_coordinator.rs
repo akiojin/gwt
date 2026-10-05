@@ -2511,7 +2511,7 @@ mod tests {
                 )
             }
             .unwrap();
-            assert!(info.DeletePending.as_bool());
+            assert!(info.DeletePending);
             let error = OpenOptions::new()
                 .read(true)
                 .write(true)
