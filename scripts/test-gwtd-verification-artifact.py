@@ -55,7 +55,7 @@ def probe_github_read(root):
         directory.mkdir()
     calls = root / "gh-calls.jsonl"
     fake_gh = bin_dir / "gh"
-    fake_gh.write_text(
+    fake_gh_source = (
         f"#!{sys.executable}\n"
         "import json, sys\n"
         f"with open({str(calls)!r}, 'a') as log:\n"
@@ -67,10 +67,19 @@ def probe_github_read(root):
         "    print(json.dumps([{'name': 'artifact-check', 'state': 'COMPLETED', "
         "'conclusion': 'SUCCESS'}]))\n"
         "else:\n"
-        "    raise SystemExit('Unexpected gh call: ' + repr(sys.argv))\n",
-        encoding="utf-8",
+        "    raise SystemExit('Unexpected gh call: ' + repr(sys.argv))\n"
     )
-    fake_gh.chmod(0o755)
+    # Sibling forks must never inherit a writable fixture FD (Issue #5028).
+    subprocess.run(
+        [sys.executable, "-c",
+         "from pathlib import Path; import sys; path = Path(sys.argv[1]); "
+         "path.write_text(sys.stdin.buffer.read().decode('utf-8'), encoding='utf-8'); "
+         "path.chmod(0o755)",
+         str(fake_gh)],
+        input=fake_gh_source,
+        encoding="utf-8",
+        check=True,
+    )
     # No sandbox or live-opt-in marker, and no launch or Git context: an armed
     # artifact must refuse before it ever reaches the PATH fixture.
     env = {
