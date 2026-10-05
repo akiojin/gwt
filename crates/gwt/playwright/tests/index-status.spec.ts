@@ -9,6 +9,40 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { acquireLiveGwtBackendLock, gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+
+test("live backend replays fresh index health after reconnect", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated backend");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const release = await acquireLiveGwtBackendLock(base!, testInfo);
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("pageerror", (error) => errors.push(String(error)));
+  try {
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    const { table } = await openIndexHealthPanel(page, true, true);
+    await expect(table.locator("tr[data-scope='issues']")).toBeVisible();
+    const status = await page.waitForFunction(() => {
+      const messages = (window as any).__gwtPlaywrightMessages ?? [];
+      return messages.map((entry: any) => entry.payload)
+        .findLast((payload: any) => payload.kind === "project_index_status" && payload.status?.scopes?.issues);
+    }).then((handle) => handle.jsonValue());
+    expect(status.status.state).toBe("ready");
+    expect(status.status.scopes.issues.healthy).toBe(true);
+    await sendLiveGwtEvent(page, { kind: "refresh_index_status", project_root: status.project_root });
+    await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+
+    await gotoLiveGwt(page, page.url(), { enableTestBridge: true });
+    const reconnected = await openIndexHealthPanel(page, false, true);
+    await expect(reconnected.table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally {
+    await release();
+  }
+});
 
 test.describe("Project Index status surface", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -489,18 +523,20 @@ test.describe("Project Index status surface", () => {
 
 });
 
-async function openIndexHealthPanel(page) {
+async function openIndexHealthPanel(page, createWindow = true, live = false) {
   await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
   // SPEC-1939 Phase 15: settings target=index is now the compatibility
   // entrypoint for the dedicated Index window, not a Settings tab.
-  await page.evaluate(() => {
+  if (createWindow) await page.evaluate(() => {
     document.dispatchEvent(
       new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
     );
   });
 
-  const root = page.locator(".index-search-root").first();
+  const root = page.locator(live
+    ? ".workspace-window.surface-index.focused .index-search-root"
+    : ".index-search-root").first();
   await expect(root).toBeVisible({ timeout: 10_000 });
   await root.locator("[data-index-tab='health']").click();
 

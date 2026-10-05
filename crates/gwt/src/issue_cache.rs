@@ -342,6 +342,8 @@ pub fn sync_issue_cache_from_remote_with_wait(
     cache_root: &Path,
     wait: &mut dyn FnMut(Duration),
 ) -> Result<(), String> {
+    gwt_core::operation_deadline::ensure_remaining("Issue cache refresh")
+        .map_err(|error| error.to_string())?;
     let snapshots = fetch_issue_list_snapshots(repo_path)?;
     if snapshots.is_empty() {
         fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
@@ -353,6 +355,8 @@ pub fn sync_issue_cache_from_remote_with_wait(
     let ledger = BudgetLedger::global();
     let policy = ThrottlePolicy::current();
     for listed_snapshot in &snapshots {
+        gwt_core::operation_deadline::ensure_remaining("Issue cache entry")
+            .map_err(|error| error.to_string())?;
         let snapshot = if is_spec_issue(listed_snapshot) {
             if cache
                 .load_entry(listed_snapshot.number)
@@ -370,6 +374,8 @@ pub fn sync_issue_cache_from_remote_with_wait(
                     return Err("operation deadline expired during issue cache pacing".into());
                 }
                 wait(delay);
+                gwt_core::operation_deadline::ensure_remaining("Issue cache quota wait")
+                    .map_err(|error| error.to_string())?;
             }
             fetch_issue_snapshot(repo_path, listed_snapshot.number)?
         } else {
@@ -550,11 +556,9 @@ pub(crate) fn write_issue_labels_via_gh(
 
 /// Run one `gh` read for the Issue cache under the shared GitHub quota gate.
 ///
-/// This module spawns `gh` directly rather than through
-/// [`gwt_core::process_console::spawn_logged`], so it applies the gate itself
-/// (Issue #3604). Its two reads are gwt's largest GraphQL burst — a full issue
-/// enumeration plus one `issue view` per SPEC Issue — which is exactly the
-/// traffic that must stop while the budget is exhausted.
+/// This module owns quota accounting and reconciliation (Issue #3604).
+/// The capture helper applies the ambient deadline to reads and quota probes
+/// without counting the same call twice.
 fn run_gh_issue_command(repo_path: &Path, args: &[&str], label: &str) -> Result<String, String> {
     run_gh_issue_command_with_gate(gwt_core::github_quota::global(), repo_path, args, label)
 }
@@ -570,6 +574,8 @@ fn run_gh_issue_command_with_gate(
     if let Some(detail) = gwt_core::process_console::unsandboxed_gh_denial(label) {
         return Err(format!("{label}: {detail}"));
     }
+    gwt_core::operation_deadline::ensure_remaining(label)
+        .map_err(|error| format!("{label}: {error}"))?;
     let now = chrono::Utc::now();
     // Issue #3928 AC-1: the window another process persisted suppresses this
     // read too, so a restarted GUI cannot re-fire the resync into it.
@@ -1998,7 +2004,10 @@ exit 1
 
         fs::remove_file(&log).expect("reset log");
         let _moved = ScopedEnvVar::set("FAKE_UPDATED_43", UPDATED_V2);
-        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("third sync");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + Duration::from_secs(30),
+        );
+        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("third sync within a quantum");
         assert_eq!(
             invocations(&log),
             vec![LIST_CALL, "issue view 43"],
@@ -2053,6 +2062,59 @@ exit 1
                 .all(|delay| *delay > Duration::ZERO && *delay <= Duration::from_secs(61)),
             "{waits:?}"
         );
+    }
+
+    #[test]
+    fn ambient_deadline_refuses_issue_cache_read_before_spawning() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let log = temp.path().join("gh.log");
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+
+        let error = run_gh_issue_command_with_gate(
+            &QuotaGate::default(),
+            temp.path(),
+            &["issue", "view", "42"],
+            "gh issue view #42",
+        )
+        .expect_err("an exhausted refresh budget must not start another read");
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(invocations(&log).is_empty());
+    }
+
+    #[test]
+    fn ambient_deadline_refuses_quota_wait_that_outlives_refresh_budget() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        let log = temp.path().join("gh.log");
+        git_init(&repo_path);
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let ledger = BudgetLedger::global();
+        let now = chrono::Utc::now();
+        for _ in 0..ThrottlePolicy::current().burst_calls_per_minute {
+            ledger.record_spawn(GitHubQuota::GraphQl, now);
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + Duration::from_secs(30),
+        );
+        let mut waits = Vec::new();
+
+        let error = sync_issue_cache_from_remote_with_wait(&repo_path, &cache_root, &mut |delay| {
+            waits.push(delay)
+        })
+        .expect_err("a quota wait longer than the remaining quantum must defer the read");
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(waits.is_empty(), "do not sleep outside the refresh budget");
+        assert_eq!(invocations(&log), vec![LIST_CALL]);
+        assert!(Cache::new(cache_root).load_entry(IssueNumber(42)).is_none());
     }
 
     #[test]

@@ -20,7 +20,7 @@
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,41 @@ use super::redact;
 
 const SUMMARY_TARGET: &str = "gwt.process.summary";
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(1);
+
+#[cfg(windows)]
+const DEADLINE_TERMINATION_EXIT_CODE: u32 = 0x4757_5444;
+
+/// Evidence retained inside a `TimedOut` IO error without changing its text.
+#[derive(Debug, Default)]
+pub struct ProcessDeadlineExpired {
+    child_was_running: bool,
+    stop_requested: bool,
+    exit_status: Option<ExitStatus>,
+}
+
+impl ProcessDeadlineExpired {
+    /// The direct child was running at expiry, our stop request succeeded,
+    /// and cleanup finished within budget with a successful reap carrying
+    /// the corresponding termination status.
+    /// Ordinary exit/crash, pipe-only expiry, and failed reap give no permit.
+    /// On Unix an unrelated concurrent SIGKILL has the same observable status.
+    pub fn interrupted_child_reaped(&self) -> bool {
+        self.child_was_running
+            && self.stop_requested
+            && self
+                .exit_status
+                .as_ref()
+                .is_some_and(deadline_termination_status)
+    }
+}
+
+impl std::fmt::Display for ProcessDeadlineExpired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("process deadline expired")
+    }
+}
+
+impl std::error::Error for ProcessDeadlineExpired {}
 
 #[cfg(test)]
 thread_local! {
@@ -233,8 +268,9 @@ pub async fn spawn_logged(
 /// Spawn a logged child under one absolute deadline.
 ///
 /// The deadline covers process completion and stdout/stderr EOF. On expiry the
-/// dedicated process tree is terminated and the direct child is reaped before
-/// this function returns.
+/// dedicated process tree is terminated and direct-child reap is attempted
+/// within the original deadline. [`ProcessDeadlineExpired`] records whether
+/// stopping and reaping the running child were confirmed.
 pub async fn spawn_logged_with_deadline(
     hub: &ProcessConsoleHub,
     kind: ProcessKind,
@@ -262,7 +298,7 @@ async fn spawn_logged_inner(
     #[cfg(any(test, feature = "test-support"))]
     let expired = expired && !has_ready_hook;
     if expired {
-        return Err(deadline_error());
+        return Err(deadline_error(ProcessDeadlineExpired::default()));
     }
     // Issue #3675 AC-2: in test builds (armed via
     // `forbid_unsandboxed_gh_spawns_for_tests`), a `gh` spawn with no sandbox
@@ -487,7 +523,10 @@ async fn spawn_logged_inner(
     };
 
     let Some(collected) = collected else {
-        if !cleanup_child_process(&mut process_tree, &mut child, deadline).await {
+        let child_was_running = matches!(child.try_wait(), Ok(None));
+        let stop_requested = child_was_running && request_deadline_child_stop(&mut child);
+        let cleanup = cleanup_child_process(&mut process_tree, &mut child, deadline).await;
+        if !cleanup.completed {
             trace_cleanup_grace_exceeded(spawn_id, options.forward_output);
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -505,12 +544,23 @@ async fn spawn_logged_inner(
             false,
             true,
         );
-        return Err(deadline_error());
+        return Err(deadline_error(ProcessDeadlineExpired {
+            child_was_running,
+            stop_requested,
+            exit_status: if cleanup.completed {
+                cleanup.exit_status
+            } else {
+                None
+            },
+        }));
     };
     let (status, (stdout, stdout_lines), (stderr, stderr_lines)) = match collected {
         Ok(collected) => collected,
         Err(error) => {
-            if !cleanup_child_process(&mut process_tree, &mut child, deadline).await {
+            if !cleanup_child_process(&mut process_tree, &mut child, deadline)
+                .await
+                .completed
+            {
                 trace_cleanup_grace_exceeded(spawn_id, options.forward_output);
             }
             finish_failed_launch(
@@ -849,8 +899,51 @@ fn process_resolution_io_error(error: crate::process::ProcessResolveFailure) -> 
     std::io::Error::new(kind, error)
 }
 
-fn deadline_error() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::TimedOut, "process deadline expired")
+fn deadline_error(evidence: ProcessDeadlineExpired) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, evidence)
+}
+
+fn request_deadline_child_stop(child: &mut tokio::process::Child) -> bool {
+    #[cfg(unix)]
+    {
+        child.start_kill().is_ok()
+    }
+    #[cfg(windows)]
+    {
+        child.raw_handle().is_some_and(|handle| {
+            // SAFETY: Tokio owns this live process handle for the duration of
+            // the call. A distinct exit code separates our stop from exit(1).
+            unsafe {
+                windows::Win32::System::Threading::TerminateProcess(
+                    windows::Win32::Foundation::HANDLE(handle),
+                    DEADLINE_TERMINATION_EXIT_CODE,
+                )
+                .is_ok()
+            }
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = child;
+        false
+    }
+}
+
+fn deadline_termination_status(status: &ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(libc::SIGKILL)
+    }
+    #[cfg(windows)]
+    {
+        status.code() == Some(DEADLINE_TERMINATION_EXIT_CODE as i32)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = status;
+        false
+    }
 }
 
 fn deadline_before_cleanup_reserve(deadline: Instant) -> Instant {
@@ -863,11 +956,16 @@ fn deadline_before_cleanup_reserve(deadline: Instant) -> Instant {
         .unwrap_or(now)
 }
 
+struct CleanupOutcome {
+    completed: bool,
+    exit_status: Option<ExitStatus>,
+}
+
 async fn cleanup_child_process(
     process_tree: &mut ChildProcessTree,
     child: &mut tokio::process::Child,
     deadline: Option<Instant>,
-) -> bool {
+) -> CleanupOutcome {
     match deadline {
         Some(deadline) => {
             cleanup_child_process_after_tree_termination_until(
@@ -892,34 +990,44 @@ async fn cleanup_child_process_after_tree_termination<F>(
     grace: Duration,
     tree_termination: F,
     child: &mut tokio::process::Child,
-) -> bool
+) -> CleanupOutcome
 where
     F: Future<Output = ()>,
 {
-    run_cleanup_with_grace(grace, async {
+    let mut exit_status = None;
+    let completed = run_cleanup_with_grace(grace, async {
         tree_termination.await;
         let _ = child.start_kill();
-        let _ = child.wait().await;
+        exit_status = child.wait().await.ok();
         test_post_reap_delay().await;
     })
-    .await
+    .await;
+    CleanupOutcome {
+        completed,
+        exit_status,
+    }
 }
 
 async fn cleanup_child_process_after_tree_termination_until<F>(
     deadline: Instant,
     tree_termination: F,
     child: &mut tokio::process::Child,
-) -> bool
+) -> CleanupOutcome
 where
     F: Future<Output = ()>,
 {
-    run_cleanup_until(deadline, async {
+    let mut exit_status = None;
+    let completed = run_cleanup_until(deadline, async {
         tree_termination.await;
         let _ = child.start_kill();
-        let _ = child.wait().await;
+        exit_status = child.wait().await.ok();
         test_post_reap_delay().await;
     })
-    .await
+    .await;
+    CleanupOutcome {
+        completed,
+        exit_status,
+    }
 }
 
 #[cfg(test)]
@@ -1316,8 +1424,12 @@ mod tests {
         .expect("tree termination must be inside the cleanup grace");
 
         assert!(
-            !completed,
+            !completed.completed,
             "stalled tree termination must report incomplete"
+        );
+        assert!(
+            completed.exit_status.is_none(),
+            "no successful reap occurred"
         );
         let _ = child.start_kill();
         let _ = child.wait().await;
@@ -1351,7 +1463,14 @@ mod tests {
         let _delay = PostReapDelayGuard::set(Duration::from_millis(900));
         let completed = cleanup_child_process(&mut tree, &mut child, Some(deadline)).await;
 
-        assert!(!completed, "the original deadline must interrupt cleanup");
+        assert!(
+            !completed.completed,
+            "the original deadline must interrupt cleanup"
+        );
+        assert!(
+            completed.exit_status.is_some(),
+            "actual reap differs from cleanup completion"
+        );
         assert!(
             started.elapsed() < Duration::from_millis(900),
             "cleanup restarted its budget instead of using the remaining virtual time"
@@ -1746,6 +1865,76 @@ mod tests {
         }
     }
 
+    fn deadline_evidence(error: &std::io::Error) -> &ProcessDeadlineExpired {
+        assert_eq!(error.to_string(), "process deadline expired");
+        error
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<ProcessDeadlineExpired>())
+            .expect("deadline error retains typed evidence")
+    }
+
+    #[test]
+    fn deadline_evidence_rejects_cleanup_that_exceeds_its_budget_after_reap() {
+        let (program, args) = if cfg!(windows) {
+            ("ping", vec!["-n", "30", "127.0.0.1"])
+        } else {
+            ("sleep", vec!["30"])
+        };
+        let _delay = PostReapDelayGuard::set(Duration::from_secs(2));
+        let error = with_spawn_ready_for_tests(
+            Duration::from_secs(1),
+            || {},
+            || {
+                spawn_logged_blocking_with_deadline(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::IndexRunner,
+                    program,
+                    &args,
+                    SpawnOptions::new("deadline cleanup incomplete"),
+                    Instant::now() + crate::deadline_budget::HANG_GUARD,
+                )
+            },
+        )
+        .expect_err("fixture exceeds its deadline");
+        assert!(!deadline_evidence(&error).interrupted_child_reaped());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_evidence_rejects_crash_or_failed_reap_after_stop_request() {
+        use std::os::unix::process::ExitStatusExt;
+        for status in [
+            Some(std::process::ExitStatus::from_raw(7 << 8)),
+            Some(std::process::ExitStatus::from_raw(libc::SIGSEGV)),
+            None,
+        ] {
+            let evidence = ProcessDeadlineExpired {
+                child_was_running: true,
+                stop_requested: true,
+                exit_status: status,
+            };
+            assert!(!evidence.interrupted_child_reaped());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deadline_evidence_rejects_crash_or_failed_reap_after_stop_request_windows() {
+        use std::os::windows::process::ExitStatusExt;
+        for status in [
+            Some(std::process::ExitStatus::from_raw(1)),
+            Some(std::process::ExitStatus::from_raw(0xc000_0005)),
+            None,
+        ] {
+            let evidence = ProcessDeadlineExpired {
+                child_was_running: true,
+                stop_requested: true,
+                exit_status: status,
+            };
+            assert!(!evidence.interrupted_child_reaped());
+        }
+    }
+
     #[tokio::test]
     async fn spawn_logged_deadline_succeeds_before_expiry() {
         let hub = ProcessConsoleHub::new();
@@ -1821,6 +2010,7 @@ mod tests {
         .await
         .expect_err("expired deadline must fail before spawn");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!deadline_evidence(&error).interrupted_child_reaped());
         assert!(!sentinel.exists());
     }
 
@@ -1849,6 +2039,7 @@ mod tests {
         .await
         .expect_err("long-running process tree must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(deadline_evidence(&error).interrupted_child_reaped());
         assert!(started.elapsed() < Duration::from_secs(3));
 
         let parent = read_pid(&parent_file);
@@ -1881,6 +2072,7 @@ mod tests {
         .await
         .expect_err("descendant-held pipe must share the deadline");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!deadline_evidence(&error).interrupted_child_reaped());
         assert!(started.elapsed() < Duration::from_secs(3));
         wait_for_process_exit(read_pid(&descendant_file));
         let line_count = hub.snapshot_kind(ProcessKind::Gh).len();
@@ -1910,7 +2102,7 @@ mod tests {
         let ready_parent = parent_file.clone();
         let ready_descendant = descendant_file.clone();
         let error = with_spawn_ready_for_tests(
-            Duration::ZERO,
+            Duration::from_secs(1),
             move || {
                 let parent = wait_for_pid_file_windows(&ready_parent);
                 let descendant = wait_for_pid_file_windows(&ready_descendant);
@@ -1936,6 +2128,7 @@ mod tests {
         )
         .expect_err("long-running windows process tree must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(deadline_evidence(&error).interrupted_child_reaped());
 
         let parent = wait_for_pid_file_windows(&parent_file);
         let descendant = wait_for_pid_file_windows(&descendant_file);
@@ -1987,6 +2180,7 @@ mod tests {
         .expect_err("descendant-held pipe must keep collection pending until deadline");
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!deadline_evidence(&error).interrupted_child_reaped());
         let descendant = wait_for_pid_file_windows(&descendant_file);
         wait_for_process_exit_windows(descendant);
     }

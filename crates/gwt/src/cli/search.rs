@@ -204,6 +204,9 @@ fn render_search_unavailable(
             "retryable": true,
             "reason": unavailable.reason,
             "retry_after_ms": unavailable.retry_after_ms,
+            "holder": unavailable.holder,
+            "start_decision": crate::index_search::SEARCH_UNAVAILABLE_START_DECISION,
+            "recovery": crate::index_search::SEARCH_UNAVAILABLE_RECOVERY,
         });
         out.push_str(&payload.to_string());
         out.push('\n');
@@ -589,6 +592,13 @@ mod tests {
         let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
             reason: "project index runner unavailable".to_string(),
             retry_after_ms: 5_000,
+            holder: Some(Box::new(crate::index_resources::IndexRunnerHolder {
+                repo_hash: "other-repo".into(),
+                owner_pid: Some(42),
+                project_root: Some(std::path::PathBuf::from("other-project")),
+                action: Some("index-issues".into()),
+                qos: Some("background".into()),
+            })),
         });
 
         render_search_unavailable(&mut out, true, &error);
@@ -598,6 +608,17 @@ mod tests {
         assert_eq!(payload["error_code"], "SEARCH_UNAVAILABLE");
         assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
         assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(payload["holder"]["repo_hash"], "other-repo");
+        assert_eq!(payload["holder"]["project_root"], "other-project");
+        assert_eq!(payload["holder"]["action"], "index-issues");
+        assert_eq!(payload["holder"]["qos"], "background");
+        assert_eq!(payload["start_decision"], "known_approved_owner_only");
+        let recovery = payload["recovery"]
+            .as_str()
+            .expect("start and retry guidance");
+        assert!(recovery.contains("index.status"), "{recovery}");
+        assert!(recovery.contains("approved implementation"), "{recovery}");
+        assert!(recovery.contains("creating an Issue/SPEC"), "{recovery}");
         assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
         assert!(error.retryable());
         assert_eq!(error.retry_after_ms(), Some(5_000));

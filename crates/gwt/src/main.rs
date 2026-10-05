@@ -11263,8 +11263,7 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::ProjectIndexRefreshRequested { project_key, project_root }) => {
                 if let Some(state) = app.project_states.get(&project_key) {
-                    state.project_index_bootstrap.invalidate_full_status(&project_root);
-                    state.project_index_bootstrap.spawn(AppEventProxy::new(proxy.clone()).for_project(state.context.clone()), project_root);
+                    state.project_index_bootstrap.refresh_after_completion(AppEventProxy::new(proxy.clone()).for_project(state.context.clone()), project_root);
                 }
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {
