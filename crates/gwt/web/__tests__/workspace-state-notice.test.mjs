@@ -23,15 +23,6 @@ test("load errors preserve file and cause as text and Retry requests a real relo
   assert.equal(document.querySelector(".workspace-state-notice"), null);
 });
 
-test("legacy import is a nonblocking informational notice without Retry", () => {
-  const { document } = parseHTML('<html><body><div id="app"></div></body></html>');
-  const surface = createWorkspaceStateNotice({ document, send() {} });
-  surface.receive({ kind: "legacy_imported", path: '/old/workspace.json', message: '旧配置から取り込みました' });
-  const banner = document.querySelector('[role="status"]');
-  assert.ok(banner.textContent.includes('旧配置から取り込みました'));
-  assert.equal(banner.querySelector("button"), null);
-});
-
 test("notice is embedded, dispatched, and styled with Operator tokens in the existing shell", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const manifest = readFileSync(new URL('../../src/embedded_web.rs', import.meta.url), 'utf8');

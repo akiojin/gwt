@@ -133,9 +133,11 @@ All notable changes to this project will be documented in this file.
 
 ### Upgrade Notes
 
+- **migration:** 旧 HOME / Workspace の current・work_items・journal 自動取り込みを廃止。対応する現行状態がない場合は読み書きを拒否し、旧ファイルを保持して v9.106.0 での移行手順を案内します。現行 receipt・event の回復は維持します。
+
 - **migration:** 一回限り移行の upgrade floor は v9.72.1（2026-08-03 UTC、変更日の60日前）。古い環境は先に v9.106.0 で各プロジェクトを開いてから更新してください。旧 Claude Code backend 行の未使用の自動移行は廃止しました。旧 backend 設定は自動移行されません。Settings で provider を再登録してください。旧設定は保持されます。
 - **frontend:** 旧 Fast mode wire フィールドと operation ID のない cleanup 互換処理を廃止します。更新前から開いているタブは再読み込みしてください。保存済み設定と cleanup の再接続処理は保持します。
-- **migration:** 旧 agent identity reset を廃止し、保存済みの目的・進捗と既存 marker を保持します。旧 HOME / Workspace、coordination、discussion の取り込みはデータ保護と現用契約のため維持します。
+- **migration:** 旧 agent identity reset を廃止し、保存済みの目的・進捗と既存 marker を保持します。coordination、discussion の取り込みは現用契約のため維持します。
 
 ### Bug Fixes
 
@@ -2444,7 +2446,6 @@ All notable changes to this project will be documented in this file.
 
 - **pr:** Isolate verification guard home
 
-
 ## [9.84.0] - 2026-08-31
 
 ### Bug Fixes
@@ -2561,7 +2562,6 @@ All notable changes to this project will be documented in this file.
 - **pane:** Stabilize close verification contracts
 - **daemon:** Isolate deadline-sensitive contracts
 
-
 ## [9.83.5] - 2026-08-27
 
 ### Bug Fixes
@@ -2584,7 +2584,6 @@ All notable changes to this project will be documented in this file.
 - **work:** Record issue 3596 delivery state
 - **work:** Settle issue 3596 delivery
 - **work:** Issue 3765 の実行イベント記録を追加 (#3765)
-
 
 ## [9.83.4] - 2026-08-25
 
@@ -2659,7 +2658,6 @@ All notable changes to this project will be documented in this file.
 - **launch:** PTY start gate の sibling 解決テストを POSIX host でも成立させる
 - **pane:** #3503 / #3552 の受け入れ条件を回帰ロックとして固定する
 
-
 ## [9.83.1] - 2026-08-18
 
 ### Bug Fixes
@@ -2684,7 +2682,6 @@ All notable changes to this project will be documented in this file.
 ### Performance
 
 - **git:** Workspace-home layout の解決を fs 判定にして失敗確定 spawn を根絶する
-
 
 ## [9.83.0] - 2026-08-18
 
@@ -2890,7 +2887,6 @@ All notable changes to this project will be documented in this file.
 - Settle issue monitor work handoff
 - **work:** Record issue monitor PR handoff receipt
 
-
 ## [9.79.0] - 2026-08-14
 
 ### Bug Fixes
@@ -2926,7 +2922,6 @@ All notable changes to this project will be documented in this file.
 - **work:** Record issue 3550 completion
 - **ci:** Retrigger checks for PR #3565
 
-
 ## [9.78.2] - 2026-08-14
 
 ### Bug Fixes
@@ -2954,7 +2949,6 @@ All notable changes to this project will be documented in this file.
 - **work:** Issue #3474 の視覚検証完了を記録
 - **work:** Issue #3474 の完了状態を記録
 - **work:** Develop worktree の Work event を記録する
-
 
 ## [9.78.0] - 2026-08-12
 
@@ -3002,7 +2996,6 @@ All notable changes to this project will be documented in this file.
 - **core:** Gate Windows registry path regression
 - **hooks:** Managed assets の hook audit テストから host rg 依存を除去する (#3398)
 
-
 ## [9.77.0] - 2026-08-11
 
 ### Bug Fixes
@@ -3017,7 +3010,6 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - **pm:** FR-111 PM 特権の pane メッセージ送達 pm.message.send を実装する (SPEC #3431 T-206)
-
 
 ## [9.76.0] - 2026-08-10
 
