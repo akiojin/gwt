@@ -2778,12 +2778,9 @@ export function createKnowledgeKanbanSurface({
               const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
               const agents = work?.agents || [];
               const windows = getWorkspaceWindows?.() || [];
-              const inlineIds = new Set(issuePreviewWindowsForIssue(windows, windowId, entry.number)
-                .map(target => target.id));
               for (const target of windows) {
                 if (!target.agent_id || target.preset === "pm" ||
                     !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
-                if (target.placement?.kind === "issue_preview" && !inlineIds.has(target.id)) continue;
                 const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
                 const belongs = Number.isFinite(linked)
                   ? linked === entry.number

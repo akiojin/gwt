@@ -42,8 +42,10 @@ export function createSplitSurfaces({
   });
 
   function focusPane(index) {
+    const changed = active !== index;
     active = index;
     for (const [i, pane] of panes.entries()) pane.dataset.active = String(i === active);
+    if (changed && selections.every(surface => surface === "agents")) sync();
     onChange(selections[active]);
   }
 
@@ -51,34 +53,45 @@ export function createSplitSurfaces({
     if (!opened) return;
     const windows = getWindows();
     const desired = new Map();
-    if (!selections.includes("agents")) onAgentsHost(null);
+    const assigned = new Map();
+    // Reserve each existing pane's live view before allocating a second view.
+    for (const [index, pane] of panes.entries()) {
+      const data = windows.find(data => data.preset === PRESETS[selections[index]] &&
+        getElement(data.id)?.parentElement === pane.querySelector(".split-pane__body"));
+      if (data) { assigned.set(index, data); desired.set(data.id, { element: getElement(data.id), index }); }
+    }
     for (const [index, pane] of panes.entries()) {
       const surface = selections[index];
       pane.dataset.surface = surface;
       for (const option of pane.querySelectorAll("option")) {
         option.selected = option.value === surface;
-        option.disabled = option.value === selections[1 - index];
-        option.textContent = `${SURFACES[option.value]}${option.disabled ? " (open in other pane)" : ""}`;
+        option.disabled = false;
+        option.textContent = SURFACES[option.value];
       }
       if (surface === "agents") {
         pane.querySelector(".split-pane__empty").hidden = true;
-        onAgentsHost(pane.querySelector(".split-pane__body"));
         continue;
       }
-      const selected = windows.filter((data) => data.preset === PRESETS[surface]).slice(0, 1);
+      const data = assigned.get(index) || windows.find(data => data.preset === PRESETS[surface] && !desired.has(data.id));
       const empty = pane.querySelector(".split-pane__empty");
-      empty.hidden = selected.length > 0;
+      empty.hidden = Boolean(data);
       empty.textContent = `Opening ${SURFACES[surface]}…`;
-      if (selected.length) requested.delete(surface);
-      else if (!requested.has(surface)) {
-        requested.add(surface);
+      const request = `${index}:${surface}`;
+      if (data) requested.delete(request);
+      else if (!requested.has(request)) {
+        requested.add(request);
         openSurface(surface);
       }
-      for (const data of selected) {
+      if (data) {
         const element = getElement(data.id);
         if (element) desired.set(data.id, { element, index });
       }
     }
+    const agentPanes = panes.filter((_, index) => selections[index] === "agents");
+    const livePane = selections[active] === "agents" ? panes[active] : agentPanes[0];
+    const previewPane = agentPanes.find(pane => pane !== livePane);
+    onAgentsHost(livePane?.querySelector(".split-pane__body") || null,
+      previewPane?.querySelector(".split-pane__body") || null);
     const changed = [];
     for (const [id, element] of mounted) {
       if (desired.has(id)) continue;
@@ -106,7 +119,7 @@ export function createSplitSurfaces({
   }
 
   function choose(surface, index = active) {
-    if (!opened || !SURFACES[surface] || selections[1 - index] === surface) return false;
+    if (!opened || !SURFACES[surface]) return false;
     selections[index] = surface;
     active = index;
     sync();
@@ -138,7 +151,7 @@ export function createSplitSurfaces({
     mounted.clear();
     requested.clear();
     opened = false;
-    onAgentsHost(null);
+    onAgentsHost(null, null);
     host.hidden = true;
     area.classList.remove("is-split");
     button.setAttribute("aria-pressed", "false");
@@ -154,7 +167,7 @@ export function createSplitSurfaces({
     activeSurface: () => opened ? selections[active] : null,
     containsWindow: (id) => mounted.has(id),
     focusSurface(surface) {
-      const index = selections.indexOf(surface);
+      const index = selections[active] === surface ? active : selections.indexOf(surface);
       if (opened && index >= 0) focusPane(index);
     },
     focusWindow(id) {

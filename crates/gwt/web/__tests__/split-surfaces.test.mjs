@@ -38,18 +38,22 @@ async function fixture() {
     return [data.id, element];
   }));
   const opened = [];
+  const agentHosts = [];
   const agents = document.createElement("section");
   const controller = createSplitSurfaces({
     document,
     stage,
-    onAgentsHost: (host) => { if (host) host.appendChild(agents); else agents.remove(); },
+    onAgentsHost: (host, previewHost) => {
+      agentHosts.push([host, previewHost]);
+      if (host) host.appendChild(agents); else agents.remove();
+    },
     getWindows: () => windows,
     getElement: (id) => elements.get(id),
     openSurface: (surface) => opened.push(surface),
     onChange: () => {},
     onLayout: () => {},
   });
-  return { controller, document, window, stage, windows, elements, opened, agents };
+  return { controller, document, window, stage, windows, elements, opened, agents, agentHosts };
 }
 
 test("two panes select independently, preserve live nodes and restore canvas geometry", async () => {
@@ -65,8 +69,9 @@ test("two panes select independently, preserve live nodes and restore canvas geo
   assert.equal(panes[1].dataset.surface, "settings");
   assert.equal(elements.get("board").parentElement, stage);
   assert.equal(controller.activeSurface(), "settings");
-  assert.equal(controller.select("issues", 1), false, "an occupied surface cannot steal the other pane");
-  assert.equal(panes[1].querySelector("option[value='issues']").disabled, true);
+  assert.equal(controller.select("issues", 1), true, "both panes may select the same surface");
+  assert.equal(elements.get("issues").closest(".split-pane"), panes[0], "the existing view stays in its pane");
+  assert.equal(panes[1].querySelector("option[value='issues']").disabled, false);
   controller.focusWindow("issues");
   assert.equal(panes[0].dataset.active, "true");
   controller.close();
@@ -76,6 +81,49 @@ test("two panes select independently, preserve live nodes and restore canvas geo
     assert.equal(element.style.left, "120px");
     assert.equal(element.style.width, "600px");
   }
+});
+
+test("same non-Agent surfaces use distinct live windows and request only the missing view", async () => {
+  for (const surface of ["issues", "board", "settings"]) {
+    const { controller, document, windows, elements, stage, opened } = await fixture();
+    controller.open(surface);
+    assert.equal(controller.select(surface, 1), true);
+    controller.sync();
+    assert.deepEqual(opened, [surface]);
+    const second = { id: `${surface}-second`, preset: surface === "issues" ? "issue" : surface };
+    const element = document.createElement("div");
+    stage.appendChild(element);
+    elements.set(second.id, element);
+    windows.push(second);
+    controller.sync();
+    const panes = document.querySelectorAll(".split-pane");
+    assert.equal(elements.get(surface).closest(".split-pane"), panes[0]);
+    assert.equal(element.closest(".split-pane"), panes[1]);
+    controller.close();
+    assert.equal(element.parentElement, stage);
+    assert.equal(elements.get(surface).parentElement, stage);
+  }
+});
+
+test("same Agents surface keeps the active live host and a preview in the other pane", async () => {
+  const { controller, document, window, agents, agentHosts } = await fixture();
+  controller.open("agents");
+  assert.equal(controller.select("agents", 1), true);
+  const panes = document.querySelectorAll(".split-pane");
+  assert.equal(agents.closest(".split-pane"), panes[1]);
+  assert.equal(agentHosts.at(-1)[1].closest(".split-pane"), panes[0]);
+  panes[0].querySelector("select").dispatchEvent(new window.Event("focusin", { bubbles: true }));
+  assert.equal(agents.closest(".split-pane"), panes[0]);
+  controller.sync();
+  assert.equal(agents.closest(".split-pane"), panes[0], "metadata sync preserves active ownership");
+  controller.focusSurface("agents");
+  assert.equal(agents.closest(".split-pane"), panes[0]);
+  controller.select("board", 0);
+  assert.equal(agents.closest(".split-pane"), panes[1]);
+  assert.equal(agentHosts.at(-1)[1], null);
+  controller.close();
+  assert.equal(agentHosts.at(-1)[0], null);
+  assert.equal(agentHosts.at(-1)[1], null);
 });
 
 test("Agents hosts its dedicated grid and releases it when switching surfaces", async () => {
@@ -95,6 +143,8 @@ test("a missing surface requests the existing launcher once and mounts the arriv
   controller.select("settings", 1);
   controller.sync();
   controller.sync();
+  controller.select("board", 1);
+  controller.select("settings", 1);
   assert.deepEqual(opened, ["settings"]);
   windows.push({ id: "settings", preset: "settings" });
   controller.sync();
