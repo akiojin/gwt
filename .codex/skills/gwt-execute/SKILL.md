@@ -264,14 +264,27 @@ For canonical evidence use `verify.plan` then `verify.run`. Manual
 `verify.lease.acquire`, `verify.lease.hold`, and `verify.lease.extend` are
 retired and return an error without acquiring or reserving a lease.
 `verify.run` manages admission and waits up to `params.max_wait_secs`
-(default 300, hard cap 1500) for each Heavy command. A deferred result from the
-first command's admission timeout writes no verification record; a timeout after
-at least one command ran writes an incomplete, non-PASS deferred record that
-retains the completed commands' results; a retry reruns the entire matrix (no
-partial resume). Inspect the holder with `verify.lease.status` and retry when
+(default 300, hard cap 1500) for each Heavy command. A timeout in the
+first remaining command's admission writes no replacement record and preserves
+any predecessor; a later timeout retains incomplete, non-PASS results.
+Inspect the holder with `verify.lease.status` and retry when
 the contention is resolved. There is no manual acquire loop or
 fixed retry schedule. `verify.lease.release` remains available to drain a
 legacy holder.
+
+Retry with the identical full requested matrix, never a caller-built subset.
+Automatic resume requires valid admission-deferred evidence and exact matches
+for owner, session, execution authority digest, verification plan content hash,
+source fingerprint, requested commands (including order and duplicates), and
+headed_e2e_commands. Every preceding result must have raw PASS and no termination signal.
+Failed, killed, crashed, unreadable or mismatched records start a fresh run;
+registered plan/context mismatches still require `verify.plan`.
+Resume references the immutable predecessor by record id/content hash, keeps
+the original start timestamp (`started_at`), and copies measured per-command
+headed/nextest/admission evidence. Run outstanding Light commands first,
+preserve Heavy commands' original relative order, and keep artifact restoration last.
+The full registered matrix and required headed Chromium evidence in dark/light
+must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
 
 ## Legacy aliases
 
