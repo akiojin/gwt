@@ -2961,6 +2961,13 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
     {
         return None;
     }
+    gwtd_artifact_restore_command(worktree)
+}
+
+fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
+    if cfg!(windows) {
+        return None;
+    }
     let manifest =
         |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
     let workspace = manifest(&worktree.join("Cargo.toml"))?;
@@ -2984,6 +2991,25 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
         return None;
     }
     Some("cargo build -p gwt --bin gwtd")
+}
+
+/// Keep recovery (including failures) in the deferred admission diagnostic,
+/// without presenting unexecuted commands as passing verification evidence.
+fn restore_gwtd_after_deferral(worktree: &Path, host: &VerificationHost) -> String {
+    let Some(command) = gwtd_artifact_restore_command(worktree) else {
+        return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
+    };
+    // Restore this checkout's operational path, even when Cargo's environment
+    // or user configuration points ordinary builds at another target directory.
+    let command = format!("{command} --target-dir target");
+    match execute_command_with_isolation(worktree, &command, true, None, host, None) {
+        Ok((0, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
+        Ok((code, _, output)) => format!(
+            "gwtd artifact restoration: failed (`{command}`, exit {code}); \
+             restore from the checkout root before GitHub operations: {output}"
+        ),
+        Err(error) => format!("gwtd artifact restoration: failed (`{command}`): {error}"),
+    }
 }
 
 /// Assemble once for both local and daemon launches (Issue #4830).
@@ -3484,7 +3510,10 @@ struct RunOptions<'a> {
     admit_command: Option<&'a mut AdmitCommand<'a>>,
 }
 
-type AdmitCommand<'a> = dyn FnMut(&str) -> Result<Option<crate::cli::verification_lease::admission::Admission>, String>
+type AdmitCommand<'a> = dyn FnMut(
+        &str,
+        &VerificationHost,
+    ) -> Result<Option<crate::cli::verification_lease::admission::Admission>, String>
     + 'a;
 
 fn run_verification_for_caller(
@@ -3615,7 +3644,7 @@ where
     // follows the normal wait/deferred path. Never wait under the write lease.
     // A first-command timeout still writes no record.
     let mut first_admission = match (commands.get(preview_first), options.admit_command.as_mut()) {
-        (Some(command), Some(admit)) => admit(command)?,
+        (Some(command), Some(admit)) => admit(command, &options.host)?,
         _ => None,
     };
     if let Some(admission) = &first_admission {
@@ -3733,7 +3762,7 @@ where
         // and obtain the first fresh command's own admission.
         drop(first_admission.take());
         first_admission = match (execution_indices.first(), options.admit_command.as_mut()) {
-            (Some(index), Some(admit)) => admit(&commands[*index])?,
+            (Some(index), Some(admit)) => admit(&commands[*index], &options.host)?,
             _ => None,
         };
     }
@@ -3846,7 +3875,7 @@ where
         let admission = if position == 0 {
             first_admission.take()
         } else if let Some(admit) = options.admit_command.as_mut() {
-            match admit(command) {
+            match admit(command, &options.host) {
                 Ok(admission) => admission,
                 Err(error) => {
                     if error.contains("verify: deferred") {
@@ -5507,15 +5536,20 @@ pub(super) fn run<E: CliEnv>(
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
             out.push_str(&host_note);
-            let mut admit_command = |command: &str| {
+            let mut admit_command = |command: &str, host: &VerificationHost| {
                 if crate::cli::verification_lease::classify_command(command)
                     == crate::cli::verification_lease::CommandWeight::Light
                 {
                     Ok(None)
                 } else {
-                    crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)
-                        .map(Some)
-                        .map_err(|error| error.to_string())
+                    crate::cli::verification_lease::admission::admit(
+                        env,
+                        &worktree,
+                        max_wait,
+                        || restore_gwtd_after_deferral(&worktree, host),
+                    )
+                    .map(Some)
+                    .map_err(|error| error.to_string())
                 }
             };
             let run = run_verification_for_caller(
@@ -6462,6 +6496,17 @@ mod tests {
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
+        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit);
+        assert!(
+            recovery.contains("gwtd artifact restoration: failed"),
+            "{recovery}"
+        );
+        assert!(
+            recovery.contains("cargo build -p gwt --bin gwtd"),
+            "{recovery}"
+        );
+        assert!(recovery.contains("gwtd.rs"), "{recovery}");
+        assert_eq!(load(dir.path()).unwrap().unwrap(), persisted);
     }
 
     // Re-entered in child processes so this regression also runs on Windows.
@@ -8499,7 +8544,7 @@ mod tests {
             &authority,
         )
         .unwrap();
-        let mut admit = |command: &str| {
+        let mut admit = |command: &str, _: &VerificationHost| {
             if command == commands[1] {
                 Err("verify: deferred — admission timeout".to_string())
             } else {
@@ -8525,7 +8570,7 @@ mod tests {
             EvidenceStatus::Deferred
         );
         let mut admitted = Vec::new();
-        let mut admit = |command: &str| {
+        let mut admit = |command: &str, _: &VerificationHost| {
             admitted.push(command.to_string());
             Ok(None)
         };
