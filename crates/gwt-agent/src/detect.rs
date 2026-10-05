@@ -481,8 +481,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn detect_by_command_bounds_a_hanging_version_probe() {
-        use std::os::unix::fs::PermissionsExt;
-
         // Issue #4884: the fixture's sleep is what the assertion below reads as
         // "the bound never engaged", so it is named rather than repeated.
         const HANG_SECONDS: u64 = 30;
@@ -490,13 +488,14 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let executable = temp.path().join("agy");
-        std::fs::write(&executable, format!("#!/bin/sh\nsleep {HANG_SECONDS}\n"))
-            .expect("write hanging fixture");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("chmod fixture");
+        // Issue #5032: do not let sibling forks inherit a writable script FD.
+        // `sleep` must resolve independently of the fixture-only PATH; exec
+        // also lets the probe reap the sleeper without leaving a descendant.
+        gwt_core::test_support::write_executable_script(
+            &executable,
+            &format!("#!/bin/sh\nexec /bin/sleep {HANG_SECONDS}\n"),
+        )
+        .expect("write hanging fixture");
 
         // The fixture PATH is injected into the probe only; the process PATH
         // stays untouched so parallel `sh` / `git` spawns keep resolving
@@ -510,6 +509,12 @@ mod tests {
         assert_eq!(detected.agent_id, AgentId::Antigravity);
         assert_eq!(detected.path, executable);
         assert_eq!(detected.version, None);
+        // A fixture that exits early must not pass as a bounded hanging probe.
+        assert!(
+            elapsed >= VERSION_PROBE_TIMEOUT,
+            "the hanging fixture must reach the probe deadline: \
+             took {elapsed:?}, bound is {VERSION_PROBE_TIMEOUT:?}"
+        );
         // Issue #4884: assert the property, not the latency. What this test is
         // for is that detection stops waiting on a probe that never returns —
         // the bound engaged. `VERSION_PROBE_TIMEOUT + 3s` stood here, which
