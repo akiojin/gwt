@@ -1089,8 +1089,8 @@ pub(super) fn agent_install_update_command(
 }
 
 /// Derive setup from distribution and detection state (SPEC-3864 FR-006).
-/// Claude and Codex additionally expose pre-install/update commands because
-/// their default Host launch prefers the installed CLI (Issue #3894).
+/// Claude and Codex expose pre-install/update commands for their installed-only
+/// Host launch (SPEC-1921).
 pub fn agent_setup_affordance(
     descriptor: &gwt_agent::BuiltinAgentDescriptor,
     available: bool,
@@ -1106,7 +1106,7 @@ pub fn agent_setup_affordance(
         return Some(AgentSetupAffordance {
             kind: if available { AgentSetupKind::Update } else { AgentSetupKind::Install },
             title: format!("{verb} {name} before launch"),
-            detail: format!("Run `{command}` in a host shell pane. Restart gwt afterward to refresh the detected version. Installed launches prefer PATH and use a package runner only if the installed CLI cannot launch."),
+            detail: format!("Run `{command}` in a host shell pane. Restart gwt afterward to refresh the detected version. Launch uses the detected CLI directly and reports an error if it cannot launch."),
             action_label: Some(format!("{verb} {name}")),
         });
     }
@@ -1575,13 +1575,20 @@ mod tests {
     }
 
     #[test]
-    fn installed_preference_agents_offer_install_and_update() {
+    fn installed_agents_offer_install_and_update_without_package_fallback() {
         for command in ["claude", "codex"] {
             let descriptor = gwt_agent::builtin_agent_descriptor_for_command(command).unwrap();
             let install = agent_setup_affordance(descriptor, false, false).expect("install");
             assert_eq!(install.kind.wire_value(), "install");
             let update = agent_setup_affordance(descriptor, true, false).expect("update");
             assert_eq!(update.kind.wire_value(), "update");
+            for affordance in [install, update] {
+                assert!(
+                    !affordance.detail.contains("package runner"),
+                    "installed-only guidance must not promise package fallback: {}",
+                    affordance.detail
+                );
+            }
         }
     }
 

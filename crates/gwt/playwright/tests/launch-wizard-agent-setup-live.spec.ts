@@ -81,6 +81,8 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
       const setup = wizard.locator(`.launch-agent-setup[data-agent-id="${agentId}"]`);
       await expect(setup).toBeVisible();
       await expect(setup).toHaveAttribute("data-setup-kind", "update");
+      await expect(setup).toContainText("Launch uses the detected CLI directly");
+      await expect(setup).not.toContainText("package runner");
       await expect(setup.getByRole("button", { name: `Update ${displayName}`, exact: true })).toBeVisible();
       await page.evaluate(() => new Promise(requestAnimationFrame));
       await setup.scrollIntoViewIfNeeded();
