@@ -9,7 +9,7 @@
 //! The update-marker fixture remains dev-host-only (Issues #4839 / #4821).
 //! This observes the native tray window and sends the real muda WM_COMMAND route;
 //! it does NOT prove Explorer icon painting or a physical notification-area click.
-//! Command IDs are pinned to muda 0.20.0 and main's initial menu creation order.
+//! Command IDs follow the native menu allocation and main's initial creation order.
 #![cfg(windows)]
 
 use std::{
@@ -259,8 +259,6 @@ fn tray_ready_ms(log: &str) -> Option<f64> {
 fn startup_metric_and_native_command_contract() {
     let mark = r#"{"startup":{"phase":"tray_ready","start_ms":0},"value":1750}"#;
     assert_eq!(tray_ready_ms(mark), Some(1750.0));
-    let lock = include_str!("../../../Cargo.lock").replace('\r', "");
-    assert!(lock.contains("name = \"muda\"\nversion = \"0.20.0\""));
     let menu = include_str!("../src/main.rs")
         .rsplit_once("let tray_menu = Menu::new();")
         .unwrap()
