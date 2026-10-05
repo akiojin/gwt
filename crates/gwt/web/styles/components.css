@@ -7040,7 +7040,7 @@ button.workspace-board-ref:focus-visible {
 }
 .agents-surface[hidden],
 .canvas-area.is-agents > :not(.agents-surface) { display: none !important; }
-.agents-toolbar, .agent-tile__header, .agent-tile__input {
+.agents-toolbar, .agent-tile__header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -7050,7 +7050,7 @@ button.workspace-board-ref:focus-visible {
 .agents-toolbar h2, .agent-tile h3 { margin: 0; font: inherit; }
 .agents-toolbar label { display: flex; align-items: center; gap: var(--space-2); }
 .agents-toolbar input { width: 4em; }
-.agents-toolbar input, .agent-tile__input textarea {
+.agents-toolbar input {
   color: var(--color-text);
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-border-strong);
@@ -7058,7 +7058,7 @@ button.workspace-board-ref:focus-visible {
   padding: var(--space-1);
   font: inherit;
 }
-.agents-toolbar input:focus-visible, .agent-tile__input textarea:focus-visible {
+.agents-toolbar input:focus-visible, .agents-tabs button:focus-visible {
   outline: 2px solid var(--color-focus-ring);
 }
 .agents-grid {
@@ -7070,6 +7070,33 @@ button.workspace-board-ref:focus-visible {
   overflow: auto;
   min-height: 0;
 }
+.agents-tabs {
+  display: flex;
+  flex-shrink: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--color-border);
+}
+.agents-tabs button {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.agents-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--color-state-active);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+.agents-grid.is-single { flex: 1; grid-auto-rows: minmax(0, 1fr); }
+/* Stack tab panels so new background terminals can measure their initial grid
+   without painting or accepting input before their tab is selected. */
+.agents-grid.is-single > .agent-tile { grid-area: 1 / 1; }
+.agent-tile[hidden] { display: flex; visibility: hidden; }
+.agents-toolbar label[hidden] { display: none; }
 .agent-tile {
   min-width: 0;
   min-height: 0;
@@ -7084,9 +7111,6 @@ button.workspace-board-ref:focus-visible {
 .issue-preview-mode { grid-column: 1 / -1; }
 .agent-tile__header span, .issue-preview-mode { color: var(--color-text-muted); font-size: var(--type-xs); }
 .agent-tile .agent-tile__terminal { position: relative; inset: auto; flex: 1; min-height: 0; overflow: hidden; background: var(--color-surface); color: var(--color-text); }
-.agent-tile__input { flex-wrap: wrap; border-top: 1px solid var(--color-border); }
-.agent-tile__input textarea { flex: 1; width: 0; min-width: 0; resize: none; }
-.agent-tile__input [role="status"] { width: 100%; font-size: var(--type-xs); }
 .agents-empty { padding: var(--space-3); color: var(--color-text-muted); }
 
 /* Keep persistence diagnostics in the shell layout, above every workspace surface. */

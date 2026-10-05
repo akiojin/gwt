@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -2580,7 +2580,10 @@ fn strict_semver_probe_evidence(outcome: &HostRunnerProbeOutcome) -> Option<Stri
         .next()
 }
 
-fn runner_probe_environment(env_vars: &HashMap<String, String>) -> HashMap<String, String> {
+fn runner_probe_environment(
+    env_vars: &HashMap<String, String>,
+    remove_env: &[String],
+) -> HashMap<String, String> {
     const ALLOWLIST: &[&str] = &[
         "PATH",
         "PATHEXT",
@@ -2596,16 +2599,26 @@ fn runner_probe_environment(env_vars: &HashMap<String, String>) -> HashMap<Strin
         "TMPDIR",
         "TERM",
     ];
-    ALLOWLIST
+    let mut environment = ALLOWLIST
         .iter()
         .filter_map(|key| {
-            env_vars
-                .get(*key)
-                .cloned()
-                .or_else(|| std::env::var(key).ok())
+            std::env::var(key)
+                .ok()
                 .map(|value| ((*key).to_string(), value))
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    environment.retain(|key, _| {
+        !remove_env
+            .iter()
+            .any(|removed| removed.eq_ignore_ascii_case(key))
+    });
+    // Match launch selection and PTY spawn: explicit values override removals.
+    for key in ALLOWLIST {
+        if let Some(value) = env_vars.get(*key) {
+            environment.insert((*key).to_string(), value.clone());
+        }
+    }
+    environment
 }
 
 fn redact_runner_probe_text_with_values(
@@ -2759,17 +2772,10 @@ fn probe_host_runner_bounded_with_hub(
         "process start",
     );
 
-    let remove_env = remove_env
-        .iter()
-        .map(|key| key.to_ascii_uppercase())
-        .collect::<HashSet<_>>();
     let mut request = gwt_core::process::ProcessPlanRequest::new(command)
         .args(&args)
         .inherit_env(false);
-    for (key, value) in runner_probe_environment(env_vars) {
-        if remove_env.contains(&key.to_ascii_uppercase()) {
-            continue;
-        }
+    for (key, value) in runner_probe_environment(env_vars, remove_env) {
         request = request.env(key, value);
     }
     if let Some(cwd) = cwd {

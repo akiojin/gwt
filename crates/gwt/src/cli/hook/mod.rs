@@ -580,7 +580,10 @@ pub fn run_daemon_hook<E: CliEnv>(
                         return Ok(2);
                     }
                 },
-                None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+                // The operator supplied a project, not a provider version.
+                // Verify both files just as launch does; otherwise a linked
+                // worktree's local hooks can remain unregistered after success.
+                None => gwt_skills::CodexHookDiscoveryMode::Both,
             };
             // #3967: compare against the binary managed hook generation embeds,
             // resolved the same way materialization resolves it. Guessing here
@@ -736,6 +739,55 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     args.windows(2)
         .find(|pair| pair[0] == flag)
         .map(|pair| pair[1].as_str())
+}
+
+pub(super) fn append_codex_trust_health_for_doctor(
+    input: &health::ManagedHookHealthInput,
+    health: &mut health::ManagedHookHealth,
+) {
+    if health.status == health::ManagedHookHealthStatus::Inactive {
+        return;
+    }
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(&input.worktree_root);
+    let root = runtime.as_deref().unwrap_or(&input.worktree_root);
+    if !crate::managed_assets::managed_codex_hook_paths(root)
+        .iter()
+        .any(|path| path.exists())
+    {
+        return;
+    }
+    let Some(config_path) = default_codex_config_path() else {
+        health
+            .issues
+            .push("Codex hook trust config path is unavailable".to_string());
+        if health.status != health::ManagedHookHealthStatus::Degraded {
+            health.status = health::ManagedHookHealthStatus::NeedsAttention;
+        }
+        return;
+    };
+    let expected = input
+        .expected_hook_bin
+        .clone()
+        .or_else(|| crate::managed_assets::managed_hook_bin().ok());
+    let issue = match gwt_skills::inspect_codex_managed_hook_trust_for_mode_with_expected_bin(
+        root,
+        &config_path,
+        crate::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+        expected.as_deref(),
+    ) {
+        Ok(report) => report.hooks_need_review_reason(),
+        Err(error) => Some(format!(
+            "Codex hook trust inspection failed for {} (config {}): {error}",
+            root.display(),
+            config_path.display()
+        )),
+    };
+    if let Some(issue) = issue {
+        health.issues.push(issue);
+        if health.status != health::ManagedHookHealthStatus::Degraded {
+            health.status = health::ManagedHookHealthStatus::NeedsAttention;
+        }
+    }
 }
 
 fn default_codex_config_path() -> Option<std::path::PathBuf> {

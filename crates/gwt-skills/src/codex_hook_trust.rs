@@ -21,8 +21,8 @@ use crate::settings_local::{
 const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
 /// Distinctive substrings that mark a command as a dispatch into gwt's own hook
 /// transports. Recognising the transport says only "gwt owns this hook", never
-/// "this hook is safe" — trust still requires an exact match against a command
-/// gwt emits.
+/// "this hook is safe" — new trust still requires an exact match against a
+/// command gwt emits; an existing Codex review applies only to its exact hash.
 const GWT_HOOK_TRANSPORT_MARKERS: &[&str] = &[" hook event ", " hook gwt-self-improvement-stop"];
 /// How long a mutation waits for another writer to finish before giving up.
 /// Sized for a burst of concurrent launches against a large shared config, not
@@ -37,6 +37,16 @@ const MANAGED_EVENTS: &[(&str, &str)] = &[
     ("PostToolUse", "post_tool_use"),
     ("Stop", "stop"),
 ];
+const CODEX_HOOK_TRUST_RECOVERY: &str = "Recovery: run `hook.doctor` with `repair:true` to regenerate managed hooks, then `hook.register_codex_managed_hook_trust`";
+
+fn codex_hook_trust_recovery(config_path: &Path) -> String {
+    let params = json!({
+        "project_root": "<affected project_root>",
+        "codex_config": config_path,
+        "codex_hook_discovery": "both"
+    });
+    format!("{CODEX_HOOK_TRUST_RECOVERY} with `{params}` to register and verify all discovered hook files")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHookTrustEntry {
@@ -51,15 +61,16 @@ pub struct CodexHookTrustEntry {
 pub struct CodexHookTrustExpectation {
     /// The hooks file in the same form the trust keys use.
     pub hooks_path: PathBuf,
-    /// The fallback binary the generator was allowed to write into this file:
-    /// [`crate::CANONICAL_HOOK_BIN`] for a git-tracked config, the absolute
-    /// install path otherwise (#3567).
+    /// The resolved fallback accepted alongside the exact portable generated
+    /// command. Foreign checkout build outputs retain the generator's path
+    /// ownership restriction (#3567).
     pub expected_gwt_bin: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHookTrustReport {
     pub config_path: PathBuf,
+    /// Current hook identities whose exact hash was observed in the config.
     pub trusted_entries: Vec<CodexHookTrustEntry>,
     /// Issue #3967 AC-4: gwt hooks the pre-registration could not vouch for,
     /// as `<hooks.json>:<event>:<group>:<handler>`. Each one is a Codex
@@ -74,11 +85,10 @@ pub struct CodexHookTrustReport {
     /// binary alone did not say what the file actually held, so diagnosing a
     /// recurrence meant reading the machine's `.codex/hooks.json` by hand.
     pub untrusted_gwt_hook_commands: Vec<String>,
-    /// Issue #4071 AC-2: whether `config_path` was written. False when no gwt
-    /// hook could be vouched for — gwt 9.91.0 then left the config untouched
-    /// and the failure read as if registration had never run.
+    /// Whether registration wrote and read back `config_path`. Read-only
+    /// inspections and registrations with nothing to trust leave this false.
     pub wrote_trust_state: bool,
-    /// Per-key identity expected by Codex and the hash retained in config.
+    /// Per-key failure reason, expected/actual command and Codex identity hash.
     pub hash_diagnostics: Vec<String>,
 }
 
@@ -99,16 +109,19 @@ impl CodexHookTrustReport {
         );
         if self.wrote_trust_state {
             reason.push_str(&format!(
-                "gwt wrote {} trusted entries to {}; the listed hooks were skipped because their command does not match what gwt generates (command mismatch; expected and stored trusted_hash values are listed below). ",
-                self.trusted_entries.len(),
+                "gwt wrote the config to {}; ",
                 self.config_path.display()
             ));
         } else {
             reason.push_str(&format!(
-                "gwt wrote no trust entry to {}: none of the gwt hooks matched what gwt generates, so registration was skipped. ",
+                "gwt wrote no trust entry to {}; ",
                 self.config_path.display()
             ));
         }
+        reason.push_str(&format!(
+            "verified {} current trusted identities; the remaining per-hook trust problems are listed below. ",
+            self.trusted_entries.len()
+        ));
         let expectations = self
             .expectations
             .iter()
@@ -133,6 +146,10 @@ impl CodexHookTrustReport {
         for diagnostic in &self.hash_diagnostics {
             reason.push_str(&format!(" {diagnostic}."));
         }
+        reason.push_str(&format!(
+            " {}.",
+            codex_hook_trust_recovery(&self.config_path)
+        ));
         Some(reason)
     }
 }
@@ -176,18 +193,30 @@ fn collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
     mode: CodexHookDiscoveryMode,
     expected_gwt_bin: Option<&str>,
 ) -> io::Result<Vec<CodexHookTrustEntry>> {
-    Ok(scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?.trusted)
+    Ok(
+        scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?
+            .hooks
+            .into_iter()
+            .filter(|hook| hook.generated)
+            .map(|hook| hook.entry)
+            .collect(),
+    )
 }
 
 /// Everything one scan of the discovered `.codex/hooks.json` files learned:
 /// the hooks gwt can vouch for, and the gwt hooks it could not.
 #[derive(Debug, Default)]
 struct CodexHookTrustScan {
-    untrusted_hashes: Vec<CodexHookTrustEntry>,
-    trusted: Vec<CodexHookTrustEntry>,
-    untrusted_gwt_hooks: Vec<String>,
-    untrusted_gwt_hook_commands: Vec<String>,
+    hooks: Vec<ScannedCodexHook>,
     expectations: Vec<CodexHookTrustExpectation>,
+}
+
+#[derive(Debug)]
+struct ScannedCodexHook {
+    entry: CodexHookTrustEntry,
+    actual_command: String,
+    expected_command: String,
+    generated: bool,
 }
 
 fn scan_codex_hook_trust_for_mode(
@@ -198,12 +227,7 @@ fn scan_codex_hook_trust_for_mode(
     let mut scan = CodexHookTrustScan::default();
     for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
         let path_scan = scan_codex_hook_trust_from_path(&hooks_path, expected_gwt_bin)?;
-        scan.trusted.extend(path_scan.trusted);
-        scan.untrusted_hashes.extend(path_scan.untrusted_hashes);
-        scan.untrusted_gwt_hooks
-            .extend(path_scan.untrusted_gwt_hooks);
-        scan.untrusted_gwt_hook_commands
-            .extend(path_scan.untrusted_gwt_hook_commands);
+        scan.hooks.extend(path_scan.hooks);
         scan.expectations.extend(path_scan.expectations);
     }
     Ok(scan)
@@ -222,16 +246,19 @@ fn scan_codex_hook_trust_from_path(
         return Ok(CodexHookTrustScan::default());
     }
 
-    // #3567: what the generator was allowed to write into THIS file is not
-    // always the binary the caller resolved — a git-tracked config keeps the
-    // canonical portable fallback, and a foreign checkout's build output is
-    // never pinned here. Trust has to expect the same value, or gwt vouches for
-    // nothing and Codex stops the launch on `Hooks need review`.
-    let sanitized_expected_gwt_bin = expected_gwt_bin.map_or_else(
-        || crate::settings_local::managed_hook_bin_for_config_path(hooks_path),
-        |bin| crate::settings_local::sanitize_hook_bin_for_config_path(hooks_path, bin),
-    );
-    let expected_gwt_bin = Some(sanitized_expected_gwt_bin.as_str());
+    // Keep the resolved install as a recognized exact fallback even when a
+    // tracked config now generates the portable form. A foreign checkout's
+    // build output still follows the generator's ownership restriction (#3567).
+    let resolved_gwt_bin =
+        expected_gwt_bin.map_or_else(crate::settings_local::gwt_hook_bin_path, str::to_string);
+    let sanitized_expected_gwt_bin =
+        crate::settings_local::sanitize_hook_bin_for_config_path(hooks_path, &resolved_gwt_bin);
+    let expected_gwt_bin =
+        if crate::settings_local::build_output_owner_root(Path::new(&resolved_gwt_bin)).is_some() {
+            sanitized_expected_gwt_bin.as_str()
+        } else {
+            resolved_gwt_bin.as_str()
+        };
 
     // Issue #4071: Codex derives this key from the hooks path it discovered,
     // normalized but never canonicalized — on Windows that is the plain
@@ -254,7 +281,7 @@ fn scan_codex_hook_trust_from_path(
     let mut scan = CodexHookTrustScan {
         expectations: vec![CodexHookTrustExpectation {
             hooks_path: key_source.clone(),
-            expected_gwt_bin: sanitized_expected_gwt_bin.clone(),
+            expected_gwt_bin: expected_gwt_bin.to_string(),
         }],
         ..CodexHookTrustScan::default()
     };
@@ -287,25 +314,36 @@ fn scan_codex_hook_trust_from_path(
                     continue;
                 }
                 let key = hook_key(&key_source, event_snake_name, group_index, handler_index);
-                if matcher == "*"
+                let generated = matcher == "*"
                     && is_trusted_gwt_hook_command(
                         command,
                         event_json_name,
                         event_snake_name,
-                        expected_gwt_bin,
-                    )
-                {
-                    scan.trusted.push(CodexHookTrustEntry {
-                        key,
-                        trusted_hash: command_hook_identity_hash(event_snake_name, matcher, hook)?,
+                        Some(expected_gwt_bin),
+                    );
+                if generated || is_gwt_hook_transport_command(command) {
+                    let expected_command = if generated {
+                        command.to_string()
+                    } else {
+                        let commands = expected_generated_gwt_event_commands(
+                            event_json_name,
+                            Some(expected_gwt_bin),
+                        );
+                        commands[usize::from(command.starts_with("powershell "))].clone()
+                    };
+                    scan.hooks.push(ScannedCodexHook {
+                        entry: CodexHookTrustEntry {
+                            key,
+                            trusted_hash: command_hook_identity_hash(
+                                event_snake_name,
+                                matcher,
+                                hook,
+                            )?,
+                        },
+                        actual_command: command.to_string(),
+                        expected_command,
+                        generated,
                     });
-                } else if is_gwt_hook_transport_command(command) {
-                    scan.untrusted_hashes.push(CodexHookTrustEntry {
-                        key: key.clone(),
-                        trusted_hash: command_hook_identity_hash(event_snake_name, matcher, hook)?,
-                    });
-                    scan.untrusted_gwt_hooks.push(key);
-                    scan.untrusted_gwt_hook_commands.push(command.to_string());
                 }
             }
         }
@@ -371,6 +409,22 @@ pub fn register_codex_managed_hook_trust_for_mode(
     register_codex_managed_hook_trust_for_mode_with_expected_bin(worktree, config_path, mode, None)
 }
 
+/// Inspect the exact trust state Codex would read, without registering hooks.
+pub fn inspect_codex_managed_hook_trust_for_mode_with_expected_bin(
+    worktree: &Path,
+    config_path: &Path,
+    mode: CodexHookDiscoveryMode,
+    expected_gwt_bin: Option<&str>,
+) -> io::Result<CodexHookTrustReport> {
+    let scan = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
+    Ok(hook_trust_report(
+        scan,
+        config_path,
+        &read_codex_config(config_path)?,
+        false,
+    ))
+}
+
 /// Register trust for the hooks materialization just generated, told exactly
 /// which fallback binary it wrote.
 ///
@@ -390,39 +444,51 @@ pub fn register_codex_managed_hook_trust_for_mode_with_expected_bin(
     mode: CodexHookDiscoveryMode,
     expected_gwt_bin: Option<&str>,
 ) -> io::Result<CodexHookTrustReport> {
-    let CodexHookTrustScan {
-        untrusted_hashes,
-        trusted: trusted_entries,
-        untrusted_gwt_hooks,
-        untrusted_gwt_hook_commands,
-        expectations,
-    } = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
-    if trusted_entries.is_empty() {
-        return Ok(CodexHookTrustReport {
-            config_path: config_path.to_path_buf(),
-            trusted_entries,
-            untrusted_gwt_hooks,
-            untrusted_gwt_hook_commands,
-            expectations,
-            wrote_trust_state: false,
-            hash_diagnostics: hook_hash_diagnostics(
-                &read_codex_config(config_path)?,
-                &untrusted_hashes,
-            ),
-        });
-    }
+    register_codex_managed_hook_trust_with_writer(
+        worktree,
+        config_path,
+        mode,
+        expected_gwt_bin,
+        write_text_atomically,
+    )
+}
+
+fn register_codex_managed_hook_trust_with_writer(
+    worktree: &Path,
+    config_path: &Path,
+    mode: CodexHookDiscoveryMode,
+    expected_gwt_bin: Option<&str>,
+    write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
+) -> io::Result<CodexHookTrustReport> {
+    let scan = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
 
     // Issue #4071: read, mutate and publish as one critical section. A
     // concurrent launch that reads between our read and our write would
     // otherwise write back a copy without our entries.
-    let hash_diagnostics = with_codex_config_lock(config_path, || {
+    with_codex_config_lock(config_path, || {
         let mut root = read_codex_config(config_path)?;
+        // Codex's existing review is authority for this exact handler identity.
+        // Do not make a new trust decision for an unrecognized command.
+        let trusted_entries: Vec<_> = scan
+            .hooks
+            .iter()
+            .filter(|hook| {
+                hook.generated
+                    || stored_hook_hash(&root, &hook.entry.key)
+                        == Some(hook.entry.trusted_hash.as_str())
+            })
+            .map(|hook| hook.entry.clone())
+            .collect();
+        if trusted_entries.is_empty() {
+            return Ok(hook_trust_report(scan, config_path, &root, false));
+        }
         let root_table = root.as_table_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Codex config root must be a TOML table",
             )
         })?;
+        collect_missing_codex_managed_hook_state(root_table, expected_gwt_bin)?;
         let hooks_table = ensure_child_table(root_table, "hooks")?;
         let state_table = ensure_child_table(hooks_table, "state")?;
 
@@ -438,32 +504,205 @@ pub fn register_codex_managed_hook_trust_for_mode_with_expected_bin(
         let rendered = toml::to_string_pretty(&root).map_err(|err| {
             io::Error::other(format!("Codex config TOML serialize failed: {err}"))
         })?;
-        write_text_atomically(config_path, &rendered)?;
-        Ok(hook_hash_diagnostics(&root, &untrusted_hashes))
-    })?;
-
-    Ok(CodexHookTrustReport {
-        config_path: config_path.to_path_buf(),
-        trusted_entries,
-        untrusted_gwt_hooks,
-        untrusted_gwt_hook_commands,
-        expectations,
-        wrote_trust_state: true,
-        hash_diagnostics,
+        write_config(config_path, &rendered)?;
+        // The shared lock prevents gwt writers from losing each other's rows.
+        // A successful writer alone still does not prove what Codex will read.
+        let recovery = codex_hook_trust_recovery(config_path);
+        let persisted = read_codex_config(config_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "Codex hook trust write verification failed for {}: {error}. {recovery}",
+                    config_path.display()
+                ),
+            )
+        })?;
+        let missing: Vec<_> = trusted_entries
+            .iter()
+            .filter(|entry| {
+                stored_hook_hash(&persisted, &entry.key) != Some(entry.trusted_hash.as_str())
+            })
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "Codex hook trust write verification failed for {}: {}. {recovery}",
+                config_path.display(),
+                hook_hash_diagnostics(&persisted, &missing).join("; ")
+            )));
+        }
+        let current_scan = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
+        Ok(hook_trust_report(
+            current_scan,
+            config_path,
+            &persisted,
+            true,
+        ))
     })
+}
+
+/// Reclaim trust for missing generated hooks without registering any new trust.
+/// Unknown fingerprints and existing files are retained. The missing-file check
+/// and publication share the same config lock as concurrent launch registration.
+pub fn garbage_collect_codex_managed_hook_trust(
+    config_path: &Path,
+    expected_gwt_bin: Option<&str>,
+) -> io::Result<usize> {
+    garbage_collect_codex_managed_hook_trust_with_writer(
+        config_path,
+        expected_gwt_bin,
+        write_text_atomically,
+    )
+}
+
+fn garbage_collect_codex_managed_hook_trust_with_writer(
+    config_path: &Path,
+    expected_gwt_bin: Option<&str>,
+    write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
+) -> io::Result<usize> {
+    match fs::metadata(config_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    with_codex_config_lock(config_path, || {
+        let mut root = read_codex_config(config_path)?;
+        let removed = collect_missing_codex_managed_hook_state(
+            root.as_table_mut().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Codex config root must be a TOML table",
+                )
+            })?,
+            expected_gwt_bin,
+        )?;
+        if removed > 0 {
+            let rendered = toml::to_string_pretty(&root).map_err(io::Error::other)?;
+            write_config(config_path, &rendered)?;
+        }
+        Ok(removed)
+    })
+}
+
+fn collect_missing_codex_managed_hook_state(
+    root: &mut toml::Table,
+    expected_gwt_bin: Option<&str>,
+) -> io::Result<usize> {
+    let Some(hooks) = root.get_mut("hooks") else {
+        return Ok(0);
+    };
+    let hooks = hooks.as_table_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Codex config key `hooks` must be a TOML table",
+        )
+    })?;
+    let Some(state) = hooks.get_mut("state") else {
+        return Ok(0);
+    };
+    let state = state.as_table_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Codex config key `hooks.state` must be a TOML table",
+        )
+    })?;
+    let mut known = std::collections::BTreeSet::new();
+    for (event, name) in MANAGED_EVENTS {
+        let mut commands = expected_generated_gwt_event_commands(event, expected_gwt_bin);
+        commands.extend(codex_event_hook_commands_with_bin(
+            crate::CANONICAL_HOOK_BIN,
+            event,
+        ));
+        if *name == "stop" {
+            commands.extend(codex_self_improvement_stop_hook_commands());
+        }
+        for command in commands {
+            let hook = json!({"command": command});
+            known.insert((
+                *name,
+                command_hook_identity_hash(name, "*", hook.as_object().unwrap())?,
+            ));
+        }
+    }
+    let before = state.len();
+    state.retain(|key, value| {
+        let mut parts = key.rsplitn(4, ':');
+        let (Some(handler), Some(group), Some(event), Some(path)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return true;
+        };
+        let path = Path::new(path);
+        let Some(hash) = value.get("trusted_hash").and_then(toml::Value::as_str) else {
+            return true;
+        };
+        if handler.parse::<usize>().is_err()
+            || group.parse::<usize>().is_err()
+            || !path.is_absolute()
+            || !path.ends_with(".codex/hooks.json")
+            || !known.contains(&(event, hash.to_string()))
+        {
+            return true;
+        }
+        !matches!(fs::metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    });
+    Ok(before - state.len())
+}
+
+fn hook_trust_report(
+    scan: CodexHookTrustScan,
+    config_path: &Path,
+    root: &toml::Value,
+    wrote_trust_state: bool,
+) -> CodexHookTrustReport {
+    let mut report = CodexHookTrustReport {
+        config_path: config_path.to_path_buf(),
+        trusted_entries: Vec::new(),
+        untrusted_gwt_hooks: Vec::new(),
+        untrusted_gwt_hook_commands: Vec::new(),
+        expectations: scan.expectations,
+        wrote_trust_state,
+        hash_diagnostics: Vec::new(),
+    };
+    for hook in scan.hooks {
+        let stored = stored_hook_hash(root, &hook.entry.key);
+        if stored == Some(hook.entry.trusted_hash.as_str()) {
+            report.trusted_entries.push(hook.entry);
+            continue;
+        }
+        let state_problem = if stored.is_none() {
+            "trust entry missing"
+        } else {
+            "trusted hash mismatch"
+        };
+        let cause = if hook.generated {
+            state_problem.to_string()
+        } else {
+            format!("command mismatch; {state_problem}")
+        };
+        report.hash_diagnostics.push(format!(
+            "{}: {cause}; expected_command=`{}` actual_command=`{}` expected_hash={} stored_hash={}",
+            hook.entry.key, hook.expected_command, hook.actual_command, hook.entry.trusted_hash, stored.unwrap_or("<missing>")
+        ));
+        report.untrusted_gwt_hooks.push(hook.entry.key);
+        report.untrusted_gwt_hook_commands.push(hook.actual_command);
+    }
+    report
+}
+
+fn stored_hook_hash<'a>(root: &'a toml::Value, key: &str) -> Option<&'a str> {
+    root.get("hooks")?
+        .get("state")?
+        .get(key)?
+        .get("trusted_hash")?
+        .as_str()
 }
 
 fn hook_hash_diagnostics(root: &toml::Value, entries: &[CodexHookTrustEntry]) -> Vec<String> {
     entries
         .iter()
         .map(|entry| {
-            let stored = root
-                .get("hooks")
-                .and_then(|v| v.get("state"))
-                .and_then(|v| v.get(&entry.key))
-                .and_then(|v| v.get("trusted_hash"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or("<missing>");
+            let stored = stored_hook_hash(root, &entry.key).unwrap_or("<missing>");
             format!(
                 "{} expected_hash={} stored_hash={stored}",
                 entry.key, entry.trusted_hash
@@ -1245,6 +1484,12 @@ fn is_generated_gwt_event_command(
 ) -> bool {
     expected_generated_gwt_event_commands(event_json_name, expected_gwt_bin)
         .iter()
+        // Existing portable hooks use the canonical fallback even when this
+        // install now generates an absolute fallback. Recognize only the exact
+        // generated wrapper and hash its actual command, never a rewritten one.
+        .chain(
+            codex_event_hook_commands_with_bin(crate::CANONICAL_HOOK_BIN, event_json_name).iter(),
+        )
         .any(|expected| expected == command)
 }
 
@@ -1476,6 +1721,142 @@ mod tests {
         fs::remove_dir_all(parent.join("worktree")).unwrap();
         revoke_codex_managed_project_trust(&worktree, &config).unwrap();
         assert!(trust_state(&config).is_empty());
+    }
+
+    #[test]
+    fn garbage_collection_keeps_live_state_and_does_not_rewrite_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = worktree_with_generated_hooks();
+        let config = dir.path().join("config.toml");
+        register_codex_managed_hook_trust(live.path(), &config).unwrap();
+        let contents = format!("# user comment\n{}", fs::read_to_string(&config).unwrap());
+        fs::write(&config, &contents).unwrap();
+
+        assert_eq!(
+            garbage_collect_codex_managed_hook_trust(&config, None).unwrap(),
+            0
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), contents);
+        let absent = dir.path().join("absent/config.toml");
+        assert_eq!(
+            garbage_collect_codex_managed_hook_trust(&absent, None).unwrap(),
+            0
+        );
+        assert!(!absent.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn garbage_collection_and_registration_share_the_config_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = worktree_with_generated_hooks();
+        let live = worktree_with_generated_hooks();
+        let launch = worktree_with_generated_hooks();
+        let config = dir.path().join("config.toml");
+        let gone_entries = register_codex_managed_hook_trust(gone.path(), &config)
+            .unwrap()
+            .trusted_entries;
+        let live_entries = register_codex_managed_hook_trust(live.path(), &config)
+            .unwrap()
+            .trusted_entries;
+        gone.close().unwrap();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gc_config = config.clone();
+        let gc = thread::spawn(move || {
+            garbage_collect_codex_managed_hook_trust_with_writer(&gc_config, None, |path, text| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                write_text_atomically(path, text)
+            })
+            .unwrap()
+        });
+        locked_rx.recv().unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(codex_config_lock_path(&config))
+            .unwrap();
+        let lock_result = lock.try_lock_exclusive();
+        if lock_result.is_ok() {
+            FileExt::unlock(&lock).unwrap();
+        }
+        let (started_tx, started_rx) = mpsc::channel();
+        let launch_config = config.clone();
+        let registrar = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            register_codex_managed_hook_trust(launch.path(), &launch_config).unwrap()
+        });
+        started_rx.recv().unwrap();
+        release_tx.send(()).unwrap();
+        assert_eq!(gc.join().unwrap(), gone_entries.len());
+        let launched = registrar.join().unwrap();
+        assert!(
+            lock_result.is_err(),
+            "GC must hold config.toml.gwt-lock through publication"
+        );
+        let state = trust_state(&config);
+        assert_eq!(
+            state.len(),
+            live_entries.len() + launched.trusted_entries.len()
+        );
+        for entry in live_entries.into_iter().chain(launched.trusted_entries) {
+            assert_eq!(
+                state[&entry.key]["trusted_hash"].as_str(),
+                Some(entry.trusted_hash.as_str())
+            );
+        }
+        for entry in gone_entries {
+            assert!(!state.contains_key(&entry.key));
+        }
+    }
+
+    #[test]
+    fn registration_reclaims_missing_managed_hooks_and_preserves_live_and_unknown_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = worktree_with_generated_hooks();
+        let live = worktree_with_generated_hooks();
+        let config = dir.path().join("config.toml");
+        let removed = register_codex_managed_hook_trust(gone.path(), &config).unwrap();
+        let unknown_key = format!(
+            "{}:stop:0:0",
+            dir.path().join("unmanaged/.codex/hooks.json").display()
+        );
+        let mut root = read_codex_config(&config).unwrap();
+        root["hooks"]["state"].as_table_mut().unwrap().insert(
+            unknown_key.clone(),
+            toml::Value::Table(toml::Table::from_iter([
+                ("enabled".into(), toml::Value::Boolean(false)),
+                (
+                    "trusted_hash".into(),
+                    toml::Value::String("sha256:user-owned".into()),
+                ),
+            ])),
+        );
+        fs::write(&config, toml::to_string(&root).unwrap()).unwrap();
+        gone.close().unwrap();
+
+        let retained = register_codex_managed_hook_trust(live.path(), &config).unwrap();
+
+        let state = trust_state(&config);
+        assert_eq!(state.len(), retained.trusted_entries.len() + 1);
+        for entry in removed.trusted_entries {
+            assert!(
+                !state.contains_key(&entry.key),
+                "stale entry: {}",
+                entry.key
+            );
+        }
+        for entry in retained.trusted_entries {
+            assert_eq!(
+                state[&entry.key]["trusted_hash"].as_str(),
+                Some(entry.trusted_hash.as_str())
+            );
+        }
+        assert_eq!(
+            state[&unknown_key]["trusted_hash"].as_str(),
+            Some("sha256:user-owned")
+        );
+        assert_eq!(state[&unknown_key]["enabled"].as_bool(), Some(false));
     }
 
     #[test]
@@ -3027,6 +3408,75 @@ mod tests {
     }
 
     #[test]
+    fn portable_generated_hooks_register_with_an_absolute_expected_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _pin = crate::settings_local::ScopedHookBin::set(crate::CANONICAL_HOOK_BIN);
+            generate_codex_hooks(dir.path()).unwrap();
+        }
+        let expected = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            dir.path(),
+            Some(crate::CANONICAL_HOOK_BIN),
+        )
+        .unwrap();
+        let report = register_codex_managed_hook_trust_for_mode_with_expected_bin(
+            dir.path(),
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            Some("/installed/GWT/gwtd"),
+        )
+        .unwrap();
+        assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
+        assert_eq!(report.trusted_entries, expected);
+        assert_eq!(report.trusted_entries.len(), 5);
+        // Recognition permits only the exact portable generated wrapper.
+        for command in codex_event_hook_commands_with_bin(crate::CANONICAL_HOOK_BIN, "Stop") {
+            assert!(is_generated_gwt_event_command(
+                &command,
+                "Stop",
+                Some("/installed/GWT/gwtd")
+            ));
+            assert!(!is_generated_gwt_event_command(
+                &format!("{command} ; echo injected"),
+                "Stop",
+                Some("/installed/GWT/gwtd")
+            ));
+        }
+    }
+
+    #[test]
+    fn tracked_absolute_generated_hooks_register_with_the_resolved_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = "/installed/GWT/gwtd";
+        {
+            let _pin = crate::settings_local::ScopedHookBin::set(installed);
+            generate_codex_hooks(dir.path()).unwrap();
+        }
+        let expected =
+            collect_codex_managed_hook_trust_entries_with_expected_bin(dir.path(), Some(installed))
+                .unwrap();
+        for args in [vec!["init", "-q"], vec!["add", "--", ".codex/hooks.json"]] {
+            assert!(gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let report = register_codex_managed_hook_trust_for_mode_with_expected_bin(
+            dir.path(),
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            Some(installed),
+        )
+        .unwrap();
+        assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
+        assert_eq!(report.trusted_entries, expected);
+        assert_eq!(report.trusted_entries.len(), 5);
+    }
+
+    #[test]
     fn powershell_generated_hook_with_expected_fallback_is_trusted_on_posix_registration() {
         let dir = tempfile::tempdir().unwrap();
         let codex_dir = dir.path().join(".codex");
@@ -3578,6 +4028,172 @@ enabled = false
     }
 
     #[test]
+    fn registration_keeps_an_already_reviewed_exact_hook_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        let command = "gwtd hook event Stop";
+        let mut hooks: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        hooks["hooks"]["Stop"][0]["hooks"][0]["command"] = json!(command);
+        fs::write(&hooks_path, serde_json::to_string(&hooks).unwrap()).unwrap();
+        let key = format!(
+            "{}:stop:0:0",
+            codex_hook_trust_key_path(&hooks_path).unwrap().display()
+        );
+        let config_path = dir.path().join("codex-config.toml");
+        let config: toml::Value = serde_json::from_value(json!({"hooks":{"state":{
+            (&key): {"trusted_hash": command_hook_trusted_hash_for_test("stop", "*", command), "enabled": false}
+        }}})).unwrap();
+        fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
+        assert_eq!(report.trusted_entries.len(), 5);
+        assert_eq!(
+            read_codex_config(&config_path).unwrap()["hooks"]["state"][&key]["enabled"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn registration_refuses_a_trust_entry_missing_from_the_written_config() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = codex_hook_trust_key_path(&dir.path().join(".codex/hooks.json")).unwrap();
+        let key = format!("{}:stop:0:0", hooks_path.display());
+        let config_path = dir.path().join("codex-config.toml");
+
+        let error = register_codex_managed_hook_trust_with_writer(
+            dir.path(),
+            &config_path,
+            CodexHookDiscoveryMode::WorkspaceHome,
+            None,
+            |path, content| {
+                let mut root: toml::Value = toml::from_str(content).unwrap();
+                root["hooks"]["state"].as_table_mut().unwrap().remove(&key);
+                write_text_atomically(path, &toml::to_string(&root).unwrap())
+            },
+        )
+        .expect_err("a successful write does not prove that the trust entry was retained");
+
+        let reason = error.to_string();
+        assert!(
+            reason.contains("write verification failed")
+                && reason.contains(&key)
+                && reason.contains("stored_hash=<missing>"),
+            "{reason}"
+        );
+        assert!(!reason.contains("wrote 5 trusted entries"), "{reason}");
+    }
+
+    #[test]
+    fn registration_checks_the_current_hook_identity_after_writing_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        let report = register_codex_managed_hook_trust_with_writer(
+            dir.path(),
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::WorkspaceHome,
+            None,
+            |path, content| {
+                write_text_atomically(path, content)?;
+                let mut hooks: Value =
+                    serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+                hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"] = json!(42);
+                fs::write(&hooks_path, serde_json::to_string(&hooks).unwrap())
+            },
+        )
+        .unwrap();
+
+        let reason = report
+            .hooks_need_review_reason()
+            .expect("a changed hook identity must block launch");
+        assert_eq!(report.trusted_entries.len(), 4);
+        assert!(
+            reason.contains(":stop:0:0") && reason.contains("trusted hash mismatch"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("verified 4 current trusted identities")
+                && reason.contains("wrote the config"),
+            "{reason}"
+        );
+        assert!(!reason.contains("wrote 5 trusted entries"), "{reason}");
+    }
+
+    #[test]
+    fn inspection_reports_persisted_trust_without_registering_missing_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+        let report = inspect_codex_managed_hook_trust_for_mode_with_expected_bin(
+            dir.path(),
+            &config_path,
+            CodexHookDiscoveryMode::WorkspaceHome,
+            None,
+        )
+        .unwrap();
+        assert!(report.trusted_entries.is_empty(), "{report:?}");
+        assert_eq!(report.untrusted_gwt_hooks.len(), 5);
+        let reason = report.hooks_need_review_reason().unwrap();
+        assert!(
+            reason.contains("trust entry missing") && !reason.contains("command mismatch"),
+            "{reason}"
+        );
+        assert!(!config_path.exists());
+
+        register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+        let before = fs::read_to_string(&config_path).unwrap();
+        let report = inspect_codex_managed_hook_trust_for_mode_with_expected_bin(
+            dir.path(),
+            &config_path,
+            CodexHookDiscoveryMode::WorkspaceHome,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.trusted_entries.len(), 5);
+        assert_eq!(report.hooks_need_review_reason(), None);
+        assert!(!report.wrote_trust_state);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), before);
+    }
+
+    #[test]
+    fn incomplete_trust_names_each_expected_and_actual_command_and_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        tamper_managed_hook_commands(&hooks_path, &["PreToolUse", "Stop"]);
+        let config_path = dir.path().join("config.toml");
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+        let reason = report.hooks_need_review_reason().unwrap();
+
+        assert!(
+            reason.contains("expected_command=")
+                && reason.contains("actual_command=`'/tmp/attacker/gwtd' hook event PreToolUse`")
+                && reason.contains("actual_command=`'/tmp/attacker/gwtd' hook event Stop`"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("hook.doctor")
+                && reason.contains("repair:true")
+                && reason.contains("hook.register_codex_managed_hook_trust"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("\"codex_hook_discovery\":\"both\"")
+                && reason.contains("\"project_root\":\"<affected project_root>\"")
+                && reason.contains(&format!(
+                    "\"codex_config\":{}",
+                    serde_json::to_string(&config_path).unwrap()
+                )),
+            "{reason}"
+        );
+    }
+
+    #[test]
     fn modified_gwt_command_is_not_trusted() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
@@ -3842,7 +4458,7 @@ enabled = false
             .hooks_need_review_reason()
             .expect("one untrusted gwt hook must still block the launch");
         assert!(
-            reason.contains("wrote 4 trusted entries")
+            reason.contains("verified 4 current trusted identities")
                 && reason.contains("command mismatch")
                 && reason.contains(":stop:0:0")
                 // Issue #3967: quoting the command is what lets a recurrence be
