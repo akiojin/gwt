@@ -2097,7 +2097,7 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
         // as an empty reservation that cannot establish its expiry.
         let file = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) if registration_is_gone(&path, &err) => continue,
             Err(err) => return Err(CoordinatorError::Io(err)),
         };
         match fs2::FileExt::try_lock_exclusive(&file) {
@@ -2158,8 +2158,11 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
                 }
             }
             Err(err) if is_contended(&err) => {
+                let Some(registration) = read_registration(&path)? else {
+                    continue;
+                };
                 live.push(LiveRegistration {
-                    registration: read_registration(&path)?,
+                    registration: Some(registration),
                     locked: true,
                 });
             }
@@ -2172,12 +2175,91 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
 fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorError> {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if registration_is_gone(path, &err) => return Ok(None),
         Err(err) => return Err(CoordinatorError::Io(err)),
     };
     serde_json::from_slice(&raw)
         .map(Some)
         .map_err(|err| CoordinatorError::Io(io_invalid(err)))
+}
+
+fn registration_is_gone(path: &Path, error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::NotFound {
+        return true;
+    }
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(5) {
+        return windows_registration_is_gone(path);
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    false
+}
+
+#[cfg(windows)]
+fn windows_registration_is_gone(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Wdk::Foundation::{NtClose, OBJECT_ATTRIBUTES};
+    use windows::Wdk::Storage::FileSystem::{
+        NtOpenFile, RtlDosPathNameToNtPathName_U_WithStatus, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows::Win32::Foundation::{
+        HANDLE, OBJ_CASE_INSENSITIVE, STATUS_DELETE_PENDING, STATUS_OBJECT_NAME_NOT_FOUND,
+        STATUS_OBJECT_PATH_NOT_FOUND, UNICODE_STRING,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows::Win32::System::{WindowsProgramming::RtlFreeUnicodeString, IO::IO_STATUS_BLOCK};
+
+    // Win32 maps both DELETE_PENDING and real access denial to error 5.
+    // Probe the native status rather than hiding every PermissionDenied error.
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return false;
+    }
+    wide.push(0);
+    let mut name = UNICODE_STRING::default();
+    // SAFETY: wide is NUL terminated and outlives the call; name is writable.
+    let converted = unsafe {
+        RtlDosPathNameToNtPathName_U_WithStatus(PCWSTR(wide.as_ptr()), &mut name, None, None)
+    };
+    if converted.0 < 0 {
+        return false;
+    }
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..Default::default()
+    };
+    let mut handle = HANDLE::default();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: all pointers reference live, correctly sized values. The name
+    // buffer belongs to Rtl and is released below after the synchronous call.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            (FILE_READ_ATTRIBUTES | SYNCHRONIZE).0,
+            &attributes,
+            &mut status_block,
+            (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
+            FILE_SYNCHRONOUS_IO_NONALERT.0,
+        )
+    };
+    // SAFETY: successful conversion allocated name; successful open owns handle.
+    unsafe {
+        RtlFreeUnicodeString(&mut name);
+        if status.0 >= 0 {
+            let _ = NtClose(handle);
+        }
+    }
+    // The final deletion handle may close between the Win32 error and probe.
+    matches!(
+        status,
+        STATUS_DELETE_PENDING | STATUS_OBJECT_NAME_NOT_FOUND | STATUS_OBJECT_PATH_NOT_FOUND
+    )
 }
 
 #[cfg(test)]
@@ -2487,8 +2569,39 @@ mod tests {
             JobAdmission::Owner(_) => panic!("owner already holds the target"),
         };
         let path = waiter.waiter_path.clone();
-        let retained = waiter._waiter_file.try_clone().unwrap();
         assert_eq!(owner.waiter_count().unwrap(), 1);
+        #[cfg(not(windows))]
+        let retained = waiter._waiter_file.try_clone().unwrap();
+        #[cfg(windows)]
+        let retained = {
+            use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+            use windows::Win32::Foundation::{GENERIC_READ, HANDLE};
+            use windows::Win32::Storage::FileSystem::{
+                FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO,
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+
+            let retained = OpenOptions::new()
+                .access_mode(DELETE.0 | GENERIC_READ.0)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+                .open(&path)
+                .unwrap();
+            // Explicitly retain the name in delete-pending state. Modern Rust
+            // remove_file may use POSIX deletion and unlink the name immediately.
+            let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+            // SAFETY: retained owns the live handle with DELETE access, and
+            // disposition has the exact layout and size required by this API.
+            unsafe {
+                SetFileInformationByHandle(
+                    HANDLE(retained.as_raw_handle()),
+                    FileDispositionInfo,
+                    std::ptr::from_ref(&disposition).cast(),
+                    std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+                )
+            }
+            .unwrap();
+            retained
+        };
         drop(waiter);
 
         #[cfg(windows)]
@@ -2529,6 +2642,8 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    // Restores a Windows file attribute, without changing Unix permission bits.
+    #[allow(clippy::permissions_set_readonly_false)]
     fn registration_permission_denied_is_still_reported() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("read-only.json");
