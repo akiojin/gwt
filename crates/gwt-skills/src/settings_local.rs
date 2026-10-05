@@ -647,9 +647,9 @@ thread_local! {
 
 /// The hook binary pinned for the current thread by [`ScopedHookBin`], if any.
 ///
-/// #4057: this is the per-thread seam that lets in-process tests choose the
-/// binary generated hook commands embed without touching the process-global
-/// `GWT_HOOK_BIN`. Production never sets it, so the answer there is `None`.
+/// Public materialization and in-process tests use this per-thread seam to
+/// choose the binary generated hook commands embed without changing the
+/// process-global `GWT_HOOK_BIN` (#4057, #3839).
 pub fn hook_bin_override() -> Option<String> {
     HOOK_BIN_OVERRIDE.with(|value| value.borrow().clone())
 }
@@ -660,6 +660,8 @@ pub fn hook_bin_override() -> Option<String> {
 /// variables are process-global, so one parallel test's pin leaks into every
 /// materialization running at the same time — and outlives the tempdir it
 /// pointed at (#4057). Mirrors `gwt_core::test_support::ScopedGwtHome`.
+/// Public materialization also holds this guard across its synchronous
+/// provider generators so they share one selected fallback (#3839).
 pub struct ScopedHookBin {
     previous: Option<String>,
 }
@@ -684,10 +686,10 @@ impl Drop for ScopedHookBin {
 /// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
 /// the launch did not provide an explicit runtime binary.
 ///
-/// Resolution order: the thread-local [`ScopedHookBin`] override (tests only),
-/// then `GWT_HOOK_BIN`, which public materialization sets from the stable
-/// managed-assets resolver. The `current_exe` / PATH fallback remains for
-/// direct library use and tests that do not enter through that
+/// Resolution order: the thread-local [`ScopedHookBin`] override, then an
+/// explicit `GWT_HOOK_BIN`. Public materialization pins its stable
+/// managed-assets resolution to the thread. The `current_exe` / PATH fallback
+/// remains for direct library use and tests that do not enter through that
 /// materialization boundary.
 pub(crate) fn gwt_hook_bin_path() -> String {
     if let Some(bin) = hook_bin_override() {
