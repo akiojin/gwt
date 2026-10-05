@@ -8335,46 +8335,102 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn runner_probe_deadline_includes_pipe_eof_and_kills_descendants() {
-        let temp = tempdir().expect("tempdir");
-        let pid_file = temp.path().join("descendant.pid");
-        let hub = gwt_core::process_console::ProcessConsoleHub::new();
-        let started = Instant::now();
-        let outcome = probe_host_runner_bounded_with_hub(
-            HostRunnerProbeRequest {
-                kind: HostRunnerProbeKind::Direct,
-                command: "sh",
-                args: vec![
-                    "-c".to_string(),
-                    "(sleep 6) & printf '%s' \"$!\" > \"$1\"; exit 0".to_string(),
-                    "gwt-runner-probe".to_string(),
-                    pid_file.display().to_string(),
-                ],
-                env_vars: &HashMap::new(),
-                remove_env: &[],
-                cwd: None,
-                timeout: Duration::from_secs(2),
-                poll_interval: Duration::from_millis(10),
-            },
-            &hub,
-        );
-        let elapsed = started.elapsed();
-        let pid = fs::read_to_string(&pid_file)
-            .expect("descendant pid")
-            .parse::<u32>()
-            .expect("numeric descendant pid");
-        let still_running = unix_process_exists(pid);
-        if still_running {
-            terminate_unix_test_process(pid);
-        }
+    #[tokio::test]
+    async fn runner_probe_deadline_includes_pipe_eof_and_kills_descendants() {
+        use std::{
+            ffi::CString,
+            fs::{File, OpenOptions},
+            io::{Read, Write},
+            os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        };
 
-        assert!(outcome.timed_out, "pipe EOF must share the probe deadline");
-        assert!(
-            elapsed < Duration::from_secs(3),
-            "pipe-held descendant must not extend probe return: {elapsed:?}"
-        );
-        assert!(!still_running, "probe descendant {pid} must be terminated");
+        let temp = tempdir().expect("tempdir");
+        let ready = temp.path().join("ready");
+        let release = temp.path().join("release");
+        let marker = temp.path().join("escaped");
+        for path in [&ready, &release] {
+            let path = CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+            // SAFETY: this is a NUL-terminated path in our unique tempdir.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        let mut command = gwt_core::process::hidden_command("/bin/sh");
+        command
+            .args([
+                "-c",
+                "(exec 3<> \"$2\"; exec 4> \"$1\"; printf ready >&4; read -r go <&3; printf escaped > \"$3\") & exit 0",
+                "gwt-runner-probe",
+            ])
+            .args([&ready, &release, &marker])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut process_tree =
+            RunnerProbeProcessTree::prepare(&mut command).expect("process group");
+        let mut child = tokio::process::Command::from(command)
+            .spawn()
+            .expect("spawn fixture");
+        process_tree
+            .after_spawn(child.id().expect("root PID"))
+            .expect("own process group");
+        let mut ready_reader = File::open(ready).expect("open readiness FIFO");
+        let mut message = [0; 5];
+        ready_reader
+            .read_exact(&mut message)
+            .expect("descendant readiness");
+        assert_eq!(&message, b"ready");
+        assert!(child.wait().await.expect("observe root exit").success());
+
+        // The root has exited, but its descendant still owns both output
+        // pipes. Start the unchanged budget only after observing both events.
+        // A descendant blocked on the release FIFO cannot win a timer race;
+        // cleanup is observed through EOF, without an elapsed-time assertion.
+        let capture = Arc::new(Mutex::new(RunnerProbeCapture::default()));
+        let mut stdout = Some(spawn_runner_probe_stream_capture(
+            child.stdout.take().expect("stdout"),
+            Arc::clone(&capture),
+        ));
+        let mut stderr = Some(spawn_runner_probe_stream_capture(
+            child.stderr.take().expect("stderr"),
+            capture,
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let completion = await_runner_probe_completion(
+            &mut child,
+            &mut stdout,
+            &mut stderr,
+            deadline,
+            Duration::from_millis(100),
+        )
+        .await;
+        let cleanup = cleanup_runner_probe_process(
+            &mut child,
+            &mut process_tree,
+            deadline,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        // Release a survivor on regression so EOF is still observable and the
+        // marker reports the cleanup failure without leaving an orphan behind.
+        match OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(release)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(b"go\n") {
+                    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+                }
+            }
+            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
+        }
+        ready_reader
+            .read_to_end(&mut Vec::new())
+            .expect("observe descendant exit and pipe EOF");
+        assert!(matches!(completion, Err(RunnerProbeWaitError::Deadline)));
+        assert!(cleanup.complete(), "cleanup must complete: {cleanup:?}");
+        assert!(!marker.exists(), "deadline must terminate the descendant");
     }
 
     #[cfg(unix)]
@@ -8631,8 +8687,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn docker_finalizer_reuses_one_stateful_runtime_resolution() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("create project");
@@ -8642,7 +8696,7 @@ mod tests {
         )
         .expect("write compose");
         let wrapper = temp.path().join("stateful-container-wrapper");
-        fs::write(
+        gwt_core::test_support::write_executable_script(
             &wrapper,
             r#"#!/bin/sh
 counter="$0.count"
@@ -8660,14 +8714,21 @@ fi
 "#,
         )
         .expect("write stateful wrapper");
-        let mut permissions = fs::metadata(&wrapper)
-            .expect("wrapper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
-        // test-hygiene: allow-production-probe-deadline Integration test observes real CLI invocation counts and pinned binary reuse.
-        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+        // This consumer checks identity reuse, not the CLI's deadline. Observe
+        // the real wrapper's exit and EOF, then validate its completed output.
+        let output = gwt_core::process::hidden_command(&wrapper)
+            .arg("--version")
+            .output()
+            .expect("complete initial runtime probe");
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::from_probe_output_for_tests(
             wrapper.to_str().expect("UTF-8 wrapper path"),
+            gwt_core::process_console::SpawnOutput {
+                exit_code: output.status.code(),
+                stdout: String::from_utf8(output.stdout).expect("UTF-8 version"),
+                stderr: String::from_utf8(output.stderr).expect("UTF-8 stderr"),
+                stdout_lines: 1,
+                stderr_lines: 0,
+            },
         )
         .expect("resolve launch runtime once");
         let mut config = sample_versioned_launch_config(&project);
