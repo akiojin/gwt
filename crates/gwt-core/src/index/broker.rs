@@ -1019,6 +1019,13 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    impl RefreshBrokerClock for AtomicU64 {
+        fn now_millis(&self) -> u64 {
+            self.load(Ordering::SeqCst)
+        }
+    }
 
     fn intent(target: RefreshTarget, epoch: u64, priority: JobPriority) -> RefreshIntent {
         RefreshIntent {
@@ -1072,31 +1079,56 @@ mod tests {
     #[test]
     fn failed_run_returns_to_quiet_and_keeps_the_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let broker = RefreshBroker::open(tmp.path().join("broker"), Duration::ZERO).expect("open");
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().join("broker"),
+            Duration::ZERO,
+            clock.clone(),
+        )
+        .expect("open");
         let target = RefreshTarget::base("repo", [RefreshScope::Files, RefreshScope::FilesDocs]);
         broker
             .submit(intent(target.clone(), 1, JobPriority::Background))
             .expect("submit");
         let claim = broker.claim_next().expect("claim").expect("claimable");
+        clock.store(11_000, Ordering::SeqCst);
         claim.fail("runner exploded").expect("fail");
         let snapshot = broker.inspect().expect("inspect");
         let state = snapshot.target(&target).expect("target");
         assert_eq!(state.state(), RefreshTargetState::Quiet);
+        assert_eq!(state.desired_epoch(), 1);
+        assert_eq!(state.completed_epoch(), None);
         assert_eq!(state.last_error(), Some("runner exploded"));
+        assert!(broker.claim_next().expect("claim during rest").is_none());
+        clock.store(12_000, Ordering::SeqCst);
         assert!(broker.claim_next().expect("claim again").is_some());
     }
 
     #[test]
     fn dropped_claim_is_reclaimable_after_quiet() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let broker = RefreshBroker::open(tmp.path().join("broker"), Duration::ZERO).expect("open");
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().join("broker"),
+            Duration::ZERO,
+            clock.clone(),
+        )
+        .expect("open");
         let target = RefreshTarget::base("repo", [RefreshScope::Files]);
         broker
             .submit(intent(target.clone(), 1, JobPriority::Background))
             .expect("submit");
         let claim = broker.claim_next().expect("claim").expect("claimable");
+        clock.store(11_000, Ordering::SeqCst);
         drop(claim);
-        assert_eq!(broker.inspect().expect("inspect").running_count(), 0);
+        let snapshot = broker.inspect().expect("inspect");
+        assert_eq!(snapshot.running_count(), 0);
+        let state = snapshot.target(&target).expect("target");
+        assert_eq!(state.state(), RefreshTargetState::Quiet);
+        assert_eq!(state.desired_epoch(), 1);
+        assert_eq!(state.completed_epoch(), None);
+        assert!(broker.claim_next().expect("reclaim during rest").is_none());
+        clock.store(12_000, Ordering::SeqCst);
         assert!(broker.claim_next().expect("reclaim").is_some());
     }
 
