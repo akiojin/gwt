@@ -11887,6 +11887,7 @@ fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus)
         EvidenceStatus::MissingRecord => "missing_record",
         EvidenceStatus::Running => "running",
         EvidenceStatus::Interrupted => "interrupted",
+        EvidenceStatus::Deferred => "deferred",
         EvidenceStatus::WrongSession => "wrong_session",
         EvidenceStatus::WrongOwner => "wrong_owner",
         EvidenceStatus::WrongGeneration => "wrong_generation",

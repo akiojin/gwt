@@ -109,11 +109,58 @@ test.describe("Surface rail", () => {
     await columns.fill("2");
     await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-one", data_base64: btoa("LIVE AGENT OUTPUT\r\n") }));
     await expect(tiles.first().locator(".xterm-rows")).toContainText("LIVE AGENT OUTPUT");
-    await tiles.first().getByRole("textbox", { name: "Message to agent" }).fill("Continue");
+    await tiles.first().locator(".xterm-helper-textarea").press("a");
     await expect(windowById(page, "agent-one")).toHaveClass(/\bfocused\b/);
-    await tiles.first().getByRole("button", { name: "Send", exact: true }).click();
-    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "pane_send_input")).toEqual([{ kind: "pane_send_input", session_id: "session-one", text: "Continue" }]);
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "agent-one", data: "a" });
+    await expect(tiles.locator("form, .agent-tile__input")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("agents-grid.png") });
+    expect(errors).toEqual([]);
+  });
+
+  test("agent tabs switch live terminals with direct input and keep the All agents grid", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const all = page.getByRole("tab", { name: "All agents", exact: true });
+    const one = page.getByRole("tab", { name: "agent-one", exact: true });
+    const two = page.getByRole("tab", { name: "agent-two", exact: true });
+    const first = page.locator('.agent-tile[data-agent-id="agent-one"]');
+    const second = page.locator('.agent-tile[data-agent-id="agent-two"]');
+    await expect(all).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tablist", { name: "Agent views" }).getByRole("tab")).toHaveCount(3);
+    await one.click();
+    await expect(first).toBeVisible();
+    await expect(second).toBeHidden();
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-two", data_base64: btoa("OUTPUT WHILE HIDDEN\r\n") }));
+    await two.click();
+    await expect(two).toHaveAttribute("aria-selected", "true");
+    await expect(first).toBeHidden();
+    await expect(second.locator(".xterm-rows")).toContainText("OUTPUT WHILE HIDDEN");
+    await second.locator(".xterm-helper-textarea").press("b");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "agent-two", data: "b" });
+    await expect(page.locator(".agent-tile form, .agent-tile__input")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("agents-tab-selected.png") });
+    await two.focus();
+    await two.press("ArrowLeft");
+    await expect(one).toBeFocused();
+    await expect(first).toBeVisible();
+    await one.press("Home");
+    await expect(all).toBeFocused();
+    await expect(first).toBeVisible();
+    await expect(second).toBeVisible();
+    await expect(page.locator(".agent-tile .xterm")).toHaveCount(2);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: testInfo.outputPath("agents-tab-grid.png") });
+    await one.click();
+    await expect(one).toBeFocused();
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("agent-one"));
+    await expect(all).toBeFocused();
+    await expect(all).toHaveAttribute("aria-selected", "true");
+    await expect(second).toBeVisible();
     expect(errors).toEqual([]);
   });
 
@@ -487,5 +534,10 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       value: FixtureWebSocket,
     });
     (window as any).__surfaceRailSocket = () => socket;
+    (window as any).__removeSurfaceAgent = (id: string) => {
+      const index = windows.findIndex(data => data.id === id);
+      if (index >= 0) windows.splice(index, 1);
+      socket?.emit(workspaceState());
+    };
   }, groupedSettings);
 }

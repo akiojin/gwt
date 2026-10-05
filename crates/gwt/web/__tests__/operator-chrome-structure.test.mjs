@@ -5444,15 +5444,15 @@ test("Terminal output decode is deferred out of the receive path", () => {
   );
 });
 
-test("Terminal output writes are gated while windows are hidden", () => {
+test("Hidden window output is gated while Agents retain shared preview buffers", () => {
   const batcherConfig = appSource.match(
     /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
   );
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*canRefreshTerminalViewport/,
-    "terminal output batcher must reuse the terminal visibility predicate before decode/write",
+    /canWrite:\s*\(windowId\)\s*=>\s*\(agentsHost\s*&&\s*agentsSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
+    "Agents must keep shared Issue preview buffers current while other hidden windows retain output gating",
   );
 
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");

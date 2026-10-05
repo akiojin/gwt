@@ -2487,6 +2487,9 @@ pub enum IssueMonitorIdleKind {
     /// The bound window is gone from the owning tab's canvas, or its process
     /// exited without settling anything.
     BindingDead,
+    /// Registration is within its grace period, or a live/uncertain agent
+    /// process still owns the worktree. Absence from the canvas is not death.
+    BindingPending,
     /// The execution record is still Active while the pane is idle. Only a
     /// human can tell a stall from a pause, so this stays on the steering path.
     StuckUnknown,
@@ -2498,13 +2501,14 @@ impl IssueMonitorIdleKind {
             Self::ReviewVerdictPublished => "review_verdict_published",
             Self::ExecutionSettled => "execution_settled",
             Self::BindingDead => "binding_dead",
+            Self::BindingPending => "binding_pending",
             Self::StuckUnknown => "stuck_unknown",
         }
     }
 
     /// Whether the Monitor may release this window without a human decision.
-    fn releasable(self) -> bool {
-        !matches!(self, Self::StuckUnknown)
+    pub fn releasable(self) -> bool {
+        !matches!(self, Self::StuckUnknown | Self::BindingPending)
     }
 }
 
@@ -2574,6 +2578,15 @@ pub enum IssueMonitorExecutionSettlement {
     /// it must not be treated as a settled outcome.
     Interrupted,
     Unknown,
+}
+
+/// Issue #4244: settlement and process liveness are independent. A settled
+/// holder does not prove that another agent in the same worktree has exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IssueMonitorExecutionObservation {
+    pub settlement: IssueMonitorExecutionSettlement,
+    /// A live worktree agent or ambiguous runtime evidence vetoes recovery.
+    pub process_held: bool,
 }
 
 /// Issue #4084 AC-1: one idle window and its classification.
@@ -2666,6 +2679,9 @@ impl IdleReleaseScope {
 /// Issue #4084: a canvas snapshot older than this proves nothing about the
 /// windows it omits. Two scheduled ticks plus slack.
 pub const IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS: i64 = 600;
+
+/// Issue #4244: allow the launched agent five minutes to register its binding.
+pub const BINDING_REGISTRATION_GRACE_SECS: i64 = 300;
 
 /// Issue #3992 AC-6: how long a `Launched` row with no live launch may wait for
 /// the completion evidence that would end it.
@@ -14878,10 +14894,10 @@ impl IssueMonitorState {
     /// queue, and `with_prefs` faithfully restored the dead entry on every
     /// reload, so the wedge survived restarts.
     ///
-    /// The judgement source here is window existence on the owning tab's
-    /// canvas, which is the same store that issues the ids. No pid is
-    /// consulted, so pid reuse cannot mistake a dead launch for a live one (or
-    /// the reverse). Equally important, a window that still exists keeps its
+    /// Window existence on the owning tab's canvas identifies disappearance.
+    /// Registration grace and exact worktree process observations veto death
+    /// recovery; process identity includes its start time to resist PID reuse.
+    /// A window that still exists keeps its
     /// slot no matter how long it has been silent: an unexplained stall is
     /// reported, not reclaimed (SPEC-3431 FR-069).
     ///
@@ -14895,11 +14911,13 @@ impl IssueMonitorState {
         project_tab_id: &str,
         live_window_ids: &BTreeSet<String>,
         observed_at: &str,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
     ) -> Vec<String> {
         self.launched_windows
             .iter()
             .filter(|(issue_number, window_id)| {
                 self.window_observation_covers_launch(**issue_number, window_id, observed_at)
+                    && !self.binding_recovery_pending(**issue_number, observed_at, settlements)
             })
             .map(|(_, window_id)| window_id)
             .filter(|window_id| {
@@ -14913,6 +14931,24 @@ impl IssueMonitorState {
             })
             .cloned()
             .collect()
+    }
+
+    fn binding_recovery_pending(
+        &self,
+        issue_number: u64,
+        observed_at: &str,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+    ) -> bool {
+        settlements
+            .get(&issue_number)
+            .is_some_and(|observation| observation.process_held)
+            || self
+                .launch_confirmations
+                .get(&issue_number)
+                .is_some_and(|confirmation| {
+                    rfc3339_elapsed_secs(&confirmation.confirmed_at, observed_at)
+                        .is_none_or(|elapsed| elapsed < BINDING_REGISTRATION_GRACE_SECS)
+                })
     }
 
     fn window_observation_covers_launch(
@@ -17536,7 +17572,7 @@ impl IssueMonitorState {
     /// the caller from the trusted store; an absent entry is `Unknown`.
     pub fn classify_idle_windows(
         &self,
-        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) -> Vec<IssueMonitorIdleWindow> {
         let Some(snapshot) = self.fresh_window_snapshot(now) else {
@@ -17567,7 +17603,7 @@ impl IssueMonitorState {
             {
                 continue;
             }
-            let (idle_kind, pane_present, rebind_to) = match observation(window_id) {
+            let (mut idle_kind, pane_present, rebind_to) = match observation(window_id) {
                 None => (IssueMonitorIdleKind::BindingDead, false, None),
                 Some(observed) => match observed.status {
                     WindowState::Stopped => (IssueMonitorIdleKind::BindingDead, true, None),
@@ -17598,7 +17634,9 @@ impl IssueMonitorState {
                                 rebind_to,
                             )
                         } else if matches!(
-                            settlements.get(issue_number),
+                            settlements
+                                .get(issue_number)
+                                .map(|observation| &observation.settlement),
                             Some(
                                 IssueMonitorExecutionSettlement::Completed
                                     | IssueMonitorExecutionSettlement::Blocked
@@ -17617,6 +17655,11 @@ impl IssueMonitorState {
                     | WindowState::Interrupted => continue,
                 },
             };
+            if idle_kind == IssueMonitorIdleKind::BindingDead
+                && self.binding_recovery_pending(*issue_number, &snapshot.observed_at, settlements)
+            {
+                idle_kind = IssueMonitorIdleKind::BindingPending;
+            }
             // Issue #4131: a dead binding whose execution never settled is
             // interrupted work, not a finished launch. `Interrupted` is the
             // dominant shape in production: the Active reaper runs before the
@@ -17628,7 +17671,9 @@ impl IssueMonitorState {
             // without a requeue.
             let requeue_on_release = idle_kind == IssueMonitorIdleKind::BindingDead
                 && matches!(
-                    settlements.get(issue_number),
+                    settlements
+                        .get(issue_number)
+                        .map(|observation| &observation.settlement),
                     Some(
                         IssueMonitorExecutionSettlement::Active
                             | IssueMonitorExecutionSettlement::Interrupted
@@ -17674,7 +17719,9 @@ impl IssueMonitorState {
                 match observed.status {
                     WindowState::Idle
                         if matches!(
-                            settlements.get(&issue_number),
+                            settlements
+                                .get(&issue_number)
+                                .map(|observation| &observation.settlement),
                             Some(
                                 IssueMonitorExecutionSettlement::Completed
                                     | IssueMonitorExecutionSettlement::Blocked
@@ -17745,7 +17792,7 @@ impl IssueMonitorState {
     /// changes `enabled`, `max_active_agents`, or any claim (AC-6).
     pub fn reconcile_idle_windows(
         &mut self,
-        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) -> IssueMonitorIdleReconciliation {
         // The daemon also repairs lost projections before planning admission.
@@ -17828,8 +17875,15 @@ impl IssueMonitorState {
                                         issue_monitor_window_ids_match(bound, &window.window_id)
                                     })
                             })
+                            && !self.binding_recovery_pending(
+                                number,
+                                &snapshot.observed_at,
+                                settlements,
+                            )
                             && matches!(
-                                settlements.get(&number),
+                                settlements
+                                    .get(&number)
+                                    .map(|observation| &observation.settlement),
                                 Some(
                                     IssueMonitorExecutionSettlement::Active
                                         | IssueMonitorExecutionSettlement::Interrupted
@@ -17843,7 +17897,15 @@ impl IssueMonitorState {
         for issue_number in orphaned {
             self.launch_bindings
                 .retain(|_, owner| *owner != issue_number);
-            self.requeue_released_launch(issue_number);
+            let grace = if self.launch_confirmations.contains_key(&issue_number) {
+                "registration grace expired"
+            } else {
+                "registration grace unavailable (legacy launch timestamp)"
+            };
+            self.requeue_released_launch(
+                issue_number,
+                &format!("binding missing; agent process absent; {grace}"),
+            );
             outcome.requeued.push(issue_number);
         }
         match self.pending_idle_release.take() {
@@ -17952,7 +18014,20 @@ impl IssueMonitorState {
                         // Issue back on the queue so the next scan relaunches
                         // it; `needs_human` is never involved.
                         if idle.requeue_on_release {
-                            self.requeue_released_launch(issue_number);
+                            let binding = if idle.pane_present {
+                                "binding terminal"
+                            } else {
+                                "binding missing or terminal"
+                            };
+                            let grace = if self.launch_confirmations.contains_key(&issue_number) {
+                                "registration grace expired"
+                            } else {
+                                "registration grace unavailable (legacy launch timestamp)"
+                            };
+                            self.requeue_released_launch(
+                                issue_number,
+                                &format!("{binding}; agent process absent; {grace}"),
+                            );
                             outcome.requeued.push(issue_number);
                         }
                     }
@@ -17981,8 +18056,17 @@ impl IssueMonitorState {
     /// owner is unfinished work rather than a finished launch. Make the same
     /// transition [`Self::expire_stale_unbound_launches`] makes for a launch
     /// that never bound a window, so the next scan can claim it again.
-    fn requeue_released_launch(&mut self, issue_number: u64) {
+    fn requeue_released_launch(&mut self, issue_number: u64, reason: &str) {
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        self.autonomous_record_mut(issue_number)
+            .last_failure_message = Some(format!("binding_dead: {reason}"));
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.error_message = Some(format!("binding_dead: {reason}"));
+        }
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
@@ -17994,7 +18078,7 @@ impl IssueMonitorState {
             "info",
             issue_number,
             format!(
-                "Issue #{issue_number}: requeued after its agent window died with the execution record still Active"
+                "Issue #{issue_number}: requeued after its agent window died with unfinished execution; {reason}"
             ),
         );
     }
@@ -23121,7 +23205,12 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(
-            monitor.vanished_launched_windows("project-a", &live, &chrono::Utc::now().to_rfc3339()),
+            monitor.vanished_launched_windows(
+                "project-a",
+                &live,
+                &chrono::Utc::now().to_rfc3339(),
+                &BTreeMap::new()
+            ),
             vec!["project-a::agent-24".to_string()],
             "a window the tab no longer has cannot be holding an agent"
         );
@@ -23142,7 +23231,12 @@ mod tests {
 
         assert!(
             monitor
-                .vanished_launched_windows("project-a", &live, &chrono::Utc::now().to_rfc3339())
+                .vanished_launched_windows(
+                    "project-a",
+                    &live,
+                    &chrono::Utc::now().to_rfc3339(),
+                    &BTreeMap::new()
+                )
                 .is_empty(),
             "an unexplained stall is reported, never auto-reclaimed"
         );
@@ -23160,7 +23254,8 @@ mod tests {
                 .vanished_launched_windows(
                     "project-a",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339()
+                    &chrono::Utc::now().to_rfc3339(),
+                    &BTreeMap::new()
                 )
                 .is_empty(),
             "another tab's window is invisible from here, not dead"
@@ -23172,7 +23267,8 @@ mod tests {
                 .vanished_launched_windows(
                     "project-a",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339()
+                    &chrono::Utc::now().to_rfc3339(),
+                    &BTreeMap::new()
                 )
                 .is_empty(),
             "a bare legacy id proves no ownership"
@@ -23193,7 +23289,8 @@ mod tests {
                 monitor.vanished_launched_windows(
                     "project-a",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339()
+                    &chrono::Utc::now().to_rfc3339(),
+                    &BTreeMap::new()
                 ),
                 vec!["project-a::agent-24".to_string()],
                 "autonomous_mode={autonomous_mode} must not gate slot accounting"
@@ -23234,6 +23331,7 @@ mod tests {
             "project-a",
             &BTreeSet::new(),
             &chrono::Utc::now().to_rfc3339(),
+            &BTreeMap::new(),
         );
         assert_eq!(
             vanished.len(),
@@ -31880,7 +31978,8 @@ mod tests {
                 .vanished_launched_windows(
                     "tab-1",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339()
+                    &chrono::Utc::now().to_rfc3339(),
+                    &BTreeMap::new()
                 )
                 .is_empty(),
             "a settled window is not a vanished launch"
@@ -35261,8 +35360,19 @@ mod tests {
 
     fn settlements(
         entries: &[(u64, IssueMonitorExecutionSettlement)],
-    ) -> BTreeMap<u64, IssueMonitorExecutionSettlement> {
-        entries.iter().copied().collect()
+    ) -> BTreeMap<u64, IssueMonitorExecutionObservation> {
+        entries
+            .iter()
+            .map(|(number, settlement)| {
+                (
+                    *number,
+                    IssueMonitorExecutionObservation {
+                        settlement: *settlement,
+                        process_held: false,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// An autonomous cohort of launched Issues, each bound to a window on
@@ -35279,6 +35389,121 @@ mod tests {
             .iter()
             .find(|idle| idle.window_id == window_id)
             .map(|idle| idle.idle_kind)
+    }
+
+    #[test]
+    fn issue_4244_registration_grace_retains_a_missing_binding() {
+        let mut monitor = launched_cohort(&[(42, "tab-1::previous")]);
+        monitor.complete_active_launch_at(42, "tab-1::registering", IDLE_NOW);
+        let now = "2026-09-07T04:04:59Z";
+        monitor.record_window_snapshot(idle_snapshot(now, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[(42, IssueMonitorExecutionSettlement::Active)]),
+            now,
+        );
+        assert!(outcome.released.is_empty(), "registration is still pending");
+        assert!(outcome.requeued.is_empty());
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
+        assert_eq!(
+            outcome.idle_windows[0].idle_kind.as_str(),
+            "binding_pending"
+        );
+        assert!(monitor
+            .release_idle_windows(Some(42), "operator cleanup", now)
+            .released
+            .is_empty());
+    }
+
+    #[test]
+    fn issue_4244_vanished_window_cleanup_observes_registration_grace() {
+        let mut monitor = launched_cohort(&[(42, "tab-1::previous")]);
+        monitor.complete_active_launch_at(42, "tab-1::registering", IDLE_NOW);
+        assert!(monitor
+            .vanished_launched_windows(
+                "tab-1",
+                &BTreeSet::new(),
+                "2026-09-07T04:04:59Z",
+                &BTreeMap::new()
+            )
+            .is_empty());
+        assert_eq!(
+            monitor.vanished_launched_windows(
+                "tab-1",
+                &BTreeSet::new(),
+                "2026-09-07T04:05:00Z",
+                &BTreeMap::new(),
+            ),
+            vec!["tab-1::registering"]
+        );
+    }
+
+    #[test]
+    fn issue_4244_dead_binding_requeue_records_its_evidence() {
+        let mut monitor = launched_cohort(&[(42, "tab-1::previous")]);
+        monitor.complete_active_launch_at(42, "tab-1::gone", IDLE_NOW);
+        let now = "2026-09-07T04:05:00Z";
+        monitor.record_window_snapshot(idle_snapshot(now, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[(42, IssueMonitorExecutionSettlement::Active)]),
+            now,
+        );
+        assert_eq!(outcome.requeued, vec![42]);
+        let reason = monitor
+            .inbox_item(42)
+            .unwrap()
+            .error_message
+            .as_deref()
+            .unwrap();
+        assert!(reason.contains("binding missing"), "{reason}");
+        assert!(reason.contains("agent process absent"), "{reason}");
+        assert!(reason.contains("registration grace expired"), "{reason}");
+        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        restored.record_candidate(issue(42));
+        assert_eq!(
+            restored.agent_status_at(now).inbox[0]
+                .last_failure_message
+                .as_deref(),
+            Some(reason)
+        );
+    }
+
+    #[test]
+    fn issue_4244_settlement_does_not_hide_a_live_worktree_process() {
+        let mut monitor = launched_cohort(&[(42, "tab-1::gone")]);
+        let observations = BTreeMap::from([(
+            42,
+            IssueMonitorExecutionObservation {
+                settlement: IssueMonitorExecutionSettlement::Completed,
+                process_held: true,
+            },
+        )]);
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(&observations, IDLE_NOW);
+        assert!(outcome.released.is_empty());
+        assert_eq!(
+            outcome.idle_windows[0].idle_kind.as_str(),
+            "binding_pending"
+        );
+        assert!(monitor
+            .vanished_launched_windows("tab-1", &BTreeSet::new(), IDLE_NOW, &observations)
+            .is_empty());
+
+        // Intentional cleanup of a settled, existing pane remains available.
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::gone",
+                Some(42),
+                WindowState::Idle,
+                false,
+            )],
+        ));
+        assert_eq!(
+            monitor
+                .reconcile_idle_windows(&observations, IDLE_NOW)
+                .released,
+            vec![42]
+        );
     }
 
     /// Issue #3712 AC-5: the status row carries the pane's observed state and

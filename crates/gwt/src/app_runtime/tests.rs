@@ -66996,6 +66996,15 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
                 issue_number: 42,
                 window_id: "tab-1::agent-24".to_string(),
             }],
+            launch_confirmations: std::collections::BTreeMap::from([(
+                42,
+                gwt::issue_monitor::IssueMonitorLaunchConfirmation {
+                    window_id: "tab-1::agent-24".to_string(),
+                    claim_id: None,
+                    delivery_id: None,
+                    confirmed_at: "2026-08-17T08:55:00Z".to_string(),
+                },
+            )]),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
@@ -67010,7 +67019,27 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
         WindowProcessStatus::Running,
     );
     let (mut runtime, _recorded) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        sample_runtime_with_events(temp.path(), vec![tab.clone()], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T08:59:59Z");
+    tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued registration-pending worker")();
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .launched_issues
+            .len(),
+        1,
+        "a scheduled disappearance must wait for registration"
+    );
+
+    // A new observer after the grace boundary must still reclaim a dead slot.
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 

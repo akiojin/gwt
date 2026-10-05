@@ -56,6 +56,11 @@ test.describe("Issue preview placement", () => {
     await page.evaluate(() => window.__emitAgentOutput("SIMULTANEOUS LIVE OUTPUT"));
     await expect(preview).toContainText("SIMULTANEOUS LIVE OUTPUT");
     await expect(tiles.first().locator(".xterm-rows")).toContainText("SIMULTANEOUS LIVE OUTPUT");
+    await page.getByRole("tablist", { name: "Agent views" }).getByRole("tab").nth(2).click();
+    await expect(tiles.first()).toBeHidden();
+    await page.evaluate(() => window.__emitAgentOutput("HIDDEN AGENT LIVE PREVIEW"));
+    await expect(preview).toContainText("HIDDEN AGENT LIVE PREVIEW");
+    await page.getByRole("tab", { name: "All agents", exact: true }).click();
     await preview.click();
     await page.keyboard.type("preview cannot send");
     expect(await page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input"))).toEqual([]);
@@ -76,6 +81,25 @@ test.describe("Issue preview placement", () => {
     await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview").readOnly)).toBe(true);
     await page.evaluate(() => window.__emitAgentOutput("RESTORED READ ONLY"));
     await expect(page.locator(".issue-preview")).toContainText("RESTORED READ ONLY");
+  });
+
+  test("a new agent in a hidden Agents tab updates its visible Issue preview", async ({ page }) => {
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+    await page.goto(liveUrl || APP_URL);
+    await page.getByRole("button", { name: "Output", exact: true }).click();
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    const selectedTab = page.getByRole("tab", { name: "Issue #3672 agent", exact: true });
+    await selectedTab.click();
+    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview", {
+      id: "tab-issue::new-agent", session_id: "new-session", title: "New preview agent",
+    }));
+    await expect(page.getByRole("tab", { name: "New preview agent", exact: true })).toBeVisible();
+    await page.evaluate(() => window.__emitAgentOutput("NEW AGENT LIVE PREVIEW", "tab-issue::new-agent"));
+    await expect(page.locator(".issue-preview .terminal-text-preview")).toContainText("NEW AGENT LIVE PREVIEW");
+    await expect(selectedTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator('[data-agent-id="tab-issue::new-agent"]')).toBeHidden();
   });
 
   // 受け入れシナリオ 1 / FR-004.
@@ -1034,10 +1058,10 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
         }
       }
 
-      window.__emitAgentOutput = (text) => {
+      window.__emitAgentOutput = (text, id = "tab-issue::agent-preview") => {
         window.__fixtureSocket?.emit({
           kind: "terminal_output",
-          id: "tab-issue::agent-preview",
+          id,
           data_base64: btoa(`${text}\r\n`),
         });
       };

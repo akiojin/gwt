@@ -742,13 +742,12 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.41"
+version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5ef0006ac9ab233c38522f5ae99cae3625151de8f706cacee1cba4b8e2832a"
+checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
 dependencies = [
  "cfg-if",
  "core_detect",
- "multiversion",
  "multiversion_no_op",
  "rustversion",
  "scopeguard",
@@ -1301,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1372,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1400,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1410,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1419,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "dirs 7.0.0",
  "serde",
@@ -1433,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1473,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1487,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1501,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1519,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1539,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1555,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.108.0"
+version = "9.109.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -2363,27 +2362,6 @@ dependencies = [
  "png",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "multiversion"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ca4bea16ffc3f443cf7d866912118196bfef4c6a1556ca00f9f9b00bb43f7c"
-dependencies = [
- "multiversion-macros",
-]
-
-[[package]]
-name = "multiversion-macros"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d416831a7317ef4b08bee00b69cbbb9c8763da7959a7026244d6266869f9c83"
-dependencies = [
- "proc-macro2",
- "quote",
- "rustversion",
- "syn 3.0.2",
 ]
 
 [[package]]
@@ -3828,9 +3806,9 @@ dependencies = [
 
 [[package]]
 name = "tao"
-version = "0.37.0"
+version = "0.37.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d12c8607b01516c5d4a37e471a9cfb40b4a25cebce8fecbc6a559e125e51b6b"
+checksum = "f37f381f4e048e6cdf038b5705f8cf14ad108279d46eb968140a7b291aba9400"
 dependencies = [
  "bitflags 2.11.1",
  "block2",
@@ -3854,7 +3832,6 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-ui-kit",
- "once_cell",
  "parking_lot",
  "percent-encoding",
  "raw-window-handle",

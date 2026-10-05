@@ -255,7 +255,7 @@ the scoped delivery is complete.
 ## Canonical verification admission
 
 Only canonical `verify.run` acquires the host-wide lease, in-process for
-its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+each Heavy command. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
 `cargo clippy`, `cargo build`, coverage, direct headed browser checks, and
 pre-push checks do not require a verification lease. Run the RED / GREEN /
 refactor commands directly.
@@ -264,9 +264,12 @@ For canonical evidence use `verify.plan` then `verify.run`. Manual
 `verify.lease.acquire`, `verify.lease.hold`, and `verify.lease.extend` are
 retired and return an error without acquiring or reserving a lease.
 `verify.run` manages admission and waits up to `params.max_wait_secs`
-(default 300, hard cap 1500). A `deferred` response means no verification
-record was written: inspect the holder with `verify.lease.status` and
-retry when the contention is resolved. There is no manual acquire loop or
+(default 300, hard cap 1500) for each Heavy command. A deferred result from the
+first command's admission timeout writes no verification record; a timeout after
+at least one command ran writes an incomplete, non-PASS deferred record that
+retains the completed commands' results; a retry reruns the entire matrix (no
+partial resume). Inspect the holder with `verify.lease.status` and retry when
+the contention is resolved. There is no manual acquire loop or
 fixed retry schedule. `verify.lease.release` remains available to drain a
 legacy holder.
 

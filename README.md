@@ -1218,9 +1218,12 @@ Nextest runs each test in a separate process, times out a test after 120 seconds
 
 Only canonical `verify.run` acquires the host-wide verification lease.
 Register the verification matrix with `verify.plan`, then run it with
-`verify.run`; each run manages its own admission and release. A `deferred`
-result means admission timed out without a verification record. Inspect the
-holder before retrying:
+`verify.run`; it acquires and releases the lease for each Heavy command.
+Light commands can overlap other runs. A deferred result from the first command's
+admission timeout writes no verification record; a timeout after at least one
+command ran writes an incomplete, non-PASS deferred record that retains the
+completed commands' results; a retry reruns the entire matrix (no partial resume).
+Inspect the holder before retrying:
 
 ```bash
 gwtd <<'JSON'
