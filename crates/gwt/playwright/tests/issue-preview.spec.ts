@@ -41,6 +41,43 @@ test.describe("Issue preview placement", () => {
     viewport: { width: 1600, height: 1000 },
   });
 
+  test("Active cards show all three live tails without selecting their terminals", async ({ page }, info) => {
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+    await page.goto(liveUrl || APP_URL);
+    const outputs = page.locator('[data-queue-column="active"] .issue-card-output');
+    await expect(outputs).toHaveCount(3);
+    await expect(outputs.locator("pre")).toHaveText(Array(3).fill("Waiting for output"));
+    await page.evaluate(() => {
+      for (const [index, id] of ["tab-issue::agent-preview", "tab-issue::agent-preview-2", "tab-issue::agent-preview-3"].entries()) {
+        window.__fixtureSocket.emit({ kind: "terminal_preview", id,
+          text: `agent ${index + 1} first\n  second\n<third>` });
+      }
+    });
+    for (let index = 0; index < 3; index += 1) {
+      const output = outputs.nth(index);
+      await expect(output.locator("pre")).toHaveText(`agent ${index + 1} first\n  second\n<third>`);
+      await expect(output).toHaveAttribute("aria-label", /Read-only/);
+      await expect(output.locator("pre")).toBeInViewport({ ratio: 1 });
+      await expect(output.locator("pre")).toHaveCSS("max-height", "56px");
+      await expect.poll(() => output.locator("pre").evaluate(element =>
+        element.isConnected && element.getBoundingClientRect().height > 0 &&
+        element.getBoundingClientRect().height <= 56)).toBe(true);
+      await expect.poll(() => output.locator(".issue-card-output-screen").evaluate(element =>
+        getComputedStyle(element, "::after").backgroundImage)).toContain("linear-gradient");
+      await expect(output.locator(".xterm, input, textarea, third")).toHaveCount(0);
+    }
+    expect(await page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview-2").hasRuntime)).toBe(false);
+    await page.evaluate(() => window.__fixtureSocket.emit({
+      kind: "terminal_preview", id: "tab-issue::agent-preview-2", text: "second\n<third>\nnewest",
+    }));
+    await expect(outputs.nth(1).locator("pre")).toHaveText("second\n<third>\nnewest");
+    await page.screenshot({ path: info.outputPath("active-live-tails.png") });
+    await outputs.first().locator("pre").click();
+    await page.keyboard.type("no input");
+    expect(await page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input"))).toEqual([]);
+  });
+
   test("Agents shows all inline agents while Issue preview stays read-only", async ({ page }, testInfo) => {
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installIssuePreviewBackend(page);
@@ -56,6 +93,11 @@ test.describe("Issue preview placement", () => {
     await page.evaluate(() => window.__emitAgentOutput("SIMULTANEOUS LIVE OUTPUT"));
     await expect(preview).toContainText("SIMULTANEOUS LIVE OUTPUT");
     await expect(tiles.first().locator(".xterm-rows")).toContainText("SIMULTANEOUS LIVE OUTPUT");
+    await page.getByRole("tablist", { name: "Agent views" }).getByRole("tab").nth(2).click();
+    await expect(tiles.first()).toBeHidden();
+    await page.evaluate(() => window.__emitAgentOutput("HIDDEN AGENT LIVE PREVIEW"));
+    await expect(preview).toContainText("HIDDEN AGENT LIVE PREVIEW");
+    await page.getByRole("tab", { name: "All agents", exact: true }).click();
     await preview.click();
     await page.keyboard.type("preview cannot send");
     expect(await page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input"))).toEqual([]);
@@ -76,6 +118,25 @@ test.describe("Issue preview placement", () => {
     await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview").readOnly)).toBe(true);
     await page.evaluate(() => window.__emitAgentOutput("RESTORED READ ONLY"));
     await expect(page.locator(".issue-preview")).toContainText("RESTORED READ ONLY");
+  });
+
+  test("a new agent in a hidden Agents tab updates its visible Issue preview", async ({ page }) => {
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+    await page.goto(liveUrl || APP_URL);
+    await page.getByRole("button", { name: "Output", exact: true }).click();
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    const selectedTab = page.getByRole("tab", { name: "Issue #3672 agent", exact: true });
+    await selectedTab.click();
+    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview", {
+      id: "tab-issue::new-agent", session_id: "new-session", title: "New preview agent",
+    }));
+    await expect(page.getByRole("tab", { name: "New preview agent", exact: true })).toBeVisible();
+    await page.evaluate(() => window.__emitAgentOutput("NEW AGENT LIVE PREVIEW", "tab-issue::new-agent"));
+    await expect(page.locator(".issue-preview .terminal-text-preview")).toContainText("NEW AGENT LIVE PREVIEW");
+    await expect(selectedTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator('[data-agent-id="tab-issue::new-agent"]')).toBeHidden();
   });
 
   // 受け入れシナリオ 1 / FR-004.
@@ -495,14 +556,14 @@ test.describe("Issue preview placement", () => {
       ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
     );
     await expect(first.locator(".issue-agent-status-title")).toHaveText("Issue #3671 agent");
-    await expect(first.locator(".issue-agent-status-output")).toHaveText("Running cargo test");
+    await expect(first.locator(".issue-card-output-text")).toHaveText("Waiting for output");
     await expect(first.locator(".issue-agent-status-elapsed")).toHaveText("<1m");
     await expect(page.locator(".surface-knowledge .knowledge-list")).not.toContainText(
       /preview/i,
     );
 
     // Clicking the status row is not a selection gesture.
-    await first.locator(".issue-agent-status-output").click();
+    await first.locator(".issue-card-output-text").click();
     await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveAttribute(
       "data-issue-number",
       "3671",
@@ -1034,10 +1095,10 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
         }
       }
 
-      window.__emitAgentOutput = (text) => {
+      window.__emitAgentOutput = (text, id = "tab-issue::agent-preview") => {
         window.__fixtureSocket?.emit({
           kind: "terminal_output",
-          id: "tab-issue::agent-preview",
+          id,
           data_base64: btoa(`${text}\r\n`),
         });
       };

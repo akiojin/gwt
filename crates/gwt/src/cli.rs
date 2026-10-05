@@ -75,6 +75,7 @@ pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
+pub use pr::head_check::HeadCheck as PrHeadCheck;
 pub use pr::types::{
     LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
     PrReviewThread, PrReviewThreadComment, PrUpdateBranchOutcome, PrUpdateBranchResult,
@@ -673,9 +674,11 @@ pub(crate) fn run_collect<E: CliEnv>(
             if let Some(bin) = expected_hook_bin {
                 input = input.with_expected_hook_bin(bin);
             }
-            let health = hook::health::read_managed_hook_health(&input);
+            let mut health = hook::health::read_managed_hook_health(&input);
+            hook::append_codex_trust_health_for_doctor(&input, &mut health);
             let payload = serde_json::json!({
                 "repair": repair,
+                "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
                 "health": health,
             });
             out.push_str(&serde_json::to_string_pretty(&payload).map_err(serde_as_api_error)?);

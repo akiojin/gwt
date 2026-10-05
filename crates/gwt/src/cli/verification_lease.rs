@@ -37,7 +37,6 @@ const CARGO_SCOPED_SUBCOMMANDS: &[&str] = &["test", "t", "nextest"];
 const CARGO_SCOPE_WIDENING_FLAGS: &[&str] = &[
     "--workspace",
     "--all",
-    "--all-features",
     "--all-targets",
     "--benches",
     "--bins",
@@ -68,29 +67,52 @@ pub(crate) enum CommandWeight {
 /// `--test <name>` queued behind `cargo test --workspace --all-features`, and
 /// the fleet's verification throughput was pinned at one window at a time. So
 /// the weight follows the scope the command will actually build — a widening
-/// flag is heavy, and a run narrowed to named targets of at most one package
-/// is light.
+/// flag is heavy, and a run narrowed to a named target or a filtered library
+/// of one package is light. Enabling features does not widen that selection.
 ///
 /// Anything this module cannot bound stays heavy. An unrecognized program may
 /// compile the world, and guessing light for it would trade one window's wait
 /// for the host-wide oversubscription the lease was built to prevent
 /// (Issue #3913).
 pub(crate) fn classify_command(command: &str) -> CommandWeight {
-    let Ok(args) = crate::cli::verification_record::split_command_line(command) else {
+    let Ok(args) = crate::cli::verification_record::split_command_line(command)
+        .and_then(crate::cli::verification_record::take_env_assignments)
+        .map(|(_, args)| args)
+    else {
         return CommandWeight::Heavy;
     };
     let Some(program) = args.first() else {
         return CommandWeight::Heavy;
     };
-    if Path::new(program)
+    let program = Path::new(program)
         .file_stem()
-        .and_then(|stem| stem.to_str())
-        != Some("cargo")
-    {
+        .and_then(|stem| stem.to_str());
+    let lint_program = if matches!(program, Some("bunx" | "npx")) {
+        let package_index = match (program, args.get(1).map(String::as_str)) {
+            (Some("bunx"), Some("--bun")) | (Some("npx"), Some("--yes")) => 2,
+            _ => 1,
+        };
+        args.get(package_index).map(String::as_str)
+    } else {
+        program
+    };
+    if matches!(
+        lint_program,
+        Some("markdownlint" | "markdownlint-cli" | "markdownlint-cli2")
+    ) {
+        return CommandWeight::Light;
+    }
+    if program != Some("cargo") {
         return CommandWeight::Heavy;
     }
     // Cargo's own arguments end at a bare `--`; everything after it is the
-    // test binary's filter and says nothing about what cargo will build.
+    // test binary's filter. Keep that filter for library-run classification.
+    let test_filter = args
+        .iter()
+        .position(|arg| arg == "--")
+        .map_or(Some(false), |separator| {
+            has_libtest_filter(&args[separator + 1..])
+        });
     let cargo_args: Vec<&str> = args[1..]
         .iter()
         .map(String::as_str)
@@ -119,10 +141,61 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
     if matches!(subcommand, "fmt" | "metadata") {
         return CommandWeight::Light;
     }
+    if subcommand == "doc" && args.clone().any(|arg| arg == "--no-deps") {
+        return CommandWeight::Light;
+    }
     if !CARGO_SCOPED_SUBCOMMANDS.contains(&subcommand) {
         return CommandWeight::Heavy;
     }
-    classify_cargo_scope(&cargo_args)
+    if subcommand == "nextest" && args.next() != Some("run") {
+        return CommandWeight::Heavy;
+    }
+    let Some(test_filter) = test_filter else {
+        return CommandWeight::Heavy;
+    };
+    classify_cargo_scope(&args.collect::<Vec<_>>(), test_filter)
+}
+
+/// None means unbounded or unknown, not merely the absence of a filter.
+/// Libtest ORs filters, so an empty filter wins over every non-empty filter.
+/// Option values such as `--skip some_test` are not positive filters.
+fn has_libtest_filter(args: &[String]) -> Option<bool> {
+    let mut has_filter = false;
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        if arg.is_empty() {
+            return None;
+        }
+        if !arg.starts_with('-') {
+            has_filter = true;
+            continue;
+        }
+        let (flag, inline_value) = arg
+            .split_once('=')
+            .map_or((arg, None), |(flag, value)| (flag, Some(value)));
+        if matches!(
+            flag,
+            "--skip" | "--test-threads" | "--format" | "--logfile" | "--color"
+        ) {
+            if inline_value.is_none() {
+                args.next()?;
+            }
+        } else if inline_value.is_some()
+            || !matches!(
+                flag,
+                "--exact"
+                    | "--ignored"
+                    | "--include-ignored"
+                    | "--nocapture"
+                    | "--show-output"
+                    | "--quiet"
+                    | "-q"
+            )
+        {
+            return None;
+        }
+    }
+    Some(has_filter)
 }
 
 /// Weigh a scoped `cargo test` by the selection it builds.
@@ -131,7 +204,7 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
 /// workspace with `default-members`, so `cargo test --lib` with no package
 /// selects the lib target of *every* default member — the workspace-wide build
 /// this classification exists to catch, wearing a narrowing flag.
-fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
+fn classify_cargo_scope(cargo_args: &[&str], mut test_filter: bool) -> CommandWeight {
     let mut named_targets = 0usize;
     let mut lib_target = false;
     let mut packages = 0usize;
@@ -146,6 +219,7 @@ fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
         }
         if flag == "--lib" {
             lib_target = true;
+            continue;
         }
         let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
         let package = flag == "-p" || flag == "--package" || attached_package.is_some();
@@ -162,12 +236,52 @@ fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
             } else {
                 named_targets += 1;
             }
+            continue;
+        }
+        if matches!(
+            flag,
+            "--features"
+                | "-F"
+                | "--jobs"
+                | "-j"
+                | "--target"
+                | "--manifest-path"
+                | "--target-dir"
+                | "--profile"
+                | "--config"
+                | "--color"
+                | "--message-format"
+        ) {
+            if inline_value.or_else(|| args.next()).is_none() {
+                return CommandWeight::Heavy;
+            }
+        } else if !arg.is_empty() && !arg.starts_with('-') {
+            test_filter = true;
+        } else if !matches!(
+            flag,
+            "--all-features"
+                | "--no-default-features"
+                | "--no-run"
+                | "--no-fail-fast"
+                | "--release"
+                | "-r"
+                | "--locked"
+                | "--offline"
+                | "--frozen"
+                | "--quiet"
+                | "-q"
+                | "--verbose"
+                | "-v"
+                | "--keep-going"
+                | "--future-incompat-report"
+        ) {
+            return CommandWeight::Heavy;
         }
     }
     if packages > 1 || named_targets + usize::from(lib_target) > 1 {
         return CommandWeight::Heavy;
     }
-    if named_targets == 1 || (lib_target && packages == 1) {
+    if named_targets == 1 || (lib_target && packages == 1 && test_filter) {
         CommandWeight::Light
     } else {
         CommandWeight::Heavy
@@ -996,6 +1110,42 @@ mod tests {
     /// heavy and a single named test target is light.
     #[test]
     fn classify_command_reads_the_scope_of_a_cargo_run() {
+        // Issue #4823: features do not widen target selection, and documentation
+        // checks share the host. A library run must also select a test filter.
+        for command in [
+            "cargo test -p gwt --all-features --test verification_lease",
+            "cargo test -p gwt --all-features --lib verification_lease::tests",
+            "cargo test -p gwt --all-features --lib -- verification_lease::tests --exact",
+            r#"cargo test -p gwt --lib verification_lease -- --skip """#,
+            "markdownlint README.md",
+            "markdownlint-cli2 README.md",
+            "bunx markdownlint-cli2 README.md",
+            "npx markdownlint-cli2 README.md",
+            "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks",
+            "npx --yes markdownlint-cli README.md",
+            r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items"#,
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Light, "{command}");
+        }
+        for command in [
+            "cargo test -p gwt --all-features",
+            "cargo test -p gwt --all-features --lib",
+            "cargo test -p gwt --lib --features extra",
+            "cargo test -p gwt --lib -- --skip ignored_case",
+            "cargo test -p gwt --lib -- --test-threads 1",
+            r#"cargo test -p gwt --all-features --lib verification_lease -- """#,
+            r#"cargo test -p gwt --lib -- verification_lease """#,
+            r#"cargo test -p gwt --lib -- "" verification_lease"#,
+            r#"cargo test -p gwt --lib "" -- verification_lease"#,
+            r#"cargo test -p gwt --lib -- """#,
+            "cargo test -p gwt --doc",
+            "cargo doc --workspace",
+            "bunx arbitrary-script README.md",
+            "bunx --bun arbitrary-script README.md",
+            "bunx --arbitrary markdownlint-cli README.md",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+        }
         // AC-3: the two cases the Issue fixes by name.
         assert_eq!(
             classify_command("cargo test --workspace --all-features"),
@@ -1033,7 +1183,7 @@ mod tests {
             assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
         }
         assert_eq!(
-            classify_command("cargo test -pgwt --lib"),
+            classify_command("cargo test -pgwt --lib verification_lease"),
             CommandWeight::Light
         );
 
@@ -1055,17 +1205,17 @@ mod tests {
         assert_eq!(classify_command("cargo test --lib"), CommandWeight::Heavy);
         assert_eq!(
             classify_command("cargo test -p gwt --lib"),
-            CommandWeight::Light
+            CommandWeight::Heavy
         );
 
-        // Cargo's own arguments end at `--`; the rest is the test binary's
-        // filter and says nothing about what cargo builds.
+        // Unknown libtest options cannot establish a bounded selection,
+        // even when Cargo supplied a non-empty filter before `--`.
         assert_eq!(
-            classify_command("cargo test -p gwt --lib -- --all-features"),
-            CommandWeight::Light
+            classify_command("cargo test -p gwt --lib verification_lease -- --all-features"),
+            CommandWeight::Heavy
         );
         assert_eq!(
-            classify_command("cargo +nightly test -p gwt --lib"),
+            classify_command("cargo +nightly test -p gwt --lib verification_lease"),
             CommandWeight::Light
         );
 
@@ -1100,7 +1250,10 @@ mod tests {
         assert_eq!(first_heavy_command(&light), None);
         assert_eq!(first_heavy_command(&[]), None);
 
-        let mixed = command_strings(&["cargo test -p gwt --lib", "cargo test --workspace"]);
+        let mixed = command_strings(&[
+            "cargo test -p gwt --lib admission",
+            "cargo test --workspace",
+        ]);
         assert_eq!(
             first_heavy_command(&mixed).map(String::as_str),
             Some("cargo test --workspace")

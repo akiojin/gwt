@@ -1,13 +1,201 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.110.0] - 2026-10-05
+
+### Bug Fixes
+
+- **issue:** Share spec acceptance input with the monitor
+- **codex:** Collect trust for missing generated hooks
+- **agent:** Apply probe environment overrides after removals
+- **issue-monitor:** Retain pending and live launch bindings
+- **verify:** Admit before checking the predecessor snapshot
+- **verify:** 予約の一時読取失敗でもFIFO到着順を保持する
+- **verify:** 空のlibtestフィルターを重い検証として分類する
+- **verify:** Plan不一致をhost待機とコマンド実行前に拒否する
+- **codex:** Verify both hook locations and recognize portable commands
+- **discussion:** 提案の終了操作で origin session と曖昧性を検証
+- **issue-monitor:** 一覧応答と gh 子プロセスの期限を保証する
+- **runtime:** Isolate hook pins and diagnose daemon lease failures
+- **build:** Unassigned な終端 Work の完了を冪等に確認
+- **workspace:** Container 競合の復旧診断を canonical authority に合わせる
+
+### Features
+
+- **gui:** Active カードに全エージェントの最新出力を表示する
+
+### Miscellaneous Tasks
+
+- **work:** Record codex hook cleanup PR
+- **work:** 既存Windowsテストの裁定待ちを記録する
+- **work:** 検証前提のWindowsテスト失敗を再確認する
+- **work:** AC6の既存Windowsテスト失敗と裁定待ちを記録する
+- **work:** Record PR 4977 association
+- **work:** #4984 の再開監査と配送状態を記録
+- **work:** Record PR association for issue 4953
+- **work:** Deliver issue-4918 PR link events
+- **work:** PR #4990 の配送証跡を記録
+- **work:** T-5 の最終 Work 履歴を保存する
+- **work:** T-5 の PR 履歴同期を保存する
+- **work:** T-5 の Ready PR 配送履歴を保存する
+
+### Performance
+
+- **verify:** Heavyコマンド単位で検証リースを取得する
+
+### Refactor
+
+- **migration:** 旧HOME状態の取り込みを廃止し更新手順を案内
+
+### Testing
+
+- Coordinatorとdaemon fixtureの固定待機を除去
+- **app_runtime:** Assert lock-timeout outcome instead of wall-clock bound
+- **daemon:** Retain isolated home until fixture runtime shutdown
+- **gwt:** Keep fail-open scan test off the real GitHub API
+- Cleanup競合テストを旧HOME拒否契約へ更新
+
+### Ci
+
+- **test:** Windows core全件の既定並列5周を復帰
+
+## [9.109.0] - 2026-10-03
+
+### Bug Fixes
+
+- **workspace:** 共有履歴からのcontainer誤取得と起動時衝突を解消
+- **pr:** Pr.edit のリモート更新後 Work メタデータ記録を期限付きロックにし、タイムアウト時は警告付きで返す (#4850)
+- **workspace:** 状態の読み込み失敗を通知し既存データを保護する
+- **gui:** Mouse tracking 中は agent pane の wheel fallback を送らず Codex が PageUp で Find に入るのを防ぐ (#4909)
+- **actions:** Actions.job_logs が ANSI 色付きログで失敗しないよう escape を許可して除去し、失敗箇所だけの表示を加える (#4849)
+- **hub:** MacOSのフォルダ選択を親なし非同期パネルに変更
+- **settings:** 設定フォームの Runtime ステップを開いている組の保存済み runtime から始める
+- **issue-monitor:** レートリミット拒否を観測した時点で次の launch 候補へ切り替える (#4908)
+- **verify:** 単独fixtureでもnextest設定を解決できるようにする
+- **issue-monitor:** 初回拒否でholdし不明resetの時間再入場を禁止
+- **update:** Ready後の新しい版へ提示と適用対象を切り替える
+- **update:** 適用開始後の重複通知で確定状態を解除しない
+- **gui:** 切断中の入力を再送せず打ち直しを通知する
+- **workspace:** Preserve session assignments across restart repair
+- **workspace:** Scope legacy synthesis after selecting latest sessions
+- **clippy:** Fold update discovery admission into match guards
+- **workspace:** Report in-flight external commits as retryable
+- **test:** Windowsプロセス期限テストの起動時間依存を除く
+- **verify:** Exclude stale coverage executables from reports
+- **issue-monitor:** Keep priority chips within queue cards
+- **issue-monitor:** Preserve spec badge on ordinary queue rows
+- **pr:** Reject unverified remote product changes before Ready creation
+- **pm-conversation:** Detect same-length replacement by Windows file identity
+- **workspace:** Retry a delete-pending coordinator in the transaction scan on Windows
+- **workspace:** Allow never_loop for the non-Windows coordinator read
+- **launch:** Verify Codex hook trust against current files
+- **hooks:** State the doctor repair guarantee
+- **git:** Kill timed-out command trees via Job Object and stop joining readers
+- **gwt-git:** Kill the process tree on timeout when no Job Object is available
+
+### Documentation
+
+- **migration:** 保持するデータ保護例外を明記
+
+### Features
+
+- **gui:** Activeカードに全エージェントのライブ出力を表示する
+- **settings:** Agent Settings を複数組にして並び順を起動候補の順序にする
+- **pr:** Merge queue 下の BEHIND を PM が区別できるようにし、手順を docs に残す (#4872)
+- **pm:** Offer optional request refinement
+- **gui:** エージェント面の個別タブと端末直接入力を復元
+- **issue-monitor:** Prioritize urgent issues within a bounded queue
+- **pm:** Separate conversation text from execution logs
+
+### Miscellaneous Tasks
+
+- **work:** Issue #4739 の受け入れ確認と配送記録を更新
+- **work:** 旧backend移行削除の検証方針を記録
+- **work:** MacOSフォルダ選択のPR関連付けを記録
+- **work:** Issue #4927 の Work event shard を記録する
+- **work:** PR #4935 の配送記録を反映する
+- **work:** Issue 4925のPR配信記録を保存
+- **work:** Agent Settings の再開記録を保存
+- **work:** Issue 4933のPR配信記録を保存
+- **work:** Record PR #4954 handoff
+- Resync PR #4928 head
+- **work:** Issue #4739 の再開と配送準備を記録
+- **work:** Issue 4739の再開と検証引継ぎ記録を保存
+- **work:** PRの関連付けを記録する
+- **work:** 互換移行削除の進捗を記録
+- **work:** Identity reset廃止の再検証と配送準備を記録
+- **work:** 既存PRの配送状態を記録
+- **work:** T-4t の PR 配送記録を保存する
+- **work:** Record verified PR handoff
+
+### Performance
+
+- **verify:** Windows検証をnextestで計測しJUnit証跡を保存
+- **verify:** Core結合テストもprocess直列グループに含める
+
+### Refactor
+
+- **migration:** 旧backend自動移行を削除し手動再登録を案内
+- **migration:** Identity resetを廃止（v9.72.1未満はv9.106.0経由、旧backendはSettings再登録）
+- **frontend:** 旧Fast modeフィールドとcleanup欠落ID互換を廃止
+
+### Styling
+
+- Rustfmt codex hook trust test fixtures
+
+### Testing
+
+- **gui:** 読み取り専用プレビュー追加後の出力契約を検証する
+- **core:** #4850 のデッドライン検証を壁時計待ちに依存しない形にする
+- **workspace:** 参照保護テストの不要なcloneを除去
+- **migration:** 初回準備を待って旧backend再登録案内を確認
+- **pr:** #4849 の gh api 引数変更に fake gh を合わせる
+- **launch:** Package runner guard の検証を exact version で経路固定する
+- **workspace:** 履歴取り込みの所有権期待値を仕様に合わせる
+- **settings:** Agent Settings の live spec で status の読み直しを間隔を空けて再要求する
+- **issue-monitor:** 隔離fixtureのhold解除記録を維持
+- **issue-monitor:** 拒否後の表示検証を既存headed契約へ集約
+- **windows:** Align exact npx fixture selector and codex hook trust key expectations
+- **agent:** Isolate prepare fixtures from host package caches and Windows runner contract
+- **windows:** Fix fake docker.cmd arg quoting and PTY exit receipt fixtures
+- **verify:** #4740 slice-2 — interruption テストを env lock 配下に置き、実 Err を assert に出す
+- 重複テストとCIの過剰実行を整理する
+- **launch:** Wait on lock contention instead of wall-clock in materialization lock test
+- **launch:** Declare the contention poll interval to test hygiene
+- 不要になったUnixプロセス確認helperを削除する
+- 事象待機ヘルパと壁時計例外契約を追加する
+- Daemon同期成功テストのprefs予算を明示する
+- Daemon非同期テストのprefs予算を実行フェーズ別に固定する
+- **workspace:** Keep accepted fixture sockets blocking on Windows
+- **wizard:** Hold the env lock while branch resolution tests spawn git
+- **issue-monitor:** Cover urgent queue in status snapshot
+- **pm:** Recover poisoned environment locks
+- **pm:** Wire chat dependencies into frontend fixtures
+- **gui:** 実寸を持つ非表示タブの初期fit契約を更新
+- **daemon:** Isolate subscriber fixtures through server shutdown
+- **gwt:** Wait for stopped direct agent children before re-observing sessions
+- **frontend:** Codex設定操作の前にウィザード表示を待つ
+- **execution-state:** Isolate gwt home in owner-kind evidence cache test
+
+### Ci
+
+- Develop の必須チェックを merge queue（merge_group）でも走らせる
+- **verify:** Windowsの直列と並列検証を同一jobで計測する
+- **verify:** 取消判定を有効なjob条件へ移す
+
+### Revert
+
+- T-4t先行配送のためT-5差分を保全して分離
+
 ## [9.108.0] - 2026-10-02
 
 ### Upgrade Notes
 
+- **migration:** 旧 HOME / Workspace の current・work_items・journal 自動取り込みを廃止。対応する現行状態がない場合は読み書きを拒否し、旧ファイルを保持して v9.106.0 での移行手順を案内します。現行 receipt・event の回復は維持します。
+
 - **migration:** 一回限り移行の upgrade floor は v9.72.1（2026-08-03 UTC、変更日の60日前）。古い環境は先に v9.106.0 で各プロジェクトを開いてから更新してください。旧 Claude Code backend 行の未使用の自動移行は廃止しました。旧 backend 設定は自動移行されません。Settings で provider を再登録してください。旧設定は保持されます。
 - **frontend:** 旧 Fast mode wire フィールドと operation ID のない cleanup 互換処理を廃止します。更新前から開いているタブは再読み込みしてください。保存済み設定と cleanup の再接続処理は保持します。
-- **migration:** 旧 agent identity reset を廃止し、保存済みの目的・進捗と既存 marker を保持します。旧 HOME / Workspace、coordination、discussion の取り込みはデータ保護と現用契約のため維持します。
+- **migration:** 旧 agent identity reset を廃止し、保存済みの目的・進捗と既存 marker を保持します。coordination、discussion の取り込みは現用契約のため維持します。
 
 ### Bug Fixes
 
@@ -2316,7 +2504,6 @@ All notable changes to this project will be documented in this file.
 
 - **pr:** Isolate verification guard home
 
-
 ## [9.84.0] - 2026-08-31
 
 ### Bug Fixes
@@ -2433,7 +2620,6 @@ All notable changes to this project will be documented in this file.
 - **pane:** Stabilize close verification contracts
 - **daemon:** Isolate deadline-sensitive contracts
 
-
 ## [9.83.5] - 2026-08-27
 
 ### Bug Fixes
@@ -2456,7 +2642,6 @@ All notable changes to this project will be documented in this file.
 - **work:** Record issue 3596 delivery state
 - **work:** Settle issue 3596 delivery
 - **work:** Issue 3765 の実行イベント記録を追加 (#3765)
-
 
 ## [9.83.4] - 2026-08-25
 
@@ -2531,7 +2716,6 @@ All notable changes to this project will be documented in this file.
 - **launch:** PTY start gate の sibling 解決テストを POSIX host でも成立させる
 - **pane:** #3503 / #3552 の受け入れ条件を回帰ロックとして固定する
 
-
 ## [9.83.1] - 2026-08-18
 
 ### Bug Fixes
@@ -2556,7 +2740,6 @@ All notable changes to this project will be documented in this file.
 ### Performance
 
 - **git:** Workspace-home layout の解決を fs 判定にして失敗確定 spawn を根絶する
-
 
 ## [9.83.0] - 2026-08-18
 
@@ -2762,7 +2945,6 @@ All notable changes to this project will be documented in this file.
 - Settle issue monitor work handoff
 - **work:** Record issue monitor PR handoff receipt
 
-
 ## [9.79.0] - 2026-08-14
 
 ### Bug Fixes
@@ -2798,7 +2980,6 @@ All notable changes to this project will be documented in this file.
 - **work:** Record issue 3550 completion
 - **ci:** Retrigger checks for PR #3565
 
-
 ## [9.78.2] - 2026-08-14
 
 ### Bug Fixes
@@ -2826,7 +3007,6 @@ All notable changes to this project will be documented in this file.
 - **work:** Issue #3474 の視覚検証完了を記録
 - **work:** Issue #3474 の完了状態を記録
 - **work:** Develop worktree の Work event を記録する
-
 
 ## [9.78.0] - 2026-08-12
 
@@ -2874,7 +3054,6 @@ All notable changes to this project will be documented in this file.
 - **core:** Gate Windows registry path regression
 - **hooks:** Managed assets の hook audit テストから host rg 依存を除去する (#3398)
 
-
 ## [9.77.0] - 2026-08-11
 
 ### Bug Fixes
@@ -2889,7 +3068,6 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - **pm:** FR-111 PM 特権の pane メッセージ送達 pm.message.send を実装する (SPEC #3431 T-206)
-
 
 ## [9.76.0] - 2026-08-10
 

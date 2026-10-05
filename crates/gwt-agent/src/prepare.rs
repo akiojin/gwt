@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -447,6 +447,9 @@ impl LocalPackageCacheRoot {
 }
 
 fn launch_env_value(env_vars: &HashMap<String, String>, key: &str) -> Option<String> {
+    // Preserve the nonempty, case-insensitive lookup and host fallback used
+    // by cache discovery and probe-sharing keys. Child environment overlays
+    // use runner_probe_environment separately to honor native key semantics.
     env_vars
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
@@ -2580,7 +2583,10 @@ fn strict_semver_probe_evidence(outcome: &HostRunnerProbeOutcome) -> Option<Stri
         .next()
 }
 
-fn runner_probe_environment(env_vars: &HashMap<String, String>) -> HashMap<String, String> {
+fn runner_probe_environment(
+    env_vars: &HashMap<String, String>,
+    remove_env: &[String],
+) -> HashMap<String, String> {
     const ALLOWLIST: &[&str] = &[
         "PATH",
         "PATHEXT",
@@ -2596,16 +2602,32 @@ fn runner_probe_environment(env_vars: &HashMap<String, String>) -> HashMap<Strin
         "TMPDIR",
         "TERM",
     ];
-    ALLOWLIST
+    let mut environment = ALLOWLIST
         .iter()
         .filter_map(|key| {
-            env_vars
-                .get(*key)
-                .cloned()
-                .or_else(|| std::env::var(key).ok())
+            std::env::var(key)
+                .ok()
                 .map(|value| ((*key).to_string(), value))
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    environment.retain(|key, _| {
+        !remove_env
+            .iter()
+            .any(|removed| removed.eq_ignore_ascii_case(key))
+    });
+    // Match PTY spawn: explicit values override removals with native key semantics.
+    for key in ALLOWLIST {
+        if let Some((_, value)) = env_vars.iter().find(|(candidate, _)| {
+            if cfg!(windows) {
+                candidate.eq_ignore_ascii_case(key)
+            } else {
+                candidate.as_str() == *key
+            }
+        }) {
+            environment.insert((*key).to_string(), value.clone());
+        }
+    }
+    environment
 }
 
 fn redact_runner_probe_text_with_values(
@@ -2759,17 +2781,10 @@ fn probe_host_runner_bounded_with_hub(
         "process start",
     );
 
-    let remove_env = remove_env
-        .iter()
-        .map(|key| key.to_ascii_uppercase())
-        .collect::<HashSet<_>>();
     let mut request = gwt_core::process::ProcessPlanRequest::new(command)
         .args(&args)
         .inherit_env(false);
-    for (key, value) in runner_probe_environment(env_vars) {
-        if remove_env.contains(&key.to_ascii_uppercase()) {
-            continue;
-        }
+    for (key, value) in runner_probe_environment(env_vars, remove_env) {
         request = request.env(key, value);
     }
     if let Some(cwd) = cwd {
@@ -7478,6 +7493,20 @@ mod tests {
             ),
             "an explicit PATH override is applied after remove_env"
         );
+    }
+
+    #[test]
+    fn runner_probe_environment_respects_platform_key_semantics_after_removal() {
+        for key in ["Path", "path"] {
+            let env_vars = HashMap::from([(key.to_string(), "explicit-path".to_string())]);
+            let environment = runner_probe_environment(&env_vars, &["PATH".to_string()]);
+
+            assert_eq!(
+                environment.get("PATH").map(String::as_str),
+                cfg!(windows).then_some("explicit-path"),
+                "explicit {key} must follow native environment key semantics"
+            );
+        }
     }
 
     #[cfg(unix)]

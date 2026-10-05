@@ -74,6 +74,17 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.create_pr(base, head, title, body, labels, draft)
     }
 
+    fn compare_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: Option<&str>,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        self.inner.compare_pr_head(base, head, verified)
+    }
+    fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
+        self.inner.fetch_pr_head_sha(number)
+    }
     fn edit_pr(
         &mut self,
         number: u64,

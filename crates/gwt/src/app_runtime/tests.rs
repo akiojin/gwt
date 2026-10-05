@@ -4377,6 +4377,7 @@ fn sample_runtime_with_events(
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
+        remote_terminal_previews: HashMap::new(),
         window_last_output_at: HashMap::new(),
         window_hook_states: HashMap::new(),
         window_approval_waiting: HashMap::new(),
@@ -31629,6 +31630,18 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
         .expect("legacy managed-hook fixture must be valid JSON");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
     let expected_hook_bin = missing_pin.display().to_string();
+    let resolution_context = || {
+        format!(
+            "expected={expected_hook_bin:?}, selected={:?}, thread_override={:?}, \
+             GWT_HOOK_BIN={:?}, GWT_BIN_PATH={:?}, PATH={:?}",
+            gwt::managed_assets::managed_hook_bin(),
+            gwt_skills::settings_local::hook_bin_override(),
+            std::env::var_os("GWT_HOOK_BIN"),
+            std::env::var_os("GWT_BIN_PATH"),
+            std::env::var_os("PATH"),
+        )
+    };
+    let before_heal = resolution_context();
     let mut health_input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worktree);
     health_input.runtime_state_path = None;
     health_input.expected_hook_bin = Some(expected_hook_bin.clone());
@@ -31653,8 +31666,9 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
             .issues
             .iter()
             .any(|issue| issue.starts_with("managed hook runtime guard missing:")),
-        "{:?}",
-        healed_health.issues
+        "{:?}; before: {before_heal}; after: {}",
+        healed_health.issues,
+        resolution_context()
     );
     assert!(
         !healed_health.issues.is_empty()
@@ -31662,8 +31676,9 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
                 .issues
                 .iter()
                 .all(|issue| issue.starts_with("managed hook binary missing:")),
-        "{:?}",
-        healed_health.issues
+        "{:?}; before: {before_heal}; after: {}",
+        healed_health.issues,
+        resolution_context()
     );
 
     // A second pass over the converged file must be a no-op: the guard issue is
@@ -34374,6 +34389,20 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         )
         .expect("retired Session");
         assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+    }
+    // `stop_window_runtime` kills without waiting (Issue #3705); Windows
+    // TerminateProcess is asynchronous, so the observed children may still be
+    // listed briefly. Wait for each exact child to exit before re-observing.
+    let deadline = Instant::now() + TEST_PTY_STOP_SETTLEMENT_TIMEOUT;
+    for row in &inventory.sessions {
+        while gwt::process::exact_pty_process_tree_is_alive(row.child_pid, row.child_started_at) {
+            assert!(
+                Instant::now() < deadline,
+                "stopped direct agent child {} did not exit before the deadline",
+                row.child_pid
+            );
+            thread::sleep(TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL);
+        }
     }
     assert!(
         gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir)
@@ -38464,17 +38493,6 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
     let (spawner, _tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    // Startup performs retained legacy import before the asynchronous watcher
-    // can see it, so startup itself must publish the informational notice.
-    let legacy_path =
-        gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace/current.json");
-    let legacy = serde_json::to_vec(
-        &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
-    )
-    .unwrap();
-    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-    fs::write(&legacy_path, &legacy).unwrap();
-
     runtime.bootstrap();
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -38504,11 +38522,54 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
         !local_branches.is_empty(),
         "the reconcile ran on the worker from the bootstrap listing: {local_branches:?}"
     );
-    assert!(events.lock().unwrap().iter().any(|event| matches!(
-        recorded_project_payload(event),
-        UserEvent::WorkspaceProjectionLoaded { imported_from: Some(path), .. } if path == &legacy_path
-    )), "startup import must reach the common notice delivery path");
+}
+
+/// Issue #4825: an old HOME layout must stop startup before canonical writers.
+#[test]
+fn bootstrap_refuses_legacy_workspace_layout_without_mutation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let legacy_path =
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace/current.json");
+    let legacy = serde_json::to_vec(
+        &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+    )
+    .unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, &legacy).unwrap();
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.bootstrap();
+
+    let recorded = events.lock().unwrap();
+    assert!(
+        recorded.iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::WorkspaceStateLoadFailed { error, .. }
+                if error.path == legacy_path && error.message.contains("v9.106.0")
+        )),
+        "startup must report the upgrade requirement"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::WorkEventsIngested { .. }
+        )),
+        "legacy layouts must not enter startup ingest"
+    );
     assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
+    let canonical = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
+    assert!(!canonical.exists());
+    assert!(!canonical.with_file_name("works.json").exists());
 }
 
 thread_local! {
@@ -41780,7 +41841,8 @@ fn app_runtime_remote_approval_overlay_enters_clears_and_reenters() {
         .insert(window_id.clone(), WindowProcessStatus::Running);
 
     let entered = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
-    let raw_output = runtime.handle_daemon_runtime_output(window_id.clone(), b"partial".to_vec());
+    let raw_output =
+        runtime.handle_daemon_runtime_output(window_id.clone(), b"partial".to_vec(), None);
     let duplicate = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
     let cleared = runtime.handle_daemon_runtime_approval_wait_state(&window_id, false);
     let reentered = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
@@ -42051,9 +42113,17 @@ fn app_runtime_directory_trust_prompt_is_inert_for_unowned_codex_window() {
 
     assert_eq!(
         events.len(),
-        1,
-        "unowned output remains ordinary terminal output"
+        2,
+        "unowned output only emits terminal output and its read-only preview"
     );
+    assert!(matches!(
+        events[0].event,
+        BackendEvent::TerminalOutput { .. }
+    ));
+    assert!(matches!(
+        events[1].event,
+        BackendEvent::TerminalPreview { .. }
+    ));
     assert!(
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
             .map_or(true, |prefs| prefs.failed_issues.is_empty())
@@ -48533,8 +48603,14 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.issue_monitor_fallback_commit_timeout = super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+    super::reset_local_issue_monitor_fallback_commit_count();
 
-    let started = Instant::now();
+    // The prefs lock is held for the whole synchronous call, so the call can
+    // only return by giving up on the lock at the fallback commit deadline.
+    // Assert that outcome directly instead of timing the call: a wall-clock
+    // bound here also measured the fallback projection (Git/cache reads, its
+    // own 1 s budget) that runs before the 250 ms commit deadline starts, and
+    // failed on a loaded Windows host (SPEC #4740).
     let events = runtime.issue_monitor_launch_failed_result_events(
         42,
         "launch failed",
@@ -48546,7 +48622,28 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     );
     FileExt::unlock(&lock).expect("release prefs lock");
 
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        super::local_issue_monitor_fallback_commit_count(),
+        0,
+        "a lock-timed-out fallback must not commit"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, .. }
+                if message.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER)
+                    && message.contains("file lock")
+                    && message.contains("operation=issue_monitor_prefs")
+        )),
+        "the fallback must fail on the prefs lock deadline, not another error: {:?}",
+        events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::IssueMonitorToast { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
     assert!(fs::read_dir(prefs_path.parent().expect("prefs parent"))
         .expect("read prefs parent")
@@ -49852,6 +49949,71 @@ fn list_issue_monitor_uncertain_and_legacy_daemon_reads_preserve_display() {
 }
 
 #[test]
+fn list_issue_monitor_without_daemon_never_scans_remote_for_cold_or_stale_cache() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            terminal_queue_auto_refill: true,
+            terminal_queue_auto_refill_limit: 1,
+            ..Default::default()
+        },
+    )
+    .expect("enable cached candidate admission");
+    let tab = sample_project_tab("active", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    for stale in [false, true] {
+        if stale {
+            Cache::new(issue_cache_root(&repo))
+                .write_snapshot(&sample_issue_snapshot(
+                    43,
+                    "Cached issue",
+                    &["bug"],
+                    "Body",
+                    "2026-07-21T00:00:00Z",
+                ))
+                .expect("stale cache");
+        }
+        reset_local_issue_monitor_remote_scan_count();
+        let events = runtime.list_issue_monitor_events_with_reader(
+            &runtime.test_context(),
+            "client-1",
+            |_| Ok(None),
+        );
+        assert_eq!(
+            local_issue_monitor_remote_scan_count(),
+            0,
+            "List must remain local even when stale={stale}"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })));
+        let items = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::IssueMonitorInbox { items } => Some(items),
+                _ => None,
+            })
+            .expect("local inbox");
+        assert_eq!(items.len(), usize::from(stale));
+    }
+}
+
+#[test]
 fn issue_monitor_control_error_targets_its_owner_and_drops_ownerless_notifications() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
@@ -50996,12 +51158,16 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     reset_local_issue_monitor_remote_scan_count();
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.local_issue_monitor_events_with_policy(
+        &runtime.test_context(),
+        Some("client-1"),
+        super::IssueMonitorScanPolicy::Scan,
+        |_| {},
+    );
     assert_eq!(
         local_issue_monitor_remote_scan_count(),
         1,
-        "the explicit List action proves the remote-scan test probe is live"
+        "the full scan worker policy proves the remote-scan test probe is live"
     );
 
     let status = events
@@ -51078,8 +51244,12 @@ fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.local_issue_monitor_events_with_policy(
+        &runtime.test_context(),
+        Some("client-1"),
+        super::IssueMonitorScanPolicy::Scan,
+        |_| {},
+    );
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -51169,8 +51339,12 @@ fn app_runtime_full_issue_monitor_cache_fallback_does_not_migrate_legacy_failure
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.local_issue_monitor_events_with_policy(
+        &runtime.test_context(),
+        Some("client-1"),
+        super::IssueMonitorScanPolicy::Scan,
+        |_| {},
+    );
 
     let inbox = events
         .iter()
@@ -60204,12 +60378,12 @@ fn workspace_state_load_failure_keeps_rail_and_replays_until_recovery() {
         }),
         "a cache hit must not clear the notice before a fresh load"
     );
-    let Some(UserEvent::WorkspaceProjectionLoaded { imported_from, .. }) =
+    let Some(UserEvent::WorkspaceProjectionLoaded { .. }) =
         crate::load_workspace_projection_user_event(&repo)
     else {
         panic!("repaired canonical files must load successfully");
     };
-    let recovered = runtime.handle_workspace_state_loaded(&repo, imported_from);
+    let recovered = runtime.handle_workspace_state_loaded(&repo);
     let notice = recovered
         .iter()
         .find(|event| event.event.event_kind() == "workspace_state_notice")
@@ -62609,11 +62783,24 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     let fixture_root = tempdir().expect("fixture tempdir");
     let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
 
-    // Both copies exist on disk in a real worktree: the workspace-home copy is
-    // written by the launch refresh, the worktree-local copy is tracked content
-    // refreshed by the `Both`-mode managed-asset writers.
-    gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
-        .expect("refresh managed codex hooks");
+    // A worktree created by an older launch keeps its portable local command
+    // while the current launch targets workspace-home discovery.
+    {
+        let _old_bin =
+            gwt_skills::settings_local::ScopedHookBin::set(gwt_skills::CANONICAL_HOOK_BIN);
+        gwt_skills::generate_codex_hooks_for_mode(
+            &worktree,
+            gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+        )
+        .expect("seed old local hooks");
+    }
+    let materialization = gwt::refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        &gwt_agent::AgentId::Codex,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        false,
+    )
+    .expect("refresh launch assets");
 
     let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&worktree)
@@ -62628,7 +62815,7 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
         &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
-        None,
+        materialization.hook_bin.as_deref(),
     )
     .expect("launch trust registration must succeed")
     .expect("Codex host launch registers trust");
@@ -67216,6 +67403,15 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
                 issue_number: 42,
                 window_id: "tab-1::agent-24".to_string(),
             }],
+            launch_confirmations: std::collections::BTreeMap::from([(
+                42,
+                gwt::issue_monitor::IssueMonitorLaunchConfirmation {
+                    window_id: "tab-1::agent-24".to_string(),
+                    claim_id: None,
+                    delivery_id: None,
+                    confirmed_at: "2026-08-17T08:55:00Z".to_string(),
+                },
+            )]),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
@@ -67230,7 +67426,27 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
         WindowProcessStatus::Running,
     );
     let (mut runtime, _recorded) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        sample_runtime_with_events(temp.path(), vec![tab.clone()], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T08:59:59Z");
+    tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued registration-pending worker")();
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .launched_issues
+            .len(),
+        1,
+        "a scheduled disappearance must wait for registration"
+    );
+
+    // A new observer after the grace boundary must still reclaim a dead slot.
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
@@ -75932,6 +76148,19 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
             ),
         )
     });
+    // The fail-open claim proposal is driven through the issue client. The
+    // default factory would resolve a token from the fake `gh` and call the
+    // real api.github.com, so network latency could burn the scan budget.
+    // An offline fake that has never seen #43 rejects the claim pre-submit,
+    // which deterministically leaves the proposal pending for a retry.
+    let fake_client = Arc::new(FakeIssueClient::new());
+    let issue_client_factory: super::RuntimeIssueClientFactory = Arc::new({
+        let fake_client = Arc::clone(&fake_client);
+        move |_owner, _repo| {
+            let client: Arc<dyn IssueClient> = fake_client.clone();
+            Ok(client)
+        }
+    });
 
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
@@ -75939,7 +76168,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         None,
         None,
         "2026-09-07T07:00:00Z",
-        &super::default_issue_client_factory(),
+        &issue_client_factory,
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
     )
@@ -75953,6 +76182,14 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         pending_claim_issue_numbers(&persisted),
         vec![43],
         "an ordinary probe error within budget stays fail-open"
+    );
+    assert!(
+        fake_client
+            .call_log()
+            .iter()
+            .any(|call| call == "fetch:#43"),
+        "the claim attempt must go through the injected offline client: {:?}",
+        fake_client.call_log()
     );
 }
 
@@ -77578,7 +77815,7 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
 }
 
 #[test]
-fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
+fn issue_3777_first_authoritative_projection_refuses_legacy_only_work() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -77590,22 +77827,20 @@ fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
     let legacy_current = legacy_root.join("current.json");
     let legacy_works = legacy_root.join("work_items.json");
     let now = Utc::now();
-    gwt_core::workspace_projection::save_workspace_projection_to_path(
-        &legacy_current,
+    let current_bytes = serde_json::to_vec(
         &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
     )
-    .expect("seed legacy current");
+    .unwrap();
+    fs::create_dir_all(&legacy_root).unwrap();
+    fs::write(&legacy_current, &current_bytes).expect("seed legacy current");
     let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
     work_items.apply_event(gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-3777-legacy-first",
         now,
     ));
-    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
-        &legacy_works,
-        &work_items,
-    )
-    .expect("seed legacy works");
+    let works_bytes = serde_json::to_vec(&work_items).unwrap();
+    fs::write(&legacy_works, &works_bytes).expect("seed legacy works");
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
@@ -77621,24 +77856,22 @@ fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
     else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
-    assert!(completion
-        .result
-        .as_ref()
-        .expect("prepare succeeds")
-        .is_some());
+    assert!(completion.result.is_err());
+    let error = completion.load_error.as_ref().expect("legacy load error");
+    assert!(error.message.contains("v9.106.0"));
 
     let committed = runtime.handle_active_work_projection_prepared(*completion);
-    assert!(committed.prepared_dispatch.is_some());
-    assert!(runtime
-        .project_state_for_tab("tab-1")
-        .unwrap()
-        .active_work_projection_cache
-        .borrow()
-        .get("tab-1")
-        .is_some_and(|projection| projection
-            .active_works
-            .iter()
-            .any(|work| work.id == "work-3777-legacy-first")));
+    assert!(committed.prepared_dispatch.is_none());
+    assert!(recorded_events.lock().unwrap().iter().any(|event| matches!(
+        recorded_project_payload(event),
+        UserEvent::WorkspaceStateLoadFailed { error, .. }
+            if error.message.contains("v9.106.0")
+    )));
+    assert_eq!(fs::read(&legacy_current).unwrap(), current_bytes);
+    assert_eq!(fs::read(&legacy_works).unwrap(), works_bytes);
+    let canonical = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
+    assert!(!canonical.exists());
+    assert!(!canonical.with_file_name("works.json").exists());
 }
 
 #[test]
@@ -82120,4 +82353,68 @@ mod incarnation_claiming {
             "a counter that cannot promise a successor must panic, not hand out a reused value"
         );
     }
+}
+
+#[test]
+fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    runtime.runtimes[&id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"old\r\n  indented\r\n\r\nlast\r\n");
+    let live = runtime.handle_runtime_output(id.clone(), b"last".to_vec());
+    let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
+    for events in [live, sync] {
+        let preview = events
+            .iter()
+            .map(|event| serde_json::to_value(&event.event).unwrap())
+            .find(|event| event["kind"] == "terminal_preview")
+            .expect("preview event");
+        assert_eq!(preview["id"], id);
+        assert_eq!(preview["text"], "  indented\n\nlast");
+    }
+}
+
+#[test]
+fn terminal_preview_remote_reconnect_retains_only_received_values() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "agent-1");
+    let unknown = runtime.handle_daemon_runtime_output(id.clone(), b"bytes".to_vec(), None);
+    assert!(!unknown
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalPreview { .. })));
+    let live = runtime.handle_daemon_runtime_output(
+        id.clone(),
+        b"bytes".to_vec(),
+        Some("  remote\n\nlast".into()),
+    );
+    let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
+    for events in [live, sync] {
+        assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text == "  remote\n\nlast")));
+    }
+    let cleared =
+        runtime.handle_daemon_runtime_output(id.clone(), b"clear".to_vec(), Some(String::new()));
+    assert!(cleared.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text.is_empty())));
+    runtime.remove_window_state_tracking(&id);
+    assert!(!runtime.remote_terminal_previews.contains_key(&id));
 }
