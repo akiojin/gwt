@@ -5648,26 +5648,57 @@ pub fn persist_legacy_issue_monitor_shutdown_revoke_fence(prefs_path: &Path) -> 
 pub(crate) fn acquire_issue_monitor_daemon_lease(
     prefs_path: &Path,
 ) -> io::Result<IssueMonitorAuthorityLease> {
+    let prefs_lock_path = prefs_path.with_extension("lock");
+    let authority_path = issue_monitor_authority_lock_path(prefs_path);
+    let mut stage = "prefs lock acquisition";
+    let mut lock_path = &prefs_lock_path;
     with_issue_monitor_prefs_lock(prefs_path, || {
+        stage = "authority lock open";
+        lock_path = &authority_path;
         let authority_lock = fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(issue_monitor_authority_lock_path(prefs_path))?;
+            .open(&authority_path)?;
+        stage = "authority lock acquisition";
         if let Err(error) = FileExt::try_lock_exclusive(&authority_lock) {
-            if gwt_core::operation_deadline::is_lock_contended(&error) {
-                return Err(io::Error::new(
+            let error = if gwt_core::operation_deadline::is_lock_contended(&error) {
+                io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    "Issue Monitor authority lifetime lease is already held by another daemon",
-                ));
-            }
+                    format!(
+                        "Issue Monitor authority lifetime lease is already held by another daemon: {error}"
+                    ),
+                )
+            } else {
+                error
+            };
             return Err(error);
         }
+        stage = "prefs lock release";
+        lock_path = &prefs_lock_path;
         Ok(IssueMonitorAuthorityLease {
             lock: authority_lock,
         })
     })
+    .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))
+}
+
+fn daemon_lease_lock_error(stage: &str, path: &Path, error: io::Error) -> io::Error {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    io::Error::new(
+        error.kind(),
+        format!(
+            "{stage} failed: path={} parent={} parent_exists={} parent_is_dir={}: {error}",
+            path.display(),
+            parent.display(),
+            parent.exists(),
+            parent.is_dir(),
+        ),
+    )
 }
 
 /// Establish durable effect authority and hold its process-lifetime lease.
@@ -30398,6 +30429,58 @@ mod tests {
     }
 
     #[test]
+    fn daemon_lease_identifies_authority_lock_open_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let lock_path = issue_monitor_authority_lock_path(&prefs_path);
+        fs::create_dir(&lock_path).expect("block authority lock open");
+        let original = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect_err("a directory cannot be opened as a writable lock file");
+
+        let error = acquire_issue_monitor_daemon_lease(&prefs_path).expect_err("lease refused");
+        let diagnostic = error.to_string();
+        assert_eq!(error.kind(), original.kind());
+        assert!(
+            diagnostic.contains("authority lock open")
+                && diagnostic.contains(&format!("path={}", lock_path.display()))
+                && diagnostic.contains(&format!("parent={}", temp.path().display()))
+                && diagnostic.contains("parent_exists=true")
+                && diagnostic.contains("parent_is_dir=true")
+                && diagnostic.contains(&original.to_string()),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn daemon_lease_identifies_prefs_lock_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let lock_path = prefs_path.with_extension("lock");
+        fs::create_dir(&lock_path).expect("block prefs lock open");
+        let original = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect_err("a directory cannot be opened as a writable lock file");
+
+        let error = acquire_issue_monitor_daemon_lease(&prefs_path).expect_err("lease refused");
+        let diagnostic = error.to_string();
+        assert_eq!(error.kind(), original.kind());
+        assert!(
+            diagnostic.contains("prefs lock acquisition")
+                && diagnostic.contains(&format!("path={}", lock_path.display()))
+                && diagnostic.contains(&format!("parent={}", temp.path().display()))
+                && diagnostic.contains("parent_exists=true")
+                && diagnostic.contains("parent_is_dir=true")
+                && diagnostic.contains(&original.to_string()),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
     fn current_authority_fence_rejects_a_second_owner_until_the_lease_is_dropped() {
         let temp = tempfile::tempdir().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
@@ -30412,6 +30495,16 @@ mod tests {
             .expect_err("live lifetime lease rejects a second owner");
 
         assert_eq!(overlap.kind(), io::ErrorKind::WouldBlock);
+        let diagnostic = overlap.to_string();
+        assert!(
+            diagnostic.contains("authority lock acquisition")
+                && diagnostic.contains(&format!(
+                    "path={}",
+                    issue_monitor_authority_lock_path(&prefs_path).display()
+                ))
+                && diagnostic.contains("parent_exists=true"),
+            "{diagnostic}"
+        );
         assert_eq!(
             load_issue_monitor_prefs(&prefs_path)
                 .expect("load prefs after rejected overlap")

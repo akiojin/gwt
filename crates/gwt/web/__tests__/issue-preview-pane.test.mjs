@@ -448,14 +448,14 @@ test("Issue #3884: every launched Issue row shows a read-only agent status row w
 
   const first = rows[0];
   assert.equal(first.querySelector(".issue-agent-status-title").textContent, "Agent agent-1");
-  assert.equal(first.querySelector(".issue-agent-status-meta").textContent, "codex");
+  assert.equal(first.querySelector(".issue-agent-status-meta").textContent, "Read-only · codex");
   // SPEC #3885 AC-5: the agent state is the Issue row's single primary badge;
   // the status row itself carries no second badge.
   assert.equal(first.querySelector(".knowledge-monitor-chip"), null);
   const badge = first.closest(".knowledge-row").querySelector(".knowledge-row-badge");
   assert.equal(badge.textContent, "Running");
   assert.equal(badge.dataset.tone, "active");
-  assert.equal(first.querySelector(".issue-agent-status-output").textContent, "Running cargo test");
+  assert.equal(first.querySelector(".issue-card-output-text").textContent, "Waiting for output");
   assert.equal(first.querySelector(".issue-agent-status-elapsed").textContent, "7m");
 
   const second = rows[1];
@@ -464,9 +464,9 @@ test("Issue #3884: every launched Issue row shows a read-only agent status row w
     "Needs input",
   );
   assert.equal(
-    second.querySelector(".issue-agent-status-output").textContent,
-    "",
-    "no activity line is rendered when the backend has none",
+    second.querySelector(".issue-card-output-text").textContent,
+    "Waiting for output",
+    "no output is invented when the backend has none",
   );
   assert.equal(
     second.querySelector(".issue-agent-status-elapsed").textContent,
@@ -487,7 +487,7 @@ test("Issue #3884: clicking the status row is not a selection gesture, selecting
   applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], null);
 
   fixture.body
-    .querySelector(".issue-agent-status-output")
+    .querySelector(".issue-card-output-text")
     .dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
   assert.equal(
     fixture.sent.some((message) => message.kind === "select_knowledge_bridge_entry"),

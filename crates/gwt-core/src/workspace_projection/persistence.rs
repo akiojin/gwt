@@ -83,47 +83,71 @@ impl Default for WorkspaceRetentionConfig {
     }
 }
 
+/// Refuse retired HOME state before any default, publish, or receipt replay.
+fn ensure_supported_workspace_layout(path: &Path) -> Result<()> {
+    let Some(directory) = path.parent() else {
+        return Ok(());
+    };
+    let Some(project) = directory.parent() else {
+        return Ok(());
+    };
+    let name = path.file_name().and_then(|value| value.to_str());
+    let retired = match directory.file_name().and_then(|value| value.to_str()) {
+        Some("workspace")
+            if matches!(
+                name,
+                Some("current.json" | "work_items.json" | "journal.jsonl")
+            ) =>
+        {
+            Some(path.to_path_buf())
+        }
+        Some("project-state")
+            if matches!(name, Some("current.json" | "works.json" | "journal.jsonl")) =>
+        {
+            let mut retired = None;
+            for (canonical, legacy) in [
+                ("current.json", "current.json"),
+                ("works.json", "work_items.json"),
+                ("journal.jsonl", "journal.jsonl"),
+            ] {
+                let canonical = directory.join(canonical);
+                let legacy = project.join("workspace").join(legacy);
+                if !canonical
+                    .try_exists()
+                    .map_err(|error| WorkspaceStateLoadError::io(&canonical, error))?
+                    && legacy
+                        .try_exists()
+                        .map_err(|error| WorkspaceStateLoadError::io(&legacy, error))?
+                {
+                    retired = Some(legacy);
+                    break;
+                }
+            }
+            retired
+        }
+        _ => None,
+    };
+    if let Some(path) = retired {
+        return Err(WorkspaceStateLoadError {
+            path,
+            kind: crate::WorkspaceStateLoadErrorKind::LegacyLayout,
+            message: "This legacy HOME layout is no longer imported (upgrade floor: v9.72.1). Install v9.106.0 and open each project to migrate its state before upgrading again.".to_string(),
+        }.into());
+    }
+    Ok(())
+}
+
 fn legacy_workspace_projection_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_project_dir_for_repo_path(repo_path).join("workspace/current.json")
 }
 
-fn legacy_workspace_journal_path_for_repo_path(repo_path: &Path) -> PathBuf {
-    gwt_project_dir_for_repo_path(repo_path).join("workspace/journal.jsonl")
-}
-
+#[cfg(test)]
 fn legacy_workspace_work_items_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_project_dir_for_repo_path(repo_path).join("workspace/work_items.json")
 }
 
 fn legacy_workspace_work_events_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_project_dir_for_repo_path(repo_path).join("workspace/work_events.jsonl")
-}
-
-/// Return the first legacy state file that the next load would import.
-/// Existence errors remain load errors, never evidence of a fresh project.
-pub fn pending_legacy_workspace_state_import(repo_path: &Path) -> Result<Option<PathBuf>> {
-    for (canonical, legacy) in [
-        (
-            gwt_workspace_projection_path_for_repo_path(repo_path),
-            legacy_workspace_projection_path_for_repo_path(repo_path),
-        ),
-        (
-            gwt_workspace_work_items_path_for_repo_path(repo_path),
-            legacy_workspace_work_items_path_for_repo_path(repo_path),
-        ),
-    ] {
-        if canonical != legacy
-            && !canonical
-                .try_exists()
-                .map_err(|error| WorkspaceStateLoadError::io(&canonical, error))?
-            && legacy
-                .try_exists()
-                .map_err(|error| WorkspaceStateLoadError::io(&legacy, error))?
-        {
-            return Ok(Some(legacy));
-        }
-    }
-    Ok(None)
 }
 
 fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Path) -> Result<()> {
@@ -135,6 +159,7 @@ fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Pat
 }
 
 fn write_workspace_file_if_absent(canonical_path: &Path, bytes: &[u8]) -> Result<()> {
+    ensure_supported_workspace_layout(canonical_path)?;
     if canonical_path.exists() {
         return Ok(());
     }
@@ -169,21 +194,6 @@ fn write_workspace_file_if_absent(canonical_path: &Path, bytes: &[u8]) -> Result
             Err(error.into())
         }
     }
-}
-
-fn copy_validated_workspace_projection_if_needed(
-    legacy_path: &Path,
-    canonical_path: &Path,
-) -> Result<()> {
-    if canonical_path.exists() || legacy_path == canonical_path || !legacy_path.is_file() {
-        return Ok(());
-    }
-    let Some(projection) = load_workspace_projection_from_path(legacy_path)? else {
-        return Ok(());
-    };
-    let bytes = serde_json::to_vec_pretty(&projection)
-        .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
-    write_workspace_file_if_absent(canonical_path, &bytes)
 }
 
 fn copy_validated_workspace_work_items_if_needed(
@@ -300,54 +310,12 @@ fn ensure_work_events_gitattributes(repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn migrate_legacy_workspace_projection(
-    repo_path: &Path,
-    canonical_path: &Path,
-) -> Result<Option<WorkspaceProjection>> {
-    let work_items_path = canonical_path.with_file_name("works.json");
-    with_workspace_work_items_lock(&work_items_path, || {
-        if let Some(projection) = load_workspace_projection_from_path(canonical_path)? {
-            return Ok(Some(projection));
-        }
-
-        let legacy_path = legacy_workspace_projection_path_for_repo_path(repo_path);
-        if legacy_path == canonical_path {
-            return load_workspace_projection_from_path(canonical_path);
-        }
-        let Some(projection) = load_workspace_projection_from_path(&legacy_path)? else {
-            return Ok(None);
-        };
-        save_workspace_projection_to_path_unlocked(canonical_path, &projection)?;
-        Ok(Some(projection))
-    })
-}
-
-fn migrate_legacy_workspace_work_items(
-    repo_path: &Path,
-    canonical_path: &Path,
-) -> Result<Option<WorkItemsProjection>> {
-    with_workspace_work_items_lock(canonical_path, || {
-        if let Some(projection) = load_workspace_work_items_from_path(canonical_path)? {
-            return Ok(Some(projection));
-        }
-        let legacy_path = legacy_workspace_work_items_path_for_repo_path(repo_path);
-        if legacy_path == canonical_path {
-            return load_workspace_work_items_from_path(canonical_path);
-        }
-        let Some(projection) = load_workspace_work_items_from_path(&legacy_path)? else {
-            return Ok(None);
-        };
-        save_workspace_work_items_projection_to_path(canonical_path, &projection)?;
-        Ok(Some(projection))
-    })
-}
-
 pub fn load_workspace_projection(repo_path: &Path) -> Result<Option<WorkspaceProjection>> {
     let path = gwt_workspace_projection_path_for_repo_path(repo_path);
     if let Some(projection) = load_workspace_projection_from_path(&path)? {
         return Ok(Some(projection));
     }
-    migrate_legacy_workspace_projection(repo_path, &path)
+    load_workspace_projection_from_path(&path)
 }
 
 /// SPEC-2359 FR-094 / FR-097 / FR-098 / FR-099: resolve the currently
@@ -475,7 +443,6 @@ pub fn mutate_workspace_projection<T>(
     update: impl FnOnce(&mut WorkspaceProjection) -> Result<T>,
 ) -> Result<T> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     mutate_workspace_projection_at(&current_path, repo_path, update)
 }
 
@@ -484,7 +451,6 @@ pub fn mutate_existing_workspace_projection<T>(
     update: impl FnOnce(&mut WorkspaceProjection) -> Result<T>,
 ) -> Result<Option<T>> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     mutate_existing_workspace_projection_at(repo_path, &current_path, false, update)
 }
 
@@ -561,8 +527,6 @@ pub fn transact_workspace_state<T>(
 ) -> Result<T> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let events_path = repo_local_work_event_store_dir_with_migration(repo_path)?;
     transact_workspace_state_at(
         &current_path,
@@ -599,7 +563,6 @@ pub fn transact_workspace_state_with_preflight<T>(
         let events_path = materialize_split_root_workspace_state_paths_locked(
             repo_path,
             repo_path,
-            &current_path,
             &work_items_path,
         )?;
         let (result, transaction) = build_workspace_state_transaction_locked(
@@ -711,7 +674,6 @@ fn transact_workspace_state_for_work_event_root_with_event_log<T>(
             let events_path = materialize_split_root_workspace_state_paths_locked(
                 project_state_root,
                 work_event_root,
-                &current_path,
                 &work_items_path,
             )?;
             let events_path = if machine_local_close_events {
@@ -1068,7 +1030,6 @@ pub fn recover_pending_workspace_state_transaction_for_work_event_root(
                 materialize_split_root_workspace_state_paths_locked(
                     project_state_root,
                     work_event_root,
-                    &current_path,
                     &work_items_path,
                 )?;
             }
@@ -1678,16 +1639,14 @@ fn split_root_workspace_state_paths(
 }
 
 fn split_root_workspace_work_items_sources(
-    project_state_root: &Path,
+    _project_state_root: &Path,
     work_event_root: &Path,
     work_items_path: &Path,
 ) -> Vec<PathBuf> {
     let mut sources = Vec::new();
     for source in [
         work_items_path.to_path_buf(),
-        legacy_workspace_work_items_path_for_repo_path(project_state_root),
         gwt_workspace_work_items_path_for_repo_path(work_event_root),
-        legacy_workspace_work_items_path_for_repo_path(work_event_root),
     ] {
         if !sources.contains(&source) {
             sources.push(source);
@@ -1724,15 +1683,10 @@ fn with_split_root_workspace_state_lock<T>(
 fn materialize_split_root_workspace_state_paths_locked(
     project_state_root: &Path,
     work_event_root: &Path,
-    current_path: &Path,
     work_items_path: &Path,
 ) -> Result<PathBuf> {
     let events_dir = gwt_repo_local_work_events_dir(work_event_root);
     validate_workspace_work_event_store_path(&events_dir)?;
-    copy_validated_workspace_projection_if_needed(
-        &legacy_workspace_projection_path_for_repo_path(project_state_root),
-        current_path,
-    )?;
     if !work_items_path.exists() {
         for source in split_root_workspace_work_items_sources(
             project_state_root,
@@ -1776,10 +1730,7 @@ fn load_split_root_workspace_state_for_preflight_locked(
 ) -> Result<(WorkspaceProjection, WorkItemsProjection, bool)> {
     let mut projection = match load_workspace_projection_from_path(current_path)? {
         Some(projection) => projection,
-        None => load_workspace_projection_from_path(
-            &legacy_workspace_projection_path_for_repo_path(project_state_root),
-        )?
-        .unwrap_or_else(|| WorkspaceProjection::default_for_project(project_state_root)),
+        None => WorkspaceProjection::default_for_project(project_state_root),
     };
     projection.project_root = project_state_root.to_path_buf();
 
@@ -1824,8 +1775,6 @@ pub fn transact_workspace_state_with_commit<T>(
 ) -> Result<T> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let events_path = repo_local_work_event_store_dir_with_migration(repo_path)?;
     transact_workspace_state_at_with_commit(
         &current_path,
@@ -1895,7 +1844,6 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
             let events_path = materialize_split_root_workspace_state_paths_locked(
                 project_state_root,
                 work_event_root,
-                &current_path,
                 &work_items_path,
             )?;
             let (result, mut transaction) = build_workspace_state_transaction_locked(
@@ -2416,6 +2364,9 @@ fn load_external_workspace_commit_receipt(
     work_items_path: &Path,
     operation_id: &str,
 ) -> Result<Option<ExternalWorkspaceCommitReceipt>> {
+    ensure_supported_workspace_layout(current_path)?;
+    ensure_supported_workspace_layout(work_items_path)?;
+
     let receipt_path =
         external_workspace_commit_receipt_path(current_path, work_items_path, operation_id);
     let bytes = match fs::read(&receipt_path) {
@@ -2494,6 +2445,9 @@ fn persist_external_workspace_commit_receipt(
     transaction: &PendingWorkspaceStateTransaction,
     resolution: ExternalWorkspaceCommitResolution,
 ) -> Result<()> {
+    ensure_supported_workspace_layout(current_path)?;
+    ensure_supported_workspace_layout(work_items_path)?;
+
     if matches!(
         resolution,
         ExternalWorkspaceCommitResolution::Busy | ExternalWorkspaceCommitResolution::Missing
@@ -2721,10 +2675,9 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
     tracked_event_policy: TrackedWorkEventPolicy,
 ) -> Result<WorkspaceJournalEntry> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
+    ensure_supported_workspace_layout(&current_path)?;
     let journal_path = gwt_workspace_journal_path_for_repo_path(project_state_root);
-    let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
-    let _ = migrate_legacy_workspace_work_items(project_state_root, &work_items_path)?;
     // SkipTracked leaves the git-tracked events.jsonl completely untouched — it
     // does not even run the legacy→repo-local migration, so a settled worktree
     // stays byte-for-byte clean.
@@ -2737,10 +2690,7 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
     with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
         let current_precondition = workspace_state_file_fingerprint(&current_path)?;
         let work_items_precondition = workspace_state_file_fingerprint(&work_items_path)?;
-        copy_legacy_workspace_file_if_needed(
-            &legacy_workspace_journal_path_for_repo_path(project_state_root),
-            &journal_path,
-        )?;
+
         let mut projection =
             load_or_default_workspace_projection_from_path(&current_path, project_state_root)?;
         projection.project_root = project_state_root.to_path_buf();
@@ -3123,8 +3073,19 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
                     "Session-bound Work terminalization lost its WorkItems projection".to_string(),
                 )
             })?;
-        let locked =
-            resolve_session_bound_terminal_target_locked(&projection, &work_items, target)?;
+        let confirm_work_id = match selection {
+            WorkspaceTerminalTargetSelection::Exact {
+                work_id,
+                policy: ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            } => Some(work_id),
+            _ => None,
+        };
+        let locked = resolve_session_bound_terminal_target_locked(
+            &projection,
+            &work_items,
+            target,
+            confirm_work_id,
+        )?;
         revalidate(&projection, &work_items)?;
         let (work_id, exact_policy) = match (locked, selection) {
             (
@@ -3221,6 +3182,7 @@ fn resolve_session_bound_terminal_target_locked(
     projection: &WorkspaceProjection,
     work_items: &WorkItemsProjection,
     target: &SessionBoundWorkspaceTerminalTarget,
+    confirm_work_id: Option<&str>,
 ) -> Result<LockedSessionBoundTerminalTarget> {
     let Some(agent) = resolve_unambiguous_session_bound_agent(
         projection,
@@ -3230,7 +3192,8 @@ fn resolve_session_bound_terminal_target_locked(
     else {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
     };
-    if agent.affiliation_status != WorkspaceAgentAffiliationStatus::Assigned {
+    let assigned = agent.affiliation_status == WorkspaceAgentAffiliationStatus::Assigned;
+    if !assigned && confirm_work_id.is_none() {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
     }
     if agent.agent_id != target.agent_id {
@@ -3238,11 +3201,28 @@ fn resolve_session_bound_terminal_target_locked(
             "Session-bound Work terminalization agent identity changed before commit".to_string(),
         ));
     }
-    let Some(work_id) = agent
-        .workspace_id
-        .as_deref()
-        .filter(|work_id| !work_id.trim().is_empty())
-    else {
+    let work_id = if assigned {
+        agent
+            .workspace_id
+            .as_deref()
+            .filter(|work_id| !work_id.trim().is_empty())
+    } else {
+        if agent.workspace_id.is_some()
+            || projection
+                .agents
+                .iter()
+                .filter(|agent| agent.session_id == target.session_id)
+                .count()
+                != 1
+        {
+            return Err(GwtError::Other(
+                "Session-bound Work terminal confirmation projection authority became ambiguous"
+                    .to_string(),
+            ));
+        }
+        confirm_work_id
+    };
+    let Some(work_id) = work_id else {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
     };
     if canonical_session_bound_branch(agent.branch.as_deref().unwrap_or_default())
@@ -3887,11 +3867,11 @@ pub fn mark_workspace_agent_stopped(
     window_id: Option<&str>,
 ) -> Result<bool> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     mark_workspace_agent_stopped_at(&current_path, repo_path, session_id, window_id, Utc::now())
 }
 
 pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkspaceProjection>> {
+    ensure_supported_workspace_layout(path)?;
     match fs::read(path) {
         Ok(bytes) => {
             let mut projection: WorkspaceProjection = serde_json::from_slice(&bytes)
@@ -3917,10 +3897,7 @@ fn migrate_workspace_to_work_terminology(projection: &mut WorkspaceProjection) {
 }
 
 pub fn load_workspace_work_items(repo_path: &Path) -> Result<Option<WorkItemsProjection>> {
-    migrate_legacy_workspace_work_items(
-        repo_path,
-        &gwt_workspace_work_items_path_for_repo_path(repo_path),
-    )
+    load_workspace_work_items_from_path(&gwt_workspace_work_items_path_for_repo_path(repo_path))
 }
 
 fn classify_json_decode_error(context: &'static str, error: serde_json::Error) -> GwtError {
@@ -3944,6 +3921,7 @@ fn classify_json_decode_error(context: &'static str, error: serde_json::Error) -
 }
 
 pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkItemsProjection>> {
+    ensure_supported_workspace_layout(path)?;
     match fs::read(path) {
         Ok(bytes) => {
             #[cfg(debug_assertions)]
@@ -4006,13 +3984,7 @@ pub fn load_or_synthesize_workspace_work_items(repo_path: &Path) -> Result<WorkI
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
-        copy_legacy_workspace_file_if_needed(
-            &legacy_workspace_journal_path_for_repo_path(repo_path),
-            &journal_path,
-        )?;
         load_or_synthesize_workspace_work_items_from_paths(
             &work_items_path,
             &current_path,
@@ -4037,24 +4009,7 @@ fn load_or_synthesize_workspace_work_items_profiled(
         &work_items_path,
         |lock_wait_micros| {
             let parse_started = Instant::now();
-            // A Recent Project can reach this background loader before the
-            // restored-startup migration path. Materialize legacy-only state
-            // while the same project lock is held so the first authoritative
-            // projection cannot publish an empty Work list. All migration
-            // I/O is deliberately attributed to parse/work time, never lock
-            // wait time.
-            copy_validated_workspace_projection_if_needed(
-                &legacy_workspace_projection_path_for_repo_path(repo_path),
-                &current_path,
-            )?;
-            copy_validated_workspace_work_items_if_needed(
-                &legacy_workspace_work_items_path_for_repo_path(repo_path),
-                &work_items_path,
-            )?;
-            copy_legacy_workspace_file_if_needed(
-                &legacy_workspace_journal_path_for_repo_path(repo_path),
-                &journal_path,
-            )?;
+
             let projection = load_or_synthesize_workspace_work_items_from_paths(
                 &work_items_path,
                 &current_path,
@@ -4316,6 +4271,7 @@ pub(crate) fn save_workspace_work_items_projection_after_rebuild(
     path: &Path,
     projection: &WorkItemsProjection,
 ) -> Result<()> {
+    ensure_supported_workspace_layout(path)?;
     let detachments = load_container_detachments(path)?;
     let has_detached_refs = projection.work_items.iter().any(|item| {
         detachments.get(&item.id).is_some_and(|removed| {
@@ -4461,6 +4417,20 @@ fn with_workspace_transaction_recovery_observed_profiled<T>(
     base_marker_paths: Vec<PathBuf>,
     operation: impl FnOnce(bool, u64) -> Result<T>,
 ) -> Result<T> {
+    // Admit the layout before recovery can quarantine markers or publish state.
+    // Current projection locks use works.json even for the retired workspace root.
+    for target in &base_lock_targets {
+        if target.file_name().is_some_and(|name| name == "works.json")
+            && target
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "workspace")
+        {
+            ensure_supported_workspace_layout(&target.with_file_name("current.json"))?;
+        } else {
+            ensure_supported_workspace_layout(target)?;
+        }
+    }
     let mut operation = Some(operation);
     let mut recovered = false;
     let mut total_lock_wait_micros = 0u64;
@@ -4790,6 +4760,12 @@ fn write_workspace_state_transaction_markers(
     transaction: &PendingWorkspaceStateTransaction,
     cleanup_on_error: bool,
 ) -> Result<()> {
+    ensure_supported_workspace_layout(&transaction.current_path)?;
+    ensure_supported_workspace_layout(&transaction.work_items_path)?;
+    if let Some(path) = transaction.journal_path.as_deref() {
+        ensure_supported_workspace_layout(path)?;
+    }
+
     validate_pending_workspace_state_transaction(
         transaction,
         &pending_workspace_state_transaction_path(&transaction.current_path),
@@ -4944,6 +4920,12 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
     reconciliation_work_items_path: Option<&Path>,
     mut on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
 ) -> Result<ExternalWorkspaceCommitResolution> {
+    ensure_supported_workspace_layout(current_path)?;
+    ensure_supported_workspace_layout(work_items_path)?;
+    if let Some(path) = reconciliation_work_items_path {
+        ensure_supported_workspace_layout(path)?;
+    }
+
     let requested_resolution = match decision {
         ExternalWorkspaceCommitDecision::Commit => ExternalWorkspaceCommitResolution::Committed,
         ExternalWorkspaceCommitDecision::Reject => ExternalWorkspaceCommitResolution::Rejected,
@@ -5012,6 +4994,11 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
                 .any(|required| !lock_targets.iter().any(|locked| locked == required))
             {
                 return Ok(None);
+            }
+            ensure_supported_workspace_layout(&transaction.current_path)?;
+            ensure_supported_workspace_layout(&transaction.work_items_path)?;
+            if let Some(path) = transaction.journal_path.as_deref() {
+                ensure_supported_workspace_layout(path)?;
             }
             let Some(external_commit) = transaction.external_commit.as_ref() else {
                 return Err(GwtError::Other(
@@ -5138,6 +5125,12 @@ fn apply_workspace_state_transaction_locked(
     transaction: &PendingWorkspaceStateTransaction,
     recovering: bool,
 ) -> Result<()> {
+    ensure_supported_workspace_layout(&transaction.current_path)?;
+    ensure_supported_workspace_layout(&transaction.work_items_path)?;
+    if let Some(path) = transaction.journal_path.as_deref() {
+        ensure_supported_workspace_layout(path)?;
+    }
+
     if transaction
         .external_commit
         .as_ref()
@@ -5445,7 +5438,6 @@ pub fn record_workspace_work_event(repo_path: &Path, event: WorkEvent) -> Result
     // event-log migration can create files through it.
     validate_workspace_work_event_store_path(&gwt_repo_local_work_events_dir(repo_path))?;
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let events_dir = repo_local_work_event_store_dir_with_migration(repo_path)?;
     record_workspace_work_events_to_store(&work_items_path, &events_dir, vec![event])
 }
@@ -5987,7 +5979,6 @@ fn decompose_legacy_multi_branch_work_items_paths_locked(
 /// [`decompose_legacy_multi_branch_work_items_paths`].
 pub fn decompose_legacy_multi_branch_work_items(repo_path: &Path) -> Result<usize> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     decompose_legacy_multi_branch_work_items_paths(&work_items_path, repo_path)
 }
 
@@ -6000,7 +5991,6 @@ pub fn reconcile_worktree_work_items(
     now: DateTime<Utc>,
 ) -> Result<usize> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     reconcile_worktree_work_items_paths(&work_items_path, repo_path, sources, now)
 }
 
@@ -6302,7 +6292,6 @@ pub fn record_workspace_work_paused_event(
     updated_at: DateTime<Utc>,
 ) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let events_path = gwt_workspace_work_events_closed_path_for_repo_path(repo_path);
     record_workspace_work_paused_event_paths(
         &work_items_path,
@@ -6502,9 +6491,7 @@ pub fn emit_workspace_done_event_for_session_outcome(
     updated_at: DateTime<Utc>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
-    let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
-    let _ = migrate_legacy_workspace_work_items(project_state_root, &work_items_path)?;
     emit_workspace_done_event_for_session_outcome_paths(
         &current_path,
         &work_items_path,
@@ -6542,9 +6529,7 @@ pub fn emit_workspace_discard_event_for_session_outcome(
     updated_at: DateTime<Utc>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
-    let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
-    let _ = migrate_legacy_workspace_work_items(project_state_root, &work_items_path)?;
     emit_workspace_discard_event_for_session_outcome_paths(
         &current_path,
         &work_items_path,
@@ -6930,7 +6915,6 @@ pub fn rebuild_work_items_from_events_for_repo(
         return Ok(WorkItemsRebuildOutcome::Missing);
     }
 
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let _ = repo_local_work_events_path_with_migration(repo_path)?;
     rebuild_work_items_from_event_records(&work_items_path, &marker_path, records)
 }
@@ -6966,8 +6950,6 @@ fn write_rebuild_marker(path: &Path) -> Result<()> {
 pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let events_path = gwt_workspace_work_events_closed_path_for_repo_path(repo_path);
     retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
 }
@@ -7068,6 +7050,7 @@ fn save_workspace_projection_to_path_unlocked(
     path: &Path,
     projection: &WorkspaceProjection,
 ) -> Result<()> {
+    ensure_supported_workspace_layout(path)?;
     validate_existing_workspace_state::<WorkspaceProjection>(path)?;
     let bytes = serde_json::to_vec_pretty(projection)
         .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
@@ -7161,6 +7144,7 @@ pub fn append_workspace_journal_entry_to_path(
     path: &Path,
     entry: &WorkspaceJournalEntry,
 ) -> Result<()> {
+    ensure_supported_workspace_layout(path)?;
     if let Some(parent) = path.parent() {
         create_dir_all_durable(parent)?;
     }
@@ -8007,6 +7991,7 @@ pub fn load_recent_workspace_journal_entries_from_path(
     path: &Path,
     limit: usize,
 ) -> Result<Vec<WorkspaceJournalEntry>> {
+    ensure_supported_workspace_layout(path)?;
     if limit == 0 || !path.exists() {
         return Ok(Vec::new());
     }
@@ -8769,18 +8754,12 @@ where
         {
             continue;
         }
-        let state_dir = project_dir.join("project-state");
-        let legacy_dir = project_dir.join("workspace");
-        let (workspace_dir, projection) =
-            match load_workspace_projection_from_path(&state_dir.join("current.json"))? {
-                Some(projection) => (state_dir, projection),
-                None => {
-                    match load_workspace_projection_from_path(&legacy_dir.join("current.json"))? {
-                        Some(projection) => (legacy_dir, projection),
-                        None => continue,
-                    }
-                }
-            };
+        let workspace_dir = project_dir.join("project-state");
+        let Some(projection) =
+            load_workspace_projection_from_path(&workspace_dir.join("current.json"))?
+        else {
+            continue;
+        };
 
         let stale_reason = workspace_projection_stale_reason(&projection, config, now);
 
@@ -8890,6 +8869,7 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
             }
             PruneAction::Archive => {
                 if !dry_run {
+                    ensure_supported_workspace_layout(&current_json)?;
                     let lock_target = current_json.with_file_name("works.json");
                     with_workspace_work_items_lock(&lock_target, || {
                         validate_existing_workspace_state::<WorkItemsProjection>(&work_items_path)?;
@@ -8907,6 +8887,7 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
             }
             PruneAction::Delete => {
                 if !dry_run {
+                    ensure_supported_workspace_layout(&current_json)?;
                     // Validate immediately before removal. Holding works.lock
                     // inside this directory prevents its deletion on Windows.
                     validate_existing_workspace_state::<WorkspaceProjection>(&current_json)?;
