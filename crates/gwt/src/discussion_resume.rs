@@ -1559,7 +1559,7 @@ Status: active
         std::fs::write(&discussion_path, sample_discussion()).unwrap();
 
         // Already parked
-        assert!(!set_proposal_status_by_label(
+        assert!(set_proposal_status_by_label(
             dir.path(),
             "Proposal B",
             "chosen",
@@ -1567,9 +1567,9 @@ Status: active
             Some(&legacy_target("Manual follow-up only"))
         )
         .unwrap()
-        .is_some());
+        .is_none());
         // Unknown label
-        assert!(!set_proposal_status_by_label(
+        assert!(set_proposal_status_by_label(
             dir.path(),
             "Proposal Z",
             "chosen",
@@ -1577,14 +1577,14 @@ Status: active
             Some(&legacy_target("Missing"))
         )
         .unwrap()
-        .is_some());
+        .is_none());
     }
 
     #[test]
     fn set_proposal_status_returns_false_when_discussion_md_absent() {
         let dir = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
-        assert!(!set_proposal_status_by_label(
+        assert!(set_proposal_status_by_label(
             dir.path(),
             "Proposal A",
             "chosen",
@@ -1592,7 +1592,7 @@ Status: active
             Some(&legacy_target("Missing"))
         )
         .unwrap()
-        .is_some());
+        .is_none());
     }
 
     #[test]
