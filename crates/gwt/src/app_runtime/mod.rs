@@ -277,6 +277,7 @@ mod migration;
 mod native_project_picker;
 pub(crate) mod persist_dispatcher;
 pub(crate) mod pm;
+mod pm_chat;
 mod profile;
 mod project_route;
 mod project_tabs;
@@ -1025,6 +1026,8 @@ pub(crate) struct ProjectRuntimeState {
     /// mark the PM window without touching disk on every render. Refreshed
     /// wherever the registration is read or written.
     pub(crate) pm_sessions: HashMap<PathBuf, String>,
+    /// One bounded append reader per Project; native file reads stay off tao.
+    pub(crate) pm_conversation_reader: Arc<Mutex<gwt::pm_conversation::PmConversationReader>>,
     /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
@@ -1074,6 +1077,7 @@ pub(crate) fn initial_project_states(
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
+                    pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
@@ -1529,6 +1533,8 @@ pub struct AppRuntime {
     /// delta — an in-place agent restart reusing the same window is fine.
     /// Runtime-only; never persisted.
     pub(crate) window_output_bytes: HashMap<String, u64>,
+    /// Latest parsed preview received from another runtime owner; never persisted.
+    pub(crate) remote_terminal_previews: HashMap<String, String>,
     /// Issue #4608: when each pane last wrote to its terminal. The Monitor's
     /// hook-independent liveness signal (see
     /// `IssueMonitorWindowObservation::last_output_at`). Runtime-only.
@@ -2795,7 +2801,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // I/O, and an unreadable record fails closed to `stuck_unknown`.
     let idle_settlements = window_snapshot
         .map(|_| {
-            gwt::issue_monitor_worker::read_execution_settlements(
+            gwt::issue_monitor_worker::read_execution_observations(
                 project_root,
                 &monitor.execution_settlement_issue_numbers(),
             )
@@ -3015,6 +3021,7 @@ impl AppRuntime {
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
+                    pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
@@ -3358,6 +3365,7 @@ impl AppRuntime {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: HashMap::new(),
@@ -5622,19 +5630,6 @@ impl AppRuntime {
         }))
     }
 
-    pub(crate) fn finalize_issue_monitor_window_close_in_background(
-        project_root: &Path,
-        target: &gwt::IssueMonitorStopTarget,
-        commit_timeout: std::time::Duration,
-    ) -> WindowCloseMonitorResult {
-        Self::finalize_issue_monitor_window_close_classified_in_background(
-            project_root,
-            target,
-            commit_timeout,
-            gwt::IssueMonitorFailureClass::Unknown,
-        )
-    }
-
     pub(crate) fn finalize_issue_monitor_window_close_classified_in_background(
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
@@ -5676,69 +5671,6 @@ impl AppRuntime {
             }
             Err(error) => WindowCloseMonitorResult::Failed(error),
         }
-    }
-
-    /// Reconcile monitor-owned windows against a memory-only canvas snapshot.
-    /// The caller must run this on a blocking worker: prefs reads, daemon
-    /// publication, and the exact-CAS local fallback all perform I/O.
-    fn finalize_issue_monitor_vanished_windows_in_background(
-        project_root: &Path,
-        live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
-        observed_at: &str,
-        commit_timeout: std::time::Duration,
-    ) -> Vec<String> {
-        if live_windows_per_tab.is_empty() {
-            return Vec::new();
-        }
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let prefs = match gwt::load_issue_monitor_prefs(&prefs_path) {
-            Ok(prefs) => prefs,
-            Err(error) => {
-                return vec![format!(
-                    "Issue Monitor vanished-window reconciliation could not read prefs: {error}"
-                )]
-            }
-        };
-        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-        let targets = live_windows_per_tab
-            .iter()
-            .flat_map(|(tab_id, live_window_ids)| {
-                monitor.vanished_launched_windows(tab_id, live_window_ids, observed_at)
-            })
-            .filter_map(|window_id| {
-                let issue_number = monitor.launched_window_issue(&window_id)?;
-                Some(gwt::IssueMonitorStopTarget {
-                    issue_number,
-                    claim_id: monitor.live_claim_id(issue_number),
-                    delivery_id: monitor.pending_launch_delivery_id(issue_number),
-                    window_id: Some(window_id),
-                })
-            })
-            .collect::<Vec<_>>();
-        if !targets.is_empty() {
-            tracing::info!(
-                windows = ?targets
-                    .iter()
-                    .filter_map(|target| target.window_id.as_deref())
-                    .collect::<Vec<_>>(),
-                "releasing issue monitor launches whose agent window no longer exists"
-            );
-        }
-        targets
-            .iter()
-            .filter_map(|target| {
-                match Self::finalize_issue_monitor_window_close_in_background(
-                    project_root,
-                    target,
-                    commit_timeout,
-                ) {
-                    WindowCloseMonitorResult::Failed(error) => Some(error.to_string()),
-                    WindowCloseMonitorResult::Noop
-                    | WindowCloseMonitorResult::Published
-                    | WindowCloseMonitorResult::LocalFallback(_) => None,
-                }
-            })
-            .collect()
     }
 
     fn commit_local_issue_monitor_window_close(
@@ -6556,7 +6488,10 @@ impl AppRuntime {
         self.local_issue_monitor_events_with_policy(
             context,
             Some(client_id),
-            IssueMonitorScanPolicy::Scan,
+            // Issue #4963: the GUI list only projects local state. Remote
+            // enumeration belongs to the scheduled worker, even for a cold
+            // or stale cache; a deadline alone would still stall this loop.
+            IssueMonitorScanPolicy::CacheOnly,
             |_| {},
         )
     }
@@ -7106,16 +7041,11 @@ impl AppRuntime {
         let worker_expected_project_tab_id = expected_project_tab_id.to_string();
         let worker_now = now.to_string();
         let issue_client_factory = self.issue_client_factory.clone();
-        let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let vanished_window_failures =
-                    Self::finalize_issue_monitor_vanished_windows_in_background(
-                        &worker_project_root,
-                        &live_windows_per_tab,
-                        &worker_now,
-                        fallback_commit_timeout,
-                    );
+                // Issue #4244: automatic disappearance belongs to the scan
+                // classifier, which retains pending/live bindings and returns
+                // pane-close requests with its materialized completion.
                 // Issue #3883: the scan owns the re-adoption, so it happens
                 // inside the same authority-gated transaction that persists
                 // the scan rather than in a fork of its own.
@@ -7131,7 +7061,7 @@ impl AppRuntime {
                     &worker_now,
                     &issue_client_factory,
                 );
-                (outcome, vanished_window_failures)
+                (outcome, Vec::new())
             }))
             .map_err(|panic| {
                 let detail = panic
@@ -8338,6 +8268,7 @@ impl AppRuntime {
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
+            | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -8668,6 +8599,7 @@ impl AppRuntime {
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
+            | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -8756,7 +8688,6 @@ impl AppRuntime {
                     &self.blocking_tasks,
                     self.proxy.clone(),
                     context.clone(),
-                    None,
                 );
                 Vec::new()
             }
@@ -8928,6 +8859,9 @@ impl AppRuntime {
             FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(context),
             FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
+            FrontendEvent::LoadPmConversation { id } => {
+                self.load_pm_conversation_events(context, client_id, &id)
+            }
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
@@ -9176,7 +9110,7 @@ impl AppRuntime {
                 &branches,
                 delete_remote,
                 force_filesystem_delete,
-                operation_id.as_deref(),
+                &operation_id,
             ),
             FrontendEvent::RunWorkspaceCleanup {
                 branch,
@@ -9189,7 +9123,7 @@ impl AppRuntime {
                 &branch,
                 delete_remote,
                 force_filesystem_delete,
-                operation_id.as_deref(),
+                &operation_id,
             ),
             FrontendEvent::SyncBranchCleanup { id, operation_id } => {
                 self.sync_branch_cleanup_events(context, &client_id, &id, &operation_id)
@@ -10500,6 +10434,12 @@ impl AppRuntime {
                     .map(|status| (id.clone(), status, detail.clone()))
             })
             .collect();
+        let mut terminal_previews: HashMap<String, String> = self
+            .remote_terminal_previews
+            .iter()
+            .filter(|(id, _)| self.project_key_for_window(id) == Some(&context.project_key))
+            .map(|(id, text)| (id.clone(), text.clone()))
+            .collect();
         let mut terminal_snapshots = self
             .runtimes
             .iter()
@@ -10512,7 +10452,13 @@ impl AppRuntime {
                 let (snapshot, seq) = runtime
                     .pane
                     .lock()
-                    .map(|pane| (pane.snapshot_bytes(), pane.output_seq()))
+                    .map(|pane| {
+                        terminal_previews.insert(
+                            id.clone(),
+                            runtime_events::terminal_preview_text(&pane.screen().contents()),
+                        );
+                        (pane.snapshot_bytes(), pane.output_seq())
+                    })
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot, Some(seq)))
             })
@@ -10544,6 +10490,12 @@ impl AppRuntime {
                 .and_then(|state| state.launch_wizard.as_ref())
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
+        );
+        events.splice(
+            1..1,
+            terminal_previews.into_iter().map(|(id, text)| {
+                OutboundEvent::reply(client_id, BackendEvent::TerminalPreview { id, text })
+            }),
         );
         if let Some(event) = self.active_work_projection_reply(client_id, &context.tab_id) {
             events.insert(1, event);
@@ -11229,6 +11181,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
+        self.remote_terminal_previews.remove(window_id);
         self.window_last_output_at.remove(window_id);
         self.window_hook_states.remove(window_id);
         self.clear_runtime_approval_latch_without_status(window_id, true);

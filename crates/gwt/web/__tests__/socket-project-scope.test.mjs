@@ -30,6 +30,7 @@ function fixture({ routeProjectKey = null } = {}) {
     agentCompletionNotifier: { reset() { context.notificationResetCount += 1; } },
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
     projectPageMetadata: { resetConnection() {} },
+    requestVisiblePmConversations() {}, pmChatViews: new Map(),
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
     opened, renderRouteNotFound() { context.notFoundRendered = true; },

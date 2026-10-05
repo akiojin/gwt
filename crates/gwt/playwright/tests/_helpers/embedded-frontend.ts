@@ -21,6 +21,7 @@ export const HUB_URL = ORIGIN_URL;
 
 const ROOT_MODULES = new Set([
   "app.js",
+  "pm-chat.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
   "frontend-bootstrap.js",
   "frontend-route.js",

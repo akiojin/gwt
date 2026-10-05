@@ -5695,11 +5695,11 @@ mod tests {
     use super::{
         apply_issue_monitor_control, build_handshake_response, decode_issue_monitor_control,
         decode_issue_monitor_control_in_repo, handle_connection,
-        issue_monitor_control_is_authorizing, pin_prefs_hang_guard, run_server,
+        issue_monitor_control_is_authorizing, pin_prefs_hang_guard,
         run_server_with_shutdown_and_worker_config, spawn_issue_monitor_worker_with_config,
         spawn_issue_monitor_worker_with_config_and_scan_probe,
-        spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, ConnectionGuard,
-        DaemonShutdown, IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
+        spawn_issue_monitor_worker_with_config_and_timeout, spawn_server, BroadcastHub,
+        ConnectionGuard, DaemonShutdown, IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
     };
 
     /// SPEC #4778 AC-1: these cases exercise frame shape, not PM authority, so
@@ -7621,6 +7621,7 @@ exit 0
                         number: *number,
                         queued_at: "2026-07-27T00:00:00Z".to_string(),
                         queued_by: "test".to_string(),
+                        ..Default::default()
                     });
             }
         }
@@ -20249,23 +20250,14 @@ exit 1
         let endpoint_path = temp.path().join("endpoint.json");
         let endpoint = sample_endpoint(scope.clone(), &socket_path, "secret");
 
-        // Pre-create the socket file by binding inside run_server. We need
-        // run_server to bind, then a client connects, exchanges handshake,
-        // and sends one frame.
-        let server_socket = socket_path.clone();
-        let server_endpoint_path = endpoint_path.clone();
-        let server_hub = BroadcastHub::new();
-        let server_handle = tokio::spawn(async move {
-            run_server(endpoint, server_socket, server_endpoint_path, server_hub).await
-        });
-
-        // wait until the socket is bound
-        let mut attempts = 0;
-        while !socket_path.exists() && attempts < 50 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            attempts += 1;
-        }
-        assert!(socket_path.exists(), "socket bound");
+        // The fixture returns only after binding, so the client can connect.
+        let server_handle = spawn_server(
+            endpoint,
+            socket_path.clone(),
+            endpoint_path,
+            BroadcastHub::new(),
+        )
+        .expect("spawn bound server");
 
         let stream = UnixStream::connect(&socket_path).await.expect("connect");
         let (read_half, mut write_half) = stream.into_split();

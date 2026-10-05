@@ -475,7 +475,7 @@ pub(super) struct WorkspaceCleanupAsyncTask {
     pub(super) project_root: PathBuf,
     pub(super) active_session_branches: std::collections::HashSet<String>,
     pub(super) branch: String,
-    pub(super) operation_id: Option<String>,
+    pub(super) operation_id: String,
     pub(super) operations: Arc<BranchCleanupOperationStore>,
     pub(super) options: BranchCleanupOptions,
 }
@@ -488,7 +488,7 @@ struct BranchCleanupAsyncTask {
     project_root: PathBuf,
     active_session_branches: std::collections::HashSet<String>,
     branches: Vec<String>,
-    operation_id: Option<String>,
+    operation_id: String,
     operations: Arc<BranchCleanupOperationStore>,
     options: BranchCleanupOptions,
 }
@@ -522,7 +522,7 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                             // reconnected mid-cleanup still receives progress.
                             progress_operations.record_progress(
                                 WORKSPACE_CLEANUP_EVENT_ID,
-                                progress_operation_id.as_deref(),
+                                &progress_operation_id,
                                 &progress,
                             );
                             progress_proxy.send(UserEvent::ProjectDispatch {
@@ -543,11 +543,7 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                             });
                         },
                     );
-                    operations.record_result(
-                        WORKSPACE_CLEANUP_EVENT_ID,
-                        operation_id.as_deref(),
-                        &results,
-                    );
+                    operations.record_result(WORKSPACE_CLEANUP_EVENT_ID, &operation_id, &results);
                     let mut events = vec![OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::BranchCleanupResult {
@@ -665,7 +661,7 @@ fn branch_cleanup_snapshot_event(
         gwt::BranchCleanupOperationSnapshot::Progress(progress) => {
             BackendEvent::BranchCleanupProgress {
                 id: id.to_string(),
-                operation_id: Some(operation_id.to_string()),
+                operation_id: operation_id.to_string(),
                 branch: progress.branch,
                 execution_branch: progress.execution_branch,
                 index: progress.index,
@@ -676,7 +672,7 @@ fn branch_cleanup_snapshot_event(
         }
         gwt::BranchCleanupOperationSnapshot::Result(results) => BackendEvent::BranchCleanupResult {
             id: id.to_string(),
-            operation_id: Some(operation_id.to_string()),
+            operation_id: operation_id.to_string(),
             results,
         },
     }
@@ -713,7 +709,7 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
                             // reconnected mid-cleanup still receives progress.
                             progress_operations.record_progress(
                                 &progress_window_id,
-                                progress_operation_id.as_deref(),
+                                &progress_operation_id,
                                 &progress,
                             );
                             progress_proxy.send(UserEvent::ProjectDispatch {
@@ -734,7 +730,7 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
                             });
                         },
                     );
-                    operations.record_result(&window_id, operation_id.as_deref(), &results);
+                    operations.record_result(&window_id, &operation_id, &results);
                     let mut events = vec![OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::BranchCleanupResult {
@@ -786,11 +782,7 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
 impl AppRuntime {
     /// A cached rail refresh cannot prove that an unreadable works.json has
     /// recovered: file permissions are not part of its cache signature.
-    pub(crate) fn recheck_workspace_state_after_projection(
-        &self,
-        project_root: &Path,
-        imported_from: Option<PathBuf>,
-    ) {
+    pub(crate) fn recheck_workspace_state_after_projection(&self, project_root: &Path) {
         let Some(context) = self.project_context_for_root(project_root) else {
             return;
         };
@@ -800,12 +792,11 @@ impl AppRuntime {
                 .as_ref()
                 .is_some_and(|notice| notice.kind == gwt::WorkspaceStateNoticeKind::LoadError)
         });
-        if pending || imported_from.is_some() {
+        if pending {
             crate::spawn_workspace_projection_reload(
                 &self.blocking_tasks,
                 self.proxy.clone(),
                 context,
-                imported_from,
             );
         }
     }
@@ -838,7 +829,6 @@ impl AppRuntime {
     pub(crate) fn handle_workspace_state_loaded(
         &mut self,
         project_root: &Path,
-        imported_from: Option<PathBuf>,
     ) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
@@ -848,22 +838,15 @@ impl AppRuntime {
             .workspace_state_notice
             .as_ref()
             .is_some_and(|notice| notice.kind == gwt::WorkspaceStateNoticeKind::LoadError);
-        if imported_from.is_none() && !recovered {
+        if !recovered {
             return Vec::new();
         }
-        let notice = imported_from.map(|path| gwt::WorkspaceStateNoticeView {
-            path: path.display().to_string(),
-            message: "旧配置から取り込みました。元のファイルは保持されています。".to_string(),
-            kind: gwt::WorkspaceStateNoticeKind::LegacyImported,
-        });
-        state.workspace_state_notice = notice.clone();
-        if recovered {
-            self.spawn_work_events_ingest(project_root.to_path_buf(), true);
-            let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
-        }
+        state.workspace_state_notice = None;
+        self.spawn_work_events_ingest(project_root.to_path_buf(), true);
+        let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
         vec![OutboundEvent::project(
             context.project_key,
-            BackendEvent::WorkspaceStateNotice { notice },
+            BackendEvent::WorkspaceStateNotice { notice: None },
         )]
     }
 
@@ -874,7 +857,7 @@ impl AppRuntime {
         branches: &[String],
         delete_remote: bool,
         force_filesystem_delete: bool,
-        operation_id: Option<&str>,
+        operation_id: &str,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -928,7 +911,7 @@ impl AppRuntime {
                 project_root: tab.project_root.clone(),
                 active_session_branches: self.active_session_branches_for_tab(&address.tab_id),
                 branches: branches.to_vec(),
-                operation_id: operation_id.map(str::to_string),
+                operation_id: operation_id.to_string(),
                 operations: state.branch_cleanup_operations.clone(),
                 options: BranchCleanupOptions {
                     delete_remote,
@@ -946,7 +929,7 @@ impl AppRuntime {
         branch: &str,
         delete_remote: bool,
         force_filesystem_delete: bool,
-        operation_id: Option<&str>,
+        operation_id: &str,
     ) -> Vec<OutboundEvent> {
         let tab_id = &context.tab_id;
         let Some(tab) = self.tab(tab_id) else {
@@ -969,7 +952,7 @@ impl AppRuntime {
                 project_root: tab.project_root.clone(),
                 active_session_branches: self.active_session_branches_for_tab(tab_id),
                 branch: branch.to_string(),
-                operation_id: operation_id.map(str::to_string),
+                operation_id: operation_id.to_string(),
                 operations: state.branch_cleanup_operations.clone(),
                 options: BranchCleanupOptions {
                     delete_remote,
@@ -1066,11 +1049,10 @@ mod tests {
             .expect("save current projection");
         let legacy_path = gwt_core::paths::gwt_project_dir_for_repo_path(&project_root)
             .join("workspace/current.json");
-        gwt_core::workspace_projection::save_workspace_projection_to_path(
-            &legacy_path,
-            &projection,
-        )
-        .expect("save remaining legacy projection");
+        // Retired HOME residue predates the current writer, which rejects it.
+        let legacy_bytes = serde_json::to_vec(&projection).expect("serialize legacy fixture");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).expect("create legacy directory");
+        std::fs::write(&legacy_path, &legacy_bytes).expect("seed remaining legacy projection");
         let current_path =
             gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
         let lock = std::fs::OpenOptions::new()
@@ -1101,15 +1083,21 @@ mod tests {
             (true, false),
             "a deleted current projection must not be broadcast or recreated by cleanup completion"
         );
-        assert!(
-            !legacy_path.exists(),
-            "cleanup must invalidate the legacy source that could recreate canonical state"
+        assert_eq!(
+            std::fs::read(&legacy_path).expect("read preserved legacy projection"),
+            legacy_bytes,
+            "cleanup must preserve retired HOME bytes when canonical state disappears"
         );
+        let error = gwt_core::workspace_projection::load_workspace_projection(&project_root)
+            .expect_err("remaining retired HOME state must be refused");
         assert!(
-            gwt_core::workspace_projection::load_workspace_projection(&project_root)
-                .expect("load projection after cleanup")
-                .is_none(),
-            "a normal load after cleanup must not remigrate deleted canonical state"
+            matches!(
+                error,
+                gwt_core::error::GwtError::WorkspaceStateLoad(ref detail)
+                    if detail.kind == gwt_core::error::WorkspaceStateLoadErrorKind::LegacyLayout
+                        && detail.path == legacy_path
+            ),
+            "a normal load must refuse retired state without recreating canonical state: {error}"
         );
     }
 }

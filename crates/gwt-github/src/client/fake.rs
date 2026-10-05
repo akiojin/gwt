@@ -17,7 +17,7 @@ use std::{
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueCloseReason,
-    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, LabelAssignment, MergedPullRequest,
     OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
     RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
     RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
@@ -46,6 +46,7 @@ pub struct FakeIssueClient {
 
 struct FakeState {
     issues: HashMap<IssueNumber, IssueSnapshot>,
+    label_assignments: HashMap<(IssueNumber, String), LabelAssignment>,
     /// Recorded call log for tests (operation + target).
     pub call_log: Vec<String>,
     owner_issues: HashMap<RepositoryIdentity, HashMap<IssueNumber, RepositoryIssue>>,
@@ -111,6 +112,7 @@ impl FakeIssueClient {
         FakeIssueClient {
             inner: Arc::new(Mutex::new(FakeState {
                 issues: HashMap::new(),
+                label_assignments: HashMap::new(),
                 call_log: Vec::new(),
                 owner_issues: HashMap::new(),
                 owner_comments: HashMap::new(),
@@ -169,6 +171,25 @@ impl FakeIssueClient {
     pub fn corrupt_next_create_comment(&self) {
         self.corrupt_next_create_comment
             .store(true, Ordering::SeqCst);
+    }
+
+    /// Set or clear GitHub label provenance independently of the Issue snapshot.
+    pub fn set_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+        assignment: Option<LabelAssignment>,
+    ) {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (number, label.to_ascii_lowercase());
+        if let Some(assignment) = assignment {
+            state.label_assignments.insert(key, assignment);
+        } else {
+            state.label_assignments.remove(&key);
+        }
     }
 
     /// Preload an Issue snapshot. Used by tests to set up fixtures.
@@ -491,6 +512,24 @@ impl Default for FakeIssueClient {
 }
 
 impl IssueClient for FakeIssueClient {
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<LabelAssignment>, ApiError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .call_log
+            .push(format!("fetch_label_assignment:{}:{label}", number.0));
+        Ok(state
+            .label_assignments
+            .get(&(number, label.to_ascii_lowercase()))
+            .cloned())
+    }
+
     fn fetch(
         &self,
         number: IssueNumber,

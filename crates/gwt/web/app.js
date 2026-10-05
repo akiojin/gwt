@@ -173,6 +173,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
+      import { createPmChat } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -295,7 +296,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           }
           runtime.terminal.write(text, onWritten);
         },
-        canWrite: canRefreshTerminalViewport,
+        // Hidden Agents tabs still feed the shared buffer used by Issue previews.
+        canWrite: (windowId) => (agentsHost && agentsSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
@@ -578,6 +580,10 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           appendRenderKeyPart(parts, windowData?.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, windowData?.agent_id || "");
+          appendRenderKeyPart(parts, "session_id");
+          appendRenderKeyPart(parts, windowData?.session_id || "");
+          appendRenderKeyPart(parts, "is_pm");
+          appendRenderKeyPart(parts, Boolean(windowData?.is_pm));
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, windowData?.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");
@@ -1323,6 +1329,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
+        requestVisiblePmConversations();
       }
 
       function handleSocketMessage(event) {
@@ -1395,6 +1402,11 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       function handleSocketClose() {
+        for (const [windowId, view] of pmChatViews) {
+          view.pendingSessions.length = 0;
+          view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
+          view.controller.update({ availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." });
+        }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
@@ -2752,7 +2764,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
         const workspaceWindow = workspaceWindowById(windowId);
-        if (agentsHost && agentsSurface?.contains(windowId)) return true;
+        if (agentsHost && agentsSurface?.contains(windowId)) return agentsSurface.isVisible(windowId);
         if (agentsHost === stage.closest(".canvas-area")) return false;
         if (splitSurfaces?.isOpen() && !isOffCanvasPlacement(workspaceWindow)) {
           return splitSurfaces.containsWindow(windowId);
@@ -3870,6 +3882,10 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       function focusWindowLocally(windowId) {
+        if (agentsHost && agentsSurface?.contains(windowId)) {
+          splitSurfaces?.focusSurface("agents");
+          if (!agentsSurface.isVisible(windowId)) agentsSurface.reveal(windowId);
+        }
         splitSurfaces?.focusWindow(windowId);
         const targetElement = windowMap.get(windowId);
         if (focusedId === windowId && targetElement?.classList.contains("focused")) {
@@ -4402,18 +4418,19 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
-      // pending buffered content. Idempotent and gated on
-      // `canRefreshTerminalViewport(windowId)` so we never flip
-      // `isReady = true` while the runtime element is still hidden —
-      // doing so would let later `writeOutput` calls bypass the
-      // deferredWrites buffer and render against xterm's default 80×24
-      // grid before fit ever had a chance to populate cell metrics.
+      // pending buffered content. Hidden windows wait for reveal; Agents tab
+      // panels keep their layout box and can fit before selection. Every path
+      // still waits for real dimensions before releasing deferred writes.
       function completeInitialFitHandshake(windowId) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || runtime.isReady) {
           return;
         }
-        if (!canRefreshTerminalViewport(windowId)) {
+        // Agents tab panels retain a real layout box while hidden, so their
+        // first fit can feed a visible Issue mirror without selecting the tab.
+        // Ordinary hidden windows still wait for reveal; the box guard below
+        // keeps every first write behind a fit to actual dimensions.
+        if (!(agentsHost && agentsSurface?.contains(windowId)) && !canRefreshTerminalViewport(windowId)) {
           // Still hidden; wait for the next reveal. The hidden →
           // visible transition handler (scheduleTerminalFocusActivation)
           // will call back into this helper.
@@ -5362,7 +5379,80 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         return parts.join("");
       }
 
+      const pmChatViews = new Map();
+
+      function disposePmChat(windowId) {
+        const view = pmChatViews.get(windowId);
+        if (!view) return;
+        view.controller.dispose();
+        view.body.classList.remove("pm-conversation-body");
+        // Return the terminal nodes to their original body when PM ownership ends.
+        view.body.append(...view.logHost.childNodes);
+        view.logHost.remove();
+        view.root.remove();
+        pmChatViews.delete(windowId);
+      }
+
+      function syncPmChat(windowData, element) {
+        const eligible = windowData.is_pm && presetSurface(windowData.preset) === "terminal";
+        let view = pmChatViews.get(windowData.id);
+        if (!eligible) {
+          disposePmChat(windowData.id);
+          return;
+        }
+        if (view) {
+          if (view.sessionId !== windowData.session_id) {
+            view.sessionId = windowData.session_id;
+            view.controller.setSession(windowData.session_id);
+            requestVisiblePmConversations();
+          }
+          return;
+        }
+        const body = element.querySelector(".window-body");
+        const terminalRoot = body.querySelector(".terminal-root");
+        if (!terminalRoot) return;
+        const root = document.createElement("div");
+        const logHost = document.createElement("div");
+        logHost.className = "pm-conversation-log";
+        logHost.append(terminalRoot);
+        const overlay = body.querySelector(".terminal-overlay");
+        if (overlay) logHost.append(overlay);
+        body.classList.add("pm-conversation-body");
+        body.append(root, logHost);
+        view = { root, body, logHost, sessionId: windowData.session_id, pendingSessions: [] };
+        view.controller = createPmChat({
+          document, root, windowId: windowData.id, sessionId: windowData.session_id,
+          send: (message) => {
+            const result = send(message);
+            if (result === "sent") view.pendingSessions.push(view.sessionId);
+            return result;
+          },
+          onLogVisibility: (visible) => {
+            logHost.hidden = !visible;
+            if (!visible) requestVisiblePmConversations();
+            if (visible) requestAnimationFrame(() => {
+              scheduleTerminalFit(windowData.id, false);
+              activateTerminalOnReveal(windowData.id);
+            });
+          },
+        });
+        pmChatViews.set(windowData.id, view);
+        requestVisiblePmConversations();
+      }
+
+      function requestVisiblePmConversations() {
+        if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
+        for (const windowData of activeWorkspace()?.windows || []) {
+          const view = pmChatViews.get(windowData.id);
+          if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
+            send({ kind: "load_pm_conversation", id: windowData.id });
+          }
+        }
+      }
+      window.setInterval(requestVisiblePmConversations, 5000);
+
       function mountWindowBody(windowData, element) {
+        disposePmChat(windowData.id);
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
         const surface = presetSurface(windowData.preset);
@@ -5807,6 +5897,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             renderedAgentKanbanBodyKeys.set(windowData.id, nextAgentKanbanBodyKey);
           }
         }
+        syncPmChat(windowData, element);
         // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
         // to the canvas without changing its preset, so `mountWindowBody` does not
         // run again. Reclaim the live terminal into this window's own body.
@@ -5973,6 +6064,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
                 isolate("remove_window", visibility.removed, (windowId) => {
                   const element = windowMap.get(windowId);
                   if (!element) return;
+                  disposePmChat(windowId);
                   const runtime = terminalMap.get(windowId);
                   if (runtime && runtime.activationFrame !== null) {
                     cancelAnimationFrame(runtime.activationFrame);
@@ -6331,6 +6423,27 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
+          case "pm_conversation": {
+            const view = pmChatViews.get(event.id);
+            if (view && event.session_id === view.sessionId) view.controller.update(event.snapshot);
+            break;
+          }
+          case "pane_send_result": {
+            let view = pmChatViews.get(event.window_id);
+            // A pane removed before submit has no window ID in its rejection.
+            // Only an unambiguous failure may unlock a pending PM draft.
+            if (!event.window_id && event.ok === false) {
+              const pending = (activeWorkspace()?.windows || [])
+                .map(windowData => pmChatViews.get(windowData.id))
+                .filter(candidate => candidate?.pendingSessions.length);
+              if (pending.length === 1) view = pending[0];
+            }
+            if (view && view.pendingSessions.length) {
+              const sentSession = view.pendingSessions.shift();
+              if (sentSession === view.sessionId) view.controller.handleSendResult(event);
+            }
+            break;
+          }
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);
@@ -6502,6 +6615,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           case "knowledge_entries":
           case "knowledge_search_results":
           case "knowledge_detail":
+          case "terminal_preview":
             applyKnowledgeReceiveEvent(event);
             break;
           // SPEC-3064 Phase 3 (E6e): profile state and rendering live in
@@ -7499,12 +7613,15 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           }
           createTerminalRuntime(id, root);
         },
-        sendInput: sendPaneInput,
         onFocus: focusWindowLocally,
         onLayout: () => requestAnimationFrame(() => {
           if (!agentsHost) return;
           for (const id of terminalMap.keys()) {
-            if (agentsSurface.contains(id)) scheduleTerminalFit(id, true);
+            if (agentsSurface.isVisible(id)) {
+              terminalOutputBatcher.schedulePending(id);
+              completeInitialFitHandshake(id);
+              scheduleTerminalFit(id, true);
+            }
           }
         }),
       });
@@ -7533,7 +7650,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       window.addEventListener("resize", () => {
         if (!splitSurfaces.isOpen() && !agentsHost) return;
         for (const id of windowMap.keys()) {
-          if (splitSurfaces.containsWindow(id) || (agentsHost && agentsSurface.contains(id))) scheduleTerminalFit(id, true);
+          if (splitSurfaces.containsWindow(id) || (agentsHost && agentsSurface.isVisible(id))) scheduleTerminalFit(id, true);
         }
       });
       installSurfaceRail(document, { openSurface });

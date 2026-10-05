@@ -191,6 +191,7 @@ root_js_modules! {
     // app.js imports this at module top level, so the asset MUST be registered
     // or the ES module load 404s and the splash hangs.
     "pm-settings-panel.js" => "createPmSettingsPanel",
+    "pm-chat.js" => "createPmChat",
     // SPEC #3206 — shared floating-toast primitive behind the bottom-right
     // alerts stack and the notification-center history list.
     "toast-host.js" => "createToastStack",

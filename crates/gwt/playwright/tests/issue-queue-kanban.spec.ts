@@ -101,6 +101,31 @@ test("card selection keeps issue body, acceptance and provenance beside switchab
   await expect(page.locator(".issue-queue-board")).toBeVisible();
 });
 
+test("urgent priority, cap fallback and PM demotion preserve assignment provenance", async ({page}) => {
+  await confirm(page, [3, 4, 1], { terminal_queue: [
+    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
+    {number: 4, queued_by: "auto-refill", priority: "normal", priority_reason: "urgent_limit_reached"},
+    {number: 1, queued_by: "operator", priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z"},
+  ]});
+  await expect.poll(() => column(page, "queued").locator(".knowledge-row").evaluateAll(rows => rows.map(row => row.getAttribute("data-issue-number")))).toEqual(["3", "4", "1"]);
+  for (const [number, label, actor, time] of [
+    [3, "Urgent", "alice", "2026-10-03T01:00:00Z"],
+    [4, "Normal · Urgent limit reached", "Unknown", "Not observed"],
+    [1, "Normal · PM demoted", "pm-session", "2026-10-03T02:00:00Z"],
+  ] as const) {
+    const card = row(page, number);
+    const priority = card.locator('[data-key="queue-priority"]');
+    await expect(priority).toHaveText(label);
+    const cardBounds = (await card.boundingBox())!;
+    const priorityBounds = (await priority.boundingBox())!;
+    expect(priorityBounds.x + priorityBounds.width, "priority chip fits within queued card").toBeLessThanOrEqual(cardBounds.x + cardBounds.width);
+    expect(await priority.evaluate(element => element.scrollWidth <= element.clientWidth), "priority text fits without overflowing").toBe(true);
+    await row(page, number).locator(".knowledge-row-select").click();
+    await expect(page.locator(".issue-detail-priority")).toHaveText(`Priority: ${label}`);
+    await expect(page.locator(".issue-detail-priority-assignment")).toHaveText(`Priority assigned by: ${actor} · Assigned at: ${time}`);
+  }
+});
+
 test("bulk drag and reorder wait for confirmation, forbidden and rejected changes retain cards", async ({ page }) => {
   await row(page,1).getByRole("checkbox").check();
   await row(page,2).getByRole("checkbox").check();
@@ -166,7 +191,7 @@ async function installBackend(page: Page) {
       static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3;
       readyState=0;
       constructor(public readonly url:string) { super(); fixture.__queueConfirm=(numbers:number[],extra:any)=>{
-        Object.assign(status,extra,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length});
+        Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
       }; setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
       emit(payload:unknown) {const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}

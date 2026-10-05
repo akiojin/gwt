@@ -52,6 +52,7 @@ pub(crate) mod path_filter;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
+pub mod pm_conversation;
 pub mod pm_registry;
 pub mod preset;
 pub mod process;

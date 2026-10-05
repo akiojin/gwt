@@ -84,13 +84,11 @@ impl BranchCleanupOperationStore {
         Self::default()
     }
 
-    /// Remember the latest progress for `operation_id`. Untagged operations
-    /// (an older frontend that does not send `operation_id`) are not tracked:
-    /// there is no key a reconnecting client could ask for.
+    /// Remember the latest progress for `operation_id`.
     pub fn record_progress(
         &self,
         id: &str,
-        operation_id: Option<&str>,
+        operation_id: &str,
         progress: &BranchCleanupProgressEntry,
     ) {
         self.store(
@@ -104,7 +102,7 @@ impl BranchCleanupOperationStore {
     pub fn record_result(
         &self,
         id: &str,
-        operation_id: Option<&str>,
+        operation_id: &str,
         results: &[BranchCleanupResultEntry],
     ) {
         self.store(
@@ -166,15 +164,7 @@ impl BranchCleanupOperationStore {
         }
     }
 
-    fn store(
-        &self,
-        id: &str,
-        operation_id: Option<&str>,
-        snapshot: BranchCleanupOperationSnapshot,
-    ) {
-        let Some(operation_id) = operation_id else {
-            return;
-        };
+    fn store(&self, id: &str, operation_id: &str, snapshot: BranchCleanupOperationSnapshot) {
         let mut operations = self
             .operations
             .lock()
@@ -649,28 +639,82 @@ mod tests {
             gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_cleanup_repo(&repo);
-        let branch = "work/issue-3729";
-        let worktree = temp.path().join("issue-3729");
-        gwt_git::WorktreeManager::new(&repo)
-            .create_from_base("HEAD", branch, &worktree)
-            .expect("create managed worktree");
+        let repo = dunce::canonicalize(&repo).expect("canonical repository");
         let config_path = temp.path().join(".codex/config.toml");
-        let report = gwt_skills::register_codex_managed_project_trust(&worktree, &config_path)
-            .expect("seed Codex project trust");
-        let project_key = report.project_path.to_string_lossy().into_owned();
-        let mut entry = sample_entry(branch);
-        entry.cleanup.availability = BranchCleanupAvailability::Safe;
-        entry.cleanup.execution_branch = Some(branch.to_string());
+        fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+            .expect("create Codex config parent");
+        fs::write(
+            &config_path,
+            r#"[hooks.state."/user-owned/.codex/hooks.json:stop:0:0"]
+enabled = false
+trusted_hash = "sha256:user-owned"
+"#,
+        )
+        .expect("seed user hook state");
+        gwt_skills::generate_codex_hooks(&repo).expect("generate shared root hooks");
+        let root_hooks = gwt_skills::register_codex_managed_hook_trust(&repo, &config_path)
+            .expect("seed shared root hook trust");
+        assert!(!root_hooks.trusted_entries.is_empty());
+        let baseline_config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).expect("read baseline config"))
+                .expect("parse baseline config");
+        let baseline_state = baseline_config["hooks"]["state"].as_table().unwrap();
+        assert_eq!(baseline_state.len(), root_hooks.trusted_entries.len() + 1);
 
-        let results = cleanup_selected_branches(&repo, &[entry], &[branch.to_string()], false);
+        // Issue #4230 AC-4: repeated real worktree lifecycles must reclaim local
+        // hook rows while retaining shared root and user-owned baseline rows.
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        for number in 3729..3732 {
+            let branch = format!("work/issue-{number}");
+            let worktree = repo.join(&branch);
+            manager
+                .create_from_base("HEAD", &branch, &worktree)
+                .expect("create managed worktree");
+            gwt_skills::generate_codex_hooks_for_mode(
+                &worktree,
+                gwt_skills::CodexHookDiscoveryMode::Both,
+            )
+            .expect("generate local and shared root hooks");
+            let hooks = gwt_skills::register_codex_managed_hook_trust_for_mode(
+                &worktree,
+                &config_path,
+                gwt_skills::CodexHookDiscoveryMode::Both,
+            )
+            .expect("seed worktree hook trust");
+            assert_eq!(
+                hooks.trusted_entries.len(),
+                root_hooks.trusted_entries.len() * 2
+            );
+            let report = gwt_skills::register_codex_managed_project_trust(&worktree, &config_path)
+                .expect("seed Codex project trust");
+            let project_key = report.project_path.to_string_lossy().into_owned();
+            let mut entry = sample_entry(&branch);
+            entry.cleanup.availability = BranchCleanupAvailability::Safe;
+            entry.cleanup.execution_branch = Some(branch.clone());
 
-        assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
-        assert!(!worktree.exists(), "eligible managed worktree is removed");
-        assert_eq!(
-            project_trust_level(&config_path, &project_key),
-            None,
-            "worktree cleanup must revoke the exact Codex project trust entry"
-        );
+            let results = cleanup_selected_branches(&repo, &[entry], &[branch], false);
+
+            assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
+            assert!(!worktree.exists(), "eligible managed worktree is removed");
+            assert_eq!(
+                project_trust_level(&config_path, &project_key),
+                None,
+                "worktree cleanup must revoke the exact Codex project trust entry"
+            );
+            let remaining: toml::Value =
+                toml::from_str(&fs::read_to_string(&config_path).expect("read cleaned config"))
+                    .expect("parse cleaned config");
+            let state = remaining["hooks"]["state"].as_table().unwrap();
+            assert_eq!(
+                state.len(),
+                baseline_state.len(),
+                "hook state grew after cycle {number}"
+            );
+            assert_eq!(
+                state, baseline_state,
+                "baseline hook state changed after cycle {number}"
+            );
+        }
     }
 
     #[test]

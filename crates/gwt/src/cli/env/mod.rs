@@ -72,6 +72,13 @@ pub trait CliEnv {
         labels: &[String],
         draft: bool,
     ) -> io::Result<PrStatus>;
+    fn compare_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: Option<&str>,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>>;
+    fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>>;
     fn edit_pr(
         &mut self,
         number: u64,
@@ -132,6 +139,14 @@ pub struct ClientRef<'a, C: IssueClient> {
 }
 
 impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<gwt_github::client::LabelAssignment>, gwt_github::client::ApiError> {
+        self.inner.fetch_label_assignment(number, label)
+    }
+
     fn fetch(
         &self,
         number: IssueNumber,

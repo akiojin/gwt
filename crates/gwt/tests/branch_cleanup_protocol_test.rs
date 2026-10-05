@@ -7,7 +7,8 @@ fn run_branch_cleanup_defaults_force_filesystem_delete_to_false() {
         "kind": "run_branch_cleanup",
         "id": "branches-1",
         "branches": ["work/old"],
-        "delete_remote": false
+        "delete_remote": false,
+        "operation_id": "cleanup-op-1"
     }))
     .expect("run_branch_cleanup should deserialize");
 
@@ -23,7 +24,7 @@ fn run_branch_cleanup_defaults_force_filesystem_delete_to_false() {
             assert_eq!(branches, vec!["work/old"]);
             assert!(!delete_remote);
             assert!(!force_filesystem_delete);
-            assert_eq!(operation_id, None);
+            assert_eq!(operation_id, "cleanup-op-1");
         }
         other => panic!("expected RunBranchCleanup, got {other:?}"),
     }
@@ -48,7 +49,7 @@ fn run_branch_cleanup_accepts_operation_id() {
             ..
         } => {
             assert!(force_filesystem_delete);
-            assert_eq!(operation_id.as_deref(), Some("cleanup-op-1"));
+            assert_eq!(operation_id, "cleanup-op-1");
         }
         other => panic!("expected RunBranchCleanup, got {other:?}"),
     }
@@ -59,7 +60,8 @@ fn run_workspace_cleanup_defaults_force_filesystem_delete_to_false() {
     let event = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "run_workspace_cleanup",
         "branch": "work/old",
-        "delete_remote": true
+        "delete_remote": true,
+        "operation_id": "cleanup-op-1"
     }))
     .expect("run_workspace_cleanup should deserialize");
 
@@ -73,7 +75,7 @@ fn run_workspace_cleanup_defaults_force_filesystem_delete_to_false() {
             assert_eq!(branch, "work/old");
             assert!(delete_remote);
             assert!(!force_filesystem_delete);
-            assert_eq!(operation_id, None);
+            assert_eq!(operation_id, "cleanup-op-1");
         }
         other => panic!("expected RunWorkspaceCleanup, got {other:?}"),
     }
@@ -119,7 +121,7 @@ fn clear_branch_cleanup_status_round_trips() {
 fn branch_cleanup_progress_serializes_as_backend_event() {
     let event = BackendEvent::BranchCleanupProgress {
         id: "branches-1".to_string(),
-        operation_id: Some("cleanup-op-1".to_string()),
+        operation_id: "cleanup-op-1".to_string(),
         branch: "work/old".to_string(),
         execution_branch: Some("work/old".to_string()),
         index: 2,
@@ -145,7 +147,7 @@ fn branch_cleanup_progress_serializes_as_backend_event() {
 fn branch_cleanup_result_serializes_operation_id() {
     let event = BackendEvent::BranchCleanupResult {
         id: "branches-1".to_string(),
-        operation_id: Some("cleanup-op-1".to_string()),
+        operation_id: "cleanup-op-1".to_string(),
         results: Vec::new(),
     };
 
@@ -158,14 +160,26 @@ fn branch_cleanup_result_serializes_operation_id() {
 }
 
 #[test]
-fn branch_cleanup_result_omits_absent_operation_id() {
-    let event = BackendEvent::BranchCleanupResult {
-        id: "branches-1".to_string(),
-        operation_id: None,
-        results: Vec::new(),
-    };
+fn run_branch_cleanup_rejects_missing_operation_id() {
+    let error = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "run_branch_cleanup",
+        "id": "branches-1",
+        "branches": ["work/old"],
+        "delete_remote": false
+    }))
+    .expect_err("cleanup must identify its operation before work begins");
 
-    let value = serde_json::to_value(&event).expect("serialize result event");
+    assert!(error.to_string().contains("operation_id"));
+}
 
-    assert!(value.get("operation_id").is_none());
+#[test]
+fn run_workspace_cleanup_rejects_missing_operation_id() {
+    let error = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "run_workspace_cleanup",
+        "branch": "work/old",
+        "delete_remote": false
+    }))
+    .expect_err("cleanup must identify its operation before work begins");
+
+    assert!(error.to_string().contains("operation_id"));
 }

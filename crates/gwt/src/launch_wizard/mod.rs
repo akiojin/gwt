@@ -399,8 +399,6 @@ pub struct LaunchWizardView {
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
     pub show_fast_mode: bool,
-    /// Legacy Codex-only compatibility field for older frontend payloads.
-    pub show_codex_fast_mode: bool,
     /// SPEC-3152: render the Hermes launch-options section (provider / model /
     /// profile / advanced) in the Settings form.
     pub show_hermes_options: bool,
@@ -460,8 +458,6 @@ pub struct LaunchWizardView {
     pub primary_action_enabled: bool,
     pub progress_steps: Vec<LaunchWizardProgressStepView>,
     pub fast_mode: bool,
-    /// Legacy Codex-only compatibility field for older frontend payloads.
-    pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,

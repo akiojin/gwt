@@ -200,6 +200,12 @@ function issueRowPrimaryView({ entry, attention, inlineWindow, canvasWindow }) {
     : { key: "issue:open", label: "Open", tone: "idle" };
 }
 
+function issueQueuePriorityLabel(entry) {
+  if (entry.priority_reason === "pm_demoted") return "Normal · PM demoted";
+  if (entry.priority_reason === "urgent_limit_reached") return "Normal · Urgent limit reached";
+  return entry.priority === "urgent" ? "Urgent" : "Normal";
+}
+
 function issueRowSecondaryItems({ entry, work, attention, primary }) {
   const items = [];
   if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
@@ -219,6 +225,10 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
       key: "queue",
       label: `Queue ${entry.queue_position}${terminal ? ` · ${terminal}` : ""}${entry.queued_by ? ` · ${entry.queued_by}` : ""}`,
     });
+    if (entry.priority === "urgent" || entry.priority_reason === "pm_demoted" ||
+        entry.priority_reason === "urgent_limit_reached") {
+      items.push({ kind: "chip", key: "queue-priority", label: issueQueuePriorityLabel(entry) });
+    }
   }
   if (work?.pr_number) {
     const prState = String(work.pr_state || "").trim();
@@ -618,6 +628,7 @@ export function createKnowledgeKanbanSurface({
   resolveSurfaceError = () => {},
 }) {
       const knowledgeBridgeStateMap = new Map();
+      const terminalPreviewText = new Map();
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
       // is re-broadcast constantly, so only a CHANGED text is a new event) and
       // remember which of the two sources changed last for the summary line.
@@ -1528,6 +1539,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function clearKnowledgeBridgeState(windowId) {
+        terminalPreviewText.delete(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
         if (state?.reportedError) {
           // FR-017: a closed window's load error is no longer actionable.
@@ -2727,8 +2739,13 @@ export function createKnowledgeKanbanSurface({
       function queueProjectedEntry(entry) {
         if (!Array.isArray(issueMonitorStatus.terminal_queue)) return entry;
         const index = issueMonitorStatus.terminal_queue.findIndex(item => item.number === entry.number);
+        const queued = index < 0 ? null : issueMonitorStatus.terminal_queue[index];
         return { ...entry, queue_position: index < 0 ? null : index + 1,
-          queued_by: index < 0 ? null : issueMonitorStatus.terminal_queue[index].queued_by,
+          queued_by: queued?.queued_by,
+          priority: queued?.priority,
+          priority_reason: queued?.priority_reason,
+          assigned_by: queued?.assigned_by,
+          assigned_at: queued?.assigned_at,
           monitor_state: index >= 0 && (!entry.monitor_state || entry.monitor_state === "queued")
             ? "queued" : index < 0 && entry.monitor_state === "queued" ? null : entry.monitor_state };
       }
@@ -2757,6 +2774,44 @@ export function createKnowledgeKanbanSurface({
             ? "Nothing will launch until an issue is queued." : `No ${phase} items`));
           for (const entry of items) {
             const row = renderIssueRow(windowId, state, entry);
+            if (phase === "active") {
+              const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+              const agents = work?.agents || [];
+              const windows = getWorkspaceWindows?.() || [];
+              const inlineIds = new Set(issuePreviewWindowsForIssue(windows, windowId, entry.number)
+                .map(target => target.id));
+              for (const target of windows) {
+                if (!target.agent_id || target.preset === "pm" ||
+                    !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
+                if (target.placement?.kind === "issue_preview" && !inlineIds.has(target.id)) continue;
+                const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
+                const belongs = Number.isFinite(linked)
+                  ? linked === entry.number
+                  : agents.some(agent => agent.window_id === target.id ||
+                    (target.session_id && agent.session_id === target.session_id));
+                if (!belongs) continue;
+                if (!row.classList.contains("has-live-output")) {
+                  row.querySelector(".issue-agent-status")?.remove();
+                  row.classList.add("has-live-output");
+                }
+                const output = renderIssueAgentStatusRow(windowId, state, entry,
+                  target.placement?.kind === "issue_preview"
+                    ? { inlineWindow: target } : { canvasWindow: target });
+                output.classList.add("issue-card-output");
+                output.setAttribute("role", "group");
+                const title = windowDisplayTitle?.(target) || target.title || target.id;
+                output.setAttribute("aria-label", `Read-only live output: ${title}`);
+                output.querySelector(".issue-agent-status-output")?.remove();
+                const label = output.querySelector(".issue-agent-status-meta");
+                label.classList.add("issue-card-output-label");
+                label.textContent = `Read-only · ${label.textContent}`;
+                const screen = createNode("div", "issue-card-output-screen");
+                screen.appendChild(createNode("pre", "issue-card-output-text",
+                  terminalPreviewText.get(target.id) ?? "Waiting for output"));
+                output.appendChild(screen);
+                row.appendChild(output);
+              }
+            }
             if (phase === "backlog" || phase === "queued") {
               const selection = createNode("label", "issue-queue-select");
               const checkbox = createNode("input");
@@ -3480,8 +3535,13 @@ export function createKnowledgeKanbanSurface({
         }
         header.appendChild(status);
         if (entry.queued_by) {
-          const source = entry.queued_by === "auto-refill" ? "Auto-refill" : "Operator";
+          const source = entry.queued_by === "auto-refill" ? "Auto-refill"
+            : entry.queued_by === "urgent" ? "Urgent label" : "Operator";
           header.appendChild(createNode("div", "issue-detail-provenance", `Queued by: ${source}`));
+        }
+        if (queue) {
+          header.appendChild(createNode("div", "issue-detail-priority", `Priority: ${issueQueuePriorityLabel(entry)}`));
+          header.appendChild(createNode("div", "issue-detail-priority-assignment", `Priority assigned by: ${entry.assigned_by || "Unknown"} · Assigned at: ${entry.assigned_at || "Not observed"}`));
         }
         header.appendChild(renderIssueDetailActions(context));
         detailPane.appendChild(header);
@@ -4499,6 +4559,17 @@ export function createKnowledgeKanbanSurface({
       // moved verbatim from app.js; the case arms in app.js delegate here.
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
+          case "terminal_preview": {
+            terminalPreviewText.set(event.id, event.text);
+            for (const element of windowMap.values()) {
+              for (const output of element.querySelectorAll(".issue-card-output")) {
+                if (output.dataset.windowId === event.id) {
+                  output.querySelector("pre").textContent = event.text;
+                }
+              }
+            }
+            break;
+          }
           case "knowledge_entries": {
             const state = knowledgeBridgeStateMap.get(event.id);
             if (

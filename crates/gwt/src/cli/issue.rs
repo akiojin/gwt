@@ -5,6 +5,7 @@ use std::{
 };
 
 use gwt_github::{
+    body::{Comment, SpecBody},
     cache::{write_atomic, CacheGeneration, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{ApiError, OwnerMutationError, OwnerMutationResult},
     Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError,
@@ -25,8 +26,10 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
 /// An Issue carrying the `auto-merge` label opts into autonomous execution, and
 /// the Monitor only admits it when `classify_acceptance_criteria` finds a
 /// machine-checkable block. Without this guard the write succeeds and the Issue
-/// silently lands in `needs_human` on the next scan. The guard reuses the
-/// Monitor's classifier verbatim so the two can never disagree (AC-3); an Issue
+/// silently lands in `needs_human` on the next scan. The guard shares the
+/// Monitor's classifier, and existing-Issue callers also share its
+/// `acceptance_source_text` composition of body and comment-resident spec.
+/// Prospective create/spec-section content is validated directly; an Issue
 /// without the label keeps today's behaviour.
 pub(crate) fn guard_autonomous_acceptance_block(
     labels: &[String],
@@ -125,7 +128,8 @@ pub(super) fn run<E: CliEnv>(
                 snapshot.number.0,
             );
             let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
-            finish_issue_create(&snapshot, renewal, out)
+            let code = finish_issue_create(&snapshot, renewal, out);
+            finish_urgent_issue_mutation(env, &snapshot, code, out)
         }
         IssueCommand::CreateBody {
             title,
@@ -141,7 +145,8 @@ pub(super) fn run<E: CliEnv>(
                 snapshot.number.0,
             );
             let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
-            finish_issue_create(&snapshot, renewal, out)
+            let code = finish_issue_create(&snapshot, renewal, out);
+            finish_urgent_issue_mutation(env, &snapshot, code, out)
         }
         IssueCommand::CacheRepair { number } => {
             run_issue_cache_repair(env, IssueNumber(number), out)?
@@ -256,6 +261,36 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             limit,
         } => run_monitor_queue_auto_refill(env, project_root.as_deref(), enabled, limit, out)?,
+        IssueCommand::MonitorQueueUrgentLimit {
+            project_root,
+            limit,
+        } => {
+            let root = issue_monitor_project_root(env, project_root.as_deref())?;
+            crate::try_mutate_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(&root),
+                |prefs| {
+                    prefs.urgent_queue.limit = limit;
+                    Ok(())
+                },
+            )
+            .map_err(io_as_api_error)?;
+            run_monitor_queue_list(env, Some(&root), None, out)?
+        }
+        IssueCommand::MonitorQueueDemote {
+            project_root,
+            number,
+        } => {
+            let root = issue_monitor_project_root(env, project_root.as_deref())?;
+            crate::try_mutate_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(&root),
+                |prefs| {
+                    prefs.urgent_queue.demoted.insert(number);
+                    Ok(())
+                },
+            )
+            .map_err(io_as_api_error)?;
+            run_monitor_queue_list(env, Some(&root), None, out)?
+        }
         IssueCommand::MonitorLaunchNow {
             project_root,
             number,
@@ -690,6 +725,19 @@ fn run_monitor_status<E: CliEnv>(
     let mut output =
         serde_json::to_value(&status).map_err(|error| io_as_api_error(io::Error::other(error)))?;
     output["project_root"] = serde_json::json!(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+        &project_root,
+    ))
+    .map_err(io_as_api_error)?;
+    output["urgent_queue"] = serde_json::to_value(
+        prefs.urgent_queue.projection(
+            prefs
+                .terminal_queues
+                .get(&crate::process::current_hostname())
+                .unwrap_or(&crate::issue_monitor::IssueMonitorTerminalQueue::default()),
+        ),
+    )
+    .expect("urgent queue serializes");
     output["active_session_count"] = serde_json::json!(inventory.sessions.len());
     output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
     output["session_observation"] = serde_json::json!({
@@ -1111,7 +1159,9 @@ fn run_monitor_queue_list<E: CliEnv>(
         .unwrap_or(&crate::process::current_hostname())
         .to_string();
     let queue = prefs.terminal_queues.get(&key).cloned().unwrap_or_default();
-    out.push_str(&serde_json::to_string(&queue).expect("queue serializes"));
+    out.push_str(
+        &serde_json::to_string(&prefs.urgent_queue.projection(&queue)).expect("queue serializes"),
+    );
     out.push('\n');
     Ok(0)
 }
@@ -1149,6 +1199,7 @@ fn run_monitor_queue_push<E: CliEnv>(
     let queued_expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
     let mut accepted_numbers = Vec::new();
     let mut outcomes: Vec<QueuePushOutcome> = Vec::new();
+    let mut urgent_observations = Vec::new();
     // Queue claims are advisory: a GitHub outage must not make the local
     // queue unusable. Active claims remain authoritative and are left alone.
     for number in numbers {
@@ -1203,6 +1254,18 @@ fn run_monitor_queue_push<E: CliEnv>(
                 });
                 continue;
             }
+            if snapshot
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case("urgent"))
+            {
+                let assignment = env.client().fetch_label_assignment(IssueNumber(*number), "urgent")
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(issue = *number, %error, "urgent label assignment unavailable");
+                        None
+                    });
+                urgent_observations.push((snapshot.clone(), assignment));
+            }
             let claim = gwt_github::issue_auto_claim::ClaimComment {
                 comment_id: None,
                 claim_id: format!("gwt-queue:{}:{}", number, uuid::Uuid::new_v4()),
@@ -1244,6 +1307,29 @@ fn run_monitor_queue_push<E: CliEnv>(
             prefs.clone(),
         );
         monitor.terminal_queue_push(&accepted_numbers, "operation", &now);
+        for (snapshot, assignment) in &urgent_observations {
+            let observed = crate::IssueMonitorIssue {
+                number: snapshot.number.0,
+                title: snapshot.title.clone(),
+                labels: snapshot.labels.clone(),
+                state: match snapshot.state {
+                    IssueState::Open => crate::IssueMonitorIssueState::Open,
+                    IssueState::Closed => crate::IssueMonitorIssueState::Closed,
+                },
+                body: None,
+                url: None,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: Some(snapshot.updated_at.0.clone()),
+            };
+            monitor.observe_urgent_issue(&observed, &now);
+            if let Some(assignment) = assignment {
+                monitor.record_urgent_assignment(
+                    snapshot.number.0,
+                    observed.updated_at.as_deref(),
+                    assignment,
+                );
+            }
+        }
         if let Some(position) = position {
             let current = monitor.prefs();
             let queue = &current.terminal_queues[&crate::process::current_hostname()];
@@ -1261,9 +1347,16 @@ fn run_monitor_queue_push<E: CliEnv>(
             }
             let at = position.min(order.len());
             order.splice(at..at, selected);
-            for (index, number) in order.into_iter().enumerate() {
-                monitor.terminal_queue_move(number, index, &now);
-            }
+            // This is a complete stored-order edit, not a displayed row move.
+            // Replaying displayed indexes would subtract the urgent head twice.
+            let mut priority = order.clone();
+            priority.extend(
+                current
+                    .priority_order
+                    .into_iter()
+                    .filter(|number| !order.contains(number)),
+            );
+            monitor.set_priority_order(priority);
         }
         *prefs = monitor.prefs();
         Ok(())
@@ -1300,8 +1393,13 @@ fn run_monitor_queue_push<E: CliEnv>(
         .filter(|outcome| !outcome.accepted)
         .map(|outcome| outcome.number)
         .collect::<Vec<_>>();
+    let projected = prefs
+        .terminal_queues
+        .iter()
+        .map(|(host, queue)| (host.clone(), prefs.urgent_queue.projection(queue)))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let payload = serde_json::json!({
-        "terminal_queues": prefs.terminal_queues,
+        "terminal_queues": projected,
         "results": outcomes,
         "accepted": outcomes
             .iter()
@@ -1676,7 +1774,7 @@ fn run_monitor_release_idle<E: CliEnv>(
                 "idle_kind": idle.idle_kind.as_str(),
                 "idle_since": idle.idle_since,
                 "bound": idle.bound,
-                "releasable": idle.idle_kind != crate::IssueMonitorIdleKind::StuckUnknown,
+                "releasable": idle.idle_kind.releasable(),
                 // Issue #4131: releasing this row also puts its Issue back on
                 // the queue, because the execution it was launched for never
                 // settled. The operator should see that before asking.
@@ -4087,7 +4185,8 @@ fn run_issue_label<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let issue = IssueNumber(number);
-    let current = refresh_issue_cache(env, issue)?.snapshot;
+    let entry = refresh_issue_cache(env, issue)?;
+    let current = &entry.snapshot;
     let effective = match action {
         IssueLabelAction::Add => {
             let mut effective = Vec::<String>::new();
@@ -4114,7 +4213,7 @@ fn run_issue_label<E: CliEnv>(
             .collect(),
     };
     if effective.is_empty() {
-        return Ok(write_lifecycle_noop(out, "issue.label", &current));
+        return Ok(write_lifecycle_noop(out, "issue.label", current));
     }
 
     let dangerous_confirmation = match action {
@@ -4153,11 +4252,23 @@ fn run_issue_label<E: CliEnv>(
     {
         let mut post_labels = current.labels.clone();
         post_labels.extend(effective.iter().cloned());
-        guard_autonomous_acceptance_block(&post_labels, &current.body)?;
+        let source = if post_labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+        {
+            crate::issue_monitor_worker::acceptance_source_text(&current.body, &entry.spec_body)
+        } else {
+            current.body.clone()
+        };
+        guard_autonomous_acceptance_block(&post_labels, &source)?;
     }
 
+    let grants_urgent = matches!(action, IssueLabelAction::Add)
+        && effective
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("urgent"));
     let expected_labels = effective.clone();
-    match action {
+    let code = match action {
         IssueLabelAction::Add => submit_and_verify_issue_lifecycle(
             env,
             "issue.label",
@@ -4192,7 +4303,20 @@ fn run_issue_label<E: CliEnv>(
                 out,
             )
         }
+    }?;
+    if code == 0 && grants_urgent {
+        let (queue_code, queue_result) = enqueue_urgent_after_mutation(env, number);
+        let mut result: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("label lifecycle emits JSON");
+        result["urgent_queue"] = queue_result;
+        if queue_code != 0 {
+            result["status"] = serde_json::json!("queue_refused");
+            result["retry_operation"] = serde_json::json!("issue.monitor.queue.push");
+        }
+        *out = format!("{result}\n");
+        return Ok(queue_code);
     }
+    Ok(code)
 }
 
 /// Issue #3865: update a plain Issue's title / body / labels in place.
@@ -4218,12 +4342,12 @@ fn run_issue_edit<E: CliEnv>(
         ));
     }
     let issue = IssueNumber(number);
-    let current = refresh_issue_cache(env, issue)?;
+    let entry = refresh_issue_cache(env, issue)?;
     // Issue #4392: a body whose SPEC structure cannot be parsed is not
     // section-managed, and issue.spec.edit refuses it; replacing the body
     // here is its repair path.
-    let section_managed = current.spec_parse_error.is_none();
-    let current = current.snapshot;
+    let section_managed = entry.spec_parse_error.is_none();
+    let current = &entry.snapshot;
     if let Some(requested) = labels.as_ref() {
         let contains =
             |set: &[String], name: &str| set.iter().any(|label| label.eq_ignore_ascii_case(name));
@@ -4276,7 +4400,35 @@ fn run_issue_edit<E: CliEnv>(
     if body.is_some() || labels.is_some() {
         let effective_labels = labels.as_deref().unwrap_or(&current.labels);
         let effective_body = body.as_deref().unwrap_or(&current.body);
-        guard_autonomous_acceptance_block(effective_labels, effective_body)?;
+        let source = if effective_labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+        {
+            if body.is_some() {
+                // Body repairs must use the proposed index, never old comment references.
+                let comments = current
+                    .comments
+                    .iter()
+                    .map(|comment| Comment {
+                        id: comment.id.0,
+                        body: comment.body.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                SpecBody::parse(effective_body, &comments)
+                    .map(|spec| {
+                        crate::issue_monitor_worker::acceptance_source_text(effective_body, &spec)
+                    })
+                    .unwrap_or_else(|_| effective_body.to_string())
+            } else {
+                crate::issue_monitor_worker::acceptance_source_text(
+                    effective_body,
+                    &entry.spec_body,
+                )
+            }
+        } else {
+            effective_body.to_string()
+        };
+        guard_autonomous_acceptance_block(effective_labels, &source)?;
     }
 
     let fields = gwt_github::client::IssueFieldsPatch {
@@ -4768,6 +4920,48 @@ fn finish_issue_create(
         renewal.remedy()
     ));
     1
+}
+
+/// The remote mutation already succeeded. A local enqueue failure must name
+/// that Issue instead of inviting the caller to create it again (#4819).
+fn enqueue_urgent_after_mutation<E: CliEnv>(env: &E, number: u64) -> (i32, serde_json::Value) {
+    let mut queue_out = String::new();
+    match run_monitor_queue_push(env, None, &[number], None, false, &mut queue_out) {
+        Ok(code) => (
+            code,
+            serde_json::from_str(&queue_out).expect("queue push emits JSON"),
+        ),
+        Err(error) => (
+            1,
+            serde_json::json!({
+                "accepted": [], "refused": [number], "error": error.to_string(),
+                "issue_mutation_succeeded": true, "retry_operation": "issue.monitor.queue.push",
+            }),
+        ),
+    }
+}
+
+fn finish_urgent_issue_mutation<E: CliEnv>(
+    env: &E,
+    snapshot: &IssueSnapshot,
+    code: i32,
+    out: &mut String,
+) -> i32 {
+    if code != 0
+        || snapshot.state != IssueState::Open
+        || !snapshot
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("urgent"))
+    {
+        return code;
+    }
+    let (queue_code, result) = enqueue_urgent_after_mutation(env, snapshot.number.0);
+    out.push_str(&format!("urgent queue: {result}\n"));
+    if queue_code != 0 {
+        out.push_str("The Issue exists; retry issue.monitor.queue.push, not issue.create.\n");
+    }
+    queue_code
 }
 
 /// Rewrite an Issue's cache entry and republish its validation receipt.
@@ -6086,6 +6280,128 @@ mod tests {
         assert!(fetched(&env, 7).body.contains("AC-1"));
     }
 
+    fn seeded_comment_spec_env(spec: &str) -> (TempDir, crate::cli::TestEnv) {
+        let (tmp, env) = seeded_edit_env(&["gwt-spec"]);
+        let mut snapshot = fetched(&env, 7);
+        snapshot.body = "<!-- gwt-spec id=7 version=1 -->\n\
+                         <!-- sections:\nspec=comment:9001\ntasks=body\n-->\n\
+                         <!-- artifact:tasks BEGIN -->\n- [ ] T1\n<!-- artifact:tasks END -->"
+            .to_string();
+        snapshot.comments = vec![CommentSnapshot {
+            id: CommentId(9001),
+            body: format!("<!-- artifact:spec BEGIN -->\n{spec}\n<!-- artifact:spec END -->"),
+            updated_at: snapshot.updated_at.clone(),
+        }];
+        env.client.seed(snapshot);
+        (tmp, env)
+    }
+
+    /// Issue #4974 AC-2: confirmed opt-in reads the same comment-resident spec
+    /// as Monitor rather than scanning only the Issue body.
+    #[test]
+    fn issue_label_accepts_comment_resident_acceptance_criteria() {
+        let (_tmp, mut env) =
+            seeded_comment_spec_env("## Acceptance Criteria\n- [ ] AC-1: tests pass");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["auto-merge".to_string()],
+                confirm_queue: false,
+                confirm_design_gate: false,
+                confirm_auto_merge: true,
+            },
+            &mut out,
+        )
+        .expect("comment-resident spec permits auto-merge");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).labels, ["gwt-spec", "auto-merge"]);
+    }
+
+    /// Issue #4974 AC-1: label-field edits use the same acceptance input.
+    #[test]
+    fn issue_edit_accepts_comment_resident_acceptance_criteria() {
+        let (_tmp, mut env) =
+            seeded_comment_spec_env("## Acceptance Criteria\n- [ ] AC-1: tests pass");
+        let mut snapshot = fetched(&env, 7);
+        snapshot.labels.push("auto-merge".into());
+        env.client.seed(snapshot);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: None,
+                labels: Some(vec!["gwt-spec".into(), "auto-merge".into(), "bug".into()]),
+            },
+            &mut out,
+        )
+        .expect("label edit preserves comment-resident acceptance input");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).labels, ["gwt-spec", "auto-merge", "bug"]);
+    }
+
+    /// Issue #4974 AC-3: composing the spec does not relax missing-criteria
+    /// rejection, and rejected label additions never reach the remote API.
+    #[test]
+    fn issue_label_refuses_comment_resident_spec_without_acceptance_criteria() {
+        let (_tmp, mut env) = seeded_comment_spec_env("# Spec\nNo acceptance criteria");
+        let mut out = String::new();
+        let error = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["auto-merge".to_string()],
+                confirm_queue: false,
+                confirm_design_gate: false,
+                confirm_auto_merge: true,
+            },
+            &mut out,
+        )
+        .expect_err("body and spec without criteria remain refused");
+        assert!(error.to_string().contains("no acceptance criteria heading"));
+        assert!(lifecycle_mutation_calls(&env).is_empty());
+        assert_eq!(fetched(&env, 7).labels, ["gwt-spec"]);
+    }
+
+    /// Issue #4974 AC-1/3: a supported body repair reads its proposed spec
+    /// index; replacing that index must never reuse the previous comment AC.
+    #[test]
+    fn issue_edit_acceptance_input_tracks_proposed_body() {
+        let (_tmp, mut env) =
+            seeded_comment_spec_env("## Acceptance Criteria\n- [ ] AC-1: tests pass");
+        let mut snapshot = fetched(&env, 7);
+        let repaired_body = snapshot.body.clone();
+        snapshot.labels.push("auto-merge".into());
+        snapshot.body = "<!-- gwt-spec id=7 version=1 -->\n<!-- sections: {} -->".into();
+        env.client.seed(snapshot);
+        let mut out = String::new();
+        let code = run(&mut env, edit_body(7, &repaired_body), &mut out)
+            .expect("repaired index exposes comment-resident criteria");
+        assert_eq!(code, 0, "{out}");
+
+        let mut snapshot = fetched(&env, 7);
+        snapshot.labels = vec!["auto-merge".into()];
+        env.client.seed(snapshot);
+        let error = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: Some("Replacement without spec references or criteria".into()),
+                labels: Some(vec!["gwt-spec".into(), "auto-merge".into()]),
+            },
+            &mut out,
+        )
+        .expect_err("old comment AC cannot authorize a replacement body");
+        assert!(error.to_string().contains("no acceptance criteria heading"));
+        assert_eq!(fetched(&env, 7).body, repaired_body);
+    }
+
     fn lifecycle_mutation_calls(env: &crate::cli::TestEnv) -> Vec<String> {
         env.client
             .call_log()
@@ -7085,6 +7401,199 @@ mod tests {
 
     // ---- Issue #4819: `queue.push` must never refuse silently ----
 
+    #[test]
+    fn urgent_queue_controls_survive_a_stale_scan_and_do_not_rewrite_normal_order() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[1, 2], "operator", "2026-10-03T00:00:00Z");
+        let candidate = crate::IssueMonitorIssue {
+            number: 2,
+            title: "urgent".to_string(),
+            labels: vec!["urgent".to_string()],
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-10-03T00:00:00Z".to_string()),
+        };
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&candidate),
+            "2026-10-03T00:00:00Z",
+        );
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        for (operation, params) in [
+            (
+                "issue.monitor.queue.urgent_limit",
+                serde_json::json!({"limit": 0}),
+            ),
+            (
+                "issue.monitor.queue.demote",
+                serde_json::json!({"number": 2}),
+            ),
+            (
+                "issue.monitor.queue.urgent_limit",
+                serde_json::json!({"limit": 2}),
+            ),
+        ] {
+            env.stdin =
+                serde_json::json!({"schema_version":1,"operation":operation,"params":params})
+                    .to_string();
+            env.stdout.clear();
+            assert_eq!(
+                crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
+                0,
+                "{operation}"
+            );
+        }
+        let disk = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        monitor.rebase_daemon_driver_prefs(&disk);
+        crate::scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-10-03T00:01:00Z");
+        let view = monitor.urgent_queue_projection(&crate::process::current_hostname());
+        assert_eq!(
+            view.entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            view.entries[1].priority_reason.as_deref(),
+            Some("pm_demoted")
+        );
+        assert_eq!(view.urgent_count, 0);
+    }
+
+    #[test]
+    fn urgent_queue_positioned_push_preserves_other_normal_entries() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-10-03T00:00:00Z");
+        let mut prefs = serde_json::to_value(monitor.prefs()).unwrap();
+        prefs["urgent_queue"]["grants"] = serde_json::json!({"3": {
+            "label_present": true, "observed_at": "2026-10-03T00:00:00Z",
+            "issue_updated_at": null, "assigned_by": null, "assigned_at": null
+        }});
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &serde_json::from_value(prefs).unwrap(),
+        )
+        .unwrap();
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorQueuePush {
+                    project_root: None,
+                    issue_numbers: vec![4],
+                    position: Some(3),
+                    force: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(queued_numbers(&repo), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn urgent_queue_create_and_label_confirm_membership_and_github_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+        for number in 1..=3 {
+            if number == 2 {
+                env.client.set_label_assignment(
+                    IssueNumber(number),
+                    "urgent",
+                    Some(gwt_github::client::LabelAssignment {
+                        actor: Some("alice".to_string()),
+                        created_at: "2026-10-03T00:00:00Z".to_string(),
+                    }),
+                );
+            }
+            let mut out = String::new();
+            assert_eq!(
+                run(
+                    &mut env,
+                    IssueCommand::CreateBody {
+                        title: format!("issue {number}"),
+                        body: String::new(),
+                        labels: if number == 2 {
+                            vec!["urgent".to_string()]
+                        } else {
+                            Vec::new()
+                        },
+                    },
+                    &mut out
+                )
+                .unwrap(),
+                0
+            );
+            if number == 1 {
+                assert_eq!(run_queue_push(&mut env, vec![1], false).0, 0);
+            }
+            if number == 2 {
+                assert!(
+                    out.contains("accepted"),
+                    "creation must confirm the urgent enqueue: {out}"
+                );
+            }
+        }
+        env.client.set_label_assignment(
+            IssueNumber(3),
+            "urgent",
+            Some(gwt_github::client::LabelAssignment {
+                actor: Some("bob".to_string()),
+                created_at: "2026-10-03T00:01:00Z".to_string(),
+            }),
+        );
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::Label {
+                    number: 3,
+                    action: IssueLabelAction::Add,
+                    labels: vec!["urgent".to_string()],
+                    confirm_queue: false,
+                    confirm_design_gate: false,
+                    confirm_auto_merge: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        let labeled: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(labeled["urgent_queue"]["accepted"], serde_json::json!([3]));
+        out.clear();
+        run_monitor_queue_list(&env, None, None, &mut out).unwrap();
+        let listed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(listed["entries"][0]["number"], 2);
+        assert_eq!(listed["entries"][0]["assigned_by"], "alice");
+        assert_eq!(listed["entries"][1]["assigned_at"], "2026-10-03T00:01:00Z");
+        out.clear();
+        run_monitor_status(&env, None, &mut out).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            status["urgent_queue"], listed,
+            "both JSON surfaces share ordering and evidence"
+        );
+    }
+
     /// Seed one open Issue carrying the queue label and, optionally, a claim
     /// comment owned by somebody other than this process.
     fn queue_push_issue(
@@ -7206,6 +7715,30 @@ mod tests {
             vec![4803],
             "the accepted number is queued and the refused one is not"
         );
+        // #4831 AC-7: granting urgent succeeds remotely, but must not hide
+        // the same enqueue refusal or suggest recreating the Issue.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 4812,
+                action: IssueLabelAction::Add,
+                labels: vec!["urgent".to_string()],
+                confirm_queue: false,
+                confirm_design_gate: false,
+                confirm_auto_merge: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        let labeled: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(
+            labeled["urgent_queue"]["refused"],
+            serde_json::json!([4812])
+        );
+        assert_eq!(labeled["retry_operation"], "issue.monitor.queue.push");
+        assert_eq!(queued_numbers(&repo), vec![4803]);
     }
 
     /// Issue #4819 AC-5: the queue claim carries a 15-minute lease, so an
@@ -8223,6 +8756,20 @@ mod tests {
                 "project_root": std::fs::canonicalize(&repo).expect("canonical project"),
                 "active_launches_incomplete": true,
                 "queue": [2, 1],
+                "urgent_queue": {
+                    "entries": [
+                        {"number": 2, "queued_at": "2026-08-03T00:00:00Z",
+                         "queued_by": "operator", "priority": "normal",
+                         "priority_reason": "normal_order"},
+                        {"number": 1, "queued_at": "2026-08-03T00:00:00Z",
+                         "queued_by": "operator", "priority": "normal",
+                         "priority_reason": "normal_order"},
+                    ],
+                    "last_seen_at": "2026-08-03T00:00:00Z",
+                    "urgent_limit": 2,
+                    "urgent_count": 0,
+                    "urgent_overflow": 0,
+                },
                 "active_launches": [9],
                 "occupied_slot_count": 1,
                 "pending_claim_issues": [],

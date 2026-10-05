@@ -312,6 +312,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "issue.monitor.queue.demote",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.queue.list",
         aliases: &[],
     },
@@ -325,6 +329,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "issue.monitor.queue.remove",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.queue.urgent_limit",
         aliases: &[],
     },
     Operation {

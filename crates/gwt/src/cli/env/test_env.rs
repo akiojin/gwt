@@ -271,6 +271,58 @@ impl CliEnv for TestEnv {
             .clone()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no created pr seeded"))
     }
+    fn compare_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: Option<&str>,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        // GitHub transport is canned in TestEnv. Local bare-remote fixtures
+        // deliberately exercise the real comparison without network access.
+        let output = gwt_core::process::hidden_command("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&self.repo_path)
+            .output()?;
+        let remote = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !std::path::Path::new(&remote).exists() || remote.is_empty() {
+            return Ok(None);
+        }
+        let current = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&self.repo_path)
+            .output()?;
+        let current = String::from_utf8_lossy(&current.stdout).trim().to_string();
+        crate::cli::pr::head_check::compare(
+            &self.repo_path,
+            "origin",
+            head.unwrap_or(&current),
+            base,
+            verified.ok_or_else(|| io::Error::other("missing verified HEAD"))?,
+        )
+        .map(Some)
+    }
+    fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
+        let Some(pr) = self.prs.get(&number) else {
+            return Ok(None);
+        };
+        let output = gwt_core::process::hidden_command("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&self.repo_path)
+            .output()?;
+        let remote = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if remote.is_empty() || !std::path::Path::new(&remote).exists() {
+            return Ok(None);
+        }
+        let reference = format!("refs/heads/{}", pr.head_ref_name);
+        let output = gwt_core::process::hidden_command("git")
+            .args(["ls-remote", "--heads", "origin", &reference])
+            .current_dir(&self.repo_path)
+            .output()?;
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_string))
+    }
     fn edit_pr(
         &mut self,
         number: u64,

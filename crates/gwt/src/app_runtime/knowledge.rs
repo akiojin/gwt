@@ -575,6 +575,7 @@ mod monitor_snapshot_cache_tests {
                     number: *number,
                     queued_at: String::new(),
                     queued_by: "operator".to_string(),
+                    ..Default::default()
                 },
             )
             .collect()

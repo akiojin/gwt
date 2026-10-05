@@ -28,11 +28,11 @@ use sha2::{Digest, Sha256};
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CommitComparisonStatus, CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueCloseReason, IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
-    OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
-    RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
-    RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
-    UpdatedAt,
+    IssueCloseReason, IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, LabelAssignment,
+    MergedPullRequest, OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient,
+    RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity,
+    RepositoryIssue, RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter,
+    SpecSummary, UpdatedAt,
 };
 
 /// HTTP method.
@@ -1927,6 +1927,118 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         }
     }
 
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<LabelAssignment>, ApiError> {
+        let operation = "fetch issue label assignment";
+        let endpoint = format!(
+            "{}/repos/{}/{}/issues/{}/events?",
+            self.rest_base, self.owner, self.repo, number.0
+        );
+        let mut url = format!("{endpoint}per_page=100&page=1");
+        let mut seen_urls = HashSet::new();
+        let mut completed_pages = 0;
+        let mut latest = None;
+        loop {
+            // Never forward authorization to a different endpoint, or accept a
+            // cycling Link header as a complete history.
+            if !url.starts_with(&endpoint) || !seen_urls.insert(url.clone()) {
+                return Err(ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                });
+            }
+            self.admit(&REST_BUDGET_ARGS)?;
+            let response = self.settle(
+                &REST_BUDGET_ARGS,
+                (|| {
+                    let response = self
+                        .transport
+                        .execute(HttpRequest {
+                            method: HttpMethod::Get,
+                            url: url.clone(),
+                            headers: self.auth_headers(),
+                            body: None,
+                        })
+                        .map_err(|error| ApiError::Network(error.to_string()))?;
+                    check_status(&response)?;
+                    Ok(response)
+                })(),
+            )?;
+            let events: Vec<Value> =
+                serde_json::from_str(&response.body).map_err(|error| ApiError::Parse {
+                    operation: operation.to_string(),
+                    message: error.to_string(),
+                })?;
+            for event in events {
+                if !event
+                    .pointer("/label/name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case(label))
+                {
+                    continue;
+                }
+                let kind = event.get("event").and_then(Value::as_str);
+                if !matches!(kind, Some("labeled" | "unlabeled")) {
+                    continue;
+                }
+                let malformed = || ApiError::Parse {
+                    operation: operation.to_string(),
+                    message: "label event id or created_at is missing or invalid".to_string(),
+                };
+                let id = event
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(malformed)?;
+                let created_at = event
+                    .get("created_at")
+                    .and_then(Value::as_str)
+                    .ok_or_else(malformed)?;
+                let at =
+                    chrono::DateTime::parse_from_rfc3339(created_at).map_err(|_| malformed())?;
+                let key = (at, id);
+                if latest
+                    .as_ref()
+                    .is_some_and(|(previous, _)| previous >= &key)
+                {
+                    continue;
+                }
+                let assignment = (kind == Some("labeled")).then(|| LabelAssignment {
+                    actor: event
+                        .pointer("/actor/login")
+                        .and_then(Value::as_str)
+                        .filter(|login| !login.is_empty())
+                        .map(str::to_string),
+                    created_at: created_at.to_string(),
+                });
+                latest = Some((key, assignment));
+            }
+            completed_pages += 1;
+            let next = response_header(&response, "link").and_then(|header| {
+                header.split(',').find_map(|part| {
+                    let mut fields = part.split(';');
+                    let target = fields.next()?.trim();
+                    fields
+                        .any(|field| field.trim() == "rel=\"next\"")
+                        .then_some(target)
+                })
+            });
+            let Some(next) = next else {
+                return Ok(latest.and_then(|(_, assignment)| assignment));
+            };
+            url = next
+                .strip_prefix('<')
+                .and_then(|value| value.strip_suffix('>'))
+                .ok_or_else(|| ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                })?
+                .to_string();
+        }
+    }
+
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError> {
         let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
         let resp = self.rest_patch(&path, json!({ "body": new_body }))?;
@@ -2897,5 +3009,81 @@ mod check_status_tests {
             }
             other => panic!("404 must map to Unexpected with message, got: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod label_assignment_tests {
+    use super::*;
+
+    fn event(id: u64, event: &str, label: &str, actor: &str) -> Value {
+        json!({"id":id,"event":event,"label":{"name":label},
+            "actor":{"login":actor},"created_at":"2026-10-03T00:00:00Z"})
+    }
+
+    fn response(events: Vec<Value>, next: bool) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            headers: if next {
+                vec![("Link".into(),
+                "<https://api.github.com/repos/o/r/issues/7/events?per_page=100&page=2>; rel=\"next\"".into())]
+            } else {
+                vec![]
+            },
+            body: json!(events).to_string(),
+        }
+    }
+
+    #[test]
+    fn label_assignment_follows_pages_and_returns_latest_reassignment() {
+        let transport = FakeTransport::new();
+        transport.enqueue(response(
+            vec![
+                event(1, "labeled", "urgent", "first"),
+                event(2, "unlabeled", "urgent", "first"),
+            ],
+            true,
+        ));
+        transport.enqueue(response(
+            vec![
+                event(3, "labeled", "URGENT", "second"),
+                event(4, "labeled", "bug", "third"),
+            ],
+            false,
+        ));
+        let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+        let assignment = client
+            .fetch_label_assignment(IssueNumber(7), "urgent")
+            .expect("events")
+            .expect("latest assignment");
+        assert_eq!(assignment.actor.as_deref(), Some("second"));
+        assert_eq!(assignment.created_at, "2026-10-03T00:00:00Z");
+        let requests = client.transport().recorded();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].url,
+            "https://api.github.com/repos/o/r/issues/7/events?per_page=100&page=2"
+        );
+        assert!(requests.iter().all(|r| r.method == HttpMethod::Get
+            && r.headers
+                .contains(&("Authorization".into(), "Bearer token".into()))));
+    }
+
+    #[test]
+    fn label_assignment_removal_on_later_page_clears_assignment() {
+        let transport = FakeTransport::new();
+        transport.enqueue(response(vec![event(1, "labeled", "urgent", "first")], true));
+        transport.enqueue(response(
+            vec![event(2, "unlabeled", "urgent", "second")],
+            false,
+        ));
+        let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+        assert_eq!(
+            client
+                .fetch_label_assignment(IssueNumber(7), "urgent")
+                .unwrap(),
+            None
+        );
+        assert_eq!(client.transport().recorded().len(), 2);
     }
 }

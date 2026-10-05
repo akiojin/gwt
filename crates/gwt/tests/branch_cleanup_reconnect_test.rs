@@ -36,7 +36,7 @@ fn results() -> Vec<BranchCleanupResultEntry> {
 fn reconnecting_client_recovers_in_flight_progress_then_result() {
     let store = BranchCleanupOperationStore::new();
 
-    store.record_progress(WINDOW_ID, Some(OPERATION_ID), &progress(1));
+    store.record_progress(WINDOW_ID, OPERATION_ID, &progress(1));
 
     // The reconnected client has a fresh client_id, so it can only ask by
     // (window id, operation id). It must still see the running operation.
@@ -45,7 +45,7 @@ fn reconnecting_client_recovers_in_flight_progress_then_result() {
         Some(BranchCleanupOperationSnapshot::Progress(progress(1)))
     );
 
-    store.record_result(WINDOW_ID, Some(OPERATION_ID), &results());
+    store.record_result(WINDOW_ID, OPERATION_ID, &results());
 
     assert_eq!(
         store.snapshot(WINDOW_ID, OPERATION_ID),
@@ -57,7 +57,7 @@ fn reconnecting_client_recovers_in_flight_progress_then_result() {
 #[test]
 fn cleared_operation_stops_answering_and_never_leaks_into_the_next_cleanup() {
     let store = BranchCleanupOperationStore::new();
-    store.record_result(WINDOW_ID, Some(OPERATION_ID), &results());
+    store.record_result(WINDOW_ID, OPERATION_ID, &results());
 
     store.clear(WINDOW_ID, OPERATION_ID);
     assert_eq!(
@@ -68,7 +68,7 @@ fn cleared_operation_stops_answering_and_never_leaks_into_the_next_cleanup() {
 
     // A second cleanup in the same window carries a new operation id; the
     // previous run's state must never be served under it.
-    store.record_result(WINDOW_ID, Some(OPERATION_ID), &results());
+    store.record_result(WINDOW_ID, OPERATION_ID, &results());
     assert_eq!(
         store.snapshot(WINDOW_ID, "branches-1-1758000009999-2"),
         None
@@ -78,10 +78,10 @@ fn cleared_operation_stops_answering_and_never_leaks_into_the_next_cleanup() {
 #[test]
 fn a_newer_operation_evicts_the_previous_one_for_the_same_window() {
     let store = BranchCleanupOperationStore::new();
-    store.record_result(WINDOW_ID, Some(OPERATION_ID), &results());
+    store.record_result(WINDOW_ID, OPERATION_ID, &results());
 
     let next_operation_id = "branches-1-1758000009999-2";
-    store.record_progress(WINDOW_ID, Some(next_operation_id), &progress(1));
+    store.record_progress(WINDOW_ID, next_operation_id, &progress(1));
 
     assert_eq!(store.snapshot(WINDOW_ID, OPERATION_ID), None);
     assert_eq!(
@@ -93,7 +93,7 @@ fn a_newer_operation_evicts_the_previous_one_for_the_same_window() {
 #[test]
 fn clear_from_a_different_operation_does_not_drop_the_running_one() {
     let store = BranchCleanupOperationStore::new();
-    store.record_progress(WINDOW_ID, Some(OPERATION_ID), &progress(1));
+    store.record_progress(WINDOW_ID, OPERATION_ID, &progress(1));
 
     // A late close of the previous modal must not wipe the operation that is
     // currently running in the same window.
@@ -106,20 +106,10 @@ fn clear_from_a_different_operation_does_not_drop_the_running_one() {
 }
 
 #[test]
-fn operations_without_an_operation_id_are_not_tracked() {
-    let store = BranchCleanupOperationStore::new();
-
-    store.record_progress(WINDOW_ID, None, &progress(1));
-    store.record_result(WINDOW_ID, None, &results());
-
-    assert_eq!(store.snapshot(WINDOW_ID, OPERATION_ID), None);
-}
-
-#[test]
 fn separate_windows_keep_independent_operations() {
     let store = BranchCleanupOperationStore::new();
-    store.record_progress(WINDOW_ID, Some(OPERATION_ID), &progress(1));
-    store.record_result("__workspace_cleanup__", Some("ws-op-1"), &results());
+    store.record_progress(WINDOW_ID, OPERATION_ID, &progress(1));
+    store.record_result("__workspace_cleanup__", "ws-op-1", &results());
 
     assert_eq!(
         store.snapshot(WINDOW_ID, OPERATION_ID),
@@ -137,8 +127,8 @@ fn a_reloaded_client_can_enumerate_live_operations_it_never_started() {
     // the operation to re-sync. The backend hands it every live cleanup on
     // the initial per-client sync instead.
     let store = BranchCleanupOperationStore::new();
-    store.record_progress(WINDOW_ID, Some(OPERATION_ID), &progress(1));
-    store.record_result("__workspace_cleanup__", Some("ws-op-1"), &results());
+    store.record_progress(WINDOW_ID, OPERATION_ID, &progress(1));
+    store.record_result("__workspace_cleanup__", "ws-op-1", &results());
 
     let mut live = store.live_operations();
     live.sort_by(|left, right| left.0.cmp(&right.0));
@@ -167,8 +157,8 @@ fn a_reloaded_client_can_enumerate_live_operations_it_never_started() {
 #[test]
 fn later_progress_replaces_earlier_progress() {
     let store = BranchCleanupOperationStore::new();
-    store.record_progress(WINDOW_ID, Some(OPERATION_ID), &progress(1));
-    store.record_progress(WINDOW_ID, Some(OPERATION_ID), &progress(2));
+    store.record_progress(WINDOW_ID, OPERATION_ID, &progress(1));
+    store.record_progress(WINDOW_ID, OPERATION_ID, &progress(2));
 
     assert_eq!(
         store.snapshot(WINDOW_ID, OPERATION_ID),

@@ -889,8 +889,6 @@ mod tests {
         assert_eq!(view.selected_agent_id, "claude");
         assert!(view.show_fast_mode);
         assert!(view.fast_mode);
-        assert!(!view.show_codex_fast_mode);
-        assert!(!view.codex_fast_mode);
         assert!(view
             .launch_summary
             .iter()

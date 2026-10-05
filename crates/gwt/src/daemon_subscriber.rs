@@ -357,6 +357,23 @@ mod tests {
     use super::DaemonSubscriber;
     use crate::cli::daemon::{broadcast::BroadcastHub, server};
 
+    fn run_isolated_daemon_fixture(fixture: impl std::future::Future<Output = ()>) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = TempDir::new().expect("fixture home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        // Stop detached tasks and finish blocking scans before restoring HOME,
+        // including when the fixture unwinds. A tokio::test body ends too early.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("fixture runtime");
+        runtime.block_on(fixture);
+    }
+
     fn sample_scope(temp: &TempDir) -> RuntimeScope {
         RuntimeScope::new(
             "abcdef0123456789",
@@ -381,134 +398,143 @@ mod tests {
         )
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn subscriber_forwards_events_through_callback() {
-        let temp = TempDir::new().expect("tempdir");
-        let scope = sample_scope(&temp);
-        let socket_path = temp.path().join("daemon.sock");
-        let endpoint_path = temp.path().join("endpoint.json");
-        let endpoint = sample_endpoint(scope.clone(), &socket_path, "subscriber-secret");
+    #[test]
+    fn subscriber_forwards_events_through_callback() {
+        run_isolated_daemon_fixture(async {
+            let temp = TempDir::new().expect("tempdir");
+            let scope = sample_scope(&temp);
+            let socket_path = temp.path().join("daemon.sock");
+            let endpoint_path = temp.path().join("endpoint.json");
+            let endpoint = sample_endpoint(scope.clone(), &socket_path, "subscriber-secret");
 
-        let server_endpoint = endpoint.clone();
-        let server_socket = socket_path.clone();
-        let server_endpoint_path = endpoint_path.clone();
-        let hub = BroadcastHub::new();
-        let publisher = hub.clone();
-        let server_handle =
-            server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
-                .expect("bind test server");
+            let server_endpoint = endpoint.clone();
+            let server_socket = socket_path.clone();
+            let server_endpoint_path = endpoint_path.clone();
+            let hub = BroadcastHub::new();
+            let publisher = hub.clone();
+            let server_handle =
+                server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
+                    .expect("bind test server");
 
-        let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let received_for_cb = Arc::clone(&received);
-        let subscriber = DaemonSubscriber::spawn(
-            endpoint,
-            vec!["board".to_string()],
-            move |channel, payload| {
-                received_for_cb.lock().unwrap().push((channel, payload));
-            },
-        );
+            let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
+                Arc::new(Mutex::new(Vec::new()));
+            let received_for_cb = Arc::clone(&received);
+            let subscriber = DaemonSubscriber::spawn(
+                endpoint,
+                vec!["board".to_string()],
+                move |channel, payload| {
+                    received_for_cb.lock().unwrap().push((channel, payload));
+                },
+            );
 
-        // Publish must be retried briefly: the per-connection forwarder
-        // task on the daemon side races with the test's first publish.
-        let event = DaemonFrame::Event {
-            channel: "board".to_string(),
-            payload: json!({"entries": 5}),
-        };
-        for _ in 0..50 {
-            if publisher.publish("board", event.clone()) > 0 {
-                break;
+            // Publish must be retried briefly: the per-connection forwarder
+            // task on the daemon side races with the test's first publish.
+            let event = DaemonFrame::Event {
+                channel: "board".to_string(),
+                payload: json!({"entries": 5}),
+            };
+            for _ in 0..50 {
+                if publisher.publish("board", event.clone()) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
 
-        // Wait up to 1 s for the callback to record the event.
-        let mut delivered = false;
-        for _ in 0..100 {
-            if !received.lock().unwrap().is_empty() {
-                delivered = true;
-                break;
+            // Wait up to 1 s for the callback to record the event.
+            let mut delivered = false;
+            for _ in 0..100 {
+                if !received.lock().unwrap().is_empty() {
+                    delivered = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(delivered, "expected callback to receive at least one event");
+            assert!(delivered, "expected callback to receive at least one event");
 
-        let captured = received.lock().unwrap().clone();
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].0, "board");
-        assert_eq!(captured[0].1, json!({"entries": 5}));
+            let captured = received.lock().unwrap().clone();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "board");
+            assert_eq!(captured[0].1, json!({"entries": 5}));
 
-        subscriber.stop();
-        server_handle.abort();
-        let _ = server_handle.await;
+            subscriber.stop();
+            server_handle.abort();
+            let _ = server_handle.await;
+        });
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn subscriber_stop_unblocks_thread_even_without_events() {
-        let temp = TempDir::new().expect("tempdir");
-        let scope = sample_scope(&temp);
-        let socket_path = temp.path().join("daemon.sock");
-        let endpoint_path = temp.path().join("endpoint.json");
-        let endpoint = sample_endpoint(scope.clone(), &socket_path, "stop-secret");
+    #[test]
+    fn subscriber_stop_unblocks_thread_even_without_events() {
+        run_isolated_daemon_fixture(async {
+            let temp = TempDir::new().expect("tempdir");
+            let scope = sample_scope(&temp);
+            let socket_path = temp.path().join("daemon.sock");
+            let endpoint_path = temp.path().join("endpoint.json");
+            let endpoint = sample_endpoint(scope.clone(), &socket_path, "stop-secret");
 
-        let server_endpoint = endpoint.clone();
-        let server_socket = socket_path.clone();
-        let server_endpoint_path = endpoint_path.clone();
-        let hub = BroadcastHub::new();
-        let server_handle =
-            server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
-                .expect("bind test server");
+            let server_endpoint = endpoint.clone();
+            let server_socket = socket_path.clone();
+            let server_endpoint_path = endpoint_path.clone();
+            let hub = BroadcastHub::new();
+            let server_handle =
+                server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
+                    .expect("bind test server");
 
-        let subscriber =
-            DaemonSubscriber::spawn(endpoint, vec!["board".to_string()], |_channel, _payload| {});
+            let subscriber = DaemonSubscriber::spawn(
+                endpoint,
+                vec!["board".to_string()],
+                |_channel, _payload| {},
+            );
 
-        // Drop without sending any events; stop() must complete promptly.
-        subscriber.stop();
+            // Drop without sending any events; stop() must complete promptly.
+            subscriber.stop();
 
-        server_handle.abort();
-        let _ = server_handle.await;
+            server_handle.abort();
+            let _ = server_handle.await;
+        });
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn materializer_subscriber_holds_presence_only_for_its_live_connection() {
-        let temp = TempDir::new().expect("tempdir");
-        let scope = sample_scope(&temp);
-        let socket_path = temp.path().join("daemon.sock");
-        let endpoint_path = temp.path().join("endpoint.json");
-        let endpoint = sample_endpoint(scope, &socket_path, "materializer-secret");
-        let server_endpoint = endpoint.clone();
-        let server_socket = socket_path.clone();
-        let hub = BroadcastHub::new();
-        let observed_hub = hub.clone();
-        let server_handle =
-            server::spawn_server(server_endpoint, server_socket, endpoint_path, hub)
-                .expect("bind test server");
+    #[test]
+    fn materializer_subscriber_holds_presence_only_for_its_live_connection() {
+        run_isolated_daemon_fixture(async {
+            let temp = TempDir::new().expect("tempdir");
+            let scope = sample_scope(&temp);
+            let socket_path = temp.path().join("daemon.sock");
+            let endpoint_path = temp.path().join("endpoint.json");
+            let endpoint = sample_endpoint(scope, &socket_path, "materializer-secret");
+            let server_endpoint = endpoint.clone();
+            let server_socket = socket_path.clone();
+            let hub = BroadcastHub::new();
+            let observed_hub = hub.clone();
+            let server_handle =
+                server::spawn_server(server_endpoint, server_socket, endpoint_path, hub)
+                    .expect("bind test server");
 
-        let resolver_endpoint = endpoint.clone();
-        let subscriber = DaemonSubscriber::spawn_materializer_with_resolver(
-            move || Ok(resolver_endpoint.clone()),
-            vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
-            |_channel, _payload| {},
-        );
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !observed_hub.issue_monitor_materializer_connected() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("materializer subscriber acquires presence lease");
+            let resolver_endpoint = endpoint.clone();
+            let subscriber = DaemonSubscriber::spawn_materializer_with_resolver(
+                move || Ok(resolver_endpoint.clone()),
+                vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+                |_channel, _payload| {},
+            );
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !observed_hub.issue_monitor_materializer_connected() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("materializer subscriber acquires presence lease");
 
-        subscriber.stop();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while observed_hub.issue_monitor_materializer_connected() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("stopped subscriber releases presence lease");
+            subscriber.stop();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while observed_hub.issue_monitor_materializer_connected() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("stopped subscriber releases presence lease");
 
-        server_handle.abort();
-        let _ = server_handle.await;
+            server_handle.abort();
+            let _ = server_handle.await;
+        });
     }
 
     /// The fake daemon below speaks the wire protocol over a raw Unix
@@ -590,247 +616,251 @@ mod tests {
         server.await.expect("fake daemon sessions");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn subscriber_with_resolver_picks_up_endpoint_after_initial_failure() {
-        // Reflects the production race: a project tab opens before
-        // `gwtd daemon start` is invoked, so the first resolver call
-        // returns Err. Once the daemon comes up the resolver returns
-        // the live endpoint and the subscriber starts receiving
-        // events without needing a re-spawn.
+    #[test]
+    fn subscriber_with_resolver_picks_up_endpoint_after_initial_failure() {
+        run_isolated_daemon_fixture(async {
+            // Reflects the production race: a project tab opens before
+            // `gwtd daemon start` is invoked, so the first resolver call
+            // returns Err. Once the daemon comes up the resolver returns
+            // the live endpoint and the subscriber starts receiving
+            // events without needing a re-spawn.
 
-        let temp = TempDir::new().expect("tempdir");
-        let scope = sample_scope(&temp);
-        let socket_path = temp.path().join("daemon.sock");
-        let endpoint_path = temp.path().join("endpoint.json");
-        let endpoint = sample_endpoint(scope.clone(), &socket_path, "resolver-secret");
+            let temp = TempDir::new().expect("tempdir");
+            let scope = sample_scope(&temp);
+            let socket_path = temp.path().join("daemon.sock");
+            let endpoint_path = temp.path().join("endpoint.json");
+            let endpoint = sample_endpoint(scope.clone(), &socket_path, "resolver-secret");
 
-        // The resolver returns Err the first 3 times, then Ok. This
-        // simulates the daemon coming up after the subscriber is
-        // already retrying.
-        let calls = Arc::new(Mutex::new(0usize));
-        let endpoint_for_resolver = endpoint.clone();
-        let calls_for_resolver = Arc::clone(&calls);
-        let resolver = move || -> Result<DaemonEndpoint, String> {
-            let mut guard = calls_for_resolver.lock().unwrap();
-            *guard += 1;
-            if *guard <= 3 {
-                Err("daemon not running".to_string())
-            } else {
-                Ok(endpoint_for_resolver.clone())
-            }
-        };
+            // The resolver returns Err the first 3 times, then Ok. This
+            // simulates the daemon coming up after the subscriber is
+            // already retrying.
+            let calls = Arc::new(Mutex::new(0usize));
+            let endpoint_for_resolver = endpoint.clone();
+            let calls_for_resolver = Arc::clone(&calls);
+            let resolver = move || -> Result<DaemonEndpoint, String> {
+                let mut guard = calls_for_resolver.lock().unwrap();
+                *guard += 1;
+                if *guard <= 3 {
+                    Err("daemon not running".to_string())
+                } else {
+                    Ok(endpoint_for_resolver.clone())
+                }
+            };
 
-        let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let received_for_cb = Arc::clone(&received);
-        let subscriber = DaemonSubscriber::spawn_with_resolver(
-            resolver,
-            vec!["board".to_string()],
-            move |channel, payload| {
-                received_for_cb.lock().unwrap().push((channel, payload));
-            },
-        );
+            let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
+                Arc::new(Mutex::new(Vec::new()));
+            let received_for_cb = Arc::clone(&received);
+            let subscriber = DaemonSubscriber::spawn_with_resolver(
+                resolver,
+                vec!["board".to_string()],
+                move |channel, payload| {
+                    received_for_cb.lock().unwrap().push((channel, payload));
+                },
+            );
 
-        // Observe the intended startup race, then begin binding the daemon
-        // while the resolver still has two deterministic failures left. This
-        // guarantees the socket is live before the fourth (successful)
-        // resolve without depending on OS-thread scheduling or a fixed sleep.
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while *calls.lock().unwrap() < 1 {
+            // Observe the intended startup race, then begin binding the daemon
+            // while the resolver still has two deterministic failures left. This
+            // guarantees the socket is live before the fourth (successful)
+            // resolve without depending on OS-thread scheduling or a fixed sleep.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while *calls.lock().unwrap() < 1 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("resolver records the initial pre-daemon failure");
+            let server_endpoint = endpoint.clone();
+            let server_socket = socket_path.clone();
+            let server_endpoint_path = endpoint_path.clone();
+            let hub = BroadcastHub::new();
+            let publisher = hub.clone();
+            let server_handle =
+                server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
+                    .expect("bind test server");
+
+            // The daemon socket is bound; publish until the subscriber reconnects.
+            let event = DaemonFrame::Event {
+                channel: "board".to_string(),
+                payload: json!({"entries": 11}),
+            };
+            // Publish until the callback observes one event. This verifies the
+            // end-to-end subscription instead of treating a transient forwarder
+            // count as delivery proof.
+            let mut delivered = false;
+            for _ in 0..500 {
+                publisher.publish("board", event.clone());
+                if !received.lock().unwrap().is_empty() {
+                    delivered = true;
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        })
-        .await
-        .expect("resolver records the initial pre-daemon failure");
-        let server_endpoint = endpoint.clone();
-        let server_socket = socket_path.clone();
-        let server_endpoint_path = endpoint_path.clone();
-        let hub = BroadcastHub::new();
-        let publisher = hub.clone();
-        let server_handle =
-            server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
-                .expect("bind test server");
+            assert!(
+                delivered,
+                "expected resolver-based subscriber to receive event after daemon came up"
+            );
+            assert!(
+                *calls.lock().unwrap() >= 4,
+                "expected resolver to retry at least 3 times before succeeding"
+            );
 
-        // The daemon socket is bound; publish until the subscriber reconnects.
-        let event = DaemonFrame::Event {
-            channel: "board".to_string(),
-            payload: json!({"entries": 11}),
-        };
-        // Publish until the callback observes one event. This verifies the
-        // end-to-end subscription instead of treating a transient forwarder
-        // count as delivery proof.
-        let mut delivered = false;
-        for _ in 0..500 {
-            publisher.publish("board", event.clone());
-            if !received.lock().unwrap().is_empty() {
-                delivered = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            delivered,
-            "expected resolver-based subscriber to receive event after daemon came up"
-        );
-        assert!(
-            *calls.lock().unwrap() >= 4,
-            "expected resolver to retry at least 3 times before succeeding"
-        );
-
-        subscriber.stop();
-        server_handle.abort();
-        let _ = server_handle.await;
+            subscriber.stop();
+            server_handle.abort();
+            let _ = server_handle.await;
+        });
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn subscriber_resolver_picks_up_new_token_between_sessions() {
-        // Production scenario: `gwtd daemon start` is killed and
-        // respawned. The new daemon picks a fresh `auth_token`, so a
-        // subscriber that cached the old endpoint at spawn time would
-        // loop forever on handshake rejection. `spawn_with_resolver`
-        // re-reads the persisted endpoint between sessions; this
-        // regression test exercises the contract that the auth_token
-        // is read FRESH per session, not cached at spawn.
-        //
-        // Locks in the Codex P1 fix from PR #2298.
-        //
-        // Test strategy: stand up exactly one daemon configured with
-        // the "live" token, but seed the resolver with a stale token
-        // first. The first connect attempt hits the daemon's
-        // handshake check and is rejected. After we swap the
-        // resolver's state to the live token, the next session
-        // (driven by run_loop's reconnect-on-error path) succeeds and
-        // events flow through.
-        let temp = TempDir::new().expect("tempdir");
-        let scope = sample_scope(&temp);
-        let socket_path = temp.path().join("daemon.sock");
-        let endpoint_path = temp.path().join("endpoint.json");
+    #[test]
+    fn subscriber_resolver_picks_up_new_token_between_sessions() {
+        run_isolated_daemon_fixture(async {
+            // Production scenario: `gwtd daemon start` is killed and
+            // respawned. The new daemon picks a fresh `auth_token`, so a
+            // subscriber that cached the old endpoint at spawn time would
+            // loop forever on handshake rejection. `spawn_with_resolver`
+            // re-reads the persisted endpoint between sessions; this
+            // regression test exercises the contract that the auth_token
+            // is read FRESH per session, not cached at spawn.
+            //
+            // Locks in the Codex P1 fix from PR #2298.
+            //
+            // Test strategy: stand up exactly one daemon configured with
+            // the "live" token, but seed the resolver with a stale token
+            // first. The first connect attempt hits the daemon's
+            // handshake check and is rejected. After we swap the
+            // resolver's state to the live token, the next session
+            // (driven by run_loop's reconnect-on-error path) succeeds and
+            // events flow through.
+            let temp = TempDir::new().expect("tempdir");
+            let scope = sample_scope(&temp);
+            let socket_path = temp.path().join("daemon.sock");
+            let endpoint_path = temp.path().join("endpoint.json");
 
-        // The daemon expects "live-token". The resolver initially
-        // returns "stale-token", which mirrors a subscriber holding a
-        // pre-restart cache.
-        let live_endpoint = sample_endpoint(scope.clone(), &socket_path, "live-token");
-        let stale_endpoint = sample_endpoint(scope.clone(), &socket_path, "stale-token");
+            // The daemon expects "live-token". The resolver initially
+            // returns "stale-token", which mirrors a subscriber holding a
+            // pre-restart cache.
+            let live_endpoint = sample_endpoint(scope.clone(), &socket_path, "live-token");
+            let stale_endpoint = sample_endpoint(scope.clone(), &socket_path, "stale-token");
 
-        // Start the daemon with the live token.
-        let hub = BroadcastHub::new();
-        let publisher = hub.clone();
-        let server_endpoint = live_endpoint.clone();
-        let server_socket = socket_path.clone();
-        let server_endpoint_path = endpoint_path.clone();
-        let server_handle =
-            server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
-                .expect("bind test server");
+            // Start the daemon with the live token.
+            let hub = BroadcastHub::new();
+            let publisher = hub.clone();
+            let server_endpoint = live_endpoint.clone();
+            let server_socket = socket_path.clone();
+            let server_endpoint_path = endpoint_path.clone();
+            let server_handle =
+                server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
+                    .expect("bind test server");
 
-        // Resolver state holds the currently-believed endpoint. We
-        // mutate it during the test to simulate
-        // `paths::gwt_home()` -> `endpoint.json` being rewritten by a
-        // restarted daemon.
-        //
-        // Wrap each call in a counter so the test can wait on the
-        // subscriber actually consuming the stale endpoint at least
-        // once before we flip the resolver state. A wall-clock sleep
-        // is unsafe here: on a slow CI runner the subscriber thread
-        // may not reach `resolver()` until *after* a fixed sleep
-        // window, in which case it would never observe the stale
-        // token and the regression path (handshake rejected → run_loop
-        // reconnects → second resolver call sees rotated token) would
-        // not run.
-        let resolver_state = Arc::new(Mutex::new(stale_endpoint.clone()));
-        let resolver_calls = Arc::new(AtomicUsize::new(0));
-        let resolver_state_for_resolver = Arc::clone(&resolver_state);
-        let resolver_calls_for_resolver = Arc::clone(&resolver_calls);
-        let resolver = move || -> Result<DaemonEndpoint, String> {
-            let snapshot = resolver_state_for_resolver.lock().unwrap().clone();
-            resolver_calls_for_resolver.fetch_add(1, Ordering::SeqCst);
-            Ok(snapshot)
-        };
+            // Resolver state holds the currently-believed endpoint. We
+            // mutate it during the test to simulate
+            // `paths::gwt_home()` -> `endpoint.json` being rewritten by a
+            // restarted daemon.
+            //
+            // Wrap each call in a counter so the test can wait on the
+            // subscriber actually consuming the stale endpoint at least
+            // once before we flip the resolver state. A wall-clock sleep
+            // is unsafe here: on a slow CI runner the subscriber thread
+            // may not reach `resolver()` until *after* a fixed sleep
+            // window, in which case it would never observe the stale
+            // token and the regression path (handshake rejected → run_loop
+            // reconnects → second resolver call sees rotated token) would
+            // not run.
+            let resolver_state = Arc::new(Mutex::new(stale_endpoint.clone()));
+            let resolver_calls = Arc::new(AtomicUsize::new(0));
+            let resolver_state_for_resolver = Arc::clone(&resolver_state);
+            let resolver_calls_for_resolver = Arc::clone(&resolver_calls);
+            let resolver = move || -> Result<DaemonEndpoint, String> {
+                let snapshot = resolver_state_for_resolver.lock().unwrap().clone();
+                resolver_calls_for_resolver.fetch_add(1, Ordering::SeqCst);
+                Ok(snapshot)
+            };
 
-        let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let received_for_cb = Arc::clone(&received);
-        let subscriber = DaemonSubscriber::spawn_with_resolver(
-            resolver,
-            vec!["board".to_string()],
-            move |channel, payload| {
-                received_for_cb.lock().unwrap().push((channel, payload));
-            },
-        );
+            let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
+                Arc::new(Mutex::new(Vec::new()));
+            let received_for_cb = Arc::clone(&received);
+            let subscriber = DaemonSubscriber::spawn_with_resolver(
+                resolver,
+                vec!["board".to_string()],
+                move |channel, payload| {
+                    received_for_cb.lock().unwrap().push((channel, payload));
+                },
+            );
 
-        // Wait for the subscriber thread to call the resolver at least
-        // twice while the stale token is still installed. Two calls
-        // proves the regression path actually fired:
-        //
-        // 1. First call: subscriber reads stale endpoint, attempts
-        //    connect, handshake is rejected by the daemon.
-        // 2. run_session returns Err, run_loop sleeps with backoff,
-        //    then enters the next iteration which calls resolver
-        //    again — the second call confirms the reconnect path was
-        //    actually exercised, not just the initial spawn.
-        //
-        // Up to 5 s slack covers slow CI runners; the steady-state
-        // first-connect attempt typically lands within a few ms after
-        // `spawn_server` returns.
-        let mut stale_sessions_observed = false;
-        for _ in 0..500 {
-            if resolver_calls.load(Ordering::SeqCst) >= 2 {
-                stale_sessions_observed = true;
-                break;
+            // Wait for the subscriber thread to call the resolver at least
+            // twice while the stale token is still installed. Two calls
+            // proves the regression path actually fired:
+            //
+            // 1. First call: subscriber reads stale endpoint, attempts
+            //    connect, handshake is rejected by the daemon.
+            // 2. run_session returns Err, run_loop sleeps with backoff,
+            //    then enters the next iteration which calls resolver
+            //    again — the second call confirms the reconnect path was
+            //    actually exercised, not just the initial spawn.
+            //
+            // Up to 5 s slack covers slow CI runners; the steady-state
+            // first-connect attempt typically lands within a few ms after
+            // `spawn_server` returns.
+            let mut stale_sessions_observed = false;
+            for _ in 0..500 {
+                if resolver_calls.load(Ordering::SeqCst) >= 2 {
+                    stale_sessions_observed = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            stale_sessions_observed,
-            "subscriber never attempted a stale-token session — regression path not exercised"
-        );
-        assert!(
-            received.lock().unwrap().is_empty(),
-            "stale token must not deliver events"
-        );
+            assert!(
+                stale_sessions_observed,
+                "subscriber never attempted a stale-token session — regression path not exercised"
+            );
+            assert!(
+                received.lock().unwrap().is_empty(),
+                "stale token must not deliver events"
+            );
 
-        // Simulate the daemon-restart endpoint refresh: rewrite the
-        // resolver's cache to the live token. The next resolver call
-        // (driven by run_loop's reconnect-on-error path) should now
-        // observe the rotated value and succeed.
-        *resolver_state.lock().unwrap() = live_endpoint.clone();
+            // Simulate the daemon-restart endpoint refresh: rewrite the
+            // resolver's cache to the live token. The next resolver call
+            // (driven by run_loop's reconnect-on-error path) should now
+            // observe the rotated value and succeed.
+            *resolver_state.lock().unwrap() = live_endpoint.clone();
 
-        // Publish a marker event. The publish loop spins until the
-        // subscriber's Subscribe is processed and a forwarder is
-        // attached on the daemon side.
-        let event = DaemonFrame::Event {
-            channel: "board".to_string(),
-            payload: json!({"phase": "post-restart"}),
-        };
-        for _ in 0..400 {
-            if publisher.publish("board", event.clone()) > 0 {
-                break;
+            // Publish a marker event. The publish loop spins until the
+            // subscriber's Subscribe is processed and a forwarder is
+            // attached on the daemon side.
+            let event = DaemonFrame::Event {
+                channel: "board".to_string(),
+                payload: json!({"phase": "post-restart"}),
+            };
+            for _ in 0..400 {
+                if publisher.publish("board", event.clone()) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
 
-        // Wait up to 8 s for the callback to record the event. The
-        // reconnect path can backoff up to 5 s between sessions, so
-        // allow generous slack.
-        let mut delivered = false;
-        for _ in 0..800 {
-            if received
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(_, payload)| payload == &json!({"phase": "post-restart"}))
-            {
-                delivered = true;
-                break;
+            // Wait up to 8 s for the callback to record the event. The
+            // reconnect path can backoff up to 5 s between sessions, so
+            // allow generous slack.
+            let mut delivered = false;
+            for _ in 0..800 {
+                if received
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(_, payload)| payload == &json!({"phase": "post-restart"}))
+                {
+                    delivered = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            delivered,
-            "expected subscriber to reconnect with rotated auth_token and receive event"
-        );
+            assert!(
+                delivered,
+                "expected subscriber to reconnect with rotated auth_token and receive event"
+            );
 
-        subscriber.stop();
-        server_handle.abort();
-        let _ = server_handle.await;
+            subscriber.stop();
+            server_handle.abort();
+            let _ = server_handle.await;
+        });
     }
 }

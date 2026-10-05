@@ -7040,7 +7040,7 @@ button.workspace-board-ref:focus-visible {
 }
 .agents-surface[hidden],
 .canvas-area.is-agents > :not(.agents-surface) { display: none !important; }
-.agents-toolbar, .agent-tile__header, .agent-tile__input {
+.agents-toolbar, .agent-tile__header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -7050,7 +7050,7 @@ button.workspace-board-ref:focus-visible {
 .agents-toolbar h2, .agent-tile h3 { margin: 0; font: inherit; }
 .agents-toolbar label { display: flex; align-items: center; gap: var(--space-2); }
 .agents-toolbar input { width: 4em; }
-.agents-toolbar input, .agent-tile__input textarea {
+.agents-toolbar input {
   color: var(--color-text);
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-border-strong);
@@ -7058,7 +7058,7 @@ button.workspace-board-ref:focus-visible {
   padding: var(--space-1);
   font: inherit;
 }
-.agents-toolbar input:focus-visible, .agent-tile__input textarea:focus-visible {
+.agents-toolbar input:focus-visible, .agents-tabs button:focus-visible {
   outline: 2px solid var(--color-focus-ring);
 }
 .agents-grid {
@@ -7070,6 +7070,33 @@ button.workspace-board-ref:focus-visible {
   overflow: auto;
   min-height: 0;
 }
+.agents-tabs {
+  display: flex;
+  flex-shrink: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--color-border);
+}
+.agents-tabs button {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.agents-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--color-state-active);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+.agents-grid.is-single { flex: 1; grid-auto-rows: minmax(0, 1fr); }
+/* Stack tab panels so new background terminals can measure their initial grid
+   without painting or accepting input before their tab is selected. */
+.agents-grid.is-single > .agent-tile { grid-area: 1 / 1; }
+.agent-tile[hidden] { display: flex; visibility: hidden; }
+.agents-toolbar label[hidden] { display: none; }
 .agent-tile {
   min-width: 0;
   min-height: 0;
@@ -7084,9 +7111,6 @@ button.workspace-board-ref:focus-visible {
 .issue-preview-mode { grid-column: 1 / -1; }
 .agent-tile__header span, .issue-preview-mode { color: var(--color-text-muted); font-size: var(--type-xs); }
 .agent-tile .agent-tile__terminal { position: relative; inset: auto; flex: 1; min-height: 0; overflow: hidden; background: var(--color-surface); color: var(--color-text); }
-.agent-tile__input { flex-wrap: wrap; border-top: 1px solid var(--color-border); }
-.agent-tile__input textarea { flex: 1; width: 0; min-width: 0; resize: none; }
-.agent-tile__input [role="status"] { width: 100%; font-size: var(--type-xs); }
 .agents-empty { padding: var(--space-3); color: var(--color-text-muted); }
 
 /* Keep persistence diagnostics in the shell layout, above every workspace surface. */
@@ -7133,3 +7157,27 @@ button.workspace-board-ref:focus-visible {
   font-family: var(--font-body);
   font-size: var(--type-xs);
 }
+
+/* PM conversation */
+.pm-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; color: var(--color-text); background: var(--color-surface); font-family: var(--font-body); font-size: var(--type-sm); }
+.pm-chat[hidden], .pm-chat [hidden] { display: none; }
+.pm-chat--logs { flex: 0 0 auto; }
+.pm-chat__toolbar { display: flex; gap: var(--space-2); padding: var(--space-2); border-bottom: 1px solid var(--color-border); }
+.pm-chat button { padding: var(--space-1) var(--space-3); border: 1px solid var(--color-button-border); border-radius: var(--radius-sm); background: var(--color-button-bg); color: var(--color-button-fg); font: inherit; cursor: pointer; }
+.pm-chat button[aria-pressed="true"] { border-color: var(--color-focus-ring); }
+.pm-chat button:hover { background: var(--color-button-bg-hover); }
+.pm-chat button:disabled { cursor: default; color: var(--color-text-disabled); }
+.pm-chat button:focus-visible, .pm-chat textarea:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.pm-chat__body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.pm-chat__notice { padding: var(--space-3); margin: 0; color: var(--color-text-muted); }
+.pm-chat__transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); }
+.pm-chat__message { margin-bottom: var(--space-3); padding: var(--space-3); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.pm-chat__message--user { border-inline-start: 2px solid var(--color-border-strong); }
+.pm-chat__author { color: var(--color-text-muted); font-size: var(--type-xs); }
+.pm-chat__text { margin: var(--space-2) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__input { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--color-border); }
+.pm-chat__input textarea { flex: 1; min-width: 0; resize: vertical; padding: var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font: inherit; }
+.pm-chat__error { flex-basis: 100%; margin: 0; color: var(--color-state-blocked); }
+.pm-conversation-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.pm-conversation-log { position: relative; flex: 1; min-height: 0; }
+.pm-conversation-log[hidden] { display: none; }

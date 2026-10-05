@@ -15,9 +15,8 @@ use gwt_github::SpecOpsError;
 
 use crate::cli::{CliEnv, CliParseError};
 use crate::discussion_resume::{
-    clear_proposal_next_question, proposal_evidence_blocker_by_label,
-    set_proposal_goal_pending_by_label, set_proposal_goal_state_by_label,
-    set_proposal_status_by_label,
+    clear_proposal_next_question, set_proposal_goal_pending_by_label,
+    set_proposal_goal_state_by_label, set_proposal_status_by_label, ProposalTarget,
 };
 
 /// Sub-action for `discuss.*` operations (SPEC-1935 FR-014p).
@@ -25,12 +24,15 @@ use crate::discussion_resume::{
 pub enum DiscussAction {
     Resolve {
         proposal: String,
+        target: Option<ProposalTarget>,
     },
     Park {
         proposal: String,
+        target: Option<ProposalTarget>,
     },
     Reject {
         proposal: String,
+        target: Option<ProposalTarget>,
     },
     ClearNextQuestion {
         proposal: String,
@@ -59,10 +61,11 @@ pub enum DiscussAction {
 pub(super) fn parse(args: &[String]) -> Result<DiscussAction, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     let proposal = parse_named_string(rest, "--proposal")?;
+    let target = parse_target(rest)?;
     match head.as_str() {
-        "resolve" => Ok(DiscussAction::Resolve { proposal }),
-        "park" => Ok(DiscussAction::Park { proposal }),
-        "reject" => Ok(DiscussAction::Reject { proposal }),
+        "resolve" => Ok(DiscussAction::Resolve { proposal, target }),
+        "park" => Ok(DiscussAction::Park { proposal, target }),
+        "reject" => Ok(DiscussAction::Reject { proposal, target }),
         "clear-next-question" => Ok(DiscussAction::ClearNextQuestion { proposal }),
         "goal-pending" => Ok(DiscussAction::GoalPending {
             proposal,
@@ -79,6 +82,37 @@ pub(super) fn parse(args: &[String]) -> Result<DiscussAction, CliParseError> {
         }),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
+}
+
+fn parse_target(args: &[String]) -> Result<Option<ProposalTarget>, CliParseError> {
+    let title = args
+        .iter()
+        .any(|arg| arg == "--title")
+        .then(|| parse_named_string(args, "--title"))
+        .transpose()?;
+    let origin_session = args
+        .iter()
+        .any(|arg| arg == "--origin-session")
+        .then(|| parse_named_string(args, "--origin-session"))
+        .transpose()?;
+    if origin_session.is_some() && title.is_none() {
+        return Err(CliParseError::MissingFlag("--title"));
+    }
+    for (flag, value) in [
+        ("--title", title.as_deref()),
+        ("--origin-session", origin_session.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(CliParseError::InvalidValue {
+                flag,
+                reason: "must not be empty",
+            });
+        }
+    }
+    Ok(title.map(|title| ProposalTarget {
+        title,
+        origin_session,
+    }))
 }
 
 fn parse_named_string(args: &[String], flag: &'static str) -> Result<String, CliParseError> {
@@ -107,23 +141,15 @@ pub(super) fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let worktree = env.repo_path().to_path_buf();
     match action {
-        DiscussAction::Resolve { proposal } => {
-            match proposal_evidence_blocker_by_label(&worktree, &proposal) {
-                Ok(Some(reason)) => {
-                    out.push_str(&format!(
-                        "discuss: cannot resolve {proposal}; Evidence Gate incomplete: {reason}\n"
-                    ));
-                    Ok(2)
-                }
-                Ok(None) => apply_status(&worktree, &proposal, "chosen", out),
-                Err(err) => {
-                    out.push_str(&format!("discuss: evidence gate check failed: {err}\n"));
-                    Ok(1)
-                }
-            }
+        DiscussAction::Resolve { proposal, target } => {
+            apply_status(&worktree, &proposal, "chosen", target.as_ref(), out)
         }
-        DiscussAction::Park { proposal } => apply_status(&worktree, &proposal, "parked", out),
-        DiscussAction::Reject { proposal } => apply_status(&worktree, &proposal, "rejected", out),
+        DiscussAction::Park { proposal, target } => {
+            apply_status(&worktree, &proposal, "parked", target.as_ref(), out)
+        }
+        DiscussAction::Reject { proposal, target } => {
+            apply_status(&worktree, &proposal, "rejected", target.as_ref(), out)
+        }
         DiscussAction::ClearNextQuestion { proposal } => {
             match clear_proposal_next_question(&worktree, &proposal) {
                 Ok(true) => {
@@ -226,14 +252,21 @@ fn apply_status(
     worktree: &std::path::Path,
     proposal: &str,
     new_status: &str,
+    target: Option<&ProposalTarget>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    match set_proposal_status_by_label(worktree, proposal, new_status) {
-        Ok(true) => {
-            out.push_str(&format!("discuss: {proposal} -> [{new_status}]\n"));
+    let session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+    match set_proposal_status_by_label(worktree, proposal, new_status, session.as_deref(), target) {
+        Ok(Some(updated)) => {
+            out.push_str(&format!(
+                "discuss: {} - {} -> [{new_status}]; Origin Session: {}\n",
+                updated.label,
+                updated.title,
+                updated.origin_session.as_deref().unwrap_or("unknown")
+            ));
             Ok(0)
         }
-        Ok(false) => {
+        Ok(None) => {
             out.push_str(&format!(
                 "discuss: {proposal} is already resolved or not found (no change)\n"
             ));
@@ -241,7 +274,16 @@ fn apply_status(
         }
         Err(err) => {
             out.push_str(&format!("discuss: {new_status} failed: {err}\n"));
-            Ok(1)
+            Ok(
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied
+                ) {
+                    2
+                } else {
+                    1
+                },
+            )
         }
     }
 }

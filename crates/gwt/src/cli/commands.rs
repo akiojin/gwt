@@ -211,6 +211,14 @@ pub enum IssueCommand {
         enabled: bool,
         limit: usize,
     },
+    MonitorQueueUrgentLimit {
+        project_root: Option<std::path::PathBuf>,
+        limit: usize,
+    },
+    MonitorQueueDemote {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+    },
     MonitorConfigSet {
         project_root: Option<std::path::PathBuf>,
         enabled: Option<bool>,

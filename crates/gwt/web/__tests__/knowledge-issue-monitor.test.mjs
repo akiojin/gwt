@@ -902,3 +902,29 @@ test("Issue refresh preserves the Other disclosure node during user interaction"
   assert.equal(other.hasAttribute("open"), true);
   assert.ok(body.querySelector(".knowledge-list").lastElementChild === other);
 });
+
+
+test("queue priority displays canonical reasons and observed assignment without inventing an actor", async (t) => {
+  const { body, surface, load, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [1, 2, 3].map(number => knowledgeEntry(number, "queued", number)), refresh_enabled: true });
+  surface.applyIssueMonitorStatus({ terminal_queue: [
+    { number: 1, queued_by: "urgent", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z" },
+    { number: 2, priority: "normal", priority_reason: "urgent_limit_reached" },
+    { number: 3, priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z" },
+  ] });
+  for (const [number, label] of [[1, "Urgent"], [2, "Normal · Urgent limit reached"], [3, "Normal · PM demoted"]]) {
+    const row = body.querySelector(`[data-issue-number="${number}"]`);
+    assert.equal(row.querySelector('[data-key="queue-priority"]')?.textContent, label);
+    assert.equal(row.querySelector('[data-key="queue"]')?.textContent, `Queue ${number}${number === 1 ? " · urgent" : ""}`);
+  }
+  for (const [number, actor, time] of [[1, "alice", "2026-10-03T01:00:00Z"], [2, "Unknown", "Not observed"]]) {
+    body.querySelector(`[data-issue-number="${number}"] .knowledge-row-select`).click();
+    const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+    surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue", request_id: request.request_id,
+      detail: { number, title: `Issue ${number}`, state: "open", labels: [], sections: [], related_works: [] } });
+    if (number === 1) assert.equal(body.querySelector(".issue-detail-provenance").textContent, "Queued by: Urgent label");
+    assert.equal(body.querySelector(".issue-detail-priority-assignment").textContent, `Priority assigned by: ${actor} · Assigned at: ${time}`);
+  }
+});

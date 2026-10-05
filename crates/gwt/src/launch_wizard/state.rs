@@ -3155,7 +3155,7 @@ mod tests {
         assert!(view.skip_permissions);
         // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
-        assert!(view.codex_fast_mode);
+        assert!(view.fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
@@ -3723,7 +3723,7 @@ mod tests {
         assert!(view.skip_permissions);
         // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
-        assert!(view.codex_fast_mode);
+        assert!(view.fast_mode);
     }
 
     #[test]
@@ -4249,8 +4249,6 @@ mod tests {
         assert_eq!(view.selected_agent_id, "aider");
         assert!(!view.show_fast_mode);
         assert!(!view.fast_mode);
-        assert!(!view.show_codex_fast_mode);
-        assert!(!view.codex_fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::Custom("aider".into()));
@@ -4310,8 +4308,6 @@ mod tests {
         assert_eq!(claude_view.selected_version, "installed");
         assert_eq!(claude_view.selected_execution_mode, "normal");
         assert!(!claude_view.skip_permissions);
-        assert!(!claude_view.show_codex_fast_mode);
-        assert!(!claude_view.codex_fast_mode);
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "codex".to_string(),
@@ -4331,7 +4327,7 @@ mod tests {
         assert!(codex_view.skip_permissions);
         // Toggle visibility still follows the manual-setup launch path.
         assert!(!codex_view.show_skip_permissions);
-        assert!(codex_view.codex_fast_mode);
+        assert!(codex_view.fast_mode);
 
         state.apply(LaunchWizardAction::SetExecutionMode {
             mode: "normal".to_string(),

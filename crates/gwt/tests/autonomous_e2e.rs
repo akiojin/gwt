@@ -504,6 +504,7 @@ fn fr_family_decision_boundaries_are_observable() {
 
 mod idle_windows {
     use super::*;
+    use gwt::issue_monitor::IssueMonitorExecutionObservation;
     use gwt::{
         IssueMonitorExecutionSettlement, IssueMonitorIdleKind, IssueMonitorWindowObservation,
         IssueMonitorWindowSnapshot, WindowState,
@@ -511,11 +512,28 @@ mod idle_windows {
     use std::collections::BTreeMap;
 
     /// Issue #4328: the launch ACK carries the instant it was confirmed, and a
-    /// canvas observation only judges a binding it was captured after. So the
-    /// fixture launches first and observes the canvas a minute later, the
-    /// order production sees.
-    const LAUNCHED_AT: &str = "2026-09-07T03:59:00Z";
+    /// canvas observation only judges a binding it was captured after. Issue
+    /// #4244 also retains registration for five minutes, so dead recovery is
+    /// observed after that grace has expired.
+    const LAUNCHED_AT: &str = "2026-09-07T03:54:00Z";
     const NOW: &str = "2026-09-07T04:00:00Z";
+
+    fn settlements(
+        entries: &[(u64, IssueMonitorExecutionSettlement)],
+    ) -> BTreeMap<u64, IssueMonitorExecutionObservation> {
+        entries
+            .iter()
+            .map(|(number, settlement)| {
+                (
+                    *number,
+                    IssueMonitorExecutionObservation {
+                        settlement: *settlement,
+                        process_held: false,
+                    },
+                )
+            })
+            .collect()
+    }
 
     fn idle_monitor() -> IssueMonitorState {
         IssueMonitorState::with_prefs(
@@ -579,7 +597,7 @@ mod idle_windows {
         released: u64,
         queued: u64,
         kind: IssueMonitorIdleKind,
-        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
     ) {
         let outcome = monitor.reconcile_idle_windows(settlements, NOW);
         assert_eq!(outcome.released, vec![released], "{kind:?}");
@@ -653,7 +671,7 @@ mod idle_windows {
             42,
             52,
             IssueMonitorIdleKind::ExecutionSettled,
-            &BTreeMap::from([(42, IssueMonitorExecutionSettlement::Completed)]),
+            &settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]),
         );
         assert_eq!(
             monitor
@@ -694,7 +712,7 @@ mod idle_windows {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
         monitor.record_window_snapshot(snapshot(Vec::new()));
         let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
+            &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
             NOW,
         );
         assert_eq!(outcome.released, vec![43]);
@@ -722,7 +740,7 @@ mod idle_windows {
         monitor.set_autonomous_mode(false);
         monitor.record_window_snapshot(snapshot(Vec::new()));
         let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
+            &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
             NOW,
         );
         assert_eq!(outcome.released, vec![43]);
@@ -742,7 +760,7 @@ mod idle_windows {
         monitor.set_autonomous_mode(false);
         monitor.record_window_snapshot(snapshot(Vec::new()));
         monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
+            &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
             NOW,
         );
         let notices = monitor.take_autonomous_notices();
@@ -769,7 +787,7 @@ mod idle_windows {
             false,
         )]));
         let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(44, IssueMonitorExecutionSettlement::Active)]),
+            &settlements(&[(44, IssueMonitorExecutionSettlement::Active)]),
             NOW,
         );
         assert!(outcome.released.is_empty());

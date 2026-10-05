@@ -135,7 +135,15 @@ pub fn generate_codex_hooks_for_mode(
     worktree: &Path,
     mode: CodexHookDiscoveryMode,
 ) -> io::Result<()> {
-    for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
+    let mut paths = codex_hooks_paths_for_codex_discovery(worktree, mode);
+    // Launch trust inspects both discovery locations. Refresh an older copy
+    // that is already present so it cannot retain a previous generated command.
+    for path in codex_hooks_paths_for_codex_discovery(worktree, CodexHookDiscoveryMode::Both) {
+        if path.exists() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    for hooks_path in paths {
         generate_hook_config_at_path(&hooks_path, ManagedHookTarget::Codex)?;
     }
     Ok(())
@@ -639,9 +647,9 @@ thread_local! {
 
 /// The hook binary pinned for the current thread by [`ScopedHookBin`], if any.
 ///
-/// #4057: this is the per-thread seam that lets in-process tests choose the
-/// binary generated hook commands embed without touching the process-global
-/// `GWT_HOOK_BIN`. Production never sets it, so the answer there is `None`.
+/// Public materialization and in-process tests use this per-thread seam to
+/// choose the binary generated hook commands embed without changing the
+/// process-global `GWT_HOOK_BIN` (#4057, #3839).
 pub fn hook_bin_override() -> Option<String> {
     HOOK_BIN_OVERRIDE.with(|value| value.borrow().clone())
 }
@@ -652,6 +660,8 @@ pub fn hook_bin_override() -> Option<String> {
 /// variables are process-global, so one parallel test's pin leaks into every
 /// materialization running at the same time — and outlives the tempdir it
 /// pointed at (#4057). Mirrors `gwt_core::test_support::ScopedGwtHome`.
+/// Public materialization also holds this guard across its synchronous
+/// provider generators so they share one selected fallback (#3839).
 pub struct ScopedHookBin {
     previous: Option<String>,
 }
@@ -676,10 +686,10 @@ impl Drop for ScopedHookBin {
 /// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
 /// the launch did not provide an explicit runtime binary.
 ///
-/// Resolution order: the thread-local [`ScopedHookBin`] override (tests only),
-/// then `GWT_HOOK_BIN`, which public materialization sets from the stable
-/// managed-assets resolver. The `current_exe` / PATH fallback remains for
-/// direct library use and tests that do not enter through that
+/// Resolution order: the thread-local [`ScopedHookBin`] override, then an
+/// explicit `GWT_HOOK_BIN`. Public materialization pins its stable
+/// managed-assets resolution to the thread. The `current_exe` / PATH fallback
+/// remains for direct library use and tests that do not enter through that
 /// materialization boundary.
 pub(crate) fn gwt_hook_bin_path() -> String {
     if let Some(bin) = hook_bin_override() {
@@ -2310,6 +2320,42 @@ mod tests {
             !root_checkout.join(".codex/hooks.json").exists(),
             "old Codex mode must not create the workspace-home hook path"
         );
+    }
+
+    #[test]
+    fn generate_codex_hooks_refreshes_existing_local_copy_before_workspace_home_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        let gitdir = repo.join("project.git/worktrees/linked");
+        let worktree = repo.join("work/linked");
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        {
+            let _old_bin = ScopedHookBin::set(CANONICAL_HOOK_BIN);
+            generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal)
+                .unwrap();
+        }
+
+        let current_bin = dir.path().join("bin/gwtd").display().to_string();
+        let _current_bin = ScopedHookBin::set(&current_bin);
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorkspaceHome).unwrap();
+        let report = crate::register_codex_managed_hook_trust_for_mode_with_expected_bin(
+            &worktree,
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            Some(&current_bin),
+        )
+        .unwrap();
+        assert!(
+            report.untrusted_gwt_hooks.is_empty(),
+            "an existing local copy must migrate before launch trust: {report:?}"
+        );
+        assert_eq!(report.trusted_entries.len(), 10);
     }
 
     #[test]

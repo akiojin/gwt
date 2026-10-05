@@ -543,7 +543,7 @@ mod tests {
         );
         // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
-        assert!(view.codex_fast_mode);
+        assert!(view.fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
@@ -602,7 +602,7 @@ mod tests {
         assert!(view.skip_permissions);
         // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
-        assert!(view.codex_fast_mode);
+        assert!(view.fast_mode);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("api"));
         assert_eq!(view.selected_docker_lifecycle, "start");
