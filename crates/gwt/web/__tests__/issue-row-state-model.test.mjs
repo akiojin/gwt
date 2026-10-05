@@ -775,6 +775,10 @@ test("Issue row state CSS uses Operator tokens only", () => {
     ".knowledge-row-menu-item",
     ".issue-agent-status.is-on-canvas",
     ".issue-agent-status-placeholder",
+    ".issue-card-output",
+    ".issue-card-output-text",
+    ".issue-card-output-screen",
+    ".issue-card-output-label",
   ];
   const defined = new Set();
   for (const source of [tokensCss, typographyCss]) {
@@ -798,6 +802,37 @@ test("Issue row state CSS uses Operator tokens only", () => {
     /data-tone="remote"/,
     "the Remote lane has a badge tone",
   );
+});
+
+test("Active cards show every launch tail without mounting terminals or replacing the card", async (t) => {
+  const fixture = await makeFixture({ workspaceWindows: [
+    agentWindow("agent-1", 3671), agentWindow("agent-2", 3671),
+    agentWindow("agent-3", 3672),
+    { id: "win-2", preset: "issue" },
+    agentWindow("other-host", 3671, {
+      placement: { kind: "issue_preview", issue_window_id: "win-2", issue_number: 3671 },
+    }),
+  ] });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  fixture.surface.applyKnowledgeReceiveEvent({ kind: "terminal_preview", id: "agent-1", text: "  first\n\n<third>" });
+  applyEntries(fixture.surface, fixture.load, [
+    knowledgeEntry(3671, { monitor_state: "launched" }),
+    knowledgeEntry(3672, { monitor_state: "launched" }),
+    knowledgeEntry(42),
+  ]);
+  const previews = fixture.body.querySelectorAll(".issue-card-output");
+  assert.equal(previews.length, 3, "both launches for one issue must be visible");
+  const first = previews[0].querySelector("pre");
+  assert.equal(first.textContent, "  first\n\n<third>");
+  assert.equal(first.querySelector("third"), null, "terminal text is never HTML");
+  assert.match(previews[0].getAttribute("aria-label"), /read.only/i);
+  assert.equal(previews[1].querySelector("pre").textContent, "Waiting for output");
+  const mounts = fixture.calls.terminalMounts.length;
+  fixture.surface.applyKnowledgeReceiveEvent({ kind: "terminal_preview", id: "agent-1", text: "new output" });
+  assert.equal(first.textContent, "new output");
+  assert.ok(first.isConnected, "stream updates must preserve card focus and menus");
+  assert.equal(fixture.calls.terminalMounts.length, mounts);
+  assert.equal(fixture.body.querySelector('[data-queue-column="backlog"] .issue-card-output'), null);
 });
 
 function blocksFor(css, selector) {

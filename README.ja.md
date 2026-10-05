@@ -104,9 +104,11 @@ Settings → Agent Backends で旧設定の endpoint・API key・model を再登
 floor 以降に追加された Session schema 5、PM scratch、work-item projection rebuild v2、
 ProjectKey の移行は維持します。
 usage の `window_minutes` 契約と、未完了の SPEC #2359 に属する Workspace projection
-backfill も維持します。旧 HOME / Workspace の `workspace/current.json` と
-`work_items.json` からの取り込みはデータ保護の例外として保持し、起動時に新しい状態を
-作る前に未対応の配置を安全に案内できるようになるまで削除しません。
+backfill も維持します。旧 HOME / Workspace の `workspace/current.json`、
+`work_items.json`、`journal.jsonl` からの取り込みは廃止しました。対応する現行ファイルが
+ない場合、Workspace 状態の読み込み・保存を拒否し、旧ファイルのパスと更新手順を表示します。
+旧ファイルは変更しません。v9.106.0 で各プロジェクトを移行してから更新してください。
+空の現行ファイルを作る操作は移行になりません。現行 receipt・event の回復処理は維持します。
 coordination のイベント取り込みと discussion の取り込みも、現用の回復処理と session 別
 Stop 契約が利用するため保持します。旧 agent identity reset は廃止し、起動時には保存済みの
 目的・進捗を保持します。`agent_identity.migration.json` は既存の内容を変更せず、
