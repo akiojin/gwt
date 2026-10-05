@@ -19,7 +19,6 @@ short-wall-clock|crates/gwt-agent/src/codex_shared_state.rs|unpaced_spawns_are_s
 short-wall-clock|crates/gwt-agent/src/detect.rs|detect_by_command_preserves_the_absolute_which_path_off_windows
 short-wall-clock|crates/gwt-agent/src/prepare.rs|assert_completed_runner_probe_reaps_stdio_detached_descendant
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_capture_is_bounded_for_large_unbroken_output
-short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_deadline_includes_pipe_eof_and_kills_descendants
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_ansi_split_secret_launch_environment
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_secret_launch_environment
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_url_environment_value
