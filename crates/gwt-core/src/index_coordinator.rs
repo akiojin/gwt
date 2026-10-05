@@ -2154,9 +2154,9 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
                         continue;
                     }
                 }
-                // Older registrants can still publish before locking. Keep
-                // their grace-period entry in the snapshot too; only an old,
-                // unlocked registration is crash residue.
+                // Older registrants can still publish before locking. Leave
+                // their grace-period file alone; only an old, unlocked
+                // registration is crash residue.
                 let age = file
                     .metadata()
                     .ok()
@@ -2165,11 +2165,6 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
                     .unwrap_or_default();
                 if age > REGISTRATION_RESIDUE_GRACE {
                     let _ = fs::remove_file(&path);
-                } else {
-                    live.push(LiveRegistration {
-                        registration,
-                        locked: false,
-                    });
                 }
             }
             Err(err) if is_contended(&err) => {
@@ -2247,16 +2242,6 @@ mod tests {
         );
         assert!(live[0].locked);
         assert!(path.exists(), "a live waiter's registration must survive");
-    }
-
-    #[test]
-    fn registration_in_grace_remains_in_waiter_count() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("registering.json");
-        let file = File::create(&path).unwrap();
-        assert_eq!(sweep_live_registrations(tmp.path()).unwrap().len(), 1);
-        assert!(path.exists());
-        drop(file);
     }
 
     #[test]
