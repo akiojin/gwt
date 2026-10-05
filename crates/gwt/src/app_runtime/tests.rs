@@ -75810,6 +75810,19 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
             ),
         )
     });
+    // The fail-open claim proposal is driven through the issue client. The
+    // default factory would resolve a token from the fake `gh` and call the
+    // real api.github.com, so network latency could burn the scan budget.
+    // An offline fake that has never seen #43 rejects the claim pre-submit,
+    // which deterministically leaves the proposal pending for a retry.
+    let fake_client = Arc::new(FakeIssueClient::new());
+    let issue_client_factory: super::RuntimeIssueClientFactory = Arc::new({
+        let fake_client = Arc::clone(&fake_client);
+        move |_owner, _repo| {
+            let client: Arc<dyn IssueClient> = fake_client.clone();
+            Ok(client)
+        }
+    });
 
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
@@ -75817,7 +75830,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         None,
         None,
         "2026-09-07T07:00:00Z",
-        &super::default_issue_client_factory(),
+        &issue_client_factory,
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
     )
@@ -75831,6 +75844,14 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         pending_claim_issue_numbers(&persisted),
         vec![43],
         "an ordinary probe error within budget stays fail-open"
+    );
+    assert!(
+        fake_client
+            .call_log()
+            .iter()
+            .any(|call| call == "fetch:#43"),
+        "the claim attempt must go through the injected offline client: {:?}",
+        fake_client.call_log()
     );
 }
 
