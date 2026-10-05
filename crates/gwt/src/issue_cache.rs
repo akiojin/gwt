@@ -1209,7 +1209,7 @@ exit 1\n",
             &fake_gh,
             format!(
                 "@echo off\r\n\
-if /I \"%1 %2 %3\"==\"issue view 42\" (\r\n\
+if /I \"%~1 %~2 %~3\"==\"issue view 42\" (\r\n\
   echo {view_json}\r\n\
   exit /b 0\r\n\
 )\r\n\
