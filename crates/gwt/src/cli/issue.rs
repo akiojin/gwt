@@ -5,6 +5,7 @@ use std::{
 };
 
 use gwt_github::{
+    body::{Comment, SpecBody},
     cache::{write_atomic, CacheGeneration, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{ApiError, OwnerMutationError, OwnerMutationResult},
     Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError,
@@ -25,8 +26,10 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
 /// An Issue carrying the `auto-merge` label opts into autonomous execution, and
 /// the Monitor only admits it when `classify_acceptance_criteria` finds a
 /// machine-checkable block. Without this guard the write succeeds and the Issue
-/// silently lands in `needs_human` on the next scan. The guard reuses the
-/// Monitor's classifier verbatim so the two can never disagree (AC-3); an Issue
+/// silently lands in `needs_human` on the next scan. The guard shares the
+/// Monitor's classifier, and existing-Issue callers also share its
+/// `acceptance_source_text` composition of body and comment-resident spec.
+/// Prospective create/spec-section content is validated directly; an Issue
 /// without the label keeps today's behaviour.
 pub(crate) fn guard_autonomous_acceptance_block(
     labels: &[String],
@@ -2431,7 +2434,7 @@ fn run_monitor_requeue<E: CliEnv>(
         out.push('\n');
         return Ok(1);
     }
-    let (prefs, (outcome, released_hold)) =
+    let (prefs, (outcome, released_hold, cleared_retry)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
@@ -2439,7 +2442,19 @@ fn run_monitor_requeue<E: CliEnv>(
             );
             let outcome = monitor.requeue_failed_issue(number, reason, &now);
             let not_held = matches!(outcome, crate::IssueMonitorRequeueOutcome::NotHeld);
-            let released_hold = if not_held && monitor.clear_completion_hold(number) {
+            // Issue #4918 AC-3: a retry floor holds the row without a failure
+            // hold, so it reaches here as `NotHeld`. Tried before the holds
+            // below because it is the only one that also resets the attempt
+            // counter, and a row can carry both a floor and a stale closure
+            // record — clearing the floor is what admits it.
+            let cleared_retry = if not_held {
+                monitor.release_retry_hold_for_operator(number, &now)
+            } else {
+                None
+            };
+            let released_hold = if cleared_retry.is_some() {
+                Some("retry_backoff")
+            } else if not_held && monitor.clear_completion_hold(number) {
                 Some("completion")
             } else if not_held && monitor.reopened_issue_awaits_rescan(number) {
                 // Issue #4770: the scan that observed the close already dropped
@@ -2456,7 +2471,7 @@ fn run_monitor_requeue<E: CliEnv>(
                 monitor.terminal_queue_push(&[number], "operator", &now);
                 *prefs = monitor.prefs();
             }
-            Ok((outcome, released_hold))
+            Ok((outcome, released_hold, cleared_retry))
         })
         .map_err(io_as_api_error)?;
 
@@ -2492,6 +2507,18 @@ fn run_monitor_requeue<E: CliEnv>(
                         "status": "requeued",
                         "reason": reason,
                         "released_hold": released_hold,
+                        // Issue #4918 AC-3: name the floor and the counter that
+                        // were discarded. Without them a recovery that threw
+                        // away the cap-length backoff reads identically to one
+                        // that lifted a closure record.
+                        "cleared_retry_hold": cleared_retry.as_ref().map(|cleared| serde_json::json!({
+                            "attempts_before": cleared.attempts_before,
+                            "max_attempts": cleared.max_attempts,
+                            "retry_not_before": cleared.retry_not_before,
+                            "hold_reason": cleared.hold_reason,
+                            "hold_provider": cleared.hold_provider,
+                            "last_failure_message": cleared.last_failure_message,
+                        })),
                         "released_at": now,
                         "scan_requested": delivery.scan_requested,
                         "scan_delivery": delivery.scan_delivery,
@@ -4182,7 +4209,8 @@ fn run_issue_label<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let issue = IssueNumber(number);
-    let current = refresh_issue_cache(env, issue)?.snapshot;
+    let entry = refresh_issue_cache(env, issue)?;
+    let current = &entry.snapshot;
     let effective = match action {
         IssueLabelAction::Add => {
             let mut effective = Vec::<String>::new();
@@ -4209,7 +4237,7 @@ fn run_issue_label<E: CliEnv>(
             .collect(),
     };
     if effective.is_empty() {
-        return Ok(write_lifecycle_noop(out, "issue.label", &current));
+        return Ok(write_lifecycle_noop(out, "issue.label", current));
     }
 
     let dangerous_confirmation = match action {
@@ -4248,7 +4276,15 @@ fn run_issue_label<E: CliEnv>(
     {
         let mut post_labels = current.labels.clone();
         post_labels.extend(effective.iter().cloned());
-        guard_autonomous_acceptance_block(&post_labels, &current.body)?;
+        let source = if post_labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+        {
+            crate::issue_monitor_worker::acceptance_source_text(&current.body, &entry.spec_body)
+        } else {
+            current.body.clone()
+        };
+        guard_autonomous_acceptance_block(&post_labels, &source)?;
     }
 
     let grants_urgent = matches!(action, IssueLabelAction::Add)
@@ -4330,12 +4366,12 @@ fn run_issue_edit<E: CliEnv>(
         ));
     }
     let issue = IssueNumber(number);
-    let current = refresh_issue_cache(env, issue)?;
+    let entry = refresh_issue_cache(env, issue)?;
     // Issue #4392: a body whose SPEC structure cannot be parsed is not
     // section-managed, and issue.spec.edit refuses it; replacing the body
     // here is its repair path.
-    let section_managed = current.spec_parse_error.is_none();
-    let current = current.snapshot;
+    let section_managed = entry.spec_parse_error.is_none();
+    let current = &entry.snapshot;
     if let Some(requested) = labels.as_ref() {
         let contains =
             |set: &[String], name: &str| set.iter().any(|label| label.eq_ignore_ascii_case(name));
@@ -4388,7 +4424,35 @@ fn run_issue_edit<E: CliEnv>(
     if body.is_some() || labels.is_some() {
         let effective_labels = labels.as_deref().unwrap_or(&current.labels);
         let effective_body = body.as_deref().unwrap_or(&current.body);
-        guard_autonomous_acceptance_block(effective_labels, effective_body)?;
+        let source = if effective_labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+        {
+            if body.is_some() {
+                // Body repairs must use the proposed index, never old comment references.
+                let comments = current
+                    .comments
+                    .iter()
+                    .map(|comment| Comment {
+                        id: comment.id.0,
+                        body: comment.body.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                SpecBody::parse(effective_body, &comments)
+                    .map(|spec| {
+                        crate::issue_monitor_worker::acceptance_source_text(effective_body, &spec)
+                    })
+                    .unwrap_or_else(|_| effective_body.to_string())
+            } else {
+                crate::issue_monitor_worker::acceptance_source_text(
+                    effective_body,
+                    &entry.spec_body,
+                )
+            }
+        } else {
+            effective_body.to_string()
+        };
+        guard_autonomous_acceptance_block(effective_labels, &source)?;
     }
 
     let fields = gwt_github::client::IssueFieldsPatch {
@@ -6238,6 +6302,128 @@ mod tests {
         .expect("compliant body is accepted");
         assert_eq!(code, 0, "{out}");
         assert!(fetched(&env, 7).body.contains("AC-1"));
+    }
+
+    fn seeded_comment_spec_env(spec: &str) -> (TempDir, crate::cli::TestEnv) {
+        let (tmp, env) = seeded_edit_env(&["gwt-spec"]);
+        let mut snapshot = fetched(&env, 7);
+        snapshot.body = "<!-- gwt-spec id=7 version=1 -->\n\
+                         <!-- sections:\nspec=comment:9001\ntasks=body\n-->\n\
+                         <!-- artifact:tasks BEGIN -->\n- [ ] T1\n<!-- artifact:tasks END -->"
+            .to_string();
+        snapshot.comments = vec![CommentSnapshot {
+            id: CommentId(9001),
+            body: format!("<!-- artifact:spec BEGIN -->\n{spec}\n<!-- artifact:spec END -->"),
+            updated_at: snapshot.updated_at.clone(),
+        }];
+        env.client.seed(snapshot);
+        (tmp, env)
+    }
+
+    /// Issue #4974 AC-2: confirmed opt-in reads the same comment-resident spec
+    /// as Monitor rather than scanning only the Issue body.
+    #[test]
+    fn issue_label_accepts_comment_resident_acceptance_criteria() {
+        let (_tmp, mut env) =
+            seeded_comment_spec_env("## Acceptance Criteria\n- [ ] AC-1: tests pass");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["auto-merge".to_string()],
+                confirm_queue: false,
+                confirm_design_gate: false,
+                confirm_auto_merge: true,
+            },
+            &mut out,
+        )
+        .expect("comment-resident spec permits auto-merge");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).labels, ["gwt-spec", "auto-merge"]);
+    }
+
+    /// Issue #4974 AC-1: label-field edits use the same acceptance input.
+    #[test]
+    fn issue_edit_accepts_comment_resident_acceptance_criteria() {
+        let (_tmp, mut env) =
+            seeded_comment_spec_env("## Acceptance Criteria\n- [ ] AC-1: tests pass");
+        let mut snapshot = fetched(&env, 7);
+        snapshot.labels.push("auto-merge".into());
+        env.client.seed(snapshot);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: None,
+                labels: Some(vec!["gwt-spec".into(), "auto-merge".into(), "bug".into()]),
+            },
+            &mut out,
+        )
+        .expect("label edit preserves comment-resident acceptance input");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).labels, ["gwt-spec", "auto-merge", "bug"]);
+    }
+
+    /// Issue #4974 AC-3: composing the spec does not relax missing-criteria
+    /// rejection, and rejected label additions never reach the remote API.
+    #[test]
+    fn issue_label_refuses_comment_resident_spec_without_acceptance_criteria() {
+        let (_tmp, mut env) = seeded_comment_spec_env("# Spec\nNo acceptance criteria");
+        let mut out = String::new();
+        let error = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["auto-merge".to_string()],
+                confirm_queue: false,
+                confirm_design_gate: false,
+                confirm_auto_merge: true,
+            },
+            &mut out,
+        )
+        .expect_err("body and spec without criteria remain refused");
+        assert!(error.to_string().contains("no acceptance criteria heading"));
+        assert!(lifecycle_mutation_calls(&env).is_empty());
+        assert_eq!(fetched(&env, 7).labels, ["gwt-spec"]);
+    }
+
+    /// Issue #4974 AC-1/3: a supported body repair reads its proposed spec
+    /// index; replacing that index must never reuse the previous comment AC.
+    #[test]
+    fn issue_edit_acceptance_input_tracks_proposed_body() {
+        let (_tmp, mut env) =
+            seeded_comment_spec_env("## Acceptance Criteria\n- [ ] AC-1: tests pass");
+        let mut snapshot = fetched(&env, 7);
+        let repaired_body = snapshot.body.clone();
+        snapshot.labels.push("auto-merge".into());
+        snapshot.body = "<!-- gwt-spec id=7 version=1 -->\n<!-- sections: {} -->".into();
+        env.client.seed(snapshot);
+        let mut out = String::new();
+        let code = run(&mut env, edit_body(7, &repaired_body), &mut out)
+            .expect("repaired index exposes comment-resident criteria");
+        assert_eq!(code, 0, "{out}");
+
+        let mut snapshot = fetched(&env, 7);
+        snapshot.labels = vec!["auto-merge".into()];
+        env.client.seed(snapshot);
+        let error = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: Some("Replacement without spec references or criteria".into()),
+                labels: Some(vec!["gwt-spec".into(), "auto-merge".into()]),
+            },
+            &mut out,
+        )
+        .expect_err("old comment AC cannot authorize a replacement body");
+        assert!(error.to_string().contains("no acceptance criteria heading"));
+        assert_eq!(fetched(&env, 7).body, repaired_body);
     }
 
     fn lifecycle_mutation_calls(env: &crate::cli::TestEnv) -> Vec<String> {
@@ -8124,8 +8310,11 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -8208,8 +8397,11 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -8343,8 +8535,11 @@ mod tests {
                 issue_cache: None,
                 review_windows: Vec::new(),
                 failure_surge: None,
+                launch_failures: None,
+                candidate_pool_degradation: None,
                 stall_reason: None,
                 gui_action: None,
+                slot_occupancy: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -8418,8 +8613,11 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -10820,8 +11018,11 @@ mod tests {
             provider_usage: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             issue_cache: None,
         };
 
