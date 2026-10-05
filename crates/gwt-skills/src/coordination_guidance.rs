@@ -352,6 +352,22 @@ reserving a lease. Use `verify.lease.status` to inspect contention;
 when admission times out. Inspect the reported holder before retrying;
 there is no manual acquire loop or fixed retry schedule.
 
+Retry with the identical full requested matrix, never a caller-built subset.
+Automatic resume requires valid admission-deferred evidence and exact matches
+for owner, session, execution authority digest, verification plan content hash,
+source fingerprint, requested commands (including order and duplicates), and
+headed_e2e_commands. Every preceding result must have raw PASS and no termination signal.
+Failed, killed, crashed, unreadable or mismatched records start a fresh run;
+registered plan/context mismatches still require `verify.plan`.
+Resume references the immutable predecessor by record id/content hash, keeps
+the original start timestamp (`started_at`), and copies measured per-command
+headed/nextest/admission evidence. Run outstanding Light commands first,
+preserve Heavy commands' original relative order, and keep artifact restoration last.
+A timeout in the first remaining command's admission writes no replacement
+record and preserves any predecessor; a later timeout retains incomplete results.
+The full registered matrix and required headed Chromium evidence in dark/light
+must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
+
 ### Process ownership
 
 Never use `pkill`, `killall`, or name/pattern-based process termination:
@@ -893,8 +909,23 @@ mod tests {
     }
 
     /// SPEC #3576 AC-C6: only canonical verification uses host admission.
+    /// Issue #5035: shared and bundled guidance describes safe deferred resume.
     #[test]
     fn canonical_verification_guidance_is_materialized_without_manual_admission() {
+        let resume_contract = [
+            "identical full requested matrix",
+            "execution authority digest",
+            "verification plan content hash",
+            "headed_e2e_commands",
+            "raw PASS and no termination signal",
+            "immutable predecessor",
+            "original start timestamp",
+            "Light commands first",
+            "artifact restoration last",
+            "first remaining command's admission",
+            "Overall: PASS",
+            "required headed Chromium evidence",
+        ];
         let tmp = TempDir::new().unwrap();
         generate_coordination_guidance(tmp.path()).unwrap();
         for relative in [
@@ -905,6 +936,10 @@ mod tests {
             assert!(body.contains("Only canonical `verify.run` acquires the host-wide lease"));
             assert!(body.contains("cargo build -p gwt --bin gwtd"));
             assert!(body.contains("do not require a verification lease"));
+            for phrase in resume_contract {
+                assert!(body.contains(phrase), "{relative}: missing `{phrase}`");
+            }
+            assert!(!body.contains("no partial resume"));
             assert!(!body.contains("\"operation\":\"verify.lease.acquire\""));
             assert!(!body.contains("even a single focused test"));
             // Issue #4789 AC-5: shared process names cannot establish ownership.
@@ -919,6 +954,18 @@ mod tests {
             assert!(body.contains(
                 "inspect `verify.lease.status` / `execution.status` and report to the PM"
             ));
+        }
+        for skill in ["gwt-execute", "gwt-verify"] {
+            let relative = format!("{skill}/SKILL.md");
+            let body = crate::assets::CLAUDE_SKILLS
+                .get_file(&relative)
+                .unwrap()
+                .contents_utf8()
+                .unwrap();
+            for phrase in resume_contract {
+                assert!(body.contains(phrase), "{skill}: missing `{phrase}`");
+            }
+            assert!(!body.contains("no partial resume"));
         }
         assert!(SKILL_BODY_JA.contains("canonical `verify.run` だけ"));
     }
