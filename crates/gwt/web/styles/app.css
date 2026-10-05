@@ -7047,6 +7047,32 @@ body.route-body {
 .issue-queue-column .knowledge-row { grid-template-columns: minmax(0, 1fr); }
 .issue-queue-column .knowledge-row-actions { flex-wrap: wrap; }
 .issue-queue-column .knowledge-row-main { flex-wrap: wrap; }
+.issue-queue-column .knowledge-row.has-live-output {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1);
+  padding: var(--space-2);
+}
+.knowledge-row.has-live-output > .knowledge-row-actions { grid-column: 2; grid-row: 1; align-self: start; }
+.issue-card-output { min-width: 0; grid-column: 1 / -1; color: var(--color-text); padding: var(--space-1); }
+.issue-card-output-label { color: var(--color-text-muted); font-size: var(--type-xs); }
+.issue-card-output-screen { position: relative; grid-column: 1 / -1; }
+.issue-card-output-screen::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 12px;
+  background: linear-gradient(to bottom, transparent, var(--color-surface));
+  pointer-events: none;
+}
+.issue-card-output-text {
+  margin: 0;
+  max-height: 56px;
+  overflow: hidden;
+  white-space: pre;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 16px;
+}
 .issue-bridge-root .workspace-toolbar-main { grid-template-columns: minmax(100px, 320px) max-content; }
 .issue-bridge-root .knowledge-heading { grid-column: 1 / -1; }
 .issue-bridge-root .knowledge-search { width: 100%; }
