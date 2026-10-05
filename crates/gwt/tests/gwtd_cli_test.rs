@@ -285,41 +285,56 @@ fn gwtd_index_help_lists_every_rebuild_scope() {
     );
 }
 
-#[test]
-fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
+fn linked_codex_hook_project() -> (TempDir, PathBuf) {
     let project = tempfile::tempdir().expect("project tempdir");
-    let codex_home = tempfile::tempdir().expect("codex tempdir");
-    let config_path = codex_home.path().join("config.toml");
-    let previous_hook_bin = std::env::var_os("GWT_HOOK_BIN");
-    std::env::set_var("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"));
-    gwt_skills::generate_codex_hooks(project.path()).expect("generate hooks");
-    match previous_hook_bin {
-        Some(value) => std::env::set_var("GWT_HOOK_BIN", value),
-        None => std::env::remove_var("GWT_HOOK_BIN"),
-    }
+    let repo = project.path().join("repo");
+    let gitdir = repo.join("project.git/worktrees/linked");
+    let worktree = repo.join("work/linked");
+    fs::create_dir_all(&gitdir).unwrap();
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .unwrap();
+    (project, worktree)
+}
 
-    let output = isolated_gwtd_command()
+fn register_codex_hook_trust(
+    worktree: &Path,
+    config: &Path,
+    mode: Option<&str>,
+) -> std::process::Output {
+    let mut child = isolated_gwtd_command()
         .env("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("run gwtd hook register");
-    let mut child = output;
-    write!(
-        child.stdin.take().expect("stdin"),
-        "{}",
-        serde_json::json!({
-            "schema_version": 1,
-            "operation": "hook.register_codex_managed_hook_trust",
-            "params": {
-                "project_root": project.path().to_str().expect("project path utf8"),
-                "codex_config": config_path.to_str().expect("config path utf8"),
-            }
-        })
-    )
-    .expect("write JSON envelope");
-    let output = child.wait_with_output().expect("wait gwtd hook register");
+    write!(child.stdin.take().expect("stdin"), "{}", serde_json::json!({
+        "schema_version": 1,
+        "operation": "hook.register_codex_managed_hook_trust",
+        "params": {"project_root": worktree, "codex_config": config, "codex_hook_discovery": mode}
+    })).expect("write JSON envelope");
+    child.wait_with_output().expect("wait gwtd hook register")
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
+    let (_project, worktree) = linked_codex_hook_project();
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(env!("CARGO_BIN_EXE_gwtd"));
+        gwt_skills::generate_codex_hooks_for_mode(
+            &worktree,
+            gwt_skills::CodexHookDiscoveryMode::Both,
+        )
+        .expect("generate hooks");
+    }
+
+    let output = register_codex_hook_trust(&worktree, &config_path, None);
 
     assert!(
         output.status.success(),
@@ -332,7 +347,7 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
     assert!(
         response["output"]
             .as_str()
-            .is_some_and(|output| output.contains("trusted 5")),
+            .is_some_and(|output| output.contains("trusted 10")),
         "JSON output field should report trusted hook count, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
@@ -343,9 +358,41 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
     );
     assert_eq!(
         config.matches("enabled = true").count(),
-        5,
+        10,
         "Codex config must enable every trusted managed hook, got: {config}"
     );
+    let parsed: toml::Value = toml::from_str(&config).unwrap();
+    let state = parsed["hooks"]["state"].as_table().unwrap();
+    let entries = gwt_skills::collect_codex_managed_hook_trust_entries_for_mode(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+    )
+    .unwrap();
+    assert_eq!(state.len(), entries.len());
+    for entry in entries {
+        assert_eq!(
+            state[&entry.key]["trusted_hash"].as_str(),
+            Some(entry.trusted_hash.as_str())
+        );
+    }
+    // An explicit narrow scope still registers only the requested location.
+    let scoped_config = codex_home.path().join("workspace-home.toml");
+    let output = register_codex_hook_trust(&worktree, &scoped_config, Some("workspace-home"));
+    assert!(output.status.success(), "{output:?}");
+    let scoped: toml::Value = toml::from_str(&fs::read_to_string(scoped_config).unwrap()).unwrap();
+    let scoped_state = scoped["hooks"]["state"].as_table().unwrap();
+    let expected = gwt_skills::collect_codex_managed_hook_trust_entries_for_mode(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    )
+    .unwrap();
+    assert_eq!(scoped_state.len(), 5);
+    for entry in expected {
+        assert_eq!(
+            scoped_state[&entry.key]["trusted_hash"].as_str(),
+            Some(entry.trusted_hash.as_str())
+        );
+    }
 }
 
 /// Issue #3967 AC-4: this is the front door an operator runs to check a real
@@ -355,41 +402,36 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
 /// fail.
 #[test]
 fn gwtd_hook_register_codex_managed_hook_trust_fails_on_hooks_it_cannot_vouch_for() {
-    let project = tempfile::tempdir().expect("project tempdir");
+    let (project, worktree) = linked_codex_hook_project();
     let codex_home = tempfile::tempdir().expect("codex tempdir");
     let config_path = codex_home.path().join("config.toml");
-    // Generate against one installed binary, then ask a gwt that resolves a
-    // different one to vouch for the result.
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(env!("CARGO_BIN_EXE_gwtd"));
+        gwt_skills::generate_codex_hooks_for_mode(
+            &worktree,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        )
+        .expect("generate root hooks");
+    }
+    // Only the local copy uses a different binary; default registration must
+    // not report success based on the valid workspace-home copy.
     let generated_with = project.path().join("Programs").join("GWT").join("gwtd");
     // #4057: pin the generator per thread. `GWT_HOOK_BIN` is process-global, so
     // setting it here would leak this pin into any materialization another test
     // runs at the same time.
     {
         let _pin = gwt_skills::settings_local::ScopedHookBin::set(&generated_with);
-        gwt_skills::generate_codex_hooks(project.path()).expect("generate hooks");
+        let old_hooks = project.path().join("old-hooks");
+        gwt_skills::generate_codex_hooks(&old_hooks).expect("generate old hooks");
+        fs::create_dir_all(worktree.join(".codex")).unwrap();
+        fs::copy(
+            old_hooks.join(".codex/hooks.json"),
+            worktree.join(".codex/hooks.json"),
+        )
+        .expect("leave an older local copy beside current root hooks");
     }
 
-    let mut child = isolated_gwtd_command()
-        .env("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("run gwtd hook register");
-    write!(
-        child.stdin.take().expect("stdin"),
-        "{}",
-        serde_json::json!({
-            "schema_version": 1,
-            "operation": "hook.register_codex_managed_hook_trust",
-            "params": {
-                "project_root": project.path().to_str().expect("project path utf8"),
-                "codex_config": config_path.to_str().expect("config path utf8"),
-            }
-        })
-    )
-    .expect("write JSON envelope");
-    let output = child.wait_with_output().expect("wait gwtd hook register");
+    let output = register_codex_hook_trust(&worktree, &config_path, None);
 
     let response: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("hook registration stdout must be JSON");
@@ -405,6 +447,17 @@ fn gwtd_hook_register_codex_managed_hook_trust_fails_on_hooks_it_cannot_vouch_fo
             .is_some_and(|output| output.contains("Hooks need review")),
         "the refusal must name the launch Codex would stop, got: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+    let reason = response["output"].as_str().unwrap();
+    let local = gwt_skills::codex_hook_trust_key_path(&worktree.join(".codex/hooks.json")).unwrap();
+    assert!(reason.contains(&local.display().to_string()), "{reason}");
+    assert!(
+        reason.contains("expected_command=") && reason.contains("actual_command="),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("hook.doctor") && reason.contains("hook.register_codex_managed_hook_trust"),
+        "{reason}"
     );
 }
 

@@ -104,9 +104,11 @@ Settings → Agent Backends で旧設定の endpoint・API key・model を再登
 floor 以降に追加された Session schema 5、PM scratch、work-item projection rebuild v2、
 ProjectKey の移行は維持します。
 usage の `window_minutes` 契約と、未完了の SPEC #2359 に属する Workspace projection
-backfill も維持します。旧 HOME / Workspace の `workspace/current.json` と
-`work_items.json` からの取り込みはデータ保護の例外として保持し、起動時に新しい状態を
-作る前に未対応の配置を安全に案内できるようになるまで削除しません。
+backfill も維持します。旧 HOME / Workspace の `workspace/current.json`、
+`work_items.json`、`journal.jsonl` からの取り込みは廃止しました。対応する現行ファイルが
+ない場合、Workspace 状態の読み込み・保存を拒否し、旧ファイルのパスと更新手順を表示します。
+旧ファイルは変更しません。v9.106.0 で各プロジェクトを移行してから更新してください。
+空の現行ファイルを作る操作は移行になりません。現行 receipt・event の回復処理は維持します。
 coordination のイベント取り込みと discussion の取り込みも、現用の回復処理と session 別
 Stop 契約が利用するため保持します。旧 agent identity reset は廃止し、起動時には保存済みの
 目的・進捗を保持します。`agent_identity.migration.json` は既存の内容を変更せず、
@@ -1142,8 +1144,10 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 
 ホスト全体の verification lease を取得するのは canonical `verify.run`
 だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
-各 run が取得と解放を管理します。`deferred` は取得待機が時間切れになり、
-検証記録が生成されなかったことを示します。再試行前に保持者を確認してください。
+各 Heavy コマンドの実行時に取得・解放し、Light コマンドは他の run と並行できます。
+最初のコマンドの取得待機が時間切れになると、新しい記録を作らず `deferred` を返します。
+途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
+再試行では行列全体を再実行します。再試行前に保持者を確認してください。
 
 ```bash
 gwtd <<'JSON'

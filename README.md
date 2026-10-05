@@ -108,9 +108,12 @@ The old configuration remains readable and is not rewritten or deleted on launch
 Migrations introduced after this floor remain supported, including Session schema
 5, PM scratch relocation, work-item projection rebuild v2 and ProjectKey migration.
 The usage `window_minutes` contract and the Workspace projection backfill associated
-with open SPEC #2359 are also retained. Importing old HOME / Workspace state from
-`workspace/current.json` and `work_items.json` remains a data-protection exception
-until startup can safely diagnose unsupported layouts before creating new state.
+with open SPEC #2359 are also retained. Old HOME / Workspace imports from
+`workspace/current.json`, `work_items.json` and `journal.jsonl` are retired. If their
+canonical replacements are missing, gwt refuses to load or publish Workspace state
+and shows the legacy path with upgrade guidance. The original files stay untouched.
+Use v9.106.0 to migrate each project before upgrading; creating empty replacement
+files is not a migration. Current receipt and event recovery remains supported.
 The coordination event import and discussion import also remain supported: they
 serve the current recovery and session-specific Stop contracts. The obsolete agent
 identity reset is retired; startup preserves saved purpose and focus values and
@@ -1218,9 +1221,12 @@ Nextest runs each test in a separate process, times out a test after 120 seconds
 
 Only canonical `verify.run` acquires the host-wide verification lease.
 Register the verification matrix with `verify.plan`, then run it with
-`verify.run`; each run manages its own admission and release. A `deferred`
-result means admission timed out without a verification record. Inspect the
-holder before retrying:
+`verify.run`; it acquires and releases the lease for each Heavy command.
+Light commands can overlap other runs. A deferred result from the first command's
+admission timeout writes no verification record; a timeout after at least one
+command ran writes an incomplete, non-PASS deferred record that retains the
+completed commands' results; a retry reruns the entire matrix (no partial resume).
+Inspect the holder before retrying:
 
 ```bash
 gwtd <<'JSON'
