@@ -90,13 +90,16 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
         await labels.locator("summary").click();
         await expect(labels).toContainText("Empty list allows all labels");
         await expect(labels).toContainText("any listed label on this terminal");
-        await labels.getByLabel("Allowed label", { exact: true }).fill(`  ${fixture.allowed_label}  `);
-        await labels.getByRole("button", { name: "Add label", exact: true }).click();
-        await expectSavedLabels(page, [fixture.allowed_label]);
-        await expect(labels.locator("[data-allowed-label]")).toHaveCount(1);
-        // Commas belong to the label name; each input adds exactly one label.
-        await labels.getByLabel("Allowed label", { exact: true }).fill("agent, ready");
-        await labels.getByRole("button", { name: "Add label", exact: true }).click();
+        // Both clicks occur before any WebSocket status can be processed.
+        // Commas belong to the second label; neither addition may be lost.
+        await labels.evaluate((section, allowed) => {
+          const input = section.querySelector<HTMLInputElement>('[aria-label="Allowed label"]')!;
+          const add = section.querySelector<HTMLButtonElement>('[data-action="monitor-label-add"]')!;
+          input.value = `  ${allowed}  `;
+          add.click();
+          input.value = "agent, ready";
+          add.click();
+        }, fixture.allowed_label);
         await expectSavedLabels(page, [fixture.allowed_label, "agent, ready"]);
         const persisted = JSON.parse(await readFile(join(preferences, "issue-monitor.json"), "utf8"));
         expect(persisted.allowed_labels).toEqual([fixture.allowed_label, "agent, ready"]);
@@ -123,11 +126,23 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
         await expectSavedLabels(page, [fixture.allowed_label, "agent, ready"]);
         if (!(await labels.evaluate(node => (node as HTMLDetailsElement).open))) await labels.locator("summary").click();
         await expect(labels.locator("[data-allowed-label]")).toHaveCount(2);
+        const remove = labels.getByRole("button", { name: "Remove allowed label agent, ready", exact: true });
+        await remove.focus();
+        const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+        await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
+        await page.waitForFunction(before => ((window as any).__gwtPlaywrightMessages ?? [])
+          .some((entry: any) => entry.sequence > before && entry.payload.kind === "issue_monitor_status"), cursor);
+        await expect(remove).toBeFocused();
+        expect(await remove.evaluate(node => document.activeElement === node)).toBe(true);
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await testInfo.attach(`allowed-labels-${testInfo.project.name}`, { body: await labels.screenshot(), contentType: "image/png" });
-        await labels.getByRole("button", { name: "Remove allowed label agent, ready", exact: true }).click();
-        await expectSavedLabels(page, [fixture.allowed_label]);
-        await labels.getByRole("button", { name: `Remove allowed label ${fixture.allowed_label}`, exact: true }).click();
+        await labels.evaluate((section, allowed) => {
+          for (const label of ["agent, ready", allowed]) {
+            const row = [...section.querySelectorAll<HTMLElement>('[data-allowed-label]')]
+              .find(node => node.dataset.allowedLabel === label)!;
+            row.querySelector<HTMLButtonElement>("button")!.click();
+          }
+        }, fixture.allowed_label);
         await expectSavedLabels(page, []);
         await expect(labels.locator("summary")).toContainText("All labels");
         await expect(labels.locator('[data-metric="label-excluded"]')).toHaveText("Excluded by labels: 0", { timeout: 75_000 });

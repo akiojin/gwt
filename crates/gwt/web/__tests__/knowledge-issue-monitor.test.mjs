@@ -312,6 +312,101 @@ test("Issue #4158: empty and duplicate label input cannot replace the saved allo
   }
 });
 
+test("Issue #4158: rapid label edits serialize the latest intent across acknowledgements", async (t) => {
+  const { body, sent, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Client"] });
+  const labels = body.querySelector(".knowledge-monitor-labels");
+  const input = labels.querySelector('[aria-label="Allowed label"]');
+  const add = labels.querySelector('[data-action="monitor-label-add"]');
+  input.value = "Tools";
+  add.click();
+  const beforeCoalescedAdd = sent.length;
+  input.value = "Docs";
+  add.click();
+  assert.equal(sent.length, beforeCoalescedAdd, "only one replacement is in flight");
+  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Client", "Tools"]);
+  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 2, "render the confirmed server list only");
+  const beforeDuplicate = sent.length;
+  input.value = "docs";
+  add.click();
+  assert.equal(sent.length, beforeDuplicate, "a pending addition already counts as a duplicate");
+
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Client", "Tools"] });
+  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Client", "Tools", "Docs"], "ack sends the coalesced latest list");
+  const beforeCoalescedRemove = sent.length;
+  labels.querySelector('[aria-label="Remove allowed label Server"]').click();
+  labels.querySelector('[aria-label="Remove allowed label Client"]').click();
+  assert.equal(sent.length, beforeCoalescedRemove, "removals wait for the current replacement");
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Client", "Tools", "Docs"] });
+  assert.deepEqual(sent.at(-1).allowed_labels, ["Tools", "Docs"], "a rapid removal cannot restore Server");
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Docs"] });
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Docs", "Other"] });
+  input.value = "Next";
+  add.click();
+  assert.deepEqual(sent.at(-1).allowed_labels, ["Tools", "Docs", "Other", "Next"], "matching ack clears pending intent");
+
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Docs", "Other", "Next"] });
+  surface.applyIssueMonitorStatus({ allowed_labels: ["A", "B"] });
+  const beforeABA = sent.filter(event => event.kind === "set_issue_monitor_allowed_labels").length;
+  labels.querySelector('[aria-label="Remove allowed label B"]').click();
+  input.value = "B";
+  add.click();
+  labels.querySelector('[aria-label="Remove allowed label B"]').click();
+  const abaWrites = sent.filter(event => event.kind === "set_issue_monitor_allowed_labels").slice(beforeABA);
+  surface.applyIssueMonitorStatus({ allowed_labels: abaWrites[0].allowed_labels });
+  if (abaWrites[1]) surface.applyIssueMonitorStatus({ allowed_labels: abaWrites[1].allowed_labels });
+  input.value = "C";
+  add.click();
+  assert.deepEqual(sent.at(-1).allowed_labels, ["A", "C"], "an older ABA acknowledgement cannot restore removed B");
+  assert.deepEqual(abaWrites.map(event => event.allowed_labels), [["A"]], "ABA edits coalesce behind one replacement");
+});
+
+test("Issue #4158: reconnect and closing the Issue bridge discard unconfirmed label intent", async (t) => {
+  const { body, sent, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server"] });
+  let labels = body.querySelector(".knowledge-monitor-labels");
+  labels.querySelector('[aria-label="Allowed label"]').value = "  Tools  ";
+  labels.querySelector('[data-action="monitor-label-add"]').click();
+  surface.handleKnowledgeTransportChange(false);
+  surface.handleKnowledgeTransportChange(true);
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Remote"] });
+  labels.querySelector('[aria-label="Allowed label"]').value = "Next";
+  labels.querySelector('[data-action="monitor-label-add"]').click();
+  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Remote", "Next"], "reconnect uses fresh saved labels");
+
+  surface.clearKnowledgeBridgeState("win-1");
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Restored"] });
+  surface.mountKnowledgeWindow({ id: "win-1", preset: "issue" }, body);
+  labels = body.querySelector(".knowledge-monitor-labels");
+  labels.querySelector('[aria-label="Allowed label"]').value = "Reopened";
+  labels.querySelector('[data-action="monitor-label-add"]').click();
+  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Restored", "Reopened"], "new Issue view uses fresh saved labels");
+});
+
+test("Issue #4158: status refresh retains the focused removal node and returns focus when its label disappears", async (t) => {
+  const { body, document, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Tools"] });
+  const labels = body.querySelector(".knowledge-monitor-labels");
+  const remove = labels.querySelector('[aria-label="Remove allowed label Tools"]');
+  const summary = labels.querySelector("summary");
+  let focused = remove;
+  Object.defineProperty(document, "activeElement", { configurable: true, get: () => focused });
+  remove.focus = () => { focused = remove; };
+  summary.focus = () => { focused = summary; };
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Tools"], label_excluded_count: 1 });
+  assert.ok(labels.querySelector('[aria-label="Remove allowed label Tools"]') === remove, "refresh reuses the focused button");
+  assert.equal(remove.isConnected, true);
+  assert.ok(document.activeElement === remove);
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Server"] });
+  assert.ok(labels.querySelector('[aria-label="Remove allowed label Tools"]') === remove, "server reorder also reuses the button");
+  assert.ok(document.activeElement === remove);
+  surface.applyIssueMonitorStatus({ allowed_labels: ["Server"] });
+  assert.ok(document.activeElement === summary, "a removed focused label returns focus to the disclosure");
+});
+
 test("Issue Monitor band preserves higher-priority states around quota-hold metadata", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
