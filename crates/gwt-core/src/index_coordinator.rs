@@ -2474,6 +2474,77 @@ mod tests {
     }
 
     #[test]
+    fn departed_waiter_with_a_retained_handle_is_not_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::repo_shared("repo-a", "issues");
+        let owner = own(&coordinator, &key, JobPriority::Background);
+        let waiter = match coordinator
+            .request_job(&key, JobPriority::Background, Duration::from_secs(5))
+            .unwrap()
+        {
+            JobAdmission::Joined(waiter) => waiter,
+            JobAdmission::Owner(_) => panic!("owner already holds the target"),
+        };
+        let path = waiter.waiter_path.clone();
+        let retained = waiter._waiter_file.try_clone().unwrap();
+        assert_eq!(owner.waiter_count().unwrap(), 1);
+        drop(waiter);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
+            };
+
+            let mut info = FILE_STANDARD_INFO::default();
+            // SAFETY: retained owns the live handle, and info has the exact
+            // layout and buffer size required by FileStandardInfo.
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(retained.as_raw_handle()),
+                    FileStandardInfo,
+                    (&mut info as *mut FILE_STANDARD_INFO).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .unwrap();
+            assert!(info.DeletePending.as_bool());
+            let error = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(5));
+            eprintln!("#5030: departed registration DeletePending=true, open error={error}; parent read_dir succeeds={}", fs::read_dir(path.parent().unwrap()).is_ok());
+        }
+
+        assert_eq!(owner.waiter_count().unwrap(), 0);
+        assert!(read_registration(&path).unwrap().is_none());
+        drop(retained);
+        owner.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn registration_permission_denied_is_still_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("read-only.json");
+        fs::write(&path, b"{}").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions.clone()).unwrap();
+        let result = sweep_live_registrations(tmp.path());
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+        assert!(
+            matches!(result, Err(CoordinatorError::Io(error)) if error.raw_os_error() == Some(5))
+        );
+    }
+
+    #[test]
     fn waiter_times_out_when_owner_never_completes() {
         let tmp = tempfile::tempdir().unwrap();
         let coordinator = open(tmp.path());

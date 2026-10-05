@@ -452,6 +452,22 @@ jobs:
       - name: Build the complete core suite before repetition
         run: cargo test -p gwt-core --all-features --no-run
         timeout-minutes: 30
+      # Issue #5030: five full-suite passes do not measure the intermittent
+      # registration-departure race. Repeat its entire integration target at
+      # default parallelism, retaining all outcomes even after a failure.
+      - name: Measure index coordinator stability over twenty runs
+        shell: pwsh
+        run: |
+          Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
+          $failures = 0
+          1..20 | ForEach-Object {
+            Write-Host "index coordinator run $_ of 20"
+            cargo test -p gwt-core --test index_coordinator --all-features
+            if ($LASTEXITCODE -ne 0) { $failures++ }
+          }
+          Write-Host "index coordinator: $failures failures out of 20 runs"
+          if ($failures -ne 0) { exit 1 }
+        timeout-minutes: 15
       - name: Repeat gwt-core at default parallelism five times
         shell: pwsh
         run: |
