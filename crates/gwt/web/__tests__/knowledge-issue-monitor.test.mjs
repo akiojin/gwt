@@ -246,6 +246,72 @@ test("Issue Monitor renders the JSON gui_status contract and follows updated lim
   assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "5");
 });
 
+test("Issue #4158: allowed labels show any-of admission, all-label default and excluded issues", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const labels = body.querySelector(".knowledge-monitor-labels");
+  assert.ok(labels, "the Monitor exposes allowed-label settings");
+  assert.equal(labels.tagName, "DETAILS", "reuse the native disclosure primitive");
+  assert.ok(labels.classList.contains("knowledge-monitor-candidate"), "reuse the Operator card primitive");
+  assert.match(labels.textContent, /Empty list allows all labels/);
+  assert.match(labels.textContent, /any listed label on this terminal/);
+  assert.match(labels.querySelector("summary").textContent, /All labels/);
+
+  surface.applyIssueMonitorStatus({
+    allowed_labels: ["agent:mac", "ready, now"],
+    label_excluded_count: 2,
+    label_excluded_issues: [42, 43],
+  });
+  assert.deepEqual([...labels.querySelectorAll("[data-allowed-label]")].map(node => node.dataset.allowedLabel),
+    ["agent:mac", "ready, now"]);
+  assert.equal(labels.querySelector("summary").textContent, "Allowed labels (2) · Excluded 2");
+  assert.equal(labels.querySelector('[data-metric="label-excluded"]').textContent,
+    "Excluded by labels (2): #42, #43");
+  surface.applyIssueMonitorStatus({ allowed_labels: [], label_excluded_count: 0, label_excluded_issues: [] });
+  assert.equal(labels.querySelector("summary").textContent, "Allowed labels · All labels · Excluded 0");
+  assert.equal(labels.querySelector('[data-metric="label-excluded"]').textContent, "Excluded by labels: 0");
+});
+
+test("Issue #4158: label additions and removals use the latest server list without optimistic display", async (t) => {
+  const { body, sent, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac"], label_excluded_count: 0, label_excluded_issues: [] });
+  const labels = body.querySelector(".knowledge-monitor-labels");
+  assert.ok(labels, "the Monitor exposes allowed-label settings");
+  const input = labels.querySelector('[aria-label="Allowed label"]');
+  input.value = "  ready, now  ";
+  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac", "ready"] });
+  assert.equal(input.value, "  ready, now  ", "server refresh preserves a typed label");
+  labels.querySelector('[data-action="monitor-label-add"]').click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_allowed_labels", allowed_labels: ["agent:mac", "ready", "ready, now"],
+  });
+  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 2, "wait for server confirmation");
+  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac", "ready", "ready, now"] });
+  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 3);
+  labels.querySelector('[aria-label="Remove allowed label ready, now"]').click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_allowed_labels", allowed_labels: ["agent:mac", "ready"],
+  });
+  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 3, "removal waits for server confirmation");
+});
+
+test("Issue #4158: empty and duplicate label input cannot replace the saved allowlist", async (t) => {
+  const { body, sent, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac"] });
+  const labels = body.querySelector(".knowledge-monitor-labels");
+  assert.ok(labels, "the Monitor exposes allowed-label settings");
+  const input = labels.querySelector('[aria-label="Allowed label"]');
+  const before = sent.length;
+  for (const value of ["   ", "  AGENT:MAC  "]) {
+    input.value = value;
+    labels.querySelector('[data-action="monitor-label-add"]').click();
+    assert.equal(sent.length, before);
+    assert.notEqual(labels.querySelector('[data-label-message]').textContent, "");
+  }
+});
+
 test("Issue Monitor band preserves higher-priority states around quota-hold metadata", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

@@ -921,6 +921,9 @@ pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
     pub priority_order: Vec<u64>,
+    /// Project-local any-of admission; an empty list preserves existing policy.
+    #[serde(default)]
+    pub allowed_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub monitor_runtime_counts: BTreeMap<String, IssueMonitorRuntimeCounts>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1192,6 +1195,7 @@ impl Default for IssueMonitorPrefs {
             enabled: false,
             max_active_agents: 1,
             priority_order: Vec::new(),
+            allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
@@ -3243,6 +3247,12 @@ fn provider_quota_hold_is_released(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorStatusView {
+    #[serde(default)]
+    pub allowed_labels: Vec<String>,
+    #[serde(default)]
+    pub label_excluded_count: usize,
+    #[serde(default)]
+    pub label_excluded_issues: Vec<u64>,
     pub enabled: bool,
     pub state: String,
     pub queue_len: usize,
@@ -3422,6 +3432,12 @@ pub enum IssueMonitorStatusSource {
 /// percentage, and float equality is not reflexive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorAgentStatus {
+    #[serde(default)]
+    pub allowed_labels: Vec<String>,
+    #[serde(default)]
+    pub label_excluded_count: usize,
+    #[serde(default)]
+    pub label_excluded_issues: Vec<u64>,
     /// Issue #4413 AC-1: where these numbers came from. See
     /// [`IssueMonitorStatusSource`]; absent in pre-#4413 publications, which
     /// only a live monitor could have written.
@@ -4204,6 +4220,10 @@ pub struct AutonomousIssueSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorState {
+    #[serde(default)]
+    allowed_labels: Vec<String>,
+    #[serde(default)]
+    label_excluded_issues: BTreeSet<u64>,
     pub config: IssueMonitorConfig,
     pub gui_connected: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
@@ -4527,6 +4547,21 @@ fn autonomous_handoff_delivery_progress(delivery: &AutonomousHandoffDeliveryStat
         // concurrent restart/exit observer that can only infer ambiguity.
         AutonomousHandoffDeliveryState::Delivered { attempt, .. } => (*attempt, 6),
     }
+}
+
+pub(crate) fn normalize_issue_monitor_allowed_labels(labels: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for label in labels {
+        let label = label.trim();
+        if !label.is_empty()
+            && !normalized
+                .iter()
+                .any(|saved| saved.eq_ignore_ascii_case(label))
+        {
+            normalized.push(label.to_string());
+        }
+    }
+    normalized
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, queued: bool) -> bool {
@@ -6530,6 +6565,8 @@ impl IssueMonitorState {
             last_error: None,
             launch_auth_required: false,
             active_launches: Vec::new(),
+            allowed_labels: Vec::new(),
+            label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
             terminal_queues: BTreeMap::new(),
@@ -6609,6 +6646,7 @@ impl IssueMonitorState {
         state.issue_tiers = prefs.issue_tiers.clone();
         state.tier_overrides = prefs.tier_overrides.clone();
         state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
+        state.allowed_labels = normalize_issue_monitor_allowed_labels(prefs.allowed_labels);
         state.priority_order = prefs.priority_order;
         state.monitor_runtime_counts = prefs.monitor_runtime_counts;
         state.terminal_queues = prefs.terminal_queues;
@@ -6769,6 +6807,7 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             max_active_agents: self.config.max_active.max(1),
             priority_order: self.priority_order.clone(),
+            allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
             terminal_queues: self.terminal_queues.clone(),
             urgent_queue: self.urgent_queue.clone(),
@@ -9370,6 +9409,7 @@ impl IssueMonitorState {
             .unwrap_or_default();
         self.config.enabled = disk.enabled;
         self.config.max_active = disk.max_active_agents.max(1);
+        self.set_allowed_labels(disk.allowed_labels.clone());
         self.priority_order = disk.priority_order.clone();
         self.terminal_queues = disk.terminal_queues.clone();
         self.urgent_queue.rebase(&disk.urgent_queue);
@@ -11164,7 +11204,7 @@ impl IssueMonitorState {
                 .map(|entry| entry.number)
                 .collect::<BTreeSet<_>>()
         });
-        let terminal_queue_len = local_entries.as_ref().map_or(0, BTreeSet::len);
+        let terminal_queue_len = self.local_terminal_queue_numbers().len();
         let unqueued_open_count = local_entries.as_ref().map_or(0, |entries| {
             self.inbox
                 .iter()
@@ -11181,6 +11221,9 @@ impl IssueMonitorState {
             .map(|(_, queue)| queue.entries.len())
             .sum();
         IssueMonitorStatusView {
+            allowed_labels: self.allowed_labels.clone(),
+            label_excluded_count: self.label_excluded_issues.len(),
+            label_excluded_issues: self.label_excluded_issues.iter().copied().collect(),
             enabled: self.config.enabled,
             state: if !self.config.enabled {
                 "disabled".to_string()
@@ -11411,6 +11454,9 @@ impl IssueMonitorState {
         let failure_surge = self.failure_surge();
         let stall_reason = self.stall_reason_at(now);
         IssueMonitorAgentStatus {
+            allowed_labels: self.allowed_labels.clone(),
+            label_excluded_count: self.label_excluded_issues.len(),
+            label_excluded_issues: self.label_excluded_issues.iter().copied().collect(),
             // Issue #4413: this is the live driver talking about itself. Only
             // a reader that failed to reach one may downgrade the provenance.
             source: IssueMonitorStatusSource::Daemon,
@@ -11450,6 +11496,7 @@ impl IssueMonitorState {
                 )
                 .collect::<BTreeSet<_>>()
                 .into_iter()
+                .filter(|number| !self.label_excluded_issues.contains(number))
                 .collect(),
             inbox: self
                 .inbox
@@ -13009,6 +13056,23 @@ impl IssueMonitorState {
 
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
         let issue_number = issue.number;
+        if !self.allows_issue_labels(&issue) {
+            self.label_excluded_issues.insert(issue_number);
+            if !self.active_launches.contains(&issue_number)
+                && !self.is_autonomous_in_flight(issue_number)
+            {
+                self.queue.retain(|number| *number != issue_number);
+                self.inbox.retain(|item| item.issue.number != issue_number);
+                revoke_uncommitted_claims_for_issue(
+                    &mut self.pending_effects,
+                    self.effect_authority_epoch,
+                    issue_number,
+                );
+                return;
+            }
+        } else {
+            self.label_excluded_issues.remove(&issue_number);
+        }
         let existing = self.inbox_item(issue_number).cloned();
         let exclusion = issue_monitor_candidate_exclusion(&issue);
         let error_message = self.failed_issues.get(&issue_number).cloned().or_else(|| {
@@ -13347,9 +13411,38 @@ impl IssueMonitorState {
     }
 
     fn terminal_queue_contains(&self, number: u64) -> bool {
-        self.terminal_queues
-            .get(&crate::process::current_hostname())
-            .is_some_and(|queue| queue.entries.iter().any(|entry| entry.number == number))
+        !self.label_excluded_issues.contains(&number)
+            && self
+                .terminal_queues
+                .get(&crate::process::current_hostname())
+                .is_some_and(|queue| queue.entries.iter().any(|entry| entry.number == number))
+    }
+
+    pub fn set_allowed_labels(&mut self, labels: Vec<String>) {
+        let labels = normalize_issue_monitor_allowed_labels(labels);
+        if labels == self.allowed_labels {
+            return;
+        }
+        self.allowed_labels = labels;
+        self.label_excluded_issues = self
+            .inbox
+            .iter()
+            .filter(|item| {
+                item.issue.state == IssueMonitorIssueState::Open
+                    && !self.allows_issue_labels(&item.issue)
+            })
+            .map(|item| item.issue.number)
+            .collect();
+        self.reconcile_terminal_queue();
+    }
+
+    fn allows_issue_labels(&self, issue: &IssueMonitorIssue) -> bool {
+        self.allowed_labels.is_empty()
+            || issue.labels.iter().any(|label| {
+                self.allowed_labels
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(label))
+            })
     }
 
     pub fn set_terminal_queue_auto_refill(&mut self, enabled: bool, limit: usize) {
@@ -13509,7 +13602,10 @@ impl IssueMonitorState {
                 .entries
                 .iter()
                 .enumerate()
-                .filter(|(_, entry)| !urgent_head.contains(&entry.number))
+                .filter(|(_, entry)| {
+                    !urgent_head.contains(&entry.number)
+                        && !self.label_excluded_issues.contains(&entry.number)
+                })
                 .nth(position.saturating_sub(urgent_head.len()))
                 .map(|(index, _)| index)
                 .unwrap_or(queue.entries.len())
@@ -13574,7 +13670,11 @@ impl IssueMonitorState {
         let candidates = candidates
             .iter()
             .copied()
-            .filter(|number| !self.issue_is_closed(*number) && !self.merged_issues.contains(number))
+            .filter(|number| {
+                !self.issue_is_closed(*number)
+                    && !self.merged_issues.contains(number)
+                    && !self.label_excluded_issues.contains(number)
+            })
             .collect::<Vec<_>>();
         let host = crate::process::current_hostname();
         let excluded = self
@@ -13584,8 +13684,13 @@ impl IssueMonitorState {
             .unwrap_or_default();
         let queue = self.terminal_queues.entry(host).or_default();
         let mut added = 0;
+        let eligible_len = queue
+            .entries
+            .iter()
+            .filter(|entry| !self.label_excluded_issues.contains(&entry.number))
+            .count();
         for number in &candidates {
-            if queue.entries.len() >= self.terminal_queue_auto_refill_limit {
+            if eligible_len + added >= self.terminal_queue_auto_refill_limit {
                 break;
             }
             if !excluded.contains(number)
@@ -18544,6 +18649,19 @@ pub fn scan_issue_monitor_candidates(
     now: &str,
 ) -> IssueMonitorScanSummary {
     let mut summary = IssueMonitorScanSummary::default();
+    monitor.label_excluded_issues = issues
+        .iter()
+        .filter(|issue| {
+            issue.state == IssueMonitorIssueState::Open && !monitor.allows_issue_labels(issue)
+        })
+        .map(|issue| issue.number)
+        .collect();
+    let excluded = monitor.label_excluded_issues.clone();
+    monitor.inbox.retain(|item| {
+        !excluded.contains(&item.issue.number)
+            || monitor.active_launches.contains(&item.issue.number)
+            || monitor.launched_windows.contains_key(&item.issue.number)
+    });
     monitor.last_scan_at = Some(now.to_string());
     monitor.last_error = None;
     monitor.launch_auth_required = false;
@@ -18566,6 +18684,7 @@ pub fn scan_issue_monitor_candidates(
         .iter()
         .filter(|issue| {
             issue.state == IssueMonitorIssueState::Open
+                && monitor.allows_issue_labels(issue)
                 && issue_monitor_candidate_exclusion(issue).is_none()
         })
         .map(|issue| issue.number)
@@ -18666,7 +18785,7 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
-    let previous_inbox = monitor
+    let mut previous_inbox = monitor
         .inbox
         .iter()
         .map(|item| item.issue.number)
@@ -18734,6 +18853,10 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     if let Some(diagnosis) = drive_diagnosis {
         monitor.last_error = Some(diagnosis);
     }
+    // A known admission exclusion is an expected removal, not lost scan data.
+    previous_inbox.retain(|number| {
+        !monitor.label_excluded_issues.contains(number) || monitor.inbox_item(*number).is_some()
+    });
     if monitor.inbox.len() < previous_inbox.len() {
         let previous_count = previous_inbox.len();
         let removed = previous_inbox
@@ -18806,6 +18929,116 @@ fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn label_allowlist_monitor(labels: &[&str]) -> IssueMonitorState {
+        let mut saved = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        saved["allowed_labels"] = serde_json::json!(labels);
+        IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(saved).unwrap(),
+        )
+    }
+
+    #[test]
+    fn label_allowlist_any_of_quietly_filters_refill_and_urgent() {
+        let mut monitor = label_allowlist_monitor(&["Server", "Tools"]);
+        monitor.set_terminal_queue_auto_refill(true, 4);
+        let mut server = issue(1);
+        server.labels = vec!["server".into()];
+        let mut tools = issue(2);
+        tools.labels = vec!["Tools".into()];
+        let mut client = issue(3);
+        client.labels = vec!["Client".into(), "urgent".into()];
+        let mut held = issue(4);
+        held.labels = vec!["Server".into(), "hold".into()];
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[server, tools, client, held],
+            "2026-10-06T00:00:00Z",
+        );
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2]);
+        assert!(monitor.inbox_item(3).is_none());
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert_eq!(
+            status["allowed_labels"],
+            serde_json::json!(["Server", "Tools"])
+        );
+        assert_eq!(status["label_excluded_count"], 1);
+        assert_eq!(status["label_excluded_issues"], serde_json::json!([3]));
+        assert!(!monitor.agent_status().needs_human.contains(&3));
+    }
+
+    #[test]
+    fn label_allowlist_rescan_removes_and_restores_saved_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let mut monitor = label_allowlist_monitor(&["Server"]);
+        monitor.terminal_queue_push(&[1], "operator", "2026-10-06T00:00:00Z");
+        let mut matching = issue(1);
+        matching.labels = vec!["Server".into()];
+        scan_issue_monitor_candidates(&mut monitor, &[matching.clone()], "2026-10-06T00:00:00Z");
+        assert_eq!(monitor.queued_issue_numbers(), vec![1]);
+        let summary = scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(1)],
+            IssueMonitorCandidateSource::Live,
+            root.path(),
+            "2026-10-06T00:01:00Z",
+        );
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert!(monitor.last_error.is_none(), "{:?}", monitor.last_error);
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.local_terminal_queue_numbers().is_empty());
+        assert!(monitor.inbox_item(1).is_none());
+        assert!(monitor
+            .prefs()
+            .terminal_queues
+            .values()
+            .any(|q| q.entries.iter().any(|e| e.number == 1)));
+        scan_issue_monitor_candidates(&mut monitor, &[matching], "2026-10-06T00:02:00Z");
+        assert_eq!(monitor.queued_issue_numbers(), vec![1]);
+    }
+
+    #[test]
+    fn label_allowlist_does_not_unbind_running_launch() {
+        let running = launched_cohort(&[(4777, "project-a::agent-1343")]);
+        let mut saved = serde_json::to_value(running.prefs()).unwrap();
+        saved["allowed_labels"] = serde_json::json!(["Server"]);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(saved).unwrap(),
+        );
+        scan_issue_monitor_candidates(&mut monitor, &[issue(4777)], "2026-10-06T00:00:00Z");
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor
+                .inbox_item(4777)
+                .unwrap()
+                .launched_window_id
+                .as_deref(),
+            Some("project-a::agent-1343")
+        );
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.local_terminal_queue_numbers().is_empty());
+    }
+
+    #[test]
+    fn label_allowlist_normalizes_and_preserves_legacy_admission() {
+        let monitor = label_allowlist_monitor(&[" Server ", "server", "", "Tools"]);
+        let saved = serde_json::to_value(monitor.prefs()).unwrap();
+        assert_eq!(
+            saved["allowed_labels"],
+            serde_json::json!(["Server", "Tools"])
+        );
+        let mut legacy = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("allowed_labels");
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(legacy).unwrap(),
+        );
+        monitor.set_terminal_queue_auto_refill(true, 1);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(1)], "2026-10-06T00:00:00Z");
+        assert_eq!(monitor.queued_issue_numbers(), vec![1]);
+    }
 
     /// Issue #3676 AC-2: the auth verdict must be definitive before it may
     /// block a launch — every ambiguous shape stays fail-open (`Unknown`).
@@ -19037,6 +19270,9 @@ mod tests {
         assert_eq!(
             monitor.agent_status(),
             IssueMonitorAgentStatus {
+                allowed_labels: Vec::new(),
+                label_excluded_count: 0,
+                label_excluded_issues: Vec::new(),
                 source: IssueMonitorStatusSource::Daemon,
                 active_launches_incomplete: false,
                 queue: Vec::new(),

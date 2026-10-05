@@ -8340,6 +8340,7 @@ impl AppRuntime {
             | FrontendEvent::IssueMonitorQueueRemove { .. }
             | FrontendEvent::IssueMonitorQueueMove { .. }
             | FrontendEvent::SetIssueMonitorAutoRefill { .. }
+            | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
             | FrontendEvent::IssueMonitorRequeue { .. }
             | FrontendEvent::IssueMonitorConfigureIssue { .. }
             | FrontendEvent::QuickRegisterIssue { .. } => {
@@ -9349,6 +9350,21 @@ impl AppRuntime {
                     "auto-apply-updates",
                     |monitor| {
                         monitor.set_auto_apply_updates(Some(enabled));
+                    },
+                )
+            }
+            FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels } => {
+                let publication = self.publish_project_issue_monitor_control(
+                    context,
+                    serde_json::json!({ "config_set": { "allowed_labels": allowed_labels } }),
+                );
+                self.issue_monitor_control_result_events(
+                    context,
+                    &client_id,
+                    publication,
+                    "allowed-labels",
+                    |monitor| {
+                        monitor.set_allowed_labels(allowed_labels);
                     },
                 )
             }
