@@ -3509,6 +3509,38 @@ fn run_verification_for_caller(
     )
 }
 
+/// A registered plan must describe the caller's current source before host
+/// admission and again before dispatch. Unplanned runs remain permitted.
+fn validate_plan_run_context(
+    plan: Option<&VerificationPlanRecord>,
+    session_id: &str,
+    owner_number: Option<u64>,
+    execution_binding: Option<&ExecutionBindingIdentity>,
+    fingerprint: &str,
+) -> io::Result<()> {
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let mismatch = if plan.session_id != session_id {
+        "session"
+    } else if plan.owner_number != owner_number
+        || plan.execution_binding.as_ref() != execution_binding
+    {
+        "binding (owner or execution generation)"
+    } else if plan.worktree_fingerprint != fingerprint {
+        "fingerprint"
+    } else {
+        return Ok(());
+    };
+    Err(io::Error::new(
+        ErrorKind::InvalidInput,
+        format!(
+            "verify.run refused: registered verification plan {mismatch} mismatch; \
+             re-register the current matrix with `verify.plan`, then retry `verify.run`"
+        ),
+    ))
+}
+
 // The parameters are the run's inputs, each independently optional in a
 // different caller, so bundling them into a struct would move the same list
 // one indirection away without removing a single decision.
@@ -3562,6 +3594,13 @@ where
             let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
             if let Some(authority) = authority {
                 revalidate_verification_caller_authority(worktree, session_id, authority)?;
+                validate_plan_run_context(
+                    plan.as_ref(),
+                    session_id,
+                    owner_number,
+                    execution_binding.as_ref(),
+                    &fingerprint,
+                )?;
             }
             let verified_head = current_head_sha(worktree).ok();
             interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
@@ -5250,6 +5289,21 @@ pub(super) fn run<E: CliEnv>(
             // a watchdog. The runner checks again under its write lease.
             crate::cli::trusted_store::with_write_lease(&worktree, || {
                 revalidate_verification_caller_authority(&worktree, &session_id, &authority)?;
+                // #4953: invalid plans must not spend a host admission turn.
+                // The runner repeats this under its snapshot lease because
+                // admission may wait while the plan or source changes.
+                let plan = load_plan(&worktree)?;
+                if let Some(plan) = plan.as_ref() {
+                    let outputs = validate_generated_outputs(&worktree, &plan.generated_outputs)?;
+                    let fingerprint = worktree_fingerprint_excluding(&worktree, &outputs)?;
+                    validate_plan_run_context(
+                        Some(plan),
+                        &session_id,
+                        authority.owner_number,
+                        authority.execution_binding.as_ref(),
+                        &fingerprint,
+                    )?;
+                }
                 match interruption::previous_external_terminations(
                     &worktree,
                     current_head_sha(&worktree).ok().as_deref(),
@@ -8038,6 +8092,163 @@ mod tests {
             !out.contains("host admission"),
             "a light matrix must not claim the host lease: {out}"
         );
+
+        // #4953: a stale plan must be diagnosed before even attempting the
+        // occupied host lease. max_wait=0 observes admission without sleeping.
+        let authority = snapshot_verification_caller_authority(dir.path(), "sess-light").unwrap();
+        let mut plan = register_plan_for_caller(
+            dir.path(),
+            "sess-light",
+            vec!["cargo test -p gwt --all-features".to_string()],
+            Vec::new(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        plan.worktree_fingerprint = "stale-source".to_string();
+        save_plan(dir.path(), &plan).unwrap();
+        assert_eq!(
+            crate::cli::verification_lease::first_heavy_command(&plan.commands),
+            plan.commands.first(),
+        );
+        let before = verification_artifact_bytes(dir.path());
+        let error = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: plan.commands,
+                headed_e2e_commands: Vec::new(),
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("fingerprint"), "{error}");
+        assert!(error.contains("verify.plan"), "{error}");
+        assert!(!error.contains("deferred"), "{error}");
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+    }
+
+    #[test]
+    fn verify_run_rejects_plan_mismatches_without_executing_commands() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-preflight");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let marker = home.path().join("command-ran");
+        let commands = vec![format!(
+            "git config --file \"{}\" fixture.ran yes",
+            marker.display()
+        )];
+        let authority =
+            snapshot_verification_caller_authority(dir.path(), "sess-preflight").unwrap();
+        let plan = register_plan_for_caller(
+            dir.path(),
+            "sess-preflight",
+            commands.clone(),
+            vec!["generated-report.json".to_string()],
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        for mismatch in ["session", "owner", "binding", "fingerprint"] {
+            let mut stale = plan.clone();
+            let diagnosis = match mismatch {
+                "session" => {
+                    stale.session_id = "other-session".to_string();
+                    "session"
+                }
+                "owner" => {
+                    stale.owner_number = Some(4953);
+                    "binding"
+                }
+                "binding" => {
+                    stale.execution_binding = Some(ExecutionBindingIdentity {
+                        generation_id: "previous-generation".to_string(),
+                        binding_id: "previous-binding".to_string(),
+                        ledger_head_hash: "previous-head".to_string(),
+                    });
+                    "binding"
+                }
+                _ => {
+                    fs::write(dir.path().join("source.txt"), "changed").unwrap();
+                    "fingerprint"
+                }
+            };
+            crate::cli::trusted_store::with_write_lease(dir.path(), || {
+                save_plan_unleased(dir.path(), &stale)
+            })
+            .unwrap();
+            let before = verification_artifact_bytes(dir.path());
+            let result = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                    commands: commands.clone(),
+                    headed_e2e_commands: Vec::new(),
+                    max_wait_secs: Some(0),
+                    user_verification_result: None,
+                }),
+            );
+            assert!(
+                !marker.exists(),
+                "{mismatch}: a refused plan must execute no commands"
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(diagnosis), "{error}");
+            assert!(error.contains("verify.plan"), "{error}");
+            assert_eq!(verification_artifact_bytes(dir.path()), before);
+
+            // Recheck at dispatch too: admission may have waited while the
+            // plan or source changed.
+            let error = run_verification_for_caller(
+                dir.path(),
+                "sess-preflight",
+                &commands,
+                &authority,
+                &[],
+                RunOptions::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains(diagnosis) && error.contains("verify.plan"),
+                "{error}"
+            );
+            assert!(!marker.exists());
+            assert_eq!(verification_artifact_bytes(dir.path()), before);
+        }
+        // The advertised recovery must allow legitimate work immediately.
+        register_plan_for_caller(
+            dir.path(),
+            "sess-preflight",
+            commands.clone(),
+            plan.generated_outputs,
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        fs::write(dir.path().join("generated-report.json"), "{}").unwrap();
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands,
+                headed_e2e_commands: Vec::new(),
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(marker.exists());
+        assert!(load(dir.path()).unwrap().unwrap().plan_covered);
     }
 
     #[test]
