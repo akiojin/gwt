@@ -702,13 +702,32 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
     let doctor: serde_json::Value =
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
-    let issues = doctor["health"]["issues"].to_string();
+    // Join the decoded issue strings: serializing the array would JSON-escape
+    // Windows `\` separators and hide the trust key from a substring match.
+    let issues = doctor["health"]["issues"]
+        .as_array()
+        .expect("health issues array")
+        .iter()
+        .map(|issue| issue.as_str().expect("health issue string"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         issues.contains("Codex hook trust") && issues.contains("stored_hash=<missing>"),
         "doctor must expose persisted trust failures: {issues}"
     );
     assert!(issues.contains("hook.register_codex_managed_hook_trust"));
-    assert!(issues.contains(".codex/hooks.json:session_start:0:0"));
+    // The trust key uses the shared derivation (native separators), not a
+    // hand-built `/` path, so the expectation holds on Windows too.
+    let session_start_key = format!(
+        "{}:session_start:0:0",
+        gwt_skills::codex_hook_trust_key_path(&hooks_path)
+            .expect("derive Codex hook trust key")
+            .display()
+    );
+    assert!(
+        issues.contains(&session_start_key),
+        "doctor must name the mismatched trust key {session_start_key}: {issues}"
+    );
     assert!(issues.contains("command mismatch") && issues.contains("expected_command="));
     assert!(issues.contains("actual_command=`gwtd hook event SessionStart`"));
     assert!(!codex_home.join("config.toml").exists());

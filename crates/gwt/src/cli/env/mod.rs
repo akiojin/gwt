@@ -72,6 +72,13 @@ pub trait CliEnv {
         labels: &[String],
         draft: bool,
     ) -> io::Result<PrStatus>;
+    fn compare_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: Option<&str>,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>>;
+    fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>>;
     fn edit_pr(
         &mut self,
         number: u64,

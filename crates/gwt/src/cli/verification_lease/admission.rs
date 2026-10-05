@@ -1,12 +1,13 @@
 //! SPEC #3576: automatic admission for canonical `verify.run` execution.
 //!
-//! Each run acquires its own target job and host-wide heavy lease in-process.
+//! Each Heavy command acquires its target job and host-wide lease in-process.
 //! Even runs in the same worktree must wait for each other. Dropping the
 //! admission releases both locks; there is no detached pre-acquisition.
 //! Ordinary builds and development tests do not participate in admission.
 //!
 //! Admission preserves the existing bounded wait, FIFO reservations, holder
-//! diagnostics, and Board notice. A deferred invocation writes no run record.
+//! diagnostics, and Board notice. The runner retains partial results when a
+//! later command defers; a first-command deferral writes no new run record.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,7 @@ pub(crate) struct Admission {
     commands: Arc<super::CommandProgress>,
     lease_id: String,
     waited: Duration,
+    queue_wait_ms: u64,
 }
 
 impl std::fmt::Debug for Admission {
@@ -84,10 +86,15 @@ impl Admission {
     /// The admitted lease identity travels with the command output.
     pub(crate) fn summary(&self) -> String {
         format!(
-            "verify: host admission — lease {} acquired (waited {}s)",
+            "verify: host admission — lease {} acquired (waited {}s; queue_wait_ms: {})",
             self.lease_id,
             self.waited.as_secs(),
+            self.queue_wait_ms,
         )
+    }
+
+    pub(crate) fn queue_wait_ms(&self) -> u64 {
+        self.queue_wait_ms
     }
 
     /// Publish how far this run's command matrix has got (Issue #4280 AC-2):
@@ -503,6 +510,7 @@ pub(crate) fn admit<E: CliEnv>(
     let (spawn_host, _) = crate::cli::daemon::verification_host::describe_for_lease(&worktree);
     lease.record_spawn_host(spawn_host);
     let lease_id = lease.id().to_string();
+    let queue_wait_ms = lease.queue_wait_ms();
     let lease = Arc::new(Mutex::new(lease));
     let commands = Arc::new(super::CommandProgress::default());
     let renewal = super::renewal::Renewal::start(
@@ -523,6 +531,7 @@ pub(crate) fn admit<E: CliEnv>(
         renewal: Some(renewal),
         commands,
         waited: started.elapsed(),
+        queue_wait_ms,
     };
 
     Ok(admission)
@@ -1475,5 +1484,15 @@ mod tests {
         assert_eq!(after[0].target.as_deref(), Some(key.file_stem().as_str()));
         assert_eq!(after[0].queued_at_ms, before[0].queued_at_ms);
         assert_eq!(after[1].target.as_deref(), Some(later.file_stem().as_str()));
+        drop(_lease);
+        let admitted = lease_root
+            .admit(&mut env, worktree.path(), Duration::from_secs(1))
+            .unwrap();
+        let acquired_at = lease_root.status().acquired_at_ms.unwrap();
+        assert_eq!(
+            admitted.queue_wait_ms(),
+            acquired_at.saturating_sub(before[0].queued_at_ms),
+            "queue telemetry includes the original reservation, not only the final invocation"
+        );
     }
 }

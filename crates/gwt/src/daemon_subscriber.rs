@@ -382,7 +382,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // Keep HOME stable through daemon shutdown.
     async fn subscriber_forwards_events_through_callback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
@@ -444,7 +448,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // Keep HOME stable through daemon shutdown.
     async fn subscriber_stop_unblocks_thread_even_without_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
@@ -470,7 +478,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // Keep HOME stable through daemon shutdown.
     async fn materializer_subscriber_holds_presence_only_for_its_live_connection() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
@@ -591,7 +603,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // Keep HOME stable through daemon shutdown.
     async fn subscriber_with_resolver_picks_up_endpoint_after_initial_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Reflects the production race: a project tab opens before
         // `gwtd daemon start` is invoked, so the first resolver call
         // returns Err. Once the daemon comes up the resolver returns
@@ -683,7 +699,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // Keep HOME stable through daemon shutdown.
     async fn subscriber_resolver_picks_up_new_token_between_sessions() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Production scenario: `gwtd daemon start` is killed and
         // respawned. The new daemon picks a fresh `auth_token`, so a
         // subscriber that cached the old endpoint at spawn time would

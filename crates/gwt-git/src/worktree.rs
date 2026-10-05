@@ -1416,10 +1416,15 @@ fn run_command_with_timeout(
     timeout: Duration,
 ) -> Result<Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    configure_timeout_command(command);
+    let mut tree = TimeoutProcessTree::prepare(command);
     let mut child = command
         .spawn()
         .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
+    if let Err(error) = tree.after_spawn(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(GwtError::Git(format!("{action}: {error}")));
+    }
     let mut stdout = child.stdout.take().map(spawn_pipe_reader);
     let mut stderr = child.stderr.take().map(spawn_pipe_reader);
     let started = Instant::now();
@@ -1430,6 +1435,7 @@ fn run_command_with_timeout(
                 let status = child
                     .wait()
                     .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
+                tree.release();
                 return Ok(Output {
                     status,
                     stdout: join_pipe_reader(stdout.take(), action, "stdout")?,
@@ -1437,10 +1443,9 @@ fn run_command_with_timeout(
                 });
             }
             Ok(None) if started.elapsed() >= timeout => {
-                terminate_child_tree(&mut child);
+                tree.terminate(&mut child);
                 let _ = child.wait();
-                join_pipe_reader_lossy(stdout.take());
-                join_pipe_reader_lossy(stderr.take());
+                abandon_pipe_readers(stdout.take(), stderr.take());
                 return Err(GwtError::Git(format!(
                     "{action} timed out after {}ms",
                     timeout.as_millis()
@@ -1448,51 +1453,144 @@ fn run_command_with_timeout(
             }
             Ok(None) => std::thread::sleep(PROCESS_POLL_INTERVAL),
             Err(error) => {
-                terminate_child_tree(&mut child);
+                tree.terminate(&mut child);
                 let _ = child.wait();
-                join_pipe_reader_lossy(stdout.take());
-                join_pipe_reader_lossy(stderr.take());
+                abandon_pipe_readers(stdout.take(), stderr.take());
                 return Err(GwtError::Git(format!("{action}: {error}")));
             }
         }
     }
 }
 
+/// Owns the descendants of a deadline-bounded command so the timeout path can
+/// terminate the whole tree, including processes the child creates after the
+/// deadline fires.
 #[cfg(unix)]
-fn configure_timeout_command(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn configure_timeout_command(_command: &mut Command) {}
-
-fn terminate_child_tree(child: &mut Child) {
-    terminate_child_tree_platform(child.id());
-    let _ = child.kill();
-}
+struct TimeoutProcessTree;
 
 #[cfg(unix)]
-fn terminate_child_tree_platform(pid: u32) {
-    let process_group = -(pid as libc::pid_t);
-    // Kill the dedicated process group so descendants that inherited pipes close them too.
-    unsafe {
-        libc::kill(process_group, libc::SIGKILL);
+impl TimeoutProcessTree {
+    fn prepare(command: &mut Command) -> Self {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+        Self
+    }
+
+    fn after_spawn(&mut self, _child: &Child) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn release(self) {}
+
+    fn terminate(&mut self, child: &mut Child) {
+        let process_group = -(child.id() as libc::pid_t);
+        // Kill the dedicated process group so descendants that inherited pipes close them too.
+        unsafe {
+            libc::kill(process_group, libc::SIGKILL);
+        }
+        let _ = child.kill();
     }
 }
 
+/// Windows has no process group a late-spawned descendant is guaranteed to
+/// join, and `taskkill /T` both spawns a helper process (hundreds of ms to
+/// seconds under load) and snapshots the tree, so a grandchild created after
+/// the snapshot escapes and keeps the inherited pipe handles open. The child
+/// is instead spawned suspended into a kill-on-close Job: every descendant
+/// joins the Job, and closing it terminates them all in-process. When no Job
+/// can be created the command spawns normally and the timeout path falls back
+/// to a `taskkill /T` snapshot kill, which still reaps every descendant that
+/// exists at the deadline.
 #[cfg(windows)]
-fn terminate_child_tree_platform(pid: u32) {
-    let _ = gwt_core::process::hidden_command("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+struct TimeoutProcessTree {
+    job: Option<gwt_core::process_tree::WindowsJobObject>,
+}
+
+#[cfg(all(windows, test))]
+thread_local! {
+    /// Test-only seam that makes `TimeoutProcessTree::prepare` behave as if
+    /// Job creation failed, so the fallback tree kill can be exercised.
+    static FORCE_TIMEOUT_JOB_FALLBACK: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(windows)]
+impl TimeoutProcessTree {
+    fn prepare(command: &mut Command) -> Self {
+        let job = Self::new_job();
+        if job.is_some() {
+            gwt_core::process_tree::WindowsJobObject::configure_suspended(command);
+        }
+        Self { job }
+    }
+
+    fn new_job() -> Option<gwt_core::process_tree::WindowsJobObject> {
+        #[cfg(test)]
+        if FORCE_TIMEOUT_JOB_FALLBACK.with(std::cell::Cell::get) {
+            return None;
+        }
+        gwt_core::process_tree::WindowsJobObject::new().ok()
+    }
+
+    fn after_spawn(&mut self, child: &Child) -> std::io::Result<()> {
+        match self.job.as_mut() {
+            Some(job) => job
+                .assign_and_resume(child.id())
+                .map_err(std::io::Error::other),
+            None => Ok(()),
+        }
+    }
+
+    /// The command completed on its own; keep the pre-existing behavior of
+    /// not killing anything it left behind.
+    fn release(mut self) {
+        if let Some(job) = self.job.take() {
+            let _ = job.release_without_termination();
+        }
+    }
+
+    fn terminate(&mut self, child: &mut Child) {
+        match self.job.take() {
+            Some(mut job) => {
+                job.terminate();
+            }
+            // No Job owns the tree: kill it by snapshot while the child is
+            // still alive to anchor it. Reader threads are abandoned by the
+            // caller, so a descendant that escapes the snapshot cannot block
+            // the timeout path.
+            None => {
+                let _ = gwt_core::process::hidden_command("taskkill")
+                    .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+        let _ = child.kill();
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate_child_tree_platform(_pid: u32) {}
+struct TimeoutProcessTree;
+
+#[cfg(not(any(unix, windows)))]
+impl TimeoutProcessTree {
+    fn prepare(_command: &mut Command) -> Self {
+        Self
+    }
+
+    fn after_spawn(&mut self, _child: &Child) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn release(self) {}
+
+    fn terminate(&mut self, child: &mut Child) {
+        let _ = child.kill();
+    }
+}
 
 fn spawn_pipe_reader<T>(mut pipe: T) -> JoinHandle<std::io::Result<Vec<u8>>>
 where
@@ -1521,10 +1619,16 @@ fn join_pipe_reader(
     }
 }
 
-fn join_pipe_reader_lossy(reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>) {
-    if let Some(reader) = reader {
-        let _ = reader.join();
-    }
+/// The failure paths discard captured output, so they must not block on the
+/// readers: a descendant outside the terminated tree may still hold the write
+/// ends. Dropping the handles detaches the threads, which finish on their own
+/// once the last write end closes.
+fn abandon_pipe_readers(
+    stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    stderr: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+) {
+    drop(stdout);
+    drop(stderr);
 }
 
 fn parse_ls_remote_head_symref(stdout: &[u8]) -> Option<String> {
@@ -2201,18 +2305,28 @@ mod tests {
         }
     }
 
+    /// How long the lingering descendant holds the inherited pipe handles.
+    /// A timeout path that waits for those handles cannot return before this
+    /// much time has passed since spawn, so it is the discriminator for
+    /// `run_command_with_timeout_does_not_wait_for_lingering_descendant_pipes`
+    /// rather than a latency budget.
+    const LINGERING_DESCENDANT_SECS: u64 = 60;
+
     fn lingering_pipe_command() -> std::process::Command {
+        let secs = LINGERING_DESCENDANT_SECS;
         if cfg!(windows) {
             let mut command = gwt_core::process::hidden_command("powershell");
             command.args([
-                "-NoProfile",
-                "-Command",
-                "$psi = [Diagnostics.ProcessStartInfo]::new('powershell'); $psi.Arguments = '-NoProfile -Command Start-Sleep -Milliseconds 3000'; $psi.UseShellExecute = $false; [Diagnostics.Process]::Start($psi) | Out-Null; Start-Sleep -Milliseconds 3000",
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                format!(
+                    "$psi = [Diagnostics.ProcessStartInfo]::new('powershell'); $psi.Arguments = '-NoProfile -Command Start-Sleep -Seconds {secs}'; $psi.UseShellExecute = $false; [Diagnostics.Process]::Start($psi) | Out-Null; Start-Sleep -Seconds {secs}"
+                ),
             ]);
             command
         } else {
             let mut command = gwt_core::process::hidden_command("sh");
-            command.args(["-c", "(sleep 3) & sleep 3"]);
+            command.args(["-c".to_string(), format!("(sleep {secs}) & sleep {secs}")]);
             command
         }
     }
@@ -3648,9 +3762,71 @@ prunable gitdir file points to non-existent location
             err.to_string().contains("lingering descendant timed out"),
             "unexpected timeout error: {err}"
         );
+        // Spawn and tree-termination latency vary widely with load and
+        // coverage instrumentation, so no tight budget is asserted. Returning
+        // before the descendant could have released its pipe handles proves
+        // the timeout path did not wait for them.
         assert!(
-            elapsed < Duration::from_millis(1500),
+            elapsed < Duration::from_secs(LINGERING_DESCENDANT_SECS),
             "timeout path waited for descendant pipe handles for {elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    fn windows_process_alive(pid: u32) -> bool {
+        let output = gwt_core::process::hidden_command("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .expect("tasklist");
+        String::from_utf8_lossy(&output.stdout).contains(&format!(",\"{pid}\","))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_command_with_timeout_kills_descendants_when_job_is_unavailable() {
+        struct ForceJobFallback;
+        impl Drop for ForceJobFallback {
+            fn drop(&mut self) {
+                FORCE_TIMEOUT_JOB_FALLBACK.with(|flag| flag.set(false));
+            }
+        }
+        FORCE_TIMEOUT_JOB_FALLBACK.with(|flag| flag.set(true));
+        let _fallback = ForceJobFallback;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("descendant.pid");
+        let pid_path = pid_file.display().to_string().replace('\'', "''");
+        let secs = LINGERING_DESCENDANT_SECS;
+        let mut command = gwt_core::process::hidden_command("powershell");
+        command.args([
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            format!(
+                "$psi = [Diagnostics.ProcessStartInfo]::new('powershell'); $psi.Arguments = '-NoProfile -Command Start-Sleep -Seconds {secs}'; $psi.UseShellExecute = $false; $p = [Diagnostics.Process]::Start($psi); [IO.File]::WriteAllText('{pid_path}', [string]$p.Id); Start-Sleep -Seconds {secs}"
+            ),
+        ]);
+
+        // The deadline only has to outlast powershell startup so the
+        // descendant exists and its pid is recorded before the timeout fires.
+        let err = run_command_with_timeout(&mut command, "job fallback", Duration::from_secs(10))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("job fallback timed out"),
+            "unexpected timeout error: {err}"
+        );
+
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid must be recorded before the deadline")
+            .trim()
+            .parse()
+            .expect("descendant pid");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while windows_process_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(
+            !windows_process_alive(pid),
+            "descendant {pid} survived the fallback timeout tree kill"
         );
     }
 
