@@ -7,6 +7,7 @@ pub enum WorkspaceStateLoadErrorKind {
     Io,
     Malformed,
     IncompatibleSchema,
+    LegacyLayout,
 }
 
 /// Serializable diagnostic retained by the GUI while writes remain disabled.

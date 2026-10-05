@@ -38154,17 +38154,6 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
     let (spawner, _tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    // Startup performs retained legacy import before the asynchronous watcher
-    // can see it, so startup itself must publish the informational notice.
-    let legacy_path =
-        gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace/current.json");
-    let legacy = serde_json::to_vec(
-        &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
-    )
-    .unwrap();
-    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-    fs::write(&legacy_path, &legacy).unwrap();
-
     runtime.bootstrap();
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -38194,11 +38183,54 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
         !local_branches.is_empty(),
         "the reconcile ran on the worker from the bootstrap listing: {local_branches:?}"
     );
-    assert!(events.lock().unwrap().iter().any(|event| matches!(
-        recorded_project_payload(event),
-        UserEvent::WorkspaceProjectionLoaded { imported_from: Some(path), .. } if path == &legacy_path
-    )), "startup import must reach the common notice delivery path");
+}
+
+/// Issue #4825: an old HOME layout must stop startup before canonical writers.
+#[test]
+fn bootstrap_refuses_legacy_workspace_layout_without_mutation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let legacy_path =
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace/current.json");
+    let legacy = serde_json::to_vec(
+        &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+    )
+    .unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, &legacy).unwrap();
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.bootstrap();
+
+    let recorded = events.lock().unwrap();
+    assert!(
+        recorded.iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::WorkspaceStateLoadFailed { error, .. }
+                if error.path == legacy_path && error.message.contains("v9.106.0")
+        )),
+        "startup must report the upgrade requirement"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::WorkEventsIngested { .. }
+        )),
+        "legacy layouts must not enter startup ingest"
+    );
     assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
+    let canonical = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
+    assert!(!canonical.exists());
+    assert!(!canonical.with_file_name("works.json").exists());
 }
 
 thread_local! {
@@ -59998,12 +60030,12 @@ fn workspace_state_load_failure_keeps_rail_and_replays_until_recovery() {
         }),
         "a cache hit must not clear the notice before a fresh load"
     );
-    let Some(UserEvent::WorkspaceProjectionLoaded { imported_from, .. }) =
+    let Some(UserEvent::WorkspaceProjectionLoaded { .. }) =
         crate::load_workspace_projection_user_event(&repo)
     else {
         panic!("repaired canonical files must load successfully");
     };
-    let recovered = runtime.handle_workspace_state_loaded(&repo, imported_from);
+    let recovered = runtime.handle_workspace_state_loaded(&repo);
     let notice = recovered
         .iter()
         .find(|event| event.event.event_kind() == "workspace_state_notice")
@@ -77414,7 +77446,7 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
 }
 
 #[test]
-fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
+fn issue_3777_first_authoritative_projection_refuses_legacy_only_work() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -77426,22 +77458,20 @@ fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
     let legacy_current = legacy_root.join("current.json");
     let legacy_works = legacy_root.join("work_items.json");
     let now = Utc::now();
-    gwt_core::workspace_projection::save_workspace_projection_to_path(
-        &legacy_current,
+    let current_bytes = serde_json::to_vec(
         &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
     )
-    .expect("seed legacy current");
+    .unwrap();
+    fs::create_dir_all(&legacy_root).unwrap();
+    fs::write(&legacy_current, &current_bytes).expect("seed legacy current");
     let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
     work_items.apply_event(gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-3777-legacy-first",
         now,
     ));
-    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
-        &legacy_works,
-        &work_items,
-    )
-    .expect("seed legacy works");
+    let works_bytes = serde_json::to_vec(&work_items).unwrap();
+    fs::write(&legacy_works, &works_bytes).expect("seed legacy works");
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
@@ -77457,24 +77487,22 @@ fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
     else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
-    assert!(completion
-        .result
-        .as_ref()
-        .expect("prepare succeeds")
-        .is_some());
+    assert!(completion.result.is_err());
+    let error = completion.load_error.as_ref().expect("legacy load error");
+    assert!(error.message.contains("v9.106.0"));
 
     let committed = runtime.handle_active_work_projection_prepared(*completion);
-    assert!(committed.prepared_dispatch.is_some());
-    assert!(runtime
-        .project_state_for_tab("tab-1")
-        .unwrap()
-        .active_work_projection_cache
-        .borrow()
-        .get("tab-1")
-        .is_some_and(|projection| projection
-            .active_works
-            .iter()
-            .any(|work| work.id == "work-3777-legacy-first")));
+    assert!(committed.prepared_dispatch.is_none());
+    assert!(recorded_events.lock().unwrap().iter().any(|event| matches!(
+        recorded_project_payload(event),
+        UserEvent::WorkspaceStateLoadFailed { error, .. }
+            if error.message.contains("v9.106.0")
+    )));
+    assert_eq!(fs::read(&legacy_current).unwrap(), current_bytes);
+    assert_eq!(fs::read(&legacy_works).unwrap(), works_bytes);
+    let canonical = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
+    assert!(!canonical.exists());
+    assert!(!canonical.with_file_name("works.json").exists());
 }
 
 #[test]
