@@ -173,6 +173,45 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect(page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true})).toHaveValue("5");
 });
 
+test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
+  await confirm(page, [99, 3, 4]);
+  await page.evaluate(() => (window as any).__queueInbox([{issue:{number:3},state:"launched"}]));
+  await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
+  await expect(column(page, "active").locator('[data-issue-number="3"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages.filter((message:any) =>
+    message.kind === "load_knowledge_bridge").length)).toBeGreaterThan(1);
+  await expect(column(page, "active").locator('[data-issue-number="3"]')).toBeVisible();
+  const move = row(page, 4).locator('[data-action="move-up"]');
+  if (!await move.isVisible()) await row(page, 4).locator('.knowledge-row-menu summary').click();
+  await move.click();
+  await expect.poll(async () => (await messages(page)).at(-1)).toEqual({kind:"issue_monitor_queue_move",issue_number:4,position:1});
+});
+
+test("an unfocused Issue window reflects a launch while animation frames are suspended", async ({ page }, info) => {
+  await page.evaluate(() => (window as any).__queueAddForeground());
+  await expect(page.locator('[data-id="tab-queue::console"]')).toHaveClass(/focused/);
+  await expect(page.locator('[data-id="tab-queue::issue-1"]')).not.toHaveClass(/focused/);
+  const elapsed = await page.evaluate(async () => {
+    const scheduleFrame = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    const start = performance.now();
+    const rendered = new Promise<number>(resolve => {
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector('[data-queue-column="active"] [data-issue-number="3"]')) return;
+        observer.disconnect();
+        resolve(performance.now() - start);
+      });
+      observer.observe(document.body, {childList:true,subtree:true});
+    });
+    (window as any).__queueInbox([{issue:{number:3},state:"launched"}]);
+    try { return await rendered; } finally { window.requestAnimationFrame = scheduleFrame; }
+  });
+  expect(elapsed, 'model-to-view update without a focus or animation frame').toBeLessThanOrEqual(1000);
+  await info.attach('unfocused-render-timing', {body:JSON.stringify({elapsed_ms:elapsed,limit_ms:1000}),contentType:'application/json'});
+  await expect(page.locator('[data-id="tab-queue::issue-1"]')).not.toHaveClass(/focused/);
+  await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
+});
+
 async function installBackend(page: Page) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
   await page.addInitScript(({projectKey})=>{
@@ -193,14 +232,22 @@ async function installBackend(page: Page) {
       constructor(public readonly url:string) { super(); fixture.__queueConfirm=(numbers:number[],extra:any)=>{
         Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
-      }; setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
+      }; fixture.__queueAddForeground=()=>{
+        const workspace=fixture.__queueWorkspace;
+        workspace.tabs[0].workspace.windows.push({id:"tab-queue::console",title:"Console",preset:"console",
+          geometry:{x:1000,y:80,width:500,height:500},z_index:2,status:"running",persist:true,minimized:false,maximized:false});
+        this.emit({kind:"workspace_state",workspace});
+      }; fixture.__queueInbox=(items:unknown[])=>this.dispatchEvent(new MessageEvent("message",{
+        data:JSON.stringify({kind:"issue_monitor_inbox",items})
+      })); setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
       emit(payload:unknown) {const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}
       send(raw:string) {
         const message=JSON.parse(raw);fixture.__queueMessages.push(message);
-        if(message.kind==="frontend_ready") this.emit({kind:"workspace_state",workspace:{app_version:"playwright",tabs:[{
+        if(message.kind==="frontend_ready") { fixture.__queueWorkspace={app_version:"playwright",tabs:[{
           id:"tab-queue",title:"Queue fixture",project_root:"/fixture",project_key:projectKey,kind:"git",
           workspace:{viewport:{x:0,y:0,zoom:1},windows:[{id:"tab-queue::issue-1",title:"Issues",preset:"issue",
-            geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false}]} }],active_tab_id:"tab-queue",recent_projects:[]}});
+            geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false}]} }],active_tab_id:"tab-queue",recent_projects:[]};
+          this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace}); }
         else if(message.kind==="list_issue_monitor") this.emit({kind:"issue_monitor_status",status});
         else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) this.emit({kind:"knowledge_entries",id:message.id,knowledge_kind:"issue",request_id:message.request_id,entries,selected_number:null,refresh_enabled:true});
         else if(message.kind==="select_knowledge_bridge_entry") this.emit({kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}});

@@ -1243,6 +1243,17 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
+### Shared frontend state (SPEC-5016)
+
+Migrated frontend domains use `web/ui-state-store.js` to own immutable data. Receive
+handlers update the model; views subscribe to selectors and render the committed
+snapshot. Retain each unsubscribe function for views that can be removed. Keep
+DOM nodes and renderer functions outside the model. Notifications also run for
+unfocused windows, without a focus or animation-frame trigger. The shared
+`ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
+the content type. See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
+the migration inventory and acceptance criteria.
+
 ### Serializing heavy verification
 
 Only canonical `verify.run` acquires the host-wide verification lease.

@@ -464,8 +464,8 @@ test("Knowledge detail pane renders section bodies through sanitized Markdown he
   );
   assert.match(
     appSource,
-    /section\.body_html/,
-    "expected renderer to prefer sanitized backend-generated section.body_html",
+    /renderUiContent\(document, markdownContent\(section\), className\)/,
+    "expected detail helper to delegate to the shared typed Markdown renderer",
   );
   assert.match(
     appSource,
