@@ -131,7 +131,7 @@ pub(super) fn eligible(
     let trusted_record = crate::cli::trusted_store::read(worktree, "verification-run.json")
         .ok()
         .flatten()
-        .and_then(|bytes| serde_json::from_str::<VerificationRunRecord>(&bytes).ok());
+        .and_then(|bytes| decode_record::<VerificationRunRecord>(&bytes, "run").ok());
     fingerprint != "no-git"
         && trusted_record.as_ref() == Some(record)
         && deferred_passes(record)
@@ -203,7 +203,7 @@ pub(super) fn chain_valid(worktree: &Path, record: &VerificationRunRecord) -> bo
                     .ok()
                     .flatten()
             })
-            .and_then(|bytes| serde_json::from_str::<VerificationRunRecord>(&bytes).ok());
+            .and_then(|bytes| decode_record::<VerificationRunRecord>(&bytes, "run").ok());
         let Some(previous) = predecessor else {
             return false;
         };
