@@ -66,9 +66,8 @@ async function launchCodex(page: Page, branch: string) {
   await openLiveLaunchWizardForBranch(page, branch);
   await latestWizard(page, after, true);
   await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" });
-  await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
-  // The installed (fixture) Codex, never a package runner, is the route under test.
-  let state = await wizardAction(page, { kind: "set_version", version: "installed" });
+  // The installed (fixture) Codex is the only route: the wizard has no version choice.
+  let state = await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
   for (let step = 0; step < 12 && state.wizard; step += 1) {
     expect(state.wizard.error).toBeFalsy();
     if (state.wizard.selected_runtime_target !== "host"

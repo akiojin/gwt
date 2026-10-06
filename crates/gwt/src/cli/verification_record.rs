@@ -8529,7 +8529,12 @@ mod tests {
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         fs::create_dir_all(dir.path().join(".gwt")).unwrap();
         let commands = vec![
-            "sh -c 'printf x >> .gwt/command-count'".to_string(),
+            if cfg!(windows) {
+                r#"powershell -NoProfile -Command "[IO.File]::AppendAllText('.gwt/command-count','x')""#
+            } else {
+                "sh -c 'printf x >> .gwt/command-count'"
+            }
+            .to_string(),
             "git --version".to_string(),
             "cargo fmt --version".to_string(),
         ];
