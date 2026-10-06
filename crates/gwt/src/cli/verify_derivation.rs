@@ -1013,7 +1013,7 @@ mod tests {
         write(dir.path(), "crates/project/src/lib.rs", "// change\n");
         assert_eq!(
             derive_pre_pr_for_host(dir.path(), VerificationHost::Other, &[], &[], &[]).unwrap(),
-            derive(dir.path()).unwrap()
+            derive_for_host(dir.path(), VerificationHost::Other).unwrap()
         );
     }
 
