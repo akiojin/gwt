@@ -2860,6 +2860,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        // Shard delivery evidence is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-pr-shard-delivery";
@@ -3142,6 +3150,14 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        // Lifecycle receipt acceptance is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-completed-settled-handoff";
@@ -3299,6 +3315,14 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        // Receipt independence is unrelated to the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-receipt-independent-pr";
@@ -4475,6 +4499,7 @@ mod tests {
     #[test]
     fn autonomous_ready_format_skew_does_not_request_reverification() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         crate::cli::trusted_store::init_git_repo_with_origin(tmp.path());
         assert!(gwt_core::process::hidden_command("git")
             .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
@@ -5267,6 +5292,14 @@ mod tests {
         }
         if detached_delivery {
             if let PrCommand::Ready { number } = &command {
+                // Ready metadata delivery is independent of the host's free disk space.
+                gwt_config::Settings::update_global(|settings| {
+                    settings.verification.disk_budget_bytes = Some(0);
+                    settings.build_artifact_gc.below_bytes = 0;
+                    settings.build_artifact_gc.below_percent = 0;
+                    Ok(())
+                })
+                .expect("fixture disk admission");
                 env.pr_quarantine_contexts.insert(
                     *number,
                     PrQuarantineContext {

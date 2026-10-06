@@ -13009,6 +13009,17 @@ fn finalize_recovery_probes(
     } else {
         execution_recovery_hint(&snapshot)
     };
+    if snapshot.available_recoveries.is_empty() {
+        let mut guidance = "available_recoveries is filtered by this Session's current authority and operation applicability; an empty list does not mean the owner has no recovery.".to_string();
+        if let (Some(kind), Some(number)) = (snapshot.owner_kind, snapshot.owner_number) {
+            let owner = diagnose_owner(worktree, ExecutionOwnerKey { kind, number });
+            guidance.push_str(&format!(
+                " Owner recommended_recovery={} (not filtered to this Session): {}",
+                owner.recommended_recovery, owner.recommended_recovery_reason,
+            ));
+        }
+        snapshot.warnings.push(guidance);
+    }
     snapshot
 }
 
@@ -13113,7 +13124,7 @@ fn verification_recovery_probes(
         {
             Some((
                 GovernanceCause::Authority,
-                "verify.* requires current verification authority",
+                "verify.* requires current verification authority; unavailable is a consequence of missing authority, not a verification failure; recover the owning Session authority before retrying verify.plan / verify.run",
             ))
         }
         Some(_) => None,
@@ -20485,6 +20496,27 @@ mod tests {
         )
         .unwrap();
 
+        let release = release_blocking_prepared_transactions(
+            continuation_worktree.path(),
+            continuation_owner,
+            &sessions_dir,
+            None,
+            "check resolved historical Prepared evidence",
+            Utc::now(),
+        )
+        .unwrap();
+        let diagnosis = diagnose(
+            continuation_worktree.path(),
+            Some("startup-reaper-resolved-continuation"),
+        );
+        assert_eq!(release.status, "no_blocking_prepared_transaction");
+        assert!(!diagnosis.continuation.as_ref().unwrap().validated);
+        assert_ne!(
+            diagnosis.recovery_hint.as_deref(),
+            Some("prepared_launch_readiness_required"),
+            "historical Prepared evidence must not demand a nonexistent fence: {diagnosis:?}"
+        );
+
         assert!(matches!(
             reap_startup_defunct_active_generation(
                 &continuation_candidate,
@@ -27163,6 +27195,14 @@ exit 1
                 snapshot.recovery_hint.as_deref(),
                 Some(RECOVERY_HINT_FRESH_LAUNCH_REQUIRED)
             );
+            assert!(
+                snapshot.warnings.iter().any(|warning| {
+                    warning.contains("available_recoveries is filtered")
+                        && warning.contains("current authority")
+                        && warning.contains("recommended_recovery=gwt-execute")
+                }),
+                "an empty Session recovery list must explain the owner route: {snapshot:?}"
+            );
             assert_all_operation_local_recovery_probes(&snapshot);
             assert_eq!(
                 snapshot
@@ -31756,6 +31796,14 @@ exit 1
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            // Adopted authority is independent of the host's free disk space.
+            gwt_config::Settings::update_global(|settings| {
+                settings.verification.disk_budget_bytes = Some(0);
+                settings.build_artifact_gc.below_bytes = 0;
+                settings.build_artifact_gc.below_percent = 0;
+                Ok(())
+            })
+            .expect("fixture disk admission");
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-handoff");
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
             let dir = tempfile::tempdir().unwrap();
@@ -32036,6 +32084,14 @@ exit 1
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            // Terminal recovery evidence is independent of the host's free disk space.
+            gwt_config::Settings::update_global(|settings| {
+                settings.verification.disk_budget_bytes = Some(0);
+                settings.build_artifact_gc.below_bytes = 0;
+                settings.build_artifact_gc.below_percent = 0;
+                Ok(())
+            })
+            .expect("fixture disk admission");
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-relaunched");
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
             let dir = tempfile::tempdir().unwrap();

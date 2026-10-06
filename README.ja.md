@@ -1166,7 +1166,7 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
-### 重量級検証の直列化
+### 重量級検証の容量制御
 
 ホスト全体の verification lease を取得するのは canonical `verify.run`
 だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
@@ -1182,7 +1182,25 @@ execution authority・plan content hash・source fingerprint・要求コマン�
 引き続き `verify.plan` の再登録が必要です。再開した証跡は不変の先行記録を id/hash で参照し、
 元の開始時刻とコマンドごとの headed E2E・nextest・admission 証跡を保持します。
 行列全体と必要な headed Chromium の dark/light 証跡が成功するまでは Overall PASS や Ready にはなりません。
-再試行前に保持者を確認してください。
+独立した worktree とビルド directory の Heavy Cargo コマンドは、上限付きの
+ホスト共通 pool を利用します。既定容量は論理 CPU 8 個あたり 1 slot と
+メモリ 16 GiB あたり 1 slot の小さい方で、最低 1、最大 4 です。
+`~/.gwt/config.toml` で上書きできます。
+
+```toml
+[verification]
+slots = 4
+```
+
+同じ worktree または実効 Cargo target directory の実行は直列化します。
+共有資源を特定できない wrapper と旧 binary は全体排他を使います。
+各子プロセスの一時 directory を分離し、target と一時 directory の volume ごとに
+GC の空き容量閾値を残してディスク容量を予約します。
+`verification.disk_budget_bytes` で実測に基づく run 単位の予算を上書きできます。
+既定の予約量は各 volume で 5,904,433,337 bytes（約 5.5 GiB）です。
+target と一時領域の実測増分に 20% の余裕を加えて算出しています。
+`verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
+共通 FIFO queue を表示します。再試行前に確認してください。
 
 ```bash
 gwtd <<'JSON'

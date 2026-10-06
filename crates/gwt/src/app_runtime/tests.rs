@@ -48206,6 +48206,99 @@ fn app_runtime_allowed_labels_fallback_persists_without_changing_mode() {
     }
 }
 
+#[test]
+fn app_runtime_allowed_labels_rejection_returns_a_correlated_failure() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            allowed_labels: vec!["Server".to_string()],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open prefs lock");
+    lock.lock_exclusive().expect("hold prefs lock");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_monitor_fallback_commit_timeout = Duration::from_millis(100);
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "set_issue_monitor_allowed_labels", "allowed_labels": ["Tools"], "request_id": 41,
+    }))
+    .expect("label command");
+    let events = runtime.handle_frontend_event("client-1".to_string(), event);
+    FileExt::unlock(&lock).expect("release prefs lock");
+    let failure = events
+        .iter()
+        .map(|event| serde_json::to_value(&event.event).expect("event wire shape"))
+        .find(|event| event["kind"] == "issue_monitor_allowed_labels_write_failed")
+        .expect("a rejected save returns a correlated failure to its editor");
+    assert_eq!(failure["request_id"], 41);
+    assert_eq!(failure["outcome_unknown"], false);
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+    )));
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("saved prefs")
+            .allowed_labels,
+        ["Server"]
+    );
+}
+
+#[test]
+fn app_runtime_allowed_labels_failure_distinguishes_busy_from_unknown() {
+    use gwt::runtime_daemon_events::IssueMonitorControlPublishError;
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").expect("project context");
+    for (error, outcome_unknown) in [
+        (
+            IssueMonitorControlPublishError::Busy("admission full".to_string()),
+            false,
+        ),
+        (
+            IssueMonitorControlPublishError::OutcomeUnknown("control timed out".to_string()),
+            true,
+        ),
+    ] {
+        let events = runtime.issue_monitor_allowed_labels_result_events(
+            &context,
+            "client-1",
+            Err(error),
+            vec!["Tools".to_string()],
+            Some(41),
+        );
+        assert!(events.iter().all(|event| matches!(&event.target,
+            DispatchTarget::Client(client) if client == "client-1")));
+        assert!(events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, .. } if level == "error")));
+        assert!(events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorAllowedLabelsWriteFailed { request_id: 41, outcome_unknown: actual }
+                if *actual == outcome_unknown)));
+        assert!(events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+        )));
+    }
+}
+
 // SPEC #3165 TQ-9: the row's "Add to queue" action is the user's way to put an
 // Issue into this terminal's implementation queue. It is the requested feature's
 // main direction — "remove" is only its counterpart — so the GUI must reach

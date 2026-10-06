@@ -90,6 +90,31 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
         await labels.locator("summary").click();
         await expect(labels).toContainText("Empty list allows all labels");
         await expect(labels).toContainText("any listed label on this terminal");
+        // Reject exactly one GUI write at the socket boundary. The subsequent
+        // edit must travel through the restored socket to the actual backend.
+        await page.evaluate(() => {
+          const originalSend = WebSocket.prototype.send;
+          WebSocket.prototype.send = function (data) {
+            const request = typeof data === "string" ? JSON.parse(data) : null;
+            if (request?.kind !== "set_issue_monitor_allowed_labels") return originalSend.call(this, data);
+            WebSocket.prototype.send = originalSend;
+            (window as any).__gwtAllowedLabelsRejectedWrite = request;
+            queueMicrotask(() => {
+              for (const event of [
+                { kind: "issue_monitor_allowed_labels_write_failed", request_id: request.request_id, outcome_unknown: false },
+                { kind: "issue_monitor_toast", level: "error", message: "Issue Monitor Busy: allowed labels were not saved." },
+              ]) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
+            });
+          };
+        });
+        await labels.getByLabel("Allowed label", { exact: true }).fill("rejected-busy");
+        await labels.getByRole("button", { name: "Add label", exact: true }).click();
+        await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some((entry: any) =>
+          entry.payload.kind === "issue_monitor_allowed_labels_write_failed"
+          && entry.payload.request_id === (window as any).__gwtAllowedLabelsRejectedWrite?.request_id));
+        expect(await page.evaluate(() => Number.isInteger((window as any).__gwtAllowedLabelsRejectedWrite?.request_id))).toBe(true);
+        await expect(labels.locator("[data-allowed-label]")).toHaveCount(0);
+        expect(cli("issue.monitor.status").allowed_labels).toEqual([]);
         // Both clicks occur before any WebSocket status can be processed.
         // Commas belong to the second label; neither addition may be lost.
         await labels.evaluate((section, allowed) => {

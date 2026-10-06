@@ -2289,6 +2289,31 @@ mod tests {
     }
 
     #[test]
+    fn materialized_pre_pr_guidance_requires_required_ci_contexts_and_ac_tests() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let content = std::fs::read_to_string(
+                materialized
+                    .path()
+                    .join(provider)
+                    .join("skills/gwt-verify/SKILL.md"),
+            )
+            .unwrap();
+            for phrase in [
+                "acceptance_commands",
+                "required_status_checks.contexts",
+                "\"mode\":\"pre-pr\"",
+            ] {
+                assert!(
+                    content.contains(phrase),
+                    "{provider} pre-pr guidance is missing {phrase}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gwt_verify_references_are_bundled() {
         use crate::assets::CLAUDE_SKILLS;
 
