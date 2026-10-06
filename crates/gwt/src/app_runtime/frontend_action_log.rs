@@ -507,7 +507,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 | LaunchWizardAction::SetBranchType { prefix: value }
                 | LaunchWizardAction::SetModel { model: value }
                 | LaunchWizardAction::SetReasoning { reasoning: value }
-                | LaunchWizardAction::SetVersion { version: value }
                 | LaunchWizardAction::SetExecutionMode { mode: value }
                 | LaunchWizardAction::SetDockerService { service: value } => {
                     log = log.target(value);
@@ -697,6 +696,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
             FrontendUserActionLog::new("set_issue_monitor_max_active_agents", "issue_monitor")
                 .target(max_active_agents.to_string())
+        }
+        FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels } => {
+            FrontendUserActionLog::new("set_issue_monitor_allowed_labels", "issue_monitor")
+                .count(allowed_labels.len())
         }
         FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
             FrontendUserActionLog::new("reorder_issue_monitor_issues", "issue_monitor")
