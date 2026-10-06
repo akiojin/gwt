@@ -98,6 +98,45 @@ test("tab selection survives updates and falls back when the selected agent disa
   assert.equal(document.querySelector(".agents-empty").hidden, false);
 });
 
+test("closing agent tabs preserves the live grid and reopens the same terminal", async () => {
+  const { surface, document, window } = await fixture();
+  surface.sync(agents);
+  const tab = id => document.getElementById(`agents-tab-${id}`);
+  const one = document.querySelector('[data-agent-id="one"]');
+  const terminal = one.querySelector("textarea");
+  const reopen = one.querySelector('[aria-label="Open One tab"]');
+  assert.equal(reopen.textContent, "Open tab", "reopening has a visible action label");
+  assert.equal(reopen.hidden, true, "open tabs already have a selection button");
+  tab("one").click();
+  const close = document.querySelector('[aria-label="Close One tab"]');
+  assert.ok(close, "each individual tab has a named close button");
+  assert.equal(close.closest('[role="tab"]'), null, "buttons are siblings, not nested");
+  close.click();
+  assert.equal(tab("one"), null);
+  assert.equal(tab("all").getAttribute("aria-selected"), "true");
+  assert.equal(surface.contains("one"), true);
+  assert.equal(surface.isVisible("one"), true, "All agents still shows the running agent");
+  assert.equal(reopen.hidden, false);
+  surface.sync(agents);
+  assert.equal(tab("one"), null, "metadata updates do not reopen closed tabs");
+  document.querySelector('[aria-label="Open One tab"]').click();
+  assert.equal(tab("one").getAttribute("aria-selected"), "true");
+  assert.equal(one.querySelector("textarea"), terminal);
+  assert.equal(reopen.hidden, true);
+  document.querySelector('[aria-label="Close Two tab"]').click();
+  assert.equal(tab("one").getAttribute("aria-selected"), "true", "background close preserves selection");
+  const event = new window.Event("keydown", { cancelable: true });
+  Object.defineProperty(event, "key", { value: "Delete" });
+  tab("one").dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(tab("one"), null);
+  assert.equal(tab("all").getAttribute("aria-selected"), "true");
+  surface.sync(agents.filter(data => data.id !== "two"));
+  surface.sync(agents);
+  assert.ok(tab("two"), "a newly arriving agent has an open tab");
+  assert.equal(document.querySelectorAll('[aria-label="Close All agents tab"]').length, 0);
+});
+
 test("the grid uses Operator tokens and contains the terminal inside each tile", () => {
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   const surface = css.slice(css.indexOf("/* Issue 4777 T-4:"));
@@ -108,5 +147,7 @@ test("the grid uses Operator tokens and contains the terminal inside each tile",
   assert.match(surface, /\.agent-tile\[hidden\]/);
   assert.match(surface, /\.agents-grid\.is-single > \.agent-tile \{ grid-area: 1 \/ 1;/);
   assert.match(surface, /\.agent-tile\[hidden\] \{ display: flex; visibility: hidden;/);
+  assert.match(surface, /\.agents-tab-close/);
+  assert.match(surface, /\.agent-tile__open:focus-visible/);
   assert.doesNotMatch(surface.replace(/\/\*[\s\S]*?\*\//g, ""), /#[a-f0-9]{3,8}\b|rgba?\(/i);
 });

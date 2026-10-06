@@ -4,6 +4,24 @@ use gwt::{
 };
 
 #[test]
+fn frontend_issue_monitor_allowed_labels_use_snake_case_wire_shape() {
+    for labels in [
+        serde_json::json!(["Server", "backend"]),
+        serde_json::json!([]),
+    ] {
+        let wire = serde_json::json!({
+            "kind": "set_issue_monitor_allowed_labels",
+            "allowed_labels": labels,
+        });
+        let event: FrontendEvent = serde_json::from_value(wire).expect("allowed labels event");
+        assert!(
+            matches!(event, FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels }
+            if serde_json::to_value(&allowed_labels).expect("serialize labels") == labels)
+        );
+    }
+}
+
+#[test]
 fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     let event: FrontendEvent =
         serde_json::from_str(r#"{"kind":"set_issue_monitor_enabled","enabled":true}"#)
@@ -191,6 +209,9 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             terminal_queue: Vec::new(),
             terminal_queue_auto_refill: false,
             terminal_queue_auto_refill_limit: 0,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 1,

@@ -104,12 +104,6 @@ struct DockerExecProgram {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DockerPackageRunnerCandidate {
-    executable: &'static str,
-    base_args: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageRunnerProgram {
     pub(crate) executable: String,
     pub(crate) args: Vec<String>,
@@ -603,61 +597,11 @@ fn resolve_docker_exec_program(
     binding: &DockerLaunchBinding,
     config: &gwt_agent::LaunchConfig,
 ) -> Result<DockerExecProgram, String> {
-    let Some(version_spec) = package_runner_version_spec(config) else {
-        ensure_docker_launch_command_ready(binding, &config.command)?;
-        return Ok(DockerExecProgram {
-            executable: config.command.clone(),
-            args: config.args.clone(),
-        });
-    };
-    resolve_docker_package_runner(binding, config, &version_spec)
-}
-
-pub fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
-    let package = config.agent_id.npm_package()?;
-    let version = config.tool_version.as_deref()?;
-    if version == "installed" || version.is_empty() {
-        return None;
-    }
-    Some(if version == "latest" {
-        format!("{package}@latest")
-    } else {
-        format!("{package}@{version}")
+    ensure_docker_launch_command_ready(binding, &config.command)?;
+    Ok(DockerExecProgram {
+        executable: config.command.clone(),
+        args: config.args.clone(),
     })
-}
-
-fn resolve_docker_package_runner(
-    binding: &DockerLaunchBinding,
-    config: &gwt_agent::LaunchConfig,
-    version_spec: &str,
-) -> Result<DockerExecProgram, String> {
-    let agent_args = strip_package_runner_args(&config.args, version_spec);
-    let candidates = vec![
-        DockerPackageRunnerCandidate {
-            executable: "bunx",
-            base_args: vec![version_spec.to_string()],
-        },
-        DockerPackageRunnerCandidate {
-            executable: "npx",
-            base_args: vec!["--yes".to_string(), version_spec.to_string()],
-        },
-    ];
-
-    for candidate in candidates {
-        let output = execute_docker_binding_command(
-            binding,
-            Some(binding.container_cwd()),
-            &candidate.probe_args(),
-        )?;
-        if output.status.success() {
-            return Ok(candidate.into_exec_program(agent_args));
-        }
-    }
-
-    Err(format!(
-        "Selected Docker runtime cannot launch {version_spec} in service '{}'",
-        binding.service()
-    ))
 }
 
 fn execute_docker_binding_command(
@@ -683,18 +627,6 @@ fn execute_docker_binding_command(
         &args,
     )
     .map_err(|error| error.to_string())
-}
-
-pub fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
-    if args.first().is_some_and(|first| first == "--yes")
-        && args.get(1).is_some_and(|arg| arg == version_spec)
-    {
-        return args[2..].to_vec();
-    }
-    if args.first().is_some_and(|arg| arg == version_spec) {
-        return args[1..].to_vec();
-    }
-    args.to_vec()
 }
 
 pub fn resolve_docker_shell_command(launch: &DockerLaunchPlan) -> Result<String, String> {
@@ -742,24 +674,6 @@ fn ensure_docker_launch_command_ready(
             "Command '{command}' is not available in Docker service '{}'",
             binding.service()
         ))
-    }
-}
-
-impl DockerPackageRunnerCandidate {
-    fn probe_args(&self) -> Vec<String> {
-        let mut args = vec![self.executable.to_string()];
-        args.extend(self.base_args.clone());
-        args.push("--version".to_string());
-        args
-    }
-
-    fn into_exec_program(self, mut agent_args: Vec<String>) -> DockerExecProgram {
-        let mut args = self.base_args;
-        args.append(&mut agent_args);
-        DockerExecProgram {
-            executable: self.executable.to_string(),
-            args,
-        }
     }
 }
 
@@ -1325,22 +1239,26 @@ fi
             gwt_core::test_support::ScopedEnvVar::set("GWT_DOCKER_BIN", &ambient_runtime);
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .working_dir(temp.path().join("project"))
-            .version("latest")
             .build();
         config.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        // SPEC-1921 AS-1921-A: a selector left over from before version
+        // selection was removed must not route the launch through the
+        // container's package runner.
+        config.tool_version = Some("latest".to_string());
 
         resolve_docker_agent_program_with_binding(&mut config, Some(&binding))
             .expect("resolve agent program with bound runtime");
 
-        assert_eq!(config.command, "bunx");
-        assert!(config
-            .args
-            .first()
-            .is_some_and(|arg| arg == "@openai/codex@latest"));
+        assert_eq!(config.command, "codex");
+        assert!(
+            config.args.iter().all(|arg| arg != "@openai/codex@latest"),
+            "{:?}",
+            config.args
+        );
         let bound_invocations =
             std::fs::read_to_string(&bound_marker).expect("bound runtime invocations");
-        assert!(bound_invocations.contains("bunx"));
-        assert!(bound_invocations.contains("--version"));
+        assert!(bound_invocations.contains("command -v"));
+        assert!(!bound_invocations.contains("bunx"));
         assert!(
             !ambient_marker.exists(),
             "agent program probe must not re-resolve ambient GWT_DOCKER_BIN"
