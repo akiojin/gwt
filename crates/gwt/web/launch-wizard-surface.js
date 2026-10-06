@@ -194,9 +194,10 @@ export function createLaunchWizardSurface({
 
       // SPEC-3864 FR-005..FR-007: agent-independent setup affordance. The
       // backend derives `launchWizard.agent_setup` from the selected agent's
-      // descriptor (install when no Installed / latest route exists,
-      // configure when first-time setup is missing); this renders whatever
-      // it says without any per-agent branch.
+      // descriptor (install or update for the installed CLI, configure when
+      // first-time setup is missing), or reports that no supported agent is
+      // installed; this renders whatever it says without any per-agent
+      // branch.
       function appendAgentSetupNote(parent, setup) {
         if (!setup) return null;
         const note = createNode("div", "launch-note launch-agent-setup");
@@ -1884,7 +1885,6 @@ export function createLaunchWizardSurface({
         if (
           showSetupForms &&
           (
-            launchWizard.show_version ||
             launchWizard.show_skip_permissions ||
             launchWizard.show_fast_mode
           )
@@ -1894,22 +1894,9 @@ export function createLaunchWizardSurface({
           );
           const section = createLaunchSection(
             "Launch settings",
-            "Version, permissions, and tool-specific launch behavior.",
+            "Permissions and tool-specific launch behavior.",
           );
           const grid = createNode("div", "launch-form-grid");
-          if (launchWizard.show_version) {
-            appendSelectField(
-              grid,
-              "Version",
-              launchWizard.version_options || [],
-              launchWizard.selected_version,
-              (value) =>
-                sendWizardAction({
-                  kind: "set_version",
-                  version: value,
-                }),
-            );
-          }
           if (launchWizard.show_skip_permissions) {
             appendToggleField(
               grid,
