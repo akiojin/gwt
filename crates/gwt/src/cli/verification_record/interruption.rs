@@ -405,7 +405,11 @@ mod tests {
         settle_interrupted(dir.path(), &running.record_id, token, false).unwrap();
         let interrupted = load(dir.path()).unwrap().unwrap();
         assert_eq!(
-            interrupted.lifecycle.unwrap().external_terminations,
+            interrupted
+                .lifecycle
+                .as_ref()
+                .unwrap()
+                .external_terminations,
             Some(2)
         );
         assert!(crate::cli::trusted_store::with_write_lease(dir.path(), || {
