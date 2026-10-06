@@ -54,6 +54,11 @@ pub mod continuation;
 pub mod headed_e2e;
 pub mod interruption;
 pub mod nextest;
+pub mod wire;
+
+/// Additive fields are preserved and hash-covered independently of the
+/// reader's typed schema. Incompatible meanings require a version bump.
+pub const VERIFICATION_FORMAT_VERSION: u32 = 1;
 
 /// Per-command lease provenance; absent for Light commands and old records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,7 +365,9 @@ pub struct VerificationAdjudicationRef {
 
 /// One tool-generated verification run (T-110).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationRunRecord {
+pub struct VerificationRunData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
     pub record_id: String,
     /// Exact continuation inputs and occurrence provenance (#5035). Omission
     /// preserves legacy hashes; legacy records are never resumed.
@@ -398,7 +405,11 @@ pub struct VerificationRunRecord {
     pub all_passed: bool,
     /// Conditional dispositions for exact failures. Raw command exits and
     /// `all_passed` remain authoritative and are never rewritten.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_stored_failures"
+    )]
     pub quarantined_failures: Vec<TypedQuarantinedFailure>,
     /// Integrity-covered Board references attached through
     /// `verify.adjudicate` and consumed only by `pr.ready`.
@@ -436,6 +447,8 @@ pub struct VerificationRunRecord {
     pub content_hash: String,
 }
 
+pub type VerificationRunRecord = wire::WireRecord<VerificationRunData>;
+
 impl VerificationRunRecord {
     pub fn headed_e2e_passed(&self) -> bool {
         headed_e2e_passed(&self.commands)
@@ -462,7 +475,16 @@ fn headed_e2e_passed(commands: &[VerificationCommandResult]) -> bool {
 pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
     let mut canonical = record.clone();
     canonical.content_hash = String::new();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    if record.format_version.is_some() {
+        return wire::canonical_hash(
+            &serde_json::to_value(&canonical).expect("serializable record"),
+        );
+    }
+    let bytes = {
+        // Pre-versioned records used struct field order and omission rules.
+        serde_json::to_vec(&canonical.data)
+    }
+    .expect("serializable record");
     format!("{:x}", Sha256::digest(&bytes))
 }
 
@@ -470,7 +492,15 @@ pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
 /// a legacy pre-P9a record without one).
 #[must_use]
 pub fn integrity_ok(record: &VerificationRunRecord) -> bool {
-    record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+    match record.format_version {
+        None => {
+            record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+        }
+        Some(VERIFICATION_FORMAT_VERSION) => {
+            !record.content_hash.is_empty() && record.content_hash == compute_content_hash(record)
+        }
+        Some(_) => false,
+    }
 }
 
 /// Worktree-relative path of the registered verification plan (SPEC-3248
@@ -483,7 +513,9 @@ pub const VERIFICATION_PLAN_STATE_RELATIVE: &str = ".gwt/skill-state/verificatio
 /// scenarios is the full T-130; here the plan is a first-class recorded
 /// contract that `verify.run` must cover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationPlanRecord {
+pub struct VerificationPlanData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_number: Option<u64>,
@@ -509,7 +541,11 @@ pub struct VerificationPlanRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_outputs: Vec<String>,
     /// Exact typed quarantine requests registered before `verify.run`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_stored_quarantines"
+    )]
     pub quarantines: Vec<VerificationQuarantineRequest>,
     /// Content-level worktree fingerprint at plan registration. Derived
     /// matrices are valid only for this exact change set; a later surface
@@ -522,12 +558,77 @@ pub struct VerificationPlanRecord {
     pub content_hash: String,
 }
 
+pub type VerificationPlanRecord = wire::WireRecord<VerificationPlanData>;
+
+fn retain_stored_fields(value: &mut serde_json::Value, fields: &[&str]) {
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| fields.contains(&key.as_str()));
+    }
+}
+
+// Quarantine inputs remain strict. Only the integrity-covered stored record
+// projection ignores additive fields; WireRecord retains their original JSON.
+fn deserialize_stored_quarantines<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<VerificationQuarantineRequest>, D::Error> {
+    let mut values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    for value in &mut values {
+        retain_stored_fields(
+            value,
+            &[
+                "failed_command",
+                "test_identity",
+                "baseline_command",
+                "owner_issue",
+                "pr_number",
+            ],
+        );
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+fn deserialize_stored_failures<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<TypedQuarantinedFailure>, D::Error> {
+    let mut values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    for value in &mut values {
+        retain_stored_fields(
+            value,
+            &[
+                "failed_command",
+                "test_identity",
+                "owner_issue",
+                "head_sha",
+                "merge_base_sha",
+                "baseline_command",
+                "baseline_exit_code",
+                "baseline_result_line",
+                "pr_number",
+                "pr_reference",
+            ],
+        );
+        if let Some(reference) = value.get_mut("pr_reference") {
+            retain_stored_fields(reference, &["kind", "comment_id", "marker"]);
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
 /// Compute the integrity hash for a plan (content with the hash emptied).
 #[must_use]
 pub fn compute_plan_hash(plan: &VerificationPlanRecord) -> String {
     let mut canonical = plan.clone();
     canonical.content_hash = String::new();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    if plan.format_version.is_some() {
+        return wire::canonical_hash(&serde_json::to_value(&canonical).expect("serializable plan"));
+    }
+    let bytes = serde_json::to_vec(&canonical.data).expect("serializable plan");
     format!("{:x}", Sha256::digest(&bytes))
 }
 
@@ -553,6 +654,14 @@ fn changed_plan_fields(
             before.generated_outputs != after.generated_outputs,
         ),
         ("quarantines", before.quarantines != after.quarantines),
+        (
+            "format_version",
+            before.format_version != after.format_version,
+        ),
+        (
+            "unknown_fields",
+            before.unknown_fields() != after.unknown_fields(),
+        ),
     ]
     .into_iter()
     .filter_map(|(field, changed)| changed.then_some(field))
@@ -570,7 +679,13 @@ fn same_plan_meaning(before: &VerificationPlanRecord, after: &VerificationPlanRe
 /// True when the plan's stored integrity hash matches (or is legacy-empty).
 #[must_use]
 pub fn plan_integrity_ok(plan: &VerificationPlanRecord) -> bool {
-    plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan)
+    match plan.format_version {
+        None => plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan),
+        Some(VERIFICATION_FORMAT_VERSION) => {
+            !plan.content_hash.is_empty() && plan.content_hash == compute_plan_hash(plan)
+        }
+        Some(_) => false,
+    }
 }
 
 /// Resolve the plan path for a worktree.
@@ -592,8 +707,7 @@ pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> 
             Err(err) => return Err(err),
         },
     };
-    let plan = serde_json::from_str::<VerificationPlanRecord>(&contents)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let plan = decode_record(&contents, "plan")?;
     Ok(Some(plan))
 }
 
@@ -701,7 +815,8 @@ fn register_plan_with_context_unleased(
     context: PlanRegistrationContext,
     authority: &VerificationCallerAuthority,
 ) -> io::Result<VerificationPlanRecord> {
-    let plan = VerificationPlanRecord {
+    let plan = VerificationPlanRecord::from(VerificationPlanData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
         session_id: session_id.to_string(),
         owner_number: authority.owner_number,
         execution_binding: authority.execution_binding.clone(),
@@ -713,7 +828,7 @@ fn register_plan_with_context_unleased(
         worktree_fingerprint: context.worktree_fingerprint,
         created_at: Utc::now(),
         content_hash: String::new(),
-    };
+    });
     save_plan_unleased(worktree, &plan)
 }
 
@@ -790,9 +905,72 @@ pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
             Err(err) => return Err(err),
         },
     };
-    let record = serde_json::from_str::<VerificationRunRecord>(&contents)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let record = decode_record(&contents, "run")?;
     Ok(Some(record))
+}
+
+#[derive(Debug)]
+struct UnsupportedFormat {
+    kind: &'static str,
+    version: u64,
+}
+
+impl std::fmt::Display for UnsupportedFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "verification {} format version {} is unsupported by this gwtd (supported version: {}); upgrade gwtd to a compatible version", self.kind, self.version, VERIFICATION_FORMAT_VERSION)
+    }
+}
+
+impl std::error::Error for UnsupportedFormat {}
+
+/// Version admission precedes typed decoding: newer schemas can change even
+/// recognized fields, which must not be mistaken for corrupt evidence.
+fn decode_record<T: serde::de::DeserializeOwned>(
+    contents: &str,
+    kind: &'static str,
+) -> io::Result<T> {
+    let value: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    if let Some(version) = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        if version != u64::from(VERIFICATION_FORMAT_VERSION) {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                UnsupportedFormat { kind, version },
+            ));
+        }
+    }
+    if let Some(version) = value
+        .get("verification_plan_snapshot")
+        .and_then(|plan| plan.get("format_version"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        if version != u64::from(VERIFICATION_FORMAT_VERSION) {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                UnsupportedFormat {
+                    kind: "plan",
+                    version,
+                },
+            ));
+        }
+    }
+    serde_json::from_value(value).map_err(|err| io::Error::new(ErrorKind::InvalidData, err))
+}
+
+pub(crate) fn evidence_read_error(error: &io::Error) -> EvidenceStatus {
+    match error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<UnsupportedFormat>())
+    {
+        Some(unsupported) => EvidenceStatus::UnsupportedFormat {
+            kind: unsupported.kind,
+            version: unsupported.version,
+        },
+        None => EvidenceStatus::Unreadable,
+    }
 }
 
 /// Persist the record atomically. The integrity hash is recomputed on every
@@ -3809,7 +3987,8 @@ where
         .then(|| interruption::Watchdog::start(worktree, &record_id, &watchdog_token))
         .transpose()
         .map_err(|error| format!("failed to start verification watchdog: {error}"))?;
-    let mut running = VerificationRunRecord {
+    let mut running = VerificationRunRecord::from(VerificationRunData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
         continuation,
         record_id: record_id.clone(),
         lifecycle: Some(interruption::RunLifecycle::running(&watchdog_token)),
@@ -3835,7 +4014,13 @@ where
             .unwrap_or_default(),
         plan_derived: plan_snapshot.as_ref().is_some_and(|plan| plan.derived),
         content_hash: String::new(),
-    };
+    });
+    if let Some(previous) = &predecessor {
+        let mut document = serde_json::to_value(&running).map_err(|error| error.to_string())?;
+        document["commands"] =
+            serde_json::to_value(previous).map_err(|error| error.to_string())?["commands"].clone();
+        running = serde_json::from_value(document).map_err(|error| error.to_string())?;
+    }
     if let Some(context) = &running.continuation {
         running.planned_missing = context.missing();
     }
@@ -4171,8 +4356,11 @@ where
             }
             _ => (false, Vec::new(), String::new(), false),
         };
-    let mut record = VerificationRunRecord {
-        continuation: running.continuation.take(),
+    let continuation = running.continuation.take();
+    let mut record = running;
+    record.data = VerificationRunData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
+        continuation,
         record_id,
         lifecycle: None,
         session_id: session_id.to_string(),
@@ -4344,6 +4532,11 @@ pub enum EvidenceStatus {
     StaleFingerprintFiles(Vec<String>),
     Failing,
     Unreadable,
+    /// Authenticity cannot be interpreted by this reader's wire version.
+    UnsupportedFormat {
+        kind: &'static str,
+        version: u64,
+    },
     /// P9a (T-122): the stored integrity hash does not match the content —
     /// the record was edited outside `verify.run`.
     Tampered,
@@ -4396,6 +4589,10 @@ impl EvidenceStatus {
             Self::Unreadable => {
                 "the verification record is unreadable — rerun `verify.run` to rewrite it"
             }
+            Self::UnsupportedFormat { kind, version } => return UnsupportedFormat {
+                kind,
+                version: *version,
+            }.to_string(),
             Self::Tampered => {
                 "the verification record failed integrity validation (edited outside `verify.run`) — rerun `verify.run` to produce a genuine record"
             }
@@ -4753,6 +4950,29 @@ fn evaluate_evidence_snapshot_inner(
     require_current_execution_binding: bool,
     allow_failing_commands: bool,
 ) -> EvidenceStatus {
+    if let Some(version) = record
+        .format_version
+        .filter(|version| *version != VERIFICATION_FORMAT_VERSION)
+    {
+        return EvidenceStatus::UnsupportedFormat {
+            kind: "run",
+            version: u64::from(version),
+        };
+    }
+    for plan in plan
+        .into_iter()
+        .chain(record.verification_plan_snapshot.as_ref())
+    {
+        if let Some(version) = plan
+            .format_version
+            .filter(|version| *version != VERIFICATION_FORMAT_VERSION)
+        {
+            return EvidenceStatus::UnsupportedFormat {
+                kind: "plan",
+                version: u64::from(version),
+            };
+        }
+    }
     if !record.quarantined_failures.is_empty() && record.content_hash.is_empty() {
         return EvidenceStatus::Tampered;
     }
@@ -5218,11 +5438,11 @@ pub fn evaluate_evidence(
     let record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => return EvidenceStatus::MissingRecord,
-        Err(_) => return EvidenceStatus::Unreadable,
+        Err(error) => return evidence_read_error(&error),
     };
     let plan = match load_plan(worktree) {
         Ok(plan) => plan,
-        Err(_) => return EvidenceStatus::Unreadable,
+        Err(error) => return evidence_read_error(&error),
     };
     evaluate_evidence_snapshot(
         worktree,
@@ -5245,9 +5465,9 @@ pub(crate) fn evaluate_pr_ready_evidence(
     let record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => return Err(EvidenceStatus::MissingRecord),
-        Err(_) => return Err(EvidenceStatus::Unreadable),
+        Err(error) => return Err(evidence_read_error(&error)),
     };
-    let plan = load_plan(worktree).map_err(|_| EvidenceStatus::Unreadable)?;
+    let plan = load_plan(worktree).map_err(|error| evidence_read_error(&error))?;
     let status = evaluate_evidence_snapshot_inner(
         worktree,
         session_id,
@@ -5724,7 +5944,8 @@ pub(crate) mod tests {
             .map(|record| record.owner_number);
         save_plan(
             worktree,
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: session.to_string(),
                 owner_number,
                 execution_binding: None,
@@ -5736,14 +5957,15 @@ pub(crate) mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         run_verification(worktree, session, commands).unwrap()
     }
 
     pub(super) fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
-        VerificationRunRecord {
+        VerificationRunRecord::from(VerificationRunData {
+            format_version: None,
             continuation: None,
             lifecycle: None,
             record_id: "vr-test".to_string(),
@@ -5774,7 +5996,7 @@ pub(crate) mod tests {
             verification_plan_snapshot: None,
             plan_derived: false,
             content_hash: String::new(),
-        }
+        })
     }
 
     /// An authority refusal must explain how ordinary development can proceed
@@ -5813,7 +6035,8 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-cov".to_string(),
                 owner_number: Some(3248),
                 execution_binding: None,
@@ -5825,7 +6048,7 @@ pub(crate) mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let loaded = load_plan(dir.path()).unwrap().unwrap();
@@ -5845,7 +6068,8 @@ pub(crate) mod tests {
 
     #[test]
     fn typed_quarantine_request_roundtrips_in_verification_plan() {
-        let mut value = serde_json::to_value(VerificationPlanRecord {
+        let mut value = serde_json::to_value(VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-plan-quarantine".to_string(),
             owner_number: Some(3841),
             execution_binding: None,
@@ -5857,7 +6081,7 @@ pub(crate) mod tests {
             worktree_fingerprint: "fingerprint".to_string(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        })
+        }))
         .unwrap();
         value["quarantines"] = serde_json::json!([{
             "failed_command": "cargo test -p gwt --all-features --lib",
@@ -5951,7 +6175,8 @@ pub(crate) mod tests {
         gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
         assert!(!load(dir.path()).unwrap().unwrap().all_passed);
 
-        let plan = VerificationPlanRecord {
+        let plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -5963,7 +6188,7 @@ pub(crate) mod tests {
             quarantines: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        };
+        });
         save_plan(dir.path(), &plan).unwrap();
         // Forge a trivial (empty-matrix) plan in the mirror.
         let mut forged_plan = plan.clone();
@@ -6029,7 +6254,8 @@ pub(crate) mod tests {
         assert_eq!(load(dir.path()).unwrap(), None);
 
         // Same for a forged trivial plan.
-        let mut forged_plan = VerificationPlanRecord {
+        let mut forged_plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -6041,7 +6267,7 @@ pub(crate) mod tests {
             quarantines: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        };
+        });
         forged_plan.content_hash = compute_plan_hash(&forged_plan);
         let serialized = serde_json::to_vec_pretty(&forged_plan).unwrap();
         gwt_github::cache::write_atomic(&plan_state_path(dir.path()), &serialized).unwrap();
@@ -6268,9 +6494,11 @@ pub(crate) mod tests {
             all_passed: bool,
             created_at: DateTime<Utc>,
             plan_covered: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            verification_plan_snapshot: Option<VerificationPlanData>,
         }
 
-        let legacy = LegacyVerificationRunRecord {
+        let mut legacy = LegacyVerificationRunRecord {
             record_id: "vrr-legacy",
             session_id: "sess-legacy",
             owner_number: 3248,
@@ -6284,6 +6512,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             plan_covered: true,
+            verification_plan_snapshot: None,
         };
         let serialized = serde_json::to_vec(&legacy).unwrap();
         let hash = format!("{:x}", Sha256::digest(&serialized));
@@ -6294,6 +6523,145 @@ pub(crate) mod tests {
         assert!(integrity_ok(&loaded));
         assert_eq!(compute_content_hash(&loaded), hash);
         assert!(loaded.commands[0].output_tail.is_empty());
+
+        // A legacy embedded plan must keep struct order too, rather than
+        // acquiring the sorted object order of the versioned wire adapter.
+        legacy.verification_plan_snapshot = Some(VerificationPlanData {
+            format_version: None,
+            session_id: "sess-legacy".to_string(),
+            owner_number: Some(3248),
+            execution_binding: None,
+            commands: vec!["git --version".to_string()],
+            derived: false,
+            surfaces: Vec::new(),
+            generated_outputs: Vec::new(),
+            quarantines: Vec::new(),
+            worktree_fingerprint: String::new(),
+            created_at: legacy.created_at,
+            content_hash: String::new(),
+        });
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
+        let mut value = serde_json::to_value(legacy).unwrap();
+        value["content_hash"] = serde_json::json!(hash);
+        let loaded: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(integrity_ok(&loaded));
+        assert_eq!(compute_content_hash(&loaded), hash);
+    }
+
+    #[test]
+    fn verification_wire_roundtrip_preserves_unknown_fields_and_hash() {
+        let mut value = serde_json::to_value(passing_record("skew", "abc")).unwrap();
+        value["format_version"] = serde_json::json!(1);
+        value["future_record_field"] = serde_json::json!({"nested": [1, 2]});
+        value["commands"][0]["future_command_field"] = serde_json::json!("measured");
+        value["quarantined_failures"] = serde_json::json!([{
+            "failed_command": "cargo test", "test_identity": "test", "owner_issue": 5064,
+            "head_sha": "head", "merge_base_sha": "base", "baseline_command": "cargo test",
+            "baseline_exit_code": 1, "baseline_result_line": "FAILED", "pr_number": 1,
+            "future_failure": "opaque",
+            "pr_reference": {"kind": "body", "marker": "marker", "future_reference": true}
+        }]);
+        value.as_object_mut().unwrap().remove("content_hash");
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()));
+        value["content_hash"] = serde_json::json!(hash);
+
+        let record: VerificationRunRecord = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), value);
+        assert!(integrity_ok(&record));
+        assert_eq!(compute_content_hash(&record), hash);
+
+        let mut edited = record;
+        edited.commands[0].exit_code = 1;
+        assert!(!integrity_ok(&edited), "known fields remain hash-covered");
+        value["future_record_field"]["nested"][0] = serde_json::json!(3);
+        let edited: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(!integrity_ok(&edited), "unknown fields remain hash-covered");
+    }
+
+    #[test]
+    fn verification_wire_n_minus_one_reader_accepts_writer_continuation() {
+        // Freeze a v1 reader projection from before continuation was known.
+        #[derive(Serialize, Deserialize)]
+        struct PreviousReader {
+            format_version: u32,
+            record_id: String,
+            commands: Vec<VerificationCommandResult>,
+        }
+        let mut writer = passing_record("skew", "abc");
+        writer.format_version = Some(VERIFICATION_FORMAT_VERSION);
+        writer.continuation = Some(continuation::Continuation {
+            commands: vec!["git --version".to_string()],
+            headed_e2e_commands: Vec::new(),
+            authority_hash: "test-authority".to_string(),
+            command_indices: vec![0],
+            previous: None,
+        });
+        writer.content_hash = compute_content_hash(&writer);
+        let produced = serde_json::to_value(&writer).unwrap();
+        let reader: wire::WireRecord<PreviousReader> =
+            serde_json::from_value(produced.clone()).unwrap();
+        let mut roundtrip = serde_json::to_value(reader).unwrap();
+        assert_eq!(roundtrip, produced);
+        roundtrip.as_object_mut().unwrap().remove("content_hash");
+        assert_eq!(wire::canonical_hash(&roundtrip), writer.content_hash);
+    }
+
+    #[test]
+    fn verification_wire_plan_extensions_are_integrity_and_meaning_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        plan_and_run(dir.path(), "skew", &["git --version".to_string()]);
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        let mut value = serde_json::to_value(plan).unwrap();
+        value["future_input"] = serde_json::json!({"checks": ["new"]});
+        value["quarantines"] = serde_json::json!([{
+            "failed_command": "cargo test", "test_identity": "test",
+            "baseline_command": "cargo test", "owner_issue": 5064, "pr_number": 1,
+            "future_request": "opaque"
+        }]);
+        assert!(
+            serde_json::from_value::<VerificationQuarantineRequest>(
+                value["quarantines"][0].clone()
+            )
+            .is_err(),
+            "user input remains strict"
+        );
+        value.as_object_mut().unwrap().remove("content_hash");
+        value["content_hash"] = serde_json::json!(wire::canonical_hash(&value));
+        let extended: VerificationPlanRecord = serde_json::from_value(value.clone()).unwrap();
+        assert!(plan_integrity_ok(&extended));
+        assert_eq!(serde_json::to_value(&extended).unwrap(), value);
+
+        value["future_input"]["checks"][0] = serde_json::json!("changed");
+        let edited: VerificationPlanRecord = serde_json::from_value(value).unwrap();
+        assert!(!plan_integrity_ok(&edited));
+        assert_eq!(
+            changed_plan_fields(&extended, &edited),
+            vec!["unknown_fields"]
+        );
+    }
+
+    #[test]
+    fn verification_wire_newer_format_reports_version_instead_of_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(passing_record("skew", "no-git")).unwrap();
+        value["format_version"] = serde_json::json!(999);
+        // A newer format may change even recognized nested fields. Diagnose
+        // the version before attempting to decode that payload.
+        value["commands"] = serde_json::json!("newer command representation");
+        fs::create_dir_all(state_path(dir.path()).parent().unwrap()).unwrap();
+        fs::write(state_path(dir.path()), serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let status = evaluate_evidence(dir.path(), "skew", Some(3248));
+        let message = status.describe();
+        assert!(
+            message.contains("format version 999"),
+            "{status:?}: {message}"
+        );
+        assert!(message.contains("upgrade"), "{message}");
+        assert!(
+            !message.contains("tamper") && !message.contains("rerun"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -6913,7 +7281,8 @@ mod tests {
     fn record_roundtrips_and_missing_is_none() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), None);
-        let record = VerificationRunRecord {
+        let record = VerificationRunRecord::from(VerificationRunData {
+            format_version: Some(1),
             continuation: None,
             lifecycle: None,
             record_id: "vrr-test".to_string(),
@@ -6944,7 +7313,7 @@ mod tests {
             verification_plan_snapshot: None,
             plan_derived: false,
             content_hash: String::new(),
-        };
+        });
         save(dir.path(), &record).unwrap();
         let loaded = load(dir.path()).unwrap().unwrap();
         assert!(integrity_ok(&loaded));
@@ -7252,7 +7621,8 @@ mod tests {
 
         let plan_result = save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7264,7 +7634,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         );
         let run_result = run_verification(dir.path(), "sess-1", &["git --version".to_string()]);
         release_tx.send(()).unwrap();
@@ -7484,7 +7854,8 @@ mod tests {
             owner_issue: 3755,
             pr_number: 3854,
         };
-        let plan = VerificationPlanRecord {
+        let plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess".to_string(),
             owner_number: Some(3841),
             execution_binding: None,
@@ -7496,7 +7867,7 @@ mod tests {
             worktree_fingerprint: "fingerprint".to_string(),
             created_at: Utc::now(),
             content_hash: "hash".to_string(),
-        };
+        });
         let mut env = crate::cli::TestEnv::new(std::path::PathBuf::from("."));
         env.pr_quarantine_contexts.insert(
             3854,
@@ -7647,7 +8018,8 @@ mod tests {
         };
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-quarantine-runner".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7659,7 +8031,7 @@ mod tests {
                 worktree_fingerprint: worktree_fingerprint(dir.path()),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let prepared = PreparedQuarantineRequest {
@@ -7968,7 +8340,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-generated".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7980,7 +8353,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -8103,7 +8476,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-mixed".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8115,7 +8489,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -8157,7 +8531,8 @@ mod tests {
         // Plan with two commands; running only one is not covered.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8169,7 +8544,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, transcript) =
@@ -8201,7 +8576,8 @@ mod tests {
         // Another session's plan does not count for this session's run.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-other".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8213,7 +8589,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, _) =
@@ -8288,7 +8664,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8300,7 +8677,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
@@ -8317,7 +8694,8 @@ mod tests {
 
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8329,7 +8707,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let status = evaluate_evidence(dir.path(), "sess-1", None);
@@ -8357,7 +8735,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8369,7 +8748,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         fs::write(dir.path().join("new-rust-surface.rs"), "fn added() {}\n").unwrap();
@@ -8489,7 +8868,7 @@ mod tests {
         let error = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
-                commands: plan.commands,
+                commands: plan.commands.clone(),
                 headed_e2e_commands: Vec::new(),
                 max_wait_secs: Some(0),
                 user_verification_result: None,
@@ -8610,7 +8989,7 @@ mod tests {
             dir.path(),
             "sess-preflight",
             commands.clone(),
-            plan.generated_outputs,
+            plan.generated_outputs.clone(),
             Vec::new(),
             false,
             &authority,
@@ -8766,6 +9145,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("deferred"));
+        let mut predecessor = load(dir.path()).unwrap().unwrap();
+        let mut document = serde_json::to_value(&predecessor).unwrap();
+        document["commands"][0]["future_measurement"] = serde_json::json!({"count": 7});
+        predecessor = serde_json::from_value(document).unwrap();
+        save(dir.path(), &predecessor).unwrap();
         let predecessor = load(dir.path()).unwrap().unwrap();
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-resume", None),
@@ -8796,6 +9180,10 @@ mod tests {
         assert_eq!(admitted, vec![commands[2].clone(), commands[1].clone()]);
         assert_eq!(record.started_at, predecessor.started_at);
         assert_eq!(record.commands[0], predecessor.commands[0]);
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["commands"][0]["future_measurement"],
+            serde_json::json!({"count": 7})
+        );
         assert!(transcript.contains(&predecessor.record_id));
         assert!(record.all_passed && record.plan_covered);
         assert_eq!(
@@ -8809,7 +9197,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-trivial".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8821,7 +9210,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -8890,7 +9279,8 @@ mod tests {
         // Registered plan + covering run settles.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-ob".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8902,7 +9292,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
@@ -12643,7 +13033,8 @@ mod tests {
         let ran = "cargo test -p gwt-core -p gwt --all-features".to_string();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-4349".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -12655,7 +13046,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
