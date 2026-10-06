@@ -82180,18 +82180,25 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
         &endpoint,
     )
     .expect("persist fixture endpoint");
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("fixture daemon runtime");
+        let _runtime_guard = runtime.enter();
+        // Readiness notifications avoid spending the production IPC budget on fixture polling.
+        let listener =
+            tokio::net::UnixListener::from_std(listener).expect("register fixture daemon listener");
+        ready_tx.send(()).expect("fixture daemon is ready");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut received = Vec::new();
-        while Instant::now() < deadline {
-            let (mut stream, _) = match listener.accept() {
-                Ok(accepted) => accepted,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-                Err(error) => panic!("accept fixture publish: {error}"),
-            };
+        loop {
+            let (stream, _) = runtime
+                .block_on(async { tokio::time::timeout_at(deadline, listener.accept()).await })
+                .expect("fixture publish arrives before hang guard")
+                .expect("accept fixture publish");
+            let mut stream = stream.into_std().expect("fixture stream");
             stream
                 .set_nonblocking(false)
                 .expect("blocking fixture stream");
@@ -82274,13 +82281,16 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
                 return (received, accepted);
             }
         }
-        (received, false)
     });
 
-    let accepted = runtime
-        .claim_issue_monitor_launch_delivery(&repo, 42, "launch:effect-42", window_id)
-        .expect("daemon claim outcome");
-    let (received, daemon_accepted) = server.join().expect("fixture daemon joins");
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("fixture daemon starts before the claim");
+    let accepted =
+        runtime.claim_issue_monitor_launch_delivery(&repo, 42, "launch:effect-42", window_id);
+    let server_result = server.join();
+    let accepted = accepted.expect("daemon claim outcome");
+    let (received, daemon_accepted) = server_result.expect("fixture daemon joins");
     assert_eq!(
         received,
         ["snapshot", "claim"],
