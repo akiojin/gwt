@@ -1551,7 +1551,9 @@ mod tests {
 
     #[test]
     fn cargo_target_resolution_respects_configuration_and_command_overrides() {
-        let _lock = gwt_core::test_support::env_lock();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::create_dir_all(dir.path().join(".cargo")).unwrap();
