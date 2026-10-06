@@ -378,6 +378,15 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
+**Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
+ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
+大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
+維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
+設定欄には保存済みラベルと除外件数・Issue 番号を表示します。自動化からは
+`issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。
+`issue.monitor.status` は `allowed_labels`、`label_excluded_count`、
+`label_excluded_issues` を返します。
+
 open な GitHub Issue は、明示的な追加、有効な Auto-refill、または `urgent` ラベルによる投入
 まで Backlog に留まります。キューへの所属は Monitor の実行候補になる条件であり、
 準備状態・claim・同時実行数のチェックは引き続き適用されます。行の `Launch now` は
@@ -1145,9 +1154,18 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 ホスト全体の verification lease を取得するのは canonical `verify.run`
 だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
 各 Heavy コマンドの実行時に取得・解放し、Light コマンドは他の run と並行できます。
-最初のコマンドの取得待機が時間切れになると、新しい記録を作らず `deferred` を返します。
+未実行の Light を先に進め、Heavy の相対順序を保ち、gwt の成果物復旧は最後に実行します。
+残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
-再試行では行列全体を再実行します。再試行前に保持者を確認してください。
+
+再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
+execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、
+先行コマンドがすべて signal なしで成功した、有効な admission-deferred 記録だけを自動再開します。
+失敗・強制終了・クラッシュ・不一致などの記録では新しく実行し、登録 plan の不一致は
+引き続き `verify.plan` の再登録が必要です。再開した証跡は不変の先行記録を id/hash で参照し、
+元の開始時刻とコマンドごとの headed E2E・nextest・admission 証跡を保持します。
+行列全体と必要な headed Chromium の dark/light 証跡が成功するまでは Overall PASS や Ready にはなりません。
+再試行前に保持者を確認してください。
 
 ```bash
 gwtd <<'JSON'

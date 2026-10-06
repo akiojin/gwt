@@ -221,6 +221,7 @@ pub enum IssueCommand {
     },
     MonitorConfigSet {
         project_root: Option<std::path::PathBuf>,
+        allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
