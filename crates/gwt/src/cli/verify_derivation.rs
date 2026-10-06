@@ -388,14 +388,9 @@ pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
     derive_for_host(worktree, VerificationHost::current())
 }
 
-/// Explicit pre-PR policy for the gwt repository. Other projects keep their
-/// full matrix. CI delegation requires live protected contexts, not caller prose.
-pub fn derive_pre_pr(
-    worktree: &Path,
-    acceptance: &[String],
-    local: &[String],
-) -> Result<DerivedPlan, String> {
-    let required = if worktree.join("crates/gwt/Cargo.toml").is_file() {
+/// Read live protected contexts before taking the trusted store writer lease.
+pub fn read_pre_pr_required_contexts(worktree: &Path) -> Result<Vec<String>, String> {
+    if worktree.join("crates/gwt/Cargo.toml").is_file() {
         let read = |args: &[&str]| -> Result<String, String> {
             let output = hidden_command("gh")
                 .current_dir(worktree)
@@ -427,14 +422,24 @@ pub fn derive_pre_pr(
             "--jq",
             ".required_status_checks.contexts",
         ])?)
-        .map_err(|err| format!("pre-pr required contexts unreadable: {err}"))?
+        .map_err(|err| format!("pre-pr required contexts unreadable: {err}"))
     } else {
-        Vec::new()
-    };
+        Ok(Vec::new())
+    }
+}
+
+/// Explicit pre-PR policy for the gwt repository. Other projects keep their
+/// full matrix. Required contexts come from the live read at registration.
+pub fn derive_pre_pr(
+    worktree: &Path,
+    required: &[String],
+    acceptance: &[String],
+    local: &[String],
+) -> Result<DerivedPlan, String> {
     derive_pre_pr_for_host(
         worktree,
         VerificationHost::current(),
-        &required,
+        required,
         acceptance,
         local,
     )

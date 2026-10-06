@@ -58,6 +58,28 @@ fn main() -> ExitCode {
     let state_file = env::var("GWT_FAKE_GH_STATE_FILE").ok();
 
     match args.as_slice() {
+        [repo, view, json, field, jq, selector]
+            if mode == "pre-pr-writer-probe"
+                && repo == "repo" && view == "view" && json == "--json"
+                && field == "nameWithOwner" && jq == "--jq" && selector == ".nameWithOwner" => {
+            println!("akiojin/gwt");
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint, jq, selector]
+            if mode == "pre-pr-writer-probe"
+                && api == "api" && endpoint == "repos/akiojin/gwt/branches/develop/protection"
+                && jq == "--jq" && selector == ".required_status_checks.contexts" => {
+            let lease_path = fs::read_to_string(state_file.as_deref().expect("probe state path")).unwrap();
+            let path = std::path::Path::new(&lease_path);
+            let lease = fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+            if let Err(error) = lease.try_lock() {
+                eprintln!("trusted writer unavailable during required-context read: {error}");
+                return ExitCode::FAILURE;
+            }
+            fs::write(path.with_file_name("pre-pr-writer-probe.json"), "written").unwrap();
+            println!(r#"["Test (Rust)","Clippy & Rustfmt"]"#);
+            return ExitCode::SUCCESS;
+        }
         [pr, list, ..] if pr == "pr" && list == "list" => {
             if mode == "foreign-fork-fallback" {
                 println!("[]");
