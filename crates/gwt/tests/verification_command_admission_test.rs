@@ -15,6 +15,12 @@ const FIXTURE: &str = r#"
 use std::{env, fs, path::PathBuf, thread, time::{Duration, Instant}};
 fn main() {
     let command = env::args().nth(1).unwrap();
+    if command == "metadata" {
+        assert_eq!(env::args().skip(1).collect::<Vec<_>>(),
+            ["metadata", "--offline", "--no-deps", "--format-version", "1"]);
+        println!("{}", env::var("ADMISSION_TARGET_METADATA").unwrap());
+        return;
+    }
     let root = PathBuf::from(env::var_os("ADMISSION_SIGNALS").unwrap());
     let worker = env::var("ADMISSION_WORKER").unwrap();
     let marker = root.join(format!("{worker}-{command}"));
@@ -151,6 +157,10 @@ impl Arena {
             .env("GWT_VERIFY_SPAWN_HOST", "inherit")
             .env("ADMISSION_SIGNALS", &self.signals)
             .env("ADMISSION_WORKER", worker)
+            .env(
+                "ADMISSION_TARGET_METADATA",
+                json!({"target_directory": worktree.join("target")}).to_string(),
+            )
             .current_dir(worktree)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
