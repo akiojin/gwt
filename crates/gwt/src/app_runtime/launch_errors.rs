@@ -413,14 +413,23 @@ impl AppRuntime {
             });
             if let Some(issue_number) = monitor_owned_issue {
                 if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
-                    events.extend(self.answered_handoff_launch_failure_events(
+                    let (failure_events, committed) = self.answered_handoff_launch_failure_events(
                         issue_monitor_project_root.as_deref(),
                         issue_number,
                         issue_monitor_delivery_id.as_deref(),
                         handoff,
                         issue_monitor_autonomous_submit_started,
                         &detail,
-                    ));
+                    );
+                    events.extend(failure_events);
+                    // The durable retry owns this definitely pre-submit failure.
+                    // Submitted ambiguity and any surviving runtime retain their
+                    // window as evidence for exact reconciliation.
+                    if committed && !self.runtimes.contains_key(&window_id) {
+                        events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
                 } else {
                     let (failure_events, committed) = self
                         .issue_monitor_launch_failed_delivery_committed_events_with_mode(
@@ -497,14 +506,15 @@ impl AppRuntime {
         }
         if let Some(issue_number) = issue_monitor_issue_number {
             if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
-                events.extend(self.answered_handoff_launch_failure_events(
+                let (failure_events, _) = self.answered_handoff_launch_failure_events(
                     issue_monitor_project_root.as_deref(),
                     issue_number,
                     issue_monitor_delivery_id.as_deref(),
                     handoff,
                     issue_monitor_autonomous_submit_started,
                     &detail,
-                ));
+                );
+                events.extend(failure_events);
             } else {
                 events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
                     issue_monitor_project_root.as_deref(),
@@ -526,12 +536,13 @@ impl AppRuntime {
         handoff: &gwt::AutonomousHandoffDeliveryAttempt,
         submit_started: bool,
         detail: &str,
-    ) -> Vec<OutboundEvent> {
+    ) -> (Vec<OutboundEvent>, bool) {
         let local_delivery_key = delivery_id
             .map(str::to_string)
             .unwrap_or_else(|| format!("handoff:{}", handoff.handoff_id));
         self.issue_monitor_launch_deliveries
             .remove(&local_delivery_key);
+        let mut failure_committed = false;
         let durable_note = project_root.map_or_else(
             || "; the owning Project State is unavailable".to_string(),
             |project_root| {
@@ -566,12 +577,18 @@ impl AppRuntime {
                         Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Retry {
                             retry_not_before,
                             ..
-                        }) => format!(
-                            "; the definitely pre-submit attempt will retry after {retry_not_before}"
-                        ),
+                        }) => {
+                            failure_committed = true;
+                            format!(
+                                "; the definitely pre-submit attempt will retry after {retry_not_before}"
+                            )
+                        }
                         Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Escalated {
                             ..
-                        }) => "; the bounded retry ladder was exhausted".to_string(),
+                        }) => {
+                            failure_committed = true;
+                            "; the bounded retry ladder was exhausted".to_string()
+                        }
                         Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Rejected) => {
                             "; the durable attempt no longer matched".to_string()
                         }
@@ -584,16 +601,16 @@ impl AppRuntime {
         );
         let Some(context) = project_root.and_then(|root| self.project_context_for_root(root))
         else {
-            return Vec::new();
+            return (Vec::new(), failure_committed);
         };
-        vec![OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
+        (vec![OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
             notification_transition: None,
             level: "error".to_string(),
             message: format!(
                 "Issue Monitor could not confirm the exact answered-session submit{durable_note}: {detail}"
             ),
             issue_number: Some(issue_number),
-        }).with_error_project_root(&context.project_root)]
+        }).with_error_project_root(&context.project_root)], failure_committed)
     }
 
     pub(super) fn user_facing_launch_error_detail(detail: &str) -> String {

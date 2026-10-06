@@ -125,6 +125,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
     GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: project,
+    GWT_DISABLE_BACKGROUND_INDEX: "1",
   });
   await setup.prepare?.({ home, bin, project, env });
   const status = spawnSync(gwtd, [], {
@@ -155,12 +156,17 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
   }
   async function stop() {
+    const ownedPid = child?.pid;
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
       const deadline = Date.now() + 8_000;
       while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
-      if (current.exitCode === null && current.signalCode === null) current.kill("SIGKILL");
+      if (current.exitCode === null && current.signalCode === null) {
+        current.kill("SIGKILL");
+        const forcedDeadline = Date.now() + 8_000;
+        while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
+      }
     }
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
@@ -177,6 +183,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       if (command.join(" ").includes(home) && Number(pid) !== process.pid) {
         try { process.kill(Number(pid), "SIGTERM"); } catch { /* exited */ }
       }
+    }
+    if (ownedPid) {
+      const remaining = spawnSync("ps", ["-p", String(ownedPid), "-o", "pid="], { encoding: "utf8" });
+      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, ps_status: remaining.status }), contentType: "application/json" });
+      if (remaining.status !== 1) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
     }
     child = undefined;
   }

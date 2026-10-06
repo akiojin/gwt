@@ -11787,6 +11787,112 @@ fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
     }
 }
 
+#[test]
+fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..Default::default()
+    });
+    monitor.complete_active_launch(42, "tab-1::agent-1");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .unwrap();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-43")
+        .build();
+    let mut feedback = issue_monitor_feedback(43);
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    let result =
+        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|reason| reason.contains("max_active")),
+        "Monitor legacy/manual dispatch must honor capacity before creating a pane: {result:?}"
+    );
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+
+    // A retained Monitor pane in a sibling local tab is still a physical slot.
+    let empty_tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut sibling = sample_project_tab(
+        "tab-2",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let raw_id = sibling.workspace.persisted().windows[0].id.clone();
+    sibling
+        .workspace
+        .set_status(&raw_id, WindowProcessStatus::Error);
+    let mut runtime = sample_runtime(temp.path(), vec![empty_tab, sibling], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut retained = issue_monitor_feedback(42);
+    retained.issue_monitor_project_root = Some(repo.clone());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(combined_window_id("tab-2", &raw_id), retained);
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-06T00:00:00Z")
+        .unwrap();
+    assert_eq!(
+        snapshot.windows.len(),
+        1,
+        "the physical snapshot covers every local project tab"
+    );
+    assert_eq!(
+        snapshot.windows[0].window_id,
+        combined_window_id("tab-2", &raw_id)
+    );
+    let monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..Default::default()
+    });
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .unwrap();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-43")
+        .build();
+    let mut feedback = issue_monitor_feedback(43);
+    feedback.issue_monitor_project_root = Some(repo);
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    let result =
+        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|reason| reason.contains("max_active")),
+        "a sibling retained pane exhausts capacity: {result:?}"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+}
+
 fn spawned_agent_placement(runtime: &AppRuntime, tab_id: &str) -> WindowPlacement {
     runtime
         .tab(tab_id)
@@ -47646,7 +47752,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
 }
 
 #[test]
-fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
+fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_window() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -47695,9 +47801,23 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
         },
     );
 
+    let bootstrap_error =
+        "Process exited with status: 1\naccount/read workspace routing discovery failed (-32603)";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let _ = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        bootstrap_error,
+        Some(42),
+        Ok(()),
+    );
+    assert!(
+        runtime.tracked_window_exists(window_id),
+        "a Monitor failure ACK without a current PTY exit must retain the live pane"
+    );
+    runtime.runtimes.remove(window_id);
     let events = runtime.issue_monitor_agent_failed_result_events(
         window_id,
-        "agent failed",
+        bootstrap_error,
         Some(42),
         Ok(()),
     );
@@ -47706,15 +47826,126 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
         .pending_launch_feedback_contexts
         .contains_key(window_id));
     assert!(
-        runtime.window_lookup.contains_key(window_id),
-        "default mode retains the failed terminal for operator inspection"
+        !runtime.tracked_window_exists(window_id),
+        "a failed Monitor bootstrap must close before the row can relaunch"
     );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
     assert!(events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::IssueMonitorToast { level, issue_number, .. }
             if level == "error" && *issue_number == Some(42)
     )));
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+
+    let mut fresh = pending_fresh_execution_fixture(temp.path(), "monitor-bootstrap-before-start");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fresh.repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed unbound Monitor prefs");
+    fresh
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&fresh.window_id)
+        .expect("pending fresh execution")
+        .launch_feedback_context = Some(LaunchFeedbackContext {
+        client_id: "__issue_monitor__".to_string(),
+        title: "Issue Monitor".to_string(),
+        issue_monitor_issue_number: Some(fresh.owner.number),
+        issue_monitor_delivery_id: None,
+        issue_monitor_project_root: Some(fresh.repo.clone()),
+        issue_monitor_session_mode: None,
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
+        issue_monitor_review_dispatch: false,
+    });
+    let events = fresh.runtime.issue_monitor_agent_failed_result_events(
+        &fresh.window_id,
+        bootstrap_error,
+        None,
+        Ok(()),
+    );
+    assert!(
+        !fresh.runtime.tracked_window_exists(&fresh.window_id),
+        "an unbound Monitor bootstrap failure must roll back before another launch"
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fresh);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, issue_number, .. }
+            if level == "error" && *issue_number == Some(fresh.owner.number)
+    )));
+
+    let mut retained =
+        pending_fresh_execution_fixture(temp.path(), "monitor-bootstrap-cleanup-refused");
+    let mut feedback = issue_monitor_feedback(retained.owner.number);
+    feedback.issue_monitor_project_root = Some(retained.repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    retained
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&retained.window_id)
+        .expect("pending fresh execution")
+        .launch_feedback_context = Some(feedback.clone());
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&retained.repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed spare Monitor capacity");
+    replace_fresh_candidate_session_incarnation(
+        &retained.runtime.sessions_dir,
+        &retained.candidate_session_id,
+    );
+    retained
+        .runtime
+        .set_window_status("tab-1", "agent-1", WindowProcessStatus::Error);
+    let _ = retained.runtime.issue_monitor_agent_failed_result_events(
+        &retained.window_id,
+        bootstrap_error,
+        None,
+        Ok(()),
+    );
+    assert!(retained.runtime.tracked_window_exists(&retained.window_id));
+    assert!(retained
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&retained.window_id));
+    retained.runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&retained.repo)
+        .branch("work/issue-2359")
+        .linked_issue_number(retained.owner.number)
+        .build();
+    // The RED path may create a sample canvas pane, but must never run a provider.
+    config.command = retained
+        .repo
+        .join("missing-monitor-agent")
+        .display()
+        .to_string();
+    for _ in 0..2 {
+        let result = retained.runtime.spawn_agent_window_with_feedback(
+            "tab-1",
+            config.clone(),
+            canvas_bounds(),
+            None,
+            feedback.clone(),
+        );
+        assert!(
+            result.as_ref().is_err_and(|reason| reason.contains("pending")),
+            "a retained Prepared Monitor launch must block a second pane despite spare capacity: {result:?}"
+        );
+        assert_eq!(
+            retained.runtime.tabs[0].workspace.persisted().windows.len(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -51791,10 +52022,16 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (label, pane_status, expect_adoption) in [
-        ("running pane", WindowProcessStatus::Running, true),
-        ("idle pane", WindowProcessStatus::Idle, true),
-        ("stopped pane", WindowProcessStatus::Stopped, false),
+    for (label, pane_status, expect_adoption, pending_identity) in [
+        ("running pane", WindowProcessStatus::Running, true, false),
+        ("idle pane", WindowProcessStatus::Idle, true, false),
+        ("stopped pane", WindowProcessStatus::Stopped, false, false),
+        (
+            "pre-session Monitor pane",
+            WindowProcessStatus::Starting,
+            true,
+            true,
+        ),
     ] {
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -51807,11 +52044,12 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
         gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
             .save(&sessions_dir)
             .expect("save previous session");
+        let now = chrono::Utc::now().to_rfc3339();
         let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
             enabled: true,
             ..gwt::IssueMonitorConfig::default()
         });
-        monitor.terminal_queue_push(&[3165], "operator", "2026-07-28T00:00:00Z");
+        monitor.terminal_queue_push(&[3165], "operator", &now);
         monitor.record_candidate(gwt::IssueMonitorIssue {
             number: 3165,
             title: "SPEC: duplicate launch".to_string(),
@@ -51827,7 +52065,7 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
             "claim-3165",
             "host/session",
             "effect-3165",
-            "2026-07-28T00:00:00Z",
+            &now,
         ));
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
@@ -51841,11 +52079,27 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
         let raw_window_id = tab.workspace.persisted().windows[0].id.clone();
         assert!(tab
             .workspace
-            .set_linked_issue_number(&raw_window_id, Some(3165)));
+            .set_linked_issue_number(&raw_window_id, (!pending_identity).then_some(3165)));
         tab.workspace.set_status(&raw_window_id, pane_status);
         let (mut runtime, _recorded_events) =
             sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
         let live_window_id = combined_window_id("tab-1", &raw_window_id);
+        if pending_identity {
+            let mut feedback = issue_monitor_feedback(3165);
+            feedback.issue_monitor_project_root = Some(repo.clone());
+            runtime
+                .pending_launch_feedback_contexts
+                .insert(live_window_id.clone(), feedback);
+            let snapshot = runtime
+                .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-06T00:00:00Z")
+                .unwrap();
+            assert_eq!(
+                snapshot.windows[0].issue_number,
+                Some(3165),
+                "pre-Session identity is observable"
+            );
+            assert!(snapshot.windows[0].monitor_owned);
+        }
         if pane_status == WindowProcessStatus::Stopped {
             runtime
                 .window_pty_statuses
@@ -51859,6 +52113,13 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
                 .insert(live_window_id.clone(), pane_status);
         }
         assert_eq!(runtime.window_status(&live_window_id), Some(pane_status));
+        let observation = runtime
+            .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())
+            .unwrap();
+        assert_eq!(
+            observation.windows[0].monitor_owned, pending_identity,
+            "{label}: sessionless manual panes cannot inherit this agent's ambient Monitor route"
+        );
 
         let events = runtime.auto_launch_issue_monitor_delivery_events(
             &runtime.test_context(),
@@ -51885,7 +52146,7 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
                     BackendEvent::IssueMonitorToast { message, .. }
                         if message.contains("did not open a second pane")
                 )),
-                "{label}: the refusal is reported"
+                "{label}: the refusal is reported: {events:?}; prefs={prefs:?}"
             );
             assert!(
                 prefs.pending_launch_deliveries.is_empty(),
@@ -52373,10 +52634,13 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
             .count(),
         1
     );
-    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
-        .expect("reload ACKed prefs")
-        .pending_launch_deliveries
-        .is_empty());
+    let acknowledged = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload ACKed prefs");
+    assert!(
+        acknowledged.pending_launch_deliveries.is_empty(),
+        "restart must ACK the exact saved pane: window={:?}, deliveries={:?}",
+        restarted.tabs[0].workspace.persisted().windows,
+        acknowledged.pending_launch_deliveries
+    );
 }
 
 #[test]
@@ -54369,7 +54633,9 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
     let process = &mut result.as_mut().expect("prepared exact Resume").0;
     process.command = "/definitely/missing/gwt-answered-resume".to_string();
     process.cwd = Some(fixture.worktree.clone());
-    fixture.runtime.handle_launch_complete(window_id, result);
+    fixture
+        .runtime
+        .handle_launch_complete(window_id.clone(), result);
 
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
@@ -54399,6 +54665,15 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
         prefs.queued_launch_session_strategies.get(&3165),
         Some(&gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe),
     );
+    assert!(
+        !fixture.runtime.tracked_window_exists(&window_id),
+        "a definitely pre-submit Monitor failure must not leave an Error pane"
+    );
+    assert!(fixture.runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
 }
 
 /// Issue #3716 AC-2: an incomplete provider receipt is a retryable handoff
@@ -75422,6 +75697,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
         Some("tab-1"),
         None,
         None,
+        None,
         "2026-09-07T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -75477,6 +75753,7 @@ fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         None,
         "2026-09-07T07:00:00Z",
@@ -75556,6 +75833,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         Some("tab-1"),
         None,
         None,
+        None,
         "2026-09-07T07:00:00Z",
         &issue_client_factory,
         std::time::Duration::from_secs(60),
@@ -75620,6 +75898,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         None,
         "2026-08-12T07:00:00Z",
@@ -75705,6 +75984,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
         Some("tab-1"),
         None,
         None,
+        None,
         "2026-09-04T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -75777,6 +76057,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         None,
         "2026-09-05T07:00:00Z",
@@ -81805,4 +82086,221 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
     assert!(cleared.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text.is_empty())));
     runtime.remove_window_state_tracking(&id);
     assert!(!runtime.remote_terminal_previews.contains_key(&id));
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
+    use std::{io::BufRead, os::unix::net::UnixListener};
+
+    use gwt_core::daemon::{
+        persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest,
+        IpcHandshakeResponse, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let now = chrono::Utc::now().to_rfc3339();
+    let window_id = "tab-1::agent-1";
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid).expect("host start time");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.terminal_queue_push(&[42], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Current canvas adoption".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(42, "claim-42", "host/session", "effect-42", &now));
+    assert!(monitor.record_monitor_runtime_windows(
+        host_pid,
+        host_started_at,
+        BTreeMap::from([(42, 1)]),
+        BTreeMap::from([(window_id.to_string(), 42)]),
+        &now,
+    ));
+    assert_eq!(
+        monitor.active_count(),
+        2,
+        "the daemon has no canvas binding yet"
+    );
+    assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed unassigned delivery");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.to_string(), feedback);
+    assert_eq!(
+        runtime.window_status(window_id),
+        Some(WindowProcessStatus::Starting)
+    );
+
+    let scope = RuntimeScope::from_project_root(&repo, RuntimeTarget::Host).expect("runtime scope");
+    let socket_path = temp.path().join("claim.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fixture daemon");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        host_pid,
+        socket_path.display().to_string(),
+        "claim-token".to_string(),
+        "test-daemon".to_string(),
+    );
+    persist_endpoint(
+        &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+        &endpoint,
+    )
+    .expect("persist fixture endpoint");
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        while Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(error) => panic!("accept fixture publish: {error}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking fixture stream");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bound fixture reads");
+            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read handshake");
+            let request: IpcHandshakeRequest =
+                serde_json::from_str(line.trim_end()).expect("parse handshake");
+            assert_eq!(request.scope, scope);
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&IpcHandshakeResponse {
+                    protocol_version: DAEMON_PROTOCOL_VERSION,
+                    daemon_version: "test-daemon".to_string(),
+                    accepted: true,
+                    rejection_reason: None,
+                })
+                .expect("serialize handshake")
+            )
+            .expect("write handshake");
+            line.clear();
+            reader.read_line(&mut line).expect("read publish");
+            let ClientFrame::Publish { channel, payload } =
+                serde_json::from_str(line.trim_end()).expect("parse publish")
+            else {
+                panic!("expected control publish");
+            };
+            assert_eq!(
+                channel,
+                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+            );
+            assert_eq!(payload["source_pid"].as_u64(), Some(u64::from(host_pid)));
+            let control = &payload["payload"];
+            let claim = control.get("claim_launch_delivery");
+            let accepted = if let Some(claim) = claim {
+                received.push("claim");
+                monitor.claim_launch_delivery(
+                    claim["issue_number"].as_u64().expect("issue number"),
+                    claim["delivery_id"].as_str().expect("delivery identity"),
+                    claim["materializer_id"]
+                        .as_str()
+                        .expect("materializer identity"),
+                    claim["materializer_pid"]
+                        .as_u64()
+                        .expect("materializer pid") as u32,
+                    claim["materializer_window_id"]
+                        .as_str()
+                        .expect("pane identity"),
+                    gwt::process::is_host_process_alive,
+                )
+            } else {
+                received.push("snapshot");
+                let snapshot: gwt::IssueMonitorWindowSnapshot =
+                    serde_json::from_value(control["window_snapshot"].clone())
+                        .expect("current canvas snapshot");
+                let tabs = serde_json::from_value(control["window_snapshot_project_tabs"].clone())
+                    .expect("canvas tab scope");
+                assert_eq!(snapshot.windows[0].window_id, window_id);
+                assert!(snapshot.windows[0].monitor_owned);
+                assert_eq!(
+                    tabs,
+                    std::collections::BTreeSet::from(["tab-1".to_string()])
+                );
+                monitor.record_window_snapshot_from_host(snapshot, host_pid, host_started_at, tabs);
+                true
+            };
+            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+                .expect("commit daemon prefs");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&DaemonFrame::Ack).expect("serialize daemon ack")
+            )
+            .expect("write daemon ack");
+            if claim.is_some() {
+                return (received, accepted);
+            }
+        }
+        (received, false)
+    });
+
+    let accepted = runtime
+        .claim_issue_monitor_launch_delivery(&repo, 42, "launch:effect-42", window_id)
+        .expect("daemon claim outcome");
+    let (received, daemon_accepted) = server.join().expect("fixture daemon joins");
+    assert_eq!(
+        received,
+        ["snapshot", "claim"],
+        "the same fresh canvas must precede the claim"
+    );
+    assert!(
+        daemon_accepted,
+        "the daemon must adopt the exact existing pane at max_active=1"
+    );
+    assert!(
+        accepted,
+        "readback must confirm the exact materializer tuple"
+    );
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .expect("reload daemon claim");
+    let delivery = &prefs.pending_launch_deliveries[0];
+    assert_eq!(
+        delivery.materializer_id.as_deref(),
+        Some(runtime.issue_monitor_materializer_id.as_str())
+    );
+    assert_eq!(delivery.materializer_pid, Some(host_pid));
+    assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
 }
