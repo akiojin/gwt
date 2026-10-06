@@ -655,7 +655,8 @@ mod runtime_factory_tests {
         let commands = vec!["git --invalid-verification-command".to_string()];
         verification::save_plan(
             &repo,
-            &verification::VerificationPlanRecord {
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
                 session_id: "failed-head-session".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -667,7 +668,7 @@ mod runtime_factory_tests {
                 worktree_fingerprint: String::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, _) =
