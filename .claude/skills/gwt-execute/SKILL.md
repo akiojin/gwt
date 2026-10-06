@@ -286,6 +286,15 @@ preserve Heavy commands' original relative order, and keep artifact restoration 
 The full registered matrix and required headed Chromium evidence in dark/light
 must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
 
+Heavy Cargo admission uses a bounded host slot pool (#5082), with CPU/memory
+defaults and a global `[verification] slots` override. Distinct worktrees and
+effective Cargo target directories may run concurrently. The same worktree or
+target remains serialized, and unknown wrappers and older exclusive holders
+serialize against the entire pool. Disk reservations and isolated child temp
+directories protect concurrent runs. Read `verify.lease.status` for capacity,
+running/available slots, every holder's ETA, and the shared FIFO queue; do not
+infer the whole host state from one representative holder.
+
 ## Legacy aliases
 
 During the transition, `$gwt-build-spec SPEC-N` and `$gwt-fix-issue #N` are

@@ -3108,10 +3108,29 @@ fn execute_command_with_isolation(
     progress: Option<&CommandProgress>,
 ) -> Result<(i32, Option<i32>, String), String> {
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
+    // Heavy admission already holds this guard. Light Cargo and operational
+    // artifact restoration participate in the same GC boundary without a slot.
+    let _artifacts = if progress.is_none() {
+        crate::cli::verification_lease::effective_cargo_target(
+            worktree,
+            command,
+            isolated_baseline,
+        )?
+        .map(|target| crate::cli::verification_lease::lock_build_artifacts(&target))
+        .transpose()
+        .map_err(|error| format!("build artifact coordination failed: {error}"))?
+    } else {
+        None
+    };
+    let temporary_base = crate::cli::verification_lease::command_temporary_base(worktree, command)?;
+    fs::create_dir_all(&temporary_base).map_err(|error| error.to_string())?;
+    let temp = tempfile::Builder::new()
+        .prefix("gwt-verify-")
+        .tempdir_in(temporary_base)
+        .map_err(|error| error.to_string())?;
     match host {
         VerificationHost::Daemon(endpoint) => {
-            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-            let request = delegated_spawn_request(
+            let mut request = delegated_spawn_request(
                 worktree,
                 &args,
                 &assignments,
@@ -3120,6 +3139,14 @@ fn execute_command_with_isolation(
                 temp.path().join("stdout"),
                 temp.path().join("stderr"),
             );
+            for key in ["TMPDIR", "TEMP", "TMP"] {
+                request
+                    .env
+                    .retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
+                request
+                    .env
+                    .push((key.to_string(), temp.path().to_string_lossy().into_owned()));
+            }
             execute_command_on_daemon(command, &request, endpoint, progress)
         }
         VerificationHost::Inherit => {
@@ -3136,6 +3163,9 @@ fn execute_command_with_isolation(
             for (key, value) in &assignments {
                 process.env(key, value);
             }
+            for key in ["TMPDIR", "TEMP", "TMP"] {
+                process.env(key, temp.path());
+            }
             if isolated_baseline {
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
@@ -3150,8 +3180,8 @@ fn execute_command_with_isolation(
                 // Issue #4746 (earlier instance #4105): a grandchild can
                 // inherit stdout/stderr beyond the direct child's lifetime.
                 // Files let us wait for that child without waiting for EOF.
-                let stdout = tempfile::NamedTempFile::new()?;
-                let stderr = tempfile::NamedTempFile::new()?;
+                let stdout = tempfile::NamedTempFile::new_in(temp.path())?;
+                let stderr = tempfile::NamedTempFile::new_in(temp.path())?;
                 process
                     .stdin(std::process::Stdio::null())
                     .stdout(stdout.reopen()?)
@@ -5545,6 +5575,7 @@ pub(super) fn run<E: CliEnv>(
                     crate::cli::verification_lease::admission::admit(
                         env,
                         &worktree,
+                        Some(command),
                         max_wait,
                         || restore_gwtd_after_deferral(&worktree, host),
                     )
@@ -6231,6 +6262,105 @@ pub(crate) mod tests {
         assert!(record.commands[0].output_tail.is_empty());
         let serialized = serde_json::to_value(&record.commands[0]).unwrap();
         assert!(serialized.get("output_tail").is_none(), "{serialized}");
+    }
+
+    #[test]
+    fn command_children_have_distinct_temporary_directories() {
+        let worktree = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let command = r#"pwsh -NoProfile -Command 'Write-Output ($env:TEMP + "|" + $env:TMP + "|" + $env:TMPDIR)'"#;
+        #[cfg(unix)]
+        let command = r#"sh -c 'printf "%s|%s|%s" "$TEMP" "$TMP" "$TMPDIR"'"#;
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let (code, _, output) = execute_command_with_isolation(
+                worktree.path(),
+                command,
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{output}");
+            let line = output.lines().find(|line| line.contains('|')).unwrap();
+            let directories: Vec<_> = line.trim().split('|').collect();
+            assert_eq!(directories.len(), 3, "{output}");
+            assert!(!directories[0].is_empty());
+            assert_eq!(directories[0], directories[1]);
+            assert_eq!(directories[0], directories[2]);
+            paths.push(directories[0].to_string());
+        }
+        assert_ne!(
+            paths[0], paths[1],
+            "canonical children must not share test temp names"
+        );
+        assert!(paths.iter().all(|path| !Path::new(path).exists()));
+    }
+
+    #[test]
+    fn non_admitted_cargo_holds_the_build_artifact_boundary() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(worktree.path().join("src")).unwrap();
+        fs::write(
+            worktree.path().join("Cargo.toml"),
+            "[package]\nname='resource-boundary-fixture'\nversion='0.0.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree.path().join("src/lib.rs"),
+            "#[test] fn resource_fixture() {}",
+        )
+        .unwrap();
+        fs::write(
+            worktree.path().join("build.rs"),
+            r#"fn main() {
+                let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+                std::fs::write(root.join("entered"), "").unwrap();
+                while !root.join("release").exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }"#,
+        )
+        .unwrap();
+        let root = worktree.path().to_path_buf();
+        let child_home = home.path().to_path_buf();
+        let child = std::thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(child_home);
+            execute_command_with_isolation(
+                &root,
+                "cargo t --lib resource_fixture --target-dir target",
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !worktree.path().join("entered").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let entered = worktree.path().join("entered").exists();
+        let protected = entered
+            && crate::cli::verification_lease::try_lock_build_artifacts(
+                &worktree.path().join("target"),
+            )
+            .unwrap()
+            .is_none();
+        // Release the real build child before asserting, including on RED.
+        fs::write(worktree.path().join("release"), "").unwrap();
+        let (code, _, output) = child.join().unwrap().unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(
+            entered,
+            "the Cargo build script must exercise the execution interval"
+        );
+        assert!(
+            protected,
+            "non-admitted Cargo must participate in the GC target boundary"
+        );
     }
 
     /// Issue #4409: the daemon-hosted path assembles its child from an
@@ -8338,6 +8468,14 @@ mod tests {
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-preflight");
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let marker = home.path().join("command-ran");
@@ -8457,8 +8595,23 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-mixed");
+        let original_home = dirs::home_dir().unwrap();
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .unwrap_or_else(|| original_home.join(".cargo").into_os_string());
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .unwrap_or_else(|| original_home.join(".rustup").into_os_string());
+        let _cargo_home = ScopedEnvVar::set("CARGO_HOME", cargo_home);
+        let _rustup_home = ScopedEnvVar::set("RUSTUP_HOME", rustup_home);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let coordinator = IndexCoordinator::open_default_verification().unwrap();
         let other = TargetKey::verification("other-repo", "other-worktree");
         let JobAdmission::Owner(guard) = coordinator
@@ -8657,6 +8810,16 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
             .unwrap();
@@ -9468,6 +9631,12 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("blocked generation recovery repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();
@@ -9538,6 +9707,12 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("ledgerless compatibility repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();

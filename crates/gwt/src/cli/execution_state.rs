@@ -31693,6 +31693,14 @@ exit 1
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            // Adopted authority is independent of the host's free disk space.
+            gwt_config::Settings::update_global(|settings| {
+                settings.verification.disk_budget_bytes = Some(0);
+                settings.build_artifact_gc.below_bytes = 0;
+                settings.build_artifact_gc.below_percent = 0;
+                Ok(())
+            })
+            .expect("fixture disk admission");
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-handoff");
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
             let dir = tempfile::tempdir().unwrap();
@@ -31973,6 +31981,14 @@ exit 1
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            // Terminal recovery evidence is independent of the host's free disk space.
+            gwt_config::Settings::update_global(|settings| {
+                settings.verification.disk_budget_bytes = Some(0);
+                settings.build_artifact_gc.below_bytes = 0;
+                settings.build_artifact_gc.below_percent = 0;
+                Ok(())
+            })
+            .expect("fixture disk admission");
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-relaunched");
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
             let dir = tempfile::tempdir().unwrap();

@@ -67,7 +67,11 @@ impl Arena {
             std::fs::create_dir_all(path).unwrap();
         }
         std::fs::create_dir_all(home.join(".gwt")).unwrap();
-        std::fs::write(home.join(".gwt/config.toml"), "[verification]\nslots = 1\n").unwrap();
+        std::fs::write(
+            home.join(".gwt/config.toml"),
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let source = root.path().join("cargo_fixture.rs");
         std::fs::write(&source, FIXTURE).unwrap();
         let output = hidden_command("rustc")
@@ -692,9 +696,12 @@ fn canonical_four_matrix_throughput_probe() {
     for worker in workers.iter().skip(1) {
         copy_tree(&workers[0].join("target"), &worker.join("target"));
     }
-    for index in 0..4 {
-        finish(run(index, "warm"), index, "warm");
+    set_slots(4);
+    let warming: Vec<_> = (0..4).map(|index| run(index, "warm")).collect();
+    for (index, child) in warming.into_iter().enumerate() {
+        finish(child, index, "warm");
     }
+    set_slots(1);
     let serial_started = Instant::now();
     let mut serial = Vec::new();
     for index in 0..4 {

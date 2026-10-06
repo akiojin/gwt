@@ -66,7 +66,7 @@ encoding_rs.workspace = true
 pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
-sysinfo.workspace = true
+sysinfo = { workspace = true, features = ["disk"] }
 tray-icon = "0.26"
 auto-launch = "0.6"
 whoami = "2.1"

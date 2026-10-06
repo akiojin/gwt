@@ -2992,6 +2992,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        // Result persistence is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let _session =
             ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4217-verification");
         let repo = temp.path().join("repo");
@@ -3028,6 +3036,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        // Confirmation authority is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
         let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");

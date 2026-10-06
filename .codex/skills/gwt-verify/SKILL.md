@@ -202,6 +202,15 @@ argument-repair wrapper does not establish that the canonical defect is fixed.
 
 ## Invocation Sequence
 
+Canonical Heavy Cargo admission uses a bounded host slot pool (#5082).
+Independent worktrees and effective Cargo target directories may run
+concurrently, subject to CPU/memory capacity and disk reservations. Set
+`[verification] slots` or `disk_budget_bytes` in the global config to override
+the defaults. The same worktree or target remains serialized; unknown wrappers
+and older exclusive holders serialize against the entire pool. Children use
+isolated temporary directories. `verify.lease.status` lists capacity,
+running/available slots, every holder's ETA, and the shared FIFO queue.
+
 ```text
 agent → /gwt:gwt-verify [--mode quick|full|pre-pr] [--headed] [--skip-user-check]
   ↓
