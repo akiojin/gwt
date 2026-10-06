@@ -212,7 +212,11 @@ owner Issue.
 ## Verification and PR gate
 
 Phase 3 delegates to `gwt-verify --mode full`. Record the selected commands and
-results in the evidence bundle. In an `interactive` launch, UI-affecting work
+results in the evidence bundle. For a releaseable slice in a project with an approved
+CI-backed policy, use `gwt-verify --mode pre-pr` instead: keep the Issue AC tests
+and checks absent from required CI locally, then wait for required CI before
+claiming delivery. Full verification remains available and is the fallback
+when the CI correspondence cannot be established. In an `interactive` launch, UI-affecting work
 requires a concrete user verification handoff and a `User Verification Result`.
 
 Read the launch route from the launch record, not from the environment:
