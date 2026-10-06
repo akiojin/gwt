@@ -2128,7 +2128,11 @@ mod tests {
         )
         .expect_err("long-running windows process tree must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(deadline_evidence(&error).interrupted_child_reaped());
+        assert!(
+            deadline_evidence(&error).interrupted_child_reaped(),
+            "{:?}",
+            deadline_evidence(&error)
+        );
 
         let parent = wait_for_pid_file_windows(&parent_file);
         let descendant = wait_for_pid_file_windows(&descendant_file);
