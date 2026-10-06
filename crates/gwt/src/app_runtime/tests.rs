@@ -13611,7 +13611,7 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     session.reasoning_level = Some("high".to_string());
     session.tool_version = Some("latest".to_string());
     session.session_mode = gwt_agent::SessionMode::Continue;
-    session.skip_permissions = true;
+    session.skip_permissions = false;
     session.codex_fast_mode = true;
     session.save(&sessions_dir).expect("save session");
 
@@ -13641,11 +13641,11 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     assert_eq!(view.selected_model, "gpt-5.5");
     assert_eq!(view.selected_reasoning, "high");
     assert_eq!(view.selected_execution_mode, "continue");
-    // Issue #3462: Continue inherits the persisted Skip Permissions preference.
+    // L2 interprets the legacy permission preference as the fixed value.
     assert!(view.skip_permissions);
-    // Toggle visibility still follows the manual-setup launch path.
+    // Launch choices remain hidden.
     assert!(!view.show_skip_permissions);
-    assert!(view.fast_mode);
+    assert!(!view.fast_mode);
 }
 
 #[test]
@@ -55599,12 +55599,17 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_frontend_event(
+    runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::IssueMonitorConfigureIssue {
             issue_number: 3165,
             linked_issue_kind: Some(LinkedIssueKind::Spec),
         },
+    );
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::SetFastMode { enabled: true },
+        None,
     );
     let view = events
         .iter()
@@ -55615,6 +55620,10 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
             _ => None,
         })
         .expect("launch wizard view");
+    assert!(
+        view.fast_mode,
+        "profile editing honors its own Fast preference"
+    );
     let impact = view
         .issue_monitor_pool_impact
         .as_ref()
@@ -55666,6 +55675,7 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
     let saved_summary =
         gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
             .status_view()
