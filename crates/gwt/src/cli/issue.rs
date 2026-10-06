@@ -1090,6 +1090,7 @@ fn run_monitor_priority_move<E: CliEnv>(
             ));
         }
         prefs.priority_order.insert(index, number);
+        reorder_local_terminal_queue_by_priority(prefs);
         Ok(())
     })
     .map_err(io_as_api_error)?;
@@ -1098,6 +1099,28 @@ fn run_monitor_priority_move<E: CliEnv>(
     );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #5079: admission walks this host's stored terminal queue, never
+/// `priority_order`, so a priority write that left the queue untouched was
+/// acknowledged and then ignored — the scan kept launching in `queued_at`
+/// order. Sorting the stored entries here makes the written order the launch
+/// order: listed Issues first in `priority_order`, the rest in their existing
+/// (queued) order. The sort is stable, so unlisted entries keep their place.
+fn reorder_local_terminal_queue_by_priority(prefs: &mut crate::IssueMonitorPrefs) {
+    let Some(queue) = prefs
+        .terminal_queues
+        .get_mut(&crate::process::current_hostname())
+    else {
+        return;
+    };
+    let order = &prefs.priority_order;
+    queue.entries.sort_by_key(|entry| {
+        order
+            .iter()
+            .position(|number| *number == entry.number)
+            .unwrap_or(usize::MAX)
+    });
 }
 
 /// Issue #4231 AC-5: `priority_order` orders Issues the Monitor already
@@ -1143,6 +1166,7 @@ fn run_monitor_priority_set<E: CliEnv>(
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order = issue_numbers.to_vec();
+        reorder_local_terminal_queue_by_priority(prefs);
         Ok(())
     })
     .map_err(io_as_api_error)?;
@@ -9465,6 +9489,76 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(missing, expected, "{reply}");
         }
+    }
+
+    #[test]
+    fn issue_monitor_priority_operations_reorder_the_local_terminal_queue() {
+        // Issue #5079: admission walks the stored terminal queue, so a
+        // priority write must reorder it or the scan keeps launching FIFO.
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let host = crate::process::current_hostname();
+        let entry =
+            |number: u64, queued_at: &str| crate::issue_monitor::IssueMonitorTerminalQueueEntry {
+                number,
+                queued_at: queued_at.to_string(),
+                queued_by: "operation".to_string(),
+                ..Default::default()
+            };
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.terminal_queues.insert(
+            host.clone(),
+            crate::issue_monitor::IssueMonitorTerminalQueue {
+                entries: vec![
+                    entry(1, "2026-10-01T00:00:00Z"),
+                    entry(2, "2026-10-02T00:00:00Z"),
+                    entry(3, "2026-10-03T00:00:00Z"),
+                    entry(4, "2026-10-04T00:00:00Z"),
+                ],
+                last_seen_at: None,
+            },
+        );
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let queue_order = || {
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("load prefs")
+                .terminal_queues
+                .get(&host)
+                .expect("local queue")
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>()
+        };
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorPrioritySet {
+                project_root: Some(repo.clone()),
+                issue_numbers: vec![3, 1],
+            },
+            &mut out,
+        )
+        .expect("priority set");
+        assert_eq!(queue_order(), vec![3, 1, 2, 4]);
+
+        out.clear();
+        run(
+            &mut env,
+            IssueCommand::MonitorPriorityMove {
+                project_root: Some(repo.clone()),
+                number: 4,
+                position: crate::cli::IssueMonitorPriorityPosition::Index(1),
+            },
+            &mut out,
+        )
+        .expect("priority move");
+        assert_eq!(queue_order(), vec![3, 4, 1, 2]);
     }
 
     #[test]
