@@ -104,9 +104,11 @@ Settings → Agent Backends で旧設定の endpoint・API key・model を再登
 floor 以降に追加された Session schema 5、PM scratch、work-item projection rebuild v2、
 ProjectKey の移行は維持します。
 usage の `window_minutes` 契約と、未完了の SPEC #2359 に属する Workspace projection
-backfill も維持します。旧 HOME / Workspace の `workspace/current.json` と
-`work_items.json` からの取り込みはデータ保護の例外として保持し、起動時に新しい状態を
-作る前に未対応の配置を安全に案内できるようになるまで削除しません。
+backfill も維持します。旧 HOME / Workspace の `workspace/current.json`、
+`work_items.json`、`journal.jsonl` からの取り込みは廃止しました。対応する現行ファイルが
+ない場合、Workspace 状態の読み込み・保存を拒否し、旧ファイルのパスと更新手順を表示します。
+旧ファイルは変更しません。v9.106.0 で各プロジェクトを移行してから更新してください。
+空の現行ファイルを作る操作は移行になりません。現行 receipt・event の回復処理は維持します。
 coordination のイベント取り込みと discussion の取り込みも、現用の回復処理と session 別
 Stop 契約が利用するため保持します。旧 agent identity reset は廃止し、起動時には保存済みの
 目的・進捗を保持します。`agent_identity.migration.json` は既存の内容を変更せず、
@@ -144,6 +146,23 @@ operation ID を必須とします。更新前から開いているタブは再�
 
 Linux デスクトップ版のビルドには WebKitGTK 系の依存が必要です。CI と同じ依存は
 [docs/docker-usage.md](docs/docker-usage.md) を参照してください。
+
+### 対応する組み込みエージェント
+
+gwt は次の組み込みエージェントに対応しています。Launch Agent には、gwt が検出した
+インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
+カスタムエージェントとして引き続き利用できます。
+
+| エージェント | CLI コマンド |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
 
 ## 使い方
 
@@ -375,6 +394,15 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+
+**Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
+ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
+大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
+維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
+設定欄には保存済みラベルと除外件数・Issue 番号を表示します。自動化からは
+`issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。
+`issue.monitor.status` は `allowed_labels`、`label_excluded_count`、
+`label_excluded_issues` を返します。
 
 open な GitHub Issue は、明示的な追加、有効な Auto-refill、または `urgent` ラベルによる投入
 まで Backlog に留まります。キューへの所属は Monitor の実行候補になる条件であり、
@@ -1143,9 +1171,18 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 ホスト全体の verification lease を取得するのは canonical `verify.run`
 だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
 各 Heavy コマンドの実行時に取得・解放し、Light コマンドは他の run と並行できます。
-最初のコマンドの取得待機が時間切れになると、新しい記録を作らず `deferred` を返します。
+未実行の Light を先に進め、Heavy の相対順序を保ち、gwt の成果物復旧は最後に実行します。
+残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
-再試行では行列全体を再実行します。再試行前に保持者を確認してください。
+
+再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
+execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、
+先行コマンドがすべて signal なしで成功した、有効な admission-deferred 記録だけを自動再開します。
+失敗・強制終了・クラッシュ・不一致などの記録では新しく実行し、登録 plan の不一致は
+引き続き `verify.plan` の再登録が必要です。再開した証跡は不変の先行記録を id/hash で参照し、
+元の開始時刻とコマンドごとの headed E2E・nextest・admission 証跡を保持します。
+行列全体と必要な headed Chromium の dark/light 証跡が成功するまでは Overall PASS や Ready にはなりません。
+再試行前に保持者を確認してください。
 
 ```bash
 gwtd <<'JSON'

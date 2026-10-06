@@ -322,7 +322,7 @@ pub(crate) use launch::AgentLaunchRuntimeContext;
 use launch::{
     codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
-    codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
+    codex_hook_discovery_mode_from_detected_codex_version, dispatch_agent_launch_success,
     effective_host_codex_config_path, issue_monitor_trust_candidate_from_feedback,
     maybe_register_codex_managed_hook_trust_for_launch,
     register_codex_managed_project_trust_for_resolved_launch_with_host_context,
@@ -1442,12 +1442,6 @@ pub struct AppRuntime {
     /// for. Consumed by [`AppRuntime::launch_error_events`] and dropped once
     /// the PTY is live or the window closes.
     pub(crate) restore_launch_windows: HashMap<String, Option<String>>,
-    /// Legacy official-provider provenance is staged during preparation and
-    /// committed only after the exact launched Session emits authenticated
-    /// SessionStart. Any earlier route failure leaves the source Session bytes
-    /// unchanged and retryable.
-    pub(crate) pending_tool_runtime_migrations:
-        HashMap<String, launch::PendingToolRuntimeMigration>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
@@ -1533,6 +1527,8 @@ pub struct AppRuntime {
     /// delta — an in-place agent restart reusing the same window is fine.
     /// Runtime-only; never persisted.
     pub(crate) window_output_bytes: HashMap<String, u64>,
+    /// Latest parsed preview received from another runtime owner; never persisted.
+    pub(crate) remote_terminal_previews: HashMap<String, String>,
     /// Issue #4608: when each pane last wrote to its terminal. The Monitor's
     /// hook-independent liveness signal (see
     /// `IssueMonitorWindowObservation::last_output_at`). Runtime-only.
@@ -3333,7 +3329,6 @@ impl AppRuntime {
             pending_startup_restore_log: None,
             pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
-            pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             issue_monitor_review_dispatch_windows: HashSet::new(),
@@ -3363,6 +3358,7 @@ impl AppRuntime {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: HashMap::new(),
@@ -6485,7 +6481,10 @@ impl AppRuntime {
         self.local_issue_monitor_events_with_policy(
             context,
             Some(client_id),
-            IssueMonitorScanPolicy::Scan,
+            // Issue #4963: the GUI list only projects local state. Remote
+            // enumeration belongs to the scheduled worker, even for a cold
+            // or stale cache; a deadline alone would still stall this loop.
+            IssueMonitorScanPolicy::CacheOnly,
             |_| {},
         )
     }
@@ -8334,6 +8333,7 @@ impl AppRuntime {
             | FrontendEvent::IssueMonitorQueueRemove { .. }
             | FrontendEvent::IssueMonitorQueueMove { .. }
             | FrontendEvent::SetIssueMonitorAutoRefill { .. }
+            | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
             | FrontendEvent::IssueMonitorRequeue { .. }
             | FrontendEvent::IssueMonitorConfigureIssue { .. }
             | FrontendEvent::QuickRegisterIssue { .. } => {
@@ -8682,7 +8682,6 @@ impl AppRuntime {
                     &self.blocking_tasks,
                     self.proxy.clone(),
                     context.clone(),
-                    None,
                 );
                 Vec::new()
             }
@@ -9344,6 +9343,21 @@ impl AppRuntime {
                     "auto-apply-updates",
                     |monitor| {
                         monitor.set_auto_apply_updates(Some(enabled));
+                    },
+                )
+            }
+            FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels } => {
+                let publication = self.publish_project_issue_monitor_control(
+                    context,
+                    serde_json::json!({ "config_set": { "allowed_labels": allowed_labels } }),
+                );
+                self.issue_monitor_control_result_events(
+                    context,
+                    &client_id,
+                    publication,
+                    "allowed-labels",
+                    |monitor| {
+                        monitor.set_allowed_labels(allowed_labels);
                     },
                 )
             }
@@ -10429,6 +10443,12 @@ impl AppRuntime {
                     .map(|status| (id.clone(), status, detail.clone()))
             })
             .collect();
+        let mut terminal_previews: HashMap<String, String> = self
+            .remote_terminal_previews
+            .iter()
+            .filter(|(id, _)| self.project_key_for_window(id) == Some(&context.project_key))
+            .map(|(id, text)| (id.clone(), text.clone()))
+            .collect();
         let mut terminal_snapshots = self
             .runtimes
             .iter()
@@ -10441,7 +10461,13 @@ impl AppRuntime {
                 let (snapshot, seq) = runtime
                     .pane
                     .lock()
-                    .map(|pane| (pane.snapshot_bytes(), pane.output_seq()))
+                    .map(|pane| {
+                        terminal_previews.insert(
+                            id.clone(),
+                            runtime_events::terminal_preview_text(&pane.screen().contents()),
+                        );
+                        (pane.snapshot_bytes(), pane.output_seq())
+                    })
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot, Some(seq)))
             })
@@ -10473,6 +10499,12 @@ impl AppRuntime {
                 .and_then(|state| state.launch_wizard.as_ref())
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
+        );
+        events.splice(
+            1..1,
+            terminal_previews.into_iter().map(|(id, text)| {
+                OutboundEvent::reply(client_id, BackendEvent::TerminalPreview { id, text })
+            }),
         );
         if let Some(event) = self.active_work_projection_reply(client_id, &context.tab_id) {
             events.insert(1, event);
@@ -11158,6 +11190,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
+        self.remote_terminal_previews.remove(window_id);
         self.window_last_output_at.remove(window_id);
         self.window_hook_states.remove(window_id);
         self.clear_runtime_approval_latch_without_status(window_id, true);

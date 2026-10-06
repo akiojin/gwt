@@ -19,7 +19,6 @@ short-wall-clock|crates/gwt-agent/src/codex_shared_state.rs|unpaced_spawns_are_s
 short-wall-clock|crates/gwt-agent/src/detect.rs|detect_by_command_preserves_the_absolute_which_path_off_windows
 short-wall-clock|crates/gwt-agent/src/prepare.rs|assert_completed_runner_probe_reaps_stdio_detached_descendant
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_capture_is_bounded_for_large_unbroken_output
-short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_deadline_includes_pipe_eof_and_kills_descendants
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_ansi_split_secret_launch_environment
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_secret_launch_environment
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_url_environment_value
@@ -179,7 +178,6 @@ short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|expired_scan_deadline_st
 short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|proposal_return_deadline_expiry_is_stage_typed
 short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|the_readback_fan_out_stops_while_the_launch_stage_still_has_budget
 short-wall-clock|crates/gwt/src/main.rs|frontend_timing_warns_for_receive_latency_without_logging_input
-short-wall-clock|crates/gwt/src/main.rs|probe_host_package_runner_times_out_and_returns_false
 short-wall-clock|crates/gwt/src/main.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/main.rs|wait_for_recorded_event
 short-wall-clock|crates/gwt/src/perf/global.rs|a_phase_clock_records_each_mark_as_the_span_since_the_previous_mark
@@ -202,8 +200,6 @@ short-wall-clock|crates/gwt/src/project_index_bootstrap.rs|rebuild_for_same_cell
 short-wall-clock|crates/gwt/src/project_index_bootstrap.rs|repeated_full_status_refresh_inside_cooldown_replays_cached_status_without_reprobing
 short-wall-clock|crates/gwt/src/project_index_bootstrap.rs|wait_for_project_status
 short-wall-clock|crates/gwt/src/project_index_bootstrap.rs|wait_for_project_status_detail
-short-wall-clock|crates/gwt/src/test_guard.rs|launch_environment_sandbox_marker_lets_the_probe_proceed
-short-wall-clock|crates/gwt/src/test_guard.rs|real_package_runner_probe_fails_the_test_explicitly
 short-wall-clock|crates/gwt/tests/daemon_project_root_test.rs|<module>
 short-wall-clock|crates/gwt/tests/daemon_runtime_hook_test.rs|drop
 short-wall-clock|crates/gwt/tests/daemon_socket_path_limit_test.rs|run_envelope
@@ -222,7 +218,6 @@ short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|canonical_c
 short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|spawn_sibling_heavy
 short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|start
 short-wall-clock|crates/gwt/tests/verification_lease_cli_test.rs|legacy_holder_can_still_be_observed_and_released
-short-wall-clock|crates/gwt/tests/windows_agent_launch_e2e.rs|assert_loopback_registry_preflight
 short-wall-clock|crates/gwt/tests/workspace_cli_test.rs|drop
 short-wall-clock|crates/gwt/tests/workspace_cli_test.rs|start
 unlocked-process-env|crates/gwt-core/src/logging/config.rs|initial_filter_directive_falls_back_to_config_file_level
@@ -263,7 +258,6 @@ unlocked-process-env|crates/gwt/src/cli/update/tests.rs|run_check_only_returns_z
 unlocked-process-env|crates/gwt/src/gui_single_instance.rs|with_force_env
 unlocked-process-env|crates/gwt/src/index_worker.rs|drop
 unlocked-process-env|crates/gwt/src/index_worker.rs|set
-unlocked-process-env|crates/gwt/src/managed_assets.rs|same_path_and_env_var_guard_preserve_previous_values
 unlocked-process-env|crates/gwt/tests/autonomous_live_gh.rs|autonomous_merge_pipeline_executes_through_mock_gh
 unlocked-process-env|crates/gwt/tests/autonomous_live_gh.rs|cleanup
 unlocked-process-env|crates/gwt/tests/board_reminder_hook_test.rs|drop
@@ -271,7 +265,6 @@ unlocked-process-env|crates/gwt/tests/board_reminder_hook_test.rs|set
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|drop
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|set
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|unset
-unlocked-process-env|crates/gwt/tests/gwtd_cli_test.rs|gwtd_hook_register_codex_managed_hook_trust_writes_requested_config
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|drop
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|remove
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|set

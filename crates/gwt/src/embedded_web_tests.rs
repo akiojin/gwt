@@ -324,6 +324,26 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls(
 }
 
 #[test]
+fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
+    let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
+    assert!(
+        surface_js.contains("set_issue_monitor_allowed_labels")
+            && surface_js.contains("allowed_labels")
+            && surface_js.contains("label_excluded_count")
+            && surface_js.contains("label_excluded_issues"),
+        "Issue Monitor must edit the allowed labels and display server exclusion evidence"
+    );
+    assert!(
+        surface_js
+            .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#)
+            && surface_js.contains("knowledge-monitor-pool-field")
+            && surface_js.contains("Empty list allows all labels")
+            && surface_js.contains("any listed label on this terminal"),
+        "allowed labels must use existing Operator controls and explain empty/any-of admission"
+    );
+}
+
+#[test]
 fn embedded_web_terminal_windows_ctrl_c_copy_clears_selection() {
     let html = frontend_bundle_source();
 

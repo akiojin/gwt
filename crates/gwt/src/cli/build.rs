@@ -756,7 +756,12 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
             if matches!(close_kind, WorkTerminalKind::Discarded) {
                 crate::cli::execution_state::terminal_recovery_refusal(repo, &session_id, &refusal)
             } else {
-                refusal
+                let reason = refusal
+                    .split_once(
+                        "; run workspace.ensure for this Session before retrying workspace.update",
+                    )
+                    .map_or(refusal.as_str(), |(reason, _)| reason);
+                format!("{reason}; build.complete cannot proceed with the current Work authority, and workspace.ensure cannot restore terminal Work; inspect JSON operation `execution.status` and its `available_recoveries` / `recovery_probes`; for nonterminal Work only, follow an available workspace.ensure probe; if no recovery is available, request PM intervention")
             }
         };
         let compatibility_authority =
@@ -2020,6 +2025,7 @@ mod tests {
         crate::cli::verification_record::save(
             repo.path(),
             &crate::cli::verification_record::VerificationRunRecord {
+                continuation: None,
                 lifecycle: None,
                 record_id: "vrr-typed-build".to_string(),
                 user_verification_result: None,
@@ -2166,6 +2172,102 @@ mod tests {
         assert!(!fixture.canonical_work().discarded);
         let (_, request) = server.receive();
         assert_eq!(request["terminal_kind"], "done");
+    }
+
+    #[test]
+    fn managed_build_complete_closes_done_unassigned_work_with_merged_pr() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.terminalize_canonical_done();
+        let mut final_event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            &fixture.work_id,
+            chrono::Utc::now(),
+        );
+        final_event.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+        let mut container = fixture.canonical_work().execution_containers[0].clone();
+        container.pr_number = Some(3840);
+        container.pr_state = Some("MERGED".to_string());
+        final_event.execution_container = Some(container);
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.git.repo, final_event)
+            .expect("record final Done event with merged PR");
+        run_terminal_fixture_git(&["add", "--", ".gwt/work/events"], &fixture.git.repo);
+        fixture
+            .git
+            .commit("chore(work): record delivered Done event");
+        fixture.git.push();
+        let mut current =
+            gwt_core::workspace_projection::load_workspace_projection(&fixture.git.repo)
+                .unwrap()
+                .unwrap();
+        current.agents[0].affiliation_status =
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+        current.agents[0].workspace_id = None;
+        gwt_core::workspace_projection::save_workspace_projection(&fixture.git.repo, &current)
+            .unwrap();
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        let state_paths = [
+            works_path,
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&fixture.git.repo),
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&fixture.git.repo),
+        ];
+        let state_bytes = || {
+            state_paths
+                .each_ref()
+                .map(|path| std::fs::read(path).unwrap())
+        };
+        let before = state_bytes();
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::NoTarget),
+        );
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Complete { spec: 3327 },
+                &mut output,
+            )
+            .unwrap();
+            (code, output)
+        });
+        assert_eq!(code, 0, "{output}");
+        assert!(!output.contains("run workspace.ensure"), "{output}");
+        assert!(
+            !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert_eq!(state_bytes(), before);
+        assert_eq!(
+            fixture.canonical_work().execution_containers[0]
+                .pr_state
+                .as_deref(),
+            Some("MERGED")
+        );
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Complete { spec: 3327 },
+                &mut output,
+            )
+            .unwrap();
+            (code, output)
+        });
+        assert_eq!(code, 0, "idempotent retry: {output}");
+        assert_eq!(state_bytes(), before);
+        server.receive();
     }
 
     #[test]
@@ -3138,6 +3240,10 @@ mod tests {
         });
 
         assert!(result.is_err(), "duplicate authority must fail closed");
+        let error = result.unwrap_err();
+        assert!(!error.contains("run workspace.ensure"), "{error}");
+        assert!(error.contains("execution.status"), "{error}");
+        assert!(error.contains("recovery_probes"), "{error}");
         assert_eq!(
             std::fs::read(&works_path).expect("read canonical WorkItems"),
             before

@@ -721,6 +721,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            let allowed_labels = match lookup(params, "allowed_labels") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(
+                    serde_json::from_value::<Vec<String>>(value.clone()).map_err(|error| {
+                        CliParseError::InvalidJson(format!(
+                            "allowed_labels must be an array of strings: {error}"
+                        ))
+                    })?,
+                ),
+            };
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
@@ -730,7 +740,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let launch_agent = optional_string(params, "launch_agent")?;
             // Issue #4037 AC-5: the non-destructive update drain.
             let update_drain = optional_update_drain_control(params)?;
-            if enabled.is_none()
+            if allowed_labels.is_none()
+                && enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
                 && auto_close_merged_issues.is_none()
@@ -739,7 +750,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && update_drain.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
+                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -752,6 +763,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             }
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
                 project_root: optional_path(params, "project_root")?,
+                allowed_labels,
                 enabled,
                 autonomous_mode,
                 max_active,
@@ -1697,10 +1709,39 @@ fn discuss_proposal(
     action: DiscussEnvelopeAction,
 ) -> Result<CliCommand, CliParseError> {
     let proposal = required_string(params, "proposal")?;
+    let target = if matches!(
+        &action,
+        DiscussEnvelopeAction::Resolve
+            | DiscussEnvelopeAction::Park
+            | DiscussEnvelopeAction::Reject
+    ) {
+        let title = optional_string(params, "title")?;
+        let origin_session = optional_string(params, "origin_session")?;
+        if origin_session.is_some() && title.is_none() {
+            return Err(CliParseError::MissingFlag("title"));
+        }
+        for (flag, value) in [
+            ("title", title.as_deref()),
+            ("origin_session", origin_session.as_deref()),
+        ] {
+            if lookup(params, flag).is_some() && value.is_none() {
+                return Err(CliParseError::InvalidValue {
+                    flag,
+                    reason: "must not be empty",
+                });
+            }
+        }
+        title.map(|title| crate::discussion_resume::ProposalTarget {
+            title,
+            origin_session,
+        })
+    } else {
+        None
+    };
     let action = match action {
-        DiscussEnvelopeAction::Resolve => super::DiscussAction::Resolve { proposal },
-        DiscussEnvelopeAction::Park => super::DiscussAction::Park { proposal },
-        DiscussEnvelopeAction::Reject => super::DiscussAction::Reject { proposal },
+        DiscussEnvelopeAction::Resolve => super::DiscussAction::Resolve { proposal, target },
+        DiscussEnvelopeAction::Park => super::DiscussAction::Park { proposal, target },
+        DiscussEnvelopeAction::Reject => super::DiscussAction::Reject { proposal, target },
         DiscussEnvelopeAction::ClearNextQuestion => {
             super::DiscussAction::ClearNextQuestion { proposal }
         }
@@ -3171,6 +3212,7 @@ mod tests {
         for params in [
             json!({
                 "project_root": project_root.to_string_lossy(),
+                "allowed_labels": ["Server"],
                 "enabled": true,
                 "max_active": 7,
             }),
@@ -3935,6 +3977,80 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn issue_monitor_config_set_accepts_allowed_labels_alone() {
+        for labels in [
+            json!(["Server", "backend"]),
+            json!([" Server ", "server", "", "Tools"]),
+            json!([]),
+        ] {
+            let CliCommand::Issue(IssueCommand::MonitorConfigSet { allowed_labels, .. }) = ok(
+                "issue.monitor.config.set",
+                json!({"allowed_labels": labels}),
+            ) else {
+                panic!("expected config set");
+            };
+            assert_eq!(
+                serde_json::to_value(allowed_labels).expect("serialize labels"),
+                labels
+            );
+        }
+        for labels in [json!("Server"), json!([42])] {
+            assert!(matches!(
+                err(
+                    "issue.monitor.config.set",
+                    json!({"allowed_labels": labels})
+                ),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn issue_monitor_config_set_allowed_labels_persist_without_daemon() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        for (labels, expected) in [
+            (json!(["Server", "backend"]), json!(["Server", "backend"])),
+            (
+                json!([" Server ", "server", "", "Tools"]),
+                json!(["Server", "Tools"]),
+            ),
+            (json!([]), json!([])),
+        ] {
+            let mut env = TestEnv::new(repo.clone());
+            env.stdin = envelope(
+                "issue.monitor.config.set",
+                json!({"allowed_labels": labels}),
+            );
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+            let saved = crate::load_issue_monitor_prefs(&path).expect("load prefs");
+            assert!(saved.enabled && saved.autonomous_mode);
+            let saved = serde_json::to_value(saved).expect("serialize prefs");
+            assert_eq!(
+                saved.get("allowed_labels").cloned().unwrap_or(json!([])),
+                expected
+            );
+            let reply: Value = serde_json::from_slice(&env.stdout).expect("JSON reply");
+            let output: Value = serde_json::from_str(reply["output"].as_str().expect("output"))
+                .expect("config output");
+            assert_eq!(output["allowed_labels"], expected);
+        }
+    }
+
     // Issue #3814 AC-2: semantic policy belongs to the handler so dispatch can
     // report a structured operation refusal instead of a parse-only stderr.
     #[test]
@@ -3945,6 +4061,7 @@ mod tests {
                 json!({"enabled": true, "max_active": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
                 autonomous_mode: None,
@@ -3958,6 +4075,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: Some(true),
@@ -3974,6 +4092,7 @@ mod tests {
                 json!({"auto_close_merged_issues": false})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -3991,6 +4110,7 @@ mod tests {
                 json!({"auto_apply_updates": true})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4011,6 +4131,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4024,6 +4145,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": false})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4048,6 +4170,7 @@ mod tests {
                 json!({"launch_agent": "claude"})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4061,7 +4184,7 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
+                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
             )
         ));
     }
@@ -4531,6 +4654,7 @@ mod tests {
                 json!({"enabled": false, "autonomous_mode": false, "max_active": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
@@ -5993,6 +6117,17 @@ mod tests {
                 parse(&envelope("verify.adjudicate", params)).is_err(),
                 "invalid adjudication input must fail closed"
             );
+        }
+    }
+
+    #[test]
+    fn discuss_status_rejects_empty_explicit_target_fields() {
+        for params in [
+            json!({"proposal": "Proposal A", "title": " "}),
+            json!({"proposal": "Proposal A", "title": "History", "origin_session": " "}),
+            json!({"proposal": "Proposal A", "origin_session": "session-other"}),
+        ] {
+            assert!(parse(&envelope("discuss.park", params)).is_err());
         }
     }
 
