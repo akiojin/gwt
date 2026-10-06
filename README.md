@@ -152,6 +152,23 @@ preferences are retained.
 Linux desktop builds also require WebKitGTK-related system packages. See
 [docs/docker-usage.md](docs/docker-usage.md) for the dependency set used in CI.
 
+### Supported built-in agents
+
+gwt supports the following built-in agents. Launch Agent lists only installed
+built-in agents that gwt detects; other CLI commands remain available through
+custom agents.
+
+| Agent | CLI command |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
+
 ## Usage
 
 Launching `gwt` installs a system-tray icon (macOS menubar / Windows
@@ -402,6 +419,15 @@ between its body and acceptance criteria and its agent's read-only output.
 **Windowize** moves the agent to Canvas. **Hide preview / Show preview** gives
 the board the full width or restores the detail pane; columns scroll horizontally
 instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
+
+**Allowed labels** controls which Issues this terminal's Monitor admits. Add or
+remove one label at a time; an Issue needs any label in the saved list. Matching
+ignores case and surrounding whitespace. An empty list allows all labels and
+preserves the existing admission rules. Changes apply on the next scan without
+cancelling running agents. The control shows the saved labels and excluded Issue
+count/numbers. Automation can set the same list with `issue.monitor.config.set`
+and `{"allowed_labels":["agent:mac"]}`; `issue.monitor.status` reports
+`allowed_labels`, `label_excluded_count`, and `label_excluded_issues`.
 
 Open GitHub Issues remain in Backlog until explicitly queued, added by enabled
 auto-refill, or admitted with an `urgent` label. Queue membership authorizes the monitor to consider an Issue; normal

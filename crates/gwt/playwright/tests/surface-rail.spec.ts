@@ -164,6 +164,45 @@ test.describe("Surface rail", () => {
     expect(errors).toEqual([]);
   });
 
+  test("closing an agent tab keeps its terminal live and allows reopening", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const one = page.getByRole("tab", { name: "agent-one", exact: true });
+    const all = page.getByRole("tab", { name: "All agents", exact: true });
+    const tile = page.locator('.agent-tile[data-agent-id="agent-one"]');
+    await one.click();
+    await tile.locator(".xterm").evaluate(node => { (window as any).__closedTabTerminal = node; });
+    await clearMessages(page);
+    await page.getByRole("button", { name: "Close agent-one tab", exact: true }).click();
+    await expect(one).toHaveCount(0);
+    await expect(all).toBeFocused();
+    await expect(all).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".agent-tile")).toHaveCount(2);
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-one", data_base64: btoa("LIVE AFTER TAB CLOSE\r\n") }));
+    await expect(tile.locator(".xterm-rows")).toContainText("LIVE AFTER TAB CLOSE");
+    const reopen = page.getByRole("button", { name: "Open agent-one tab", exact: true });
+    await expect(reopen).toHaveText("Open tab");
+    await reopen.focus();
+    await reopen.press("Enter");
+    await expect(one).toHaveAttribute("aria-selected", "true");
+    await expect(one).toBeFocused();
+    expect(await tile.locator(".xterm").evaluate(node => node === (window as any).__closedTabTerminal)).toBe(true);
+    await tile.locator(".xterm-helper-textarea").press("c");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "agent-one", data: "c" });
+    await one.focus();
+    await one.press("Delete");
+    await expect(one).toHaveCount(0);
+    await expect(all).toBeFocused();
+    expect((await sentMessages(page)).filter(message => message.kind === "close_window" || message.kind === "stop_agent")).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("agents-tab-closed.png") });
+    expect(errors).toEqual([]);
+  });
+
   test("opening an inactive grouped surface keeps the split open", async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(String(error)));

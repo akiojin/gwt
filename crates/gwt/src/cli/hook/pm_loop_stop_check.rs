@@ -85,9 +85,13 @@ fn refresh_at_safe_boundary(worktree: &Path, nonblocking: bool) -> io::Result<Op
                 .as_deref()
                 .unwrap_or("unknown")
         ))),
-        Ok(_) => Ok(None),
+        Ok(_) => {
+            clear_refresh_failure_count(worktree);
+            Ok(None)
+        }
         Err(error) => match degraded_refresh_context(&error) {
             Some(context) => {
+                record_degraded_refresh(worktree, &error);
                 tracing::warn!(%error, "resident PM worktree refresh did not run this prompt");
                 Ok(Some(context))
             }
@@ -96,6 +100,111 @@ fn refresh_at_safe_boundary(worktree: &Path, nonblocking: bool) -> io::Result<Op
                 Err(error)
             }
         },
+    }
+}
+
+/// Issue #4975 AC-3: a degraded refresh leaves a durable row, not just a line
+/// in this prompt's text.
+///
+/// #4686 stopped the deadline path from failing the hook closed, which was
+/// right — the turn needs its Board and runtime state. But the `errors.list`
+/// row that used to accompany the exit-1 went away with it, so a refresh that
+/// never runs is observable only in the prompt the PM may not re-read. The PM
+/// cannot count how many consecutive ticks lost their refresh, and
+/// `errors.list` — the one surface that survives the turn — says nothing.
+///
+/// Only the degraded paths are recorded. A refresh that ran and deliberately
+/// kept a branch holding local commits is `Ok(Some(outcome))`, not an error,
+/// and recording it would bury real faults under a row per tick for as long as
+/// the PM has unlanded work.
+/// Issue #4975 AC-3: how many consecutive ticks have lost their refresh.
+///
+/// This cannot live in `pm_prefs`, which is where the natural home
+/// (`PmWorktreeFreshness`) sits: the failure being counted is a `pm_prefs`
+/// lock the hook could not take, so writing the count there needs the lock
+/// that just failed — unwritable exactly when it matters, and one more
+/// contender for a lock already under contention. It cannot live in
+/// `PmLoopState` either, which every user prompt resets to default.
+///
+/// So it sits in the project directory as a file of its own. The constraint is
+/// the `pm_prefs` lock, not the directory, and one file per project needs no
+/// key: the location already scopes it. One PM owns one worktree, so a
+/// read-modify-write needs no lock; the write is atomic through a rename so a
+/// crash cannot leave a torn count.
+fn refresh_failure_counter_path(worktree: &Path) -> Option<std::path::PathBuf> {
+    worktree
+        .parent()
+        .and_then(Path::parent)
+        .map(|project_dir| project_dir.join("pm-refresh-failures.txt"))
+}
+
+fn bump_refresh_failure_count(worktree: &Path) -> u32 {
+    let Some(path) = refresh_failure_counter_path(worktree) else {
+        return 0;
+    };
+    let previous = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let next = previous.saturating_add(1);
+    let temporary = path.with_extension("txt.tmp");
+    if std::fs::write(&temporary, next.to_string().as_bytes()).is_ok() {
+        let _ = std::fs::rename(&temporary, &path);
+    }
+    next
+}
+
+/// Issue #4975 AC-3: a refresh that ran clears the streak, without writing an
+/// `errors.list` row for the success — recording successes would bury the
+/// failures this whole mechanism exists to surface.
+pub(crate) fn clear_refresh_failure_count(worktree: &Path) {
+    if let Some(path) = refresh_failure_counter_path(worktree) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn record_degraded_refresh(worktree: &Path, error: &io::Error) {
+    let form = if error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<pm_registry::PmRefreshDeferred>())
+    {
+        "deferred"
+    } else {
+        "skipped"
+    };
+    let target = gwt_core::error_ledger::ErrorTarget {
+        project_root: worktree
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let consecutive = bump_refresh_failure_count(worktree);
+    // Issue #4975 AC-2: `git worktree list` measures 0.1s against a budget in
+    // seconds, so a deadline that expires on it did not run out of time here —
+    // something upstream already spent the budget. Recording what was left
+    // when the refresh gave up is the one number that separates "this step is
+    // slow" from "this step was handed an exhausted budget", and nothing
+    // recorded it before.
+    let mut context: std::collections::BTreeMap<String, String> = [
+        ("form".to_string(), form.to_string()),
+        ("consecutive_failures".to_string(), consecutive.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    if let Some(expiry) = gwt_core::operation_deadline::current() {
+        let now = std::time::Instant::now();
+        let remaining_ms = expiry.saturating_duration_since(now).as_millis();
+        context.insert("remaining_budget_ms".to_string(), remaining_ms.to_string());
+    }
+    let record = gwt_core::error_ledger::ErrorRecord::new(
+        gwt_core::error_ledger::ErrorKind::HookFailure,
+        format!("resident PM worktree refresh {form}: {error}"),
+        target,
+    )
+    .with_context(context);
+    if let Err(error) = gwt_core::error_ledger::record(record) {
+        tracing::warn!(error = %error, "PM refresh error ledger append failed");
     }
 }
 
@@ -418,6 +527,110 @@ mod tests {
     /// The Session the fixture's PM is registered as. It is passed directly
     /// to `handle_at`; no process-global session environment is needed.
     const FIXTURE_PM_SESSION: &str = "pm-session-fixture";
+
+    /// Issue #4975 AC-3: each degraded refresh leaves one `errors.list` row,
+    /// and the row says which of the two degraded paths it was.
+    ///
+    /// #4686 made the deadline path degrade instead of failing closed, which
+    /// the turn needs — but the row that used to accompany the exit-1 went with
+    /// it, leaving the prompt's own text as the only witness. A PM that does
+    /// not re-read the prompt cannot tell one lost tick from twelve.
+    #[test]
+    fn issue_4975_each_degraded_refresh_records_one_row_naming_its_path() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = ScopedGwtHome::set(home.path());
+        let worktree = home.path().join("projects/hash/pm/worktree");
+
+        record_degraded_refresh(
+            &worktree,
+            &io::Error::new(
+                io::ErrorKind::TimedOut,
+                "operation deadline expired during file lock",
+            ),
+        );
+        record_degraded_refresh(
+            &worktree,
+            &io::Error::other("Git error: worktree list: process deadline expired".to_string()),
+        );
+
+        let rows = gwt_core::error_ledger::list_since(None).expect("read the ledger");
+        let refresh_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.message.contains("resident PM worktree refresh"))
+            .collect();
+        assert_eq!(
+            refresh_rows.len(),
+            2,
+            "one row per degraded refresh: {refresh_rows:?}"
+        );
+        for row in &refresh_rows {
+            assert_eq!(row.kind, gwt_core::error_ledger::ErrorKind::HookFailure);
+            assert!(
+                row.context.contains_key("form"),
+                "the row must name which degraded path it was: {row:?}"
+            );
+            assert!(
+                row.target.project_root.is_some(),
+                "errors.list spans every project on the host, so the row must \
+                 carry the project it belongs to: {row:?}"
+            );
+        }
+    }
+
+    /// Issue #4975 AC-3: the streak counts consecutive lost ticks and a refresh
+    /// that ran clears it.
+    ///
+    /// Without the streak the PM cannot tell one lost tick from twelve, which
+    /// is the difference between noise and an outage. The counter deliberately
+    /// avoids `pm_prefs` (the lock whose failure it counts) and `PmLoopState`
+    /// (reset by every user prompt), so this also pins that it survives
+    /// neither of those paths touching it.
+    #[test]
+    fn issue_4975_the_failure_streak_counts_up_and_a_successful_refresh_clears_it() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = ScopedGwtHome::set(home.path());
+        let worktree = home.path().join("projects/hash/pm/worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree dirs");
+        let deadline = || {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "operation deadline expired during file lock",
+            )
+        };
+
+        for expected in 1..=3u32 {
+            record_degraded_refresh(&worktree, &deadline());
+            let rows = gwt_core::error_ledger::list_since(None).expect("read the ledger");
+            let latest = rows
+                .iter()
+                .rfind(|row| row.message.contains("resident PM worktree refresh"))
+                .expect("a row for this failure");
+            assert_eq!(
+                latest
+                    .context
+                    .get("consecutive_failures")
+                    .map(String::as_str),
+                Some(expected.to_string().as_str()),
+                "tick {expected} must report a streak of {expected}: {latest:?}"
+            );
+        }
+
+        clear_refresh_failure_count(&worktree);
+        record_degraded_refresh(&worktree, &deadline());
+        let rows = gwt_core::error_ledger::list_since(None).expect("read the ledger");
+        let latest = rows
+            .iter()
+            .rfind(|row| row.message.contains("resident PM worktree refresh"))
+            .expect("a row after the reset");
+        assert_eq!(
+            latest
+                .context
+                .get("consecutive_failures")
+                .map(String::as_str),
+            Some("1"),
+            "a refresh that ran must break the streak: {latest:?}"
+        );
+    }
 
     #[test]
     fn issue_4686_a_refresh_that_ran_out_of_budget_reports_instead_of_failing_closed() {
