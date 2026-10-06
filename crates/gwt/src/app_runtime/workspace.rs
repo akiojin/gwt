@@ -782,11 +782,7 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
 impl AppRuntime {
     /// A cached rail refresh cannot prove that an unreadable works.json has
     /// recovered: file permissions are not part of its cache signature.
-    pub(crate) fn recheck_workspace_state_after_projection(
-        &self,
-        project_root: &Path,
-        imported_from: Option<PathBuf>,
-    ) {
+    pub(crate) fn recheck_workspace_state_after_projection(&self, project_root: &Path) {
         let Some(context) = self.project_context_for_root(project_root) else {
             return;
         };
@@ -796,12 +792,11 @@ impl AppRuntime {
                 .as_ref()
                 .is_some_and(|notice| notice.kind == gwt::WorkspaceStateNoticeKind::LoadError)
         });
-        if pending || imported_from.is_some() {
+        if pending {
             crate::spawn_workspace_projection_reload(
                 &self.blocking_tasks,
                 self.proxy.clone(),
                 context,
-                imported_from,
             );
         }
     }
@@ -834,7 +829,6 @@ impl AppRuntime {
     pub(crate) fn handle_workspace_state_loaded(
         &mut self,
         project_root: &Path,
-        imported_from: Option<PathBuf>,
     ) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
@@ -844,22 +838,15 @@ impl AppRuntime {
             .workspace_state_notice
             .as_ref()
             .is_some_and(|notice| notice.kind == gwt::WorkspaceStateNoticeKind::LoadError);
-        if imported_from.is_none() && !recovered {
+        if !recovered {
             return Vec::new();
         }
-        let notice = imported_from.map(|path| gwt::WorkspaceStateNoticeView {
-            path: path.display().to_string(),
-            message: "旧配置から取り込みました。元のファイルは保持されています。".to_string(),
-            kind: gwt::WorkspaceStateNoticeKind::LegacyImported,
-        });
-        state.workspace_state_notice = notice.clone();
-        if recovered {
-            self.spawn_work_events_ingest(project_root.to_path_buf(), true);
-            let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
-        }
+        state.workspace_state_notice = None;
+        self.spawn_work_events_ingest(project_root.to_path_buf(), true);
+        let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
         vec![OutboundEvent::project(
             context.project_key,
-            BackendEvent::WorkspaceStateNotice { notice },
+            BackendEvent::WorkspaceStateNotice { notice: None },
         )]
     }
 
@@ -1062,11 +1049,10 @@ mod tests {
             .expect("save current projection");
         let legacy_path = gwt_core::paths::gwt_project_dir_for_repo_path(&project_root)
             .join("workspace/current.json");
-        gwt_core::workspace_projection::save_workspace_projection_to_path(
-            &legacy_path,
-            &projection,
-        )
-        .expect("save remaining legacy projection");
+        // Retired HOME residue predates the current writer, which rejects it.
+        let legacy_bytes = serde_json::to_vec(&projection).expect("serialize legacy fixture");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).expect("create legacy directory");
+        std::fs::write(&legacy_path, &legacy_bytes).expect("seed remaining legacy projection");
         let current_path =
             gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
         let lock = std::fs::OpenOptions::new()
@@ -1097,15 +1083,21 @@ mod tests {
             (true, false),
             "a deleted current projection must not be broadcast or recreated by cleanup completion"
         );
-        assert!(
-            !legacy_path.exists(),
-            "cleanup must invalidate the legacy source that could recreate canonical state"
+        assert_eq!(
+            std::fs::read(&legacy_path).expect("read preserved legacy projection"),
+            legacy_bytes,
+            "cleanup must preserve retired HOME bytes when canonical state disappears"
         );
+        let error = gwt_core::workspace_projection::load_workspace_projection(&project_root)
+            .expect_err("remaining retired HOME state must be refused");
         assert!(
-            gwt_core::workspace_projection::load_workspace_projection(&project_root)
-                .expect("load projection after cleanup")
-                .is_none(),
-            "a normal load after cleanup must not remigrate deleted canonical state"
+            matches!(
+                error,
+                gwt_core::error::GwtError::WorkspaceStateLoad(ref detail)
+                    if detail.kind == gwt_core::error::WorkspaceStateLoadErrorKind::LegacyLayout
+                        && detail.path == legacy_path
+            ),
+            "a normal load must refuse retired state without recreating canonical state: {error}"
         );
     }
 }

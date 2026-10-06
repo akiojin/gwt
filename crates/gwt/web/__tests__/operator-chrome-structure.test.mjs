@@ -2666,10 +2666,24 @@ test("Launch wizard separates launch settings from runtime controls", () => {
     launchSettingsStart,
     linkedIssueStart,
   );
-  for (const copy of ["Version", "Skip permission prompts", "Fast mode"]) {
+  for (const copy of ["Skip permission prompts", "Fast mode"]) {
     assert.ok(
       launchSettingsBlock.includes(`"${copy}"`),
       `expected Launch settings to include ${copy}`,
+    );
+  }
+  // SPEC-1921 AC-1921-L1: the wizard launches the resolved executable, so
+  // there is no version to choose and no action that could send one.
+  assert.equal(
+    launchSettingsBlock.includes('"Version"'),
+    false,
+    "Launch settings should not offer a version selection",
+  );
+  for (const retired of ["set_version", "version_options", "selected_version", "show_version"]) {
+    assert.equal(
+      launchWizardSource.includes(retired),
+      false,
+      `Launch wizard should not reference ${retired}`,
     );
   }
   assert.equal(

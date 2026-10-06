@@ -1253,7 +1253,7 @@ mod tests {
     #[test]
     fn workspace_work_events_build_hot_projection_with_lifecycle_refs() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let work_items_path = temp.path().join("workspace/work_items.json");
+        let work_items_path = temp.path().join("project-state/works.json");
         let events_path = temp.path().join("workspace/work_events.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 0, 0).unwrap();
         let done_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 30, 0).unwrap();
