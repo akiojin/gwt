@@ -9580,6 +9580,15 @@ impl IssueMonitorState {
             })
     }
 
+    /// Physical implementation presence is independent of launch binding.
+    /// Retained error/stopped panes still prevent a second pane for the Issue.
+    pub fn has_monitor_pane_for_issue(&self, issue_number: u64) -> bool {
+        self.has_observed_monitor_runtime(issue_number)
+            || self
+                .monitor_canvas_windows()
+                .any(|window| !window.review_dispatch && window.issue_number == Some(issue_number))
+    }
+
     /// Include untracked Launched rows whose execution may have been interrupted.
     pub fn execution_settlement_issue_numbers(&self) -> Vec<u64> {
         self.active_launches
@@ -15250,7 +15259,8 @@ impl IssueMonitorState {
         });
         if !recorded_pane
             && !observed_pane
-            && !self.has_capacity_for_monitor_spawn(issue_number, false)
+            && (self.has_monitor_pane_for_issue(issue_number)
+                || !self.has_capacity_for_monitor_spawn(issue_number, false))
         {
             return false;
         }
@@ -30554,6 +30564,12 @@ mod tests {
             "tab-1::new",
             |_| false
         ));
+        monitor.set_max_active_agents(3);
+        assert!(
+            !monitor
+                .claim_launch_delivery(42, "launch:effect", "gui", 101, "tab-1::new", |_| false),
+            "headroom must not create another implementation over a retained same-Issue pane"
+        );
     }
 
     #[test]
@@ -30795,6 +30811,13 @@ mod tests {
             2,
             "the unassigned reservation has not adopted the pane"
         );
+        monitor.set_max_active_agents(3);
+        assert!(
+            !monitor
+                .claim_launch_delivery(42, "launch:effect", "gui", 101, "tab-1::new", |_| false),
+            "headroom must not permit a second pane while binding is missing"
+        );
+        monitor.set_max_active_agents(1);
         assert!(
             monitor.claim_launch_delivery(
                 42,

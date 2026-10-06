@@ -4989,6 +4989,11 @@ impl AppRuntime {
                     monitor.record_window_snapshot_for_tabs(snapshot, tabs);
                 }
             }
+            if !review_dispatch && monitor.has_monitor_pane_for_issue(issue_number) {
+                return Err(format!(
+                    "Issue Monitor implementation pane already exists for Issue #{issue_number}"
+                ));
+            }
             if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
                 let status = monitor.agent_status_at(&now);
                 return Err(format!("Issue Monitor max_active reached ({}/{}) before launching Issue #{issue_number}",
