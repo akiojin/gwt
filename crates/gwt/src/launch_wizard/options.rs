@@ -1065,7 +1065,7 @@ pub struct AgentSetupAffordance {
     pub kind: AgentSetupKind,
     pub title: String,
     pub detail: String,
-    /// Button label when gwt can run the setup in a shell pane; `None` when
+    /// Button label when gwt can run the setup action; `None` when
     /// the user has to act outside gwt.
     pub action_label: Option<String>,
 }
@@ -1104,9 +1104,17 @@ pub fn agent_setup_affordance(
         let verb = if available { "Update" } else { "Install" };
         let command = agent_install_update_command(descriptor, available)?;
         return Some(AgentSetupAffordance {
-            kind: if available { AgentSetupKind::Update } else { AgentSetupKind::Install },
+            kind: if available {
+                AgentSetupKind::Update
+            } else {
+                AgentSetupKind::Install
+            },
             title: format!("{verb} {name} before launch"),
-            detail: format!("Run `{command}` in a host shell pane. Restart gwt afterward to refresh the detected version. Launch uses the detected CLI directly and reports an error if it cannot launch."),
+            detail: if available {
+                format!("Run `{command}` in the background on the Host. View progress and the updated version here; your Agent Settings stay open.")
+            } else {
+                format!("Run `{command}` in a host shell pane. Restart gwt afterward to refresh the detected version. Launch uses the detected CLI directly and reports an error if it cannot launch.")
+            },
             action_label: Some(format!("{verb} {name}")),
         });
     }

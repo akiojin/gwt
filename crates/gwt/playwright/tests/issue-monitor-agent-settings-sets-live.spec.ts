@@ -18,7 +18,8 @@ const UPDATE_FIXTURE = process.env.GWT_E2E_AGENT_UPDATE_FIXTURE_DIR ?? "";
 
 test.describe("Issue Monitor Agent Settings sets", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
-  test.setTimeout(120_000);
+  // Windows status publication can wait for the disabled Monitor's 60s scan.
+  test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
 
   test("adds, reorders, removes and saves sets in launch order", async ({ page }, testInfo) => {
@@ -101,13 +102,14 @@ test.describe("Issue Monitor Agent Settings sets", () => {
       await expect(submit).toHaveText("Save settings");
       await expect(modal.locator(".launch-agent-sets__order")).toContainText(`auto (2): ${added}`);
       await submit.click();
-      await expect(modal).not.toHaveClass(/open/);
+      // Windows publishes the saved status after its Issue Scan completes.
+      await expect(modal).not.toHaveClass(/open/, { timeout: 90_000 });
 
       // AC-5: the saved pool reads back in the same order through the status
       // the JSON operation reports, and the reopened form agrees with it.
       await expectSavedAgents(page, [added!, "codex"]);
       await sendLiveGwtEvent(page, { kind: "issue_monitor_configure_profile" });
-      await expect(modal).toHaveClass(/open/);
+      await expect(modal).toHaveClass(/open/, { timeout: 30_000 });
       await expect(sets).toHaveCount(2);
       await expect(sets.nth(0)).toHaveAttribute("data-agent-id", added!);
       await expect(sets.nth(1)).toHaveAttribute("data-agent-id", "codex");
@@ -239,17 +241,16 @@ async function liveWizardSnapshot(page: Page): Promise<any> {
 }
 
 // Waits until the newest `issue_monitor_status` — what `issue.monitor.profiles`
-// reads — lists the candidates in `expected` order. The read is re-requested on
-// a slow cadence: one request can be dropped while the page is still
-// connecting, and each one is expensive for the backend to answer.
+// reads — lists the candidates in `expected` order. Profile edits and saves
+// publish this status themselves; repeated list requests queue expensive
+// Windows scans ahead of the next form action.
 async function expectSavedAgents(page: any, expected: string[]): Promise<void> {
   await expect.poll(async () => {
-    await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
     return page.evaluate(() => {
       const statuses = ((window as any).__gwtPlaywrightMessages ?? [])
         .filter(({ payload }: any) => payload.kind === "issue_monitor_status");
       const latest = statuses[statuses.length - 1]?.payload?.status;
       return (latest?.launch_profile_candidates ?? []).map((candidate: any) => candidate.agent_id);
     });
-  }, { timeout: 30_000, intervals: [1_000, 2_000, 5_000] }).toEqual(expected);
+  }, { timeout: 90_000, intervals: [1_000, 2_000, 5_000] }).toEqual(expected);
 }

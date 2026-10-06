@@ -1611,6 +1611,14 @@ mod tests {
                     method: LaunchWizardStartMethodKind::ConfigureAndStart,
                 });
                 state.set_agent_id(agent);
+                let setup_detail = state.view().agent_setup.unwrap().detail;
+                if available {
+                    assert!(setup_detail.contains("background"));
+                    assert!(setup_detail.contains("updated version here"));
+                } else {
+                    assert!(setup_detail.contains("host shell pane"));
+                    assert!(setup_detail.contains("Restart gwt"));
+                }
                 let draft = (
                     state.model.clone(),
                     state.reasoning.clone(),
