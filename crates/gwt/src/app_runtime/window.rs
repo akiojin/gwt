@@ -111,7 +111,6 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
         $visit!($runtime, $id, pending_auto_resume_sources);
-        $visit!($runtime, $id, pending_tool_runtime_migrations);
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
         $visit!($runtime, $id, window_output_bytes);
