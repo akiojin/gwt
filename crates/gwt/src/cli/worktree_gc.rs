@@ -554,7 +554,12 @@ fn live_gwt_hosts(system: &System) -> BTreeMap<u32, u64> {
                 .unwrap_or_else(|| Path::new(process.name()).to_string_lossy());
             stem.eq_ignore_ascii_case(HOST_BINARY_STEM)
         })
-        .map(|(pid, process)| (pid.as_u32(), process.start_time()))
+        .map(|(pid, process)| {
+            (
+                pid.as_u32(),
+                crate::process::snapshot_process_start_identity(pid.as_u32(), process),
+            )
+        })
         .collect()
 }
 

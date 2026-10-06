@@ -10144,6 +10144,12 @@ mod tests {
                 probe.governance.cause,
                 Some(crate::cli::governance::GovernanceCause::Authority)
             );
+            let reason = probe.reason.as_deref().unwrap_or_default();
+            assert!(
+                reason.contains("unavailable is a consequence")
+                    && reason.contains("recover the owning Session authority"),
+                "authority loss must explain verification unavailability and recovery: {probe:?}"
+            );
         }
     }
 
