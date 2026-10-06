@@ -147,6 +147,23 @@ operation ID を必須とします。更新前から開いているタブは再�
 Linux デスクトップ版のビルドには WebKitGTK 系の依存が必要です。CI と同じ依存は
 [docs/docker-usage.md](docs/docker-usage.md) を参照してください。
 
+### 対応する組み込みエージェント
+
+gwt は次の組み込みエージェントに対応しています。Launch Agent には、gwt が検出した
+インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
+カスタムエージェントとして引き続き利用できます。
+
+| エージェント | CLI コマンド |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
+
 ## 使い方
 
 `gwt` を起動するとタスクトレイ (macOS は menubar、Windows は notification
@@ -377,6 +394,15 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+
+**Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
+ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
+大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
+維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
+設定欄には保存済みラベルと除外件数・Issue 番号を表示します。自動化からは
+`issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。
+`issue.monitor.status` は `allowed_labels`、`label_excluded_count`、
+`label_excluded_issues` を返します。
 
 open な GitHub Issue は、明示的な追加、有効な Auto-refill、または `urgent` ラベルによる投入
 まで Backlog に留まります。キューへの所属は Monitor の実行候補になる条件であり、

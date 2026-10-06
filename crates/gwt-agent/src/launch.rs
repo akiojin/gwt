@@ -11,7 +11,7 @@ use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
     permission_mode::{PermissionLaunchSource, PermissionModeDecision, PermissionModeInputs},
-    session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
+    session::{SessionExecutionBinding, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{
         AgentColor, AgentId, DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode,
     },
@@ -105,7 +105,7 @@ fn compute_worktree_hash_for_dir(dir: &Path) -> Option<String> {
 pub struct ResolvedRunner {
     /// Executable to invoke (e.g., "claude", "bunx", "npx").
     pub executable: String,
-    /// Base args inserted before agent-specific args (e.g., `["@anthropic-ai/claude-code@1.2.3"]`).
+    /// Custom package args inserted before agent-specific args.
     pub base_args: Vec<String>,
 }
 
@@ -116,6 +116,8 @@ fn command_basename(command: &str) -> &str {
         .unwrap_or(command)
 }
 
+// Legacy Session migration still accepts historical Codex package argv.
+// New built-in launches always use the installed command.
 fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
     let command = command_basename(command);
     if ["codex", "codex.exe", "codex.cmd"]
@@ -199,15 +201,6 @@ pub fn normalize_launch_args(agent_id: &AgentId, command: &str, args: &mut Vec<S
     *args = normalized;
 }
 
-/// Resolve the runner command based on version selection.
-///
-/// - `"installed"` → use the agent's direct command (must be in PATH).
-/// - `"latest"` or a semver string → use bunx/npx with `@package@version`.
-pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
-    let env = host_process_env();
-    resolve_runner_with_env(agent_id, version, &env)
-}
-
 /// Build the descriptor-defined argv used to check an installed built-in
 /// runner without assuming that `--version` is the first argument.
 pub fn builtin_version_probe_args(agent_id: &AgentId) -> Option<Vec<String>> {
@@ -219,77 +212,6 @@ pub fn builtin_version_probe_args(agent_id: &AgentId) -> Option<Vec<String>> {
         .collect::<Vec<_>>();
     args.push(descriptor.version_flag.to_string());
     Some(args)
-}
-
-/// Resolve the latest package runner against the launch environment rather
-/// than the gwt process environment.
-pub fn resolve_latest_runner_with_env(
-    agent_id: &AgentId,
-    env: &HashMap<String, String>,
-) -> ResolvedRunner {
-    resolve_latest_runner_with_effective_env(agent_id, env, &[], None)
-}
-
-/// Resolve the latest package runner with the exact environment and cwd that
-/// will be used for launch. Explicit environment entries are applied after
-/// `remove_env`; relative PATH entries are interpreted from `cwd`.
-pub(crate) fn resolve_latest_runner_with_effective_env(
-    agent_id: &AgentId,
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> ResolvedRunner {
-    resolve_runner_with_effective_env(agent_id, "latest", env, remove_env, cwd)
-}
-
-fn resolve_runner_with_env(
-    agent_id: &AgentId,
-    version: &str,
-    env: &HashMap<String, String>,
-) -> ResolvedRunner {
-    resolve_runner_with_effective_env(agent_id, version, env, &[], None)
-}
-
-fn resolve_runner_with_effective_env(
-    agent_id: &AgentId,
-    version: &str,
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> ResolvedRunner {
-    if version == "installed" || version.is_empty() {
-        return ResolvedRunner {
-            executable: agent_id.command().to_string(),
-            base_args: Vec::new(),
-        };
-    }
-
-    let Some(package) = agent_id.npm_package() else {
-        // No npm package — fall back to direct command
-        return ResolvedRunner {
-            executable: agent_id.command().to_string(),
-            base_args: Vec::new(),
-        };
-    };
-
-    let version_spec = if version == "latest" {
-        format!("{package}@latest")
-    } else {
-        format!("{package}@{version}")
-    };
-
-    let (executable, needs_yes) =
-        find_bunx_or_npx_for_agent_with_effective_env(agent_id, env, remove_env, cwd);
-    let mut base_args = Vec::new();
-    if needs_yes {
-        base_args.push("--yes".to_string());
-    }
-    base_args.push(version_spec);
-
-    ResolvedRunner {
-        executable,
-        base_args,
-    }
 }
 
 fn resolve_custom_runner_with_effective_env(
@@ -338,45 +260,6 @@ fn package_runner_candidates() -> &'static [(&'static str, bool)] {
     #[cfg(not(windows))]
     {
         &[("bunx", false), ("npx", true)]
-    }
-}
-
-fn find_bunx_or_npx_for_agent_with_effective_env(
-    agent_id: &AgentId,
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> (String, bool) {
-    find_package_runner_with_effective_env(
-        package_runner_candidates_for_agent(agent_id),
-        env,
-        remove_env,
-        cwd,
-    )
-}
-
-fn package_runner_candidates_for_agent(agent_id: &AgentId) -> &'static [(&'static str, bool)] {
-    #[cfg(windows)]
-    {
-        if matches!(agent_id, AgentId::Codex | AgentId::ClaudeCode) {
-            // Native bunx on Windows can split a whitespace-bearing final prompt
-            // when it re-spawns the package binary (SPEC-1921 Phase 75 / #3456).
-            // npx preserves the prompt as one argv entry. Targeted launches
-            // fail closed when npx is unavailable; Bunx is not a candidate.
-            &[("npx.cmd", true)]
-        } else {
-            package_runner_candidates()
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if matches!(agent_id, AgentId::ClaudeCode) {
-            // Bun can leave Claude Code's postinstall-managed native binary as a stub
-            // in one-shot package runs; npx executes the published package reliably.
-            &[("npx", true), ("bunx", false)]
-        } else {
-            package_runner_candidates()
-        }
     }
 }
 
@@ -505,108 +388,6 @@ pub(crate) fn resolve_direct_runner_with_effective_env(
         .map(|candidate| candidate.display().to_string())
 }
 
-/// Re-resolve a package-runner command against a launch `PATH` that overrides
-/// the process one, or `None` when there is nothing to re-bind.
-///
-/// [`AgentLaunchBuilder::build`] picks `bunx`/`npx` before the launch profile
-/// is merged into the config, so it resolves them from the gwt process `PATH`
-/// and stores the executable that `PATH` selects. Every later step — the health
-/// probe and the spawn itself — then reuses that stored command, so neither a
-/// profile `PATH` nor a test's pinned fixture runners can redirect it
-/// (Issue #3972).
-///
-/// Only a launch `PATH` that differs from the process `PATH` re-binds:
-/// re-resolving an inherited `PATH` would repeat the builder's own lookup and
-/// rewrite every bare `bunx` into an absolute host path for no gain.
-/// Resolution keeps the runner family too — only the same file name is looked
-/// up, so a `bunx` launch never silently becomes `npx`.
-pub(crate) fn rebind_package_runner_to_effective_env(
-    command: &str,
-    env: &HashMap<String, String>,
-    cwd: Option<&Path>,
-) -> Option<String> {
-    rebind_package_runner_with_host_path(command, env, cwd, host_process_path)
-}
-
-fn rebind_package_runner_with_host_path(
-    command: &str,
-    env: &HashMap<String, String>,
-    cwd: Option<&Path>,
-    host_path: impl FnOnce() -> Option<String>,
-) -> Option<String> {
-    let name = Path::new(command).file_name()?.to_str()?.to_owned();
-    let (_, launch_path) = env
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))?;
-    if host_path().is_some_and(|host_path| &host_path == launch_path) {
-        return None;
-    }
-    let cwd = absolute_launch_cwd(cwd);
-    let search_path = absolute_search_path(launch_path, &cwd)?;
-    let resolved = which::which_in(&name, Some(search_path), &cwd).ok()?;
-    let resolved = resolved.to_string_lossy().into_owned();
-    if resolved.contains("node_modules") || resolved == command {
-        return None;
-    }
-    Some(resolved)
-}
-
-/// Platform priority list of `npx` fallback executables consulted when the host
-/// `bunx` package-runner probe fails (Issue #2981). On Windows the `.cmd`
-/// variant is the only Windows candidate because the bare `npx` POSIX shim is
-/// not directly spawnable there (SPEC-1921 FR-080 / FR-167). Other platforms
-/// use the bare canonical name.
-fn npx_fallback_candidates() -> &'static [(&'static str, bool)] {
-    #[cfg(windows)]
-    {
-        &[("npx.cmd", true)]
-    }
-    #[cfg(not(windows))]
-    {
-        &[("npx", true)]
-    }
-}
-
-/// Resolve the host `npx` fallback executable used when the `bunx`
-/// package-runner probe fails during launch.
-///
-/// Resolution flows through the same Windows-aware `find_package_runner_in_path`
-/// machinery as the primary runner, so on Windows the spawnable `npx.cmd` is
-/// selected instead of the bare `npx` shim (Issue #2981). An unresolved Windows
-/// lookup retains `npx.cmd` so the health check fails closed without ever
-/// dispatching the POSIX shim; other platforms retain canonical bare `npx`.
-pub fn resolve_host_npx_fallback_executable(env: &HashMap<String, String>) -> String {
-    resolve_host_npx_fallback_executable_with_effective_env(env, &[], None)
-}
-
-pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> String {
-    resolve_host_npx_fallback_executable_with_host_path(env, remove_env, cwd, host_process_path)
-}
-
-fn resolve_host_npx_fallback_executable_with_host_path(
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-    host_path: impl FnOnce() -> Option<String>,
-) -> String {
-    let cwd = absolute_launch_cwd(cwd);
-    effective_launch_path_with_host(env, remove_env, host_path)
-        .as_deref()
-        .and_then(|path| find_package_runner_in_path(npx_fallback_candidates(), Some(path), &cwd))
-        .map(|(executable, _needs_yes)| executable)
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                "npx.cmd".to_string()
-            } else {
-                "npx".to_string()
-            }
-        })
-}
-
 /// Execution lifecycle intent is independent from provider conversation
 /// continuity. In particular, `SessionMode::Resume` can resume the same
 /// conversation while a coordinator starts a new producing generation.
@@ -672,431 +453,6 @@ pub enum ManualLaunchSuccessorPredecessor {
     ExactTerminalActive,
 }
 
-/// Reuse a fresh Bun-created package executable for a host launch.
-///
-/// `bunx <package>@latest` keeps an already-materialized package under the
-/// host temp directory, but still performs package resolution on every
-/// invocation. That repeated resolution is several seconds for Codex on some
-/// hosts. This best-effort fast path runs the validated cached entrypoint with
-/// the same Bun runtime while preserving the requested worktree as the process
-/// cwd.
-///
-/// `latest` cache entries are accepted for at most 24 hours. Missing, stale,
-/// malformed, escaping, non-Bun, non-host, and unsupported-platform entries
-/// leave the launch untouched so the existing bunx/npx path remains the
-/// authoritative fallback.
-pub fn apply_host_bunx_cache_fast_path(config: &mut LaunchConfig) -> HostBunxCacheFastPath {
-    #[cfg(unix)]
-    {
-        let temp_root = config
-            .env_vars
-            .get("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        apply_host_bunx_cache_fast_path_from(config, &temp_root, std::time::SystemTime::now())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = config;
-        HostBunxCacheFastPath::NotApplicable
-    }
-}
-
-/// Outcome of [`apply_host_bunx_cache_fast_path`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostBunxCacheFastPath {
-    /// The launch now runs the validated cached entrypoint.
-    Applied,
-    /// No usable cache entry exists; the package runner stays authoritative.
-    NotApplicable,
-    /// A validated cache entry resolved to `executable`, but that bin target
-    /// cannot be launched for `reason` (Issue #3857 AC-5). The launch is left
-    /// on the package runner so the operator can see why the cache was
-    /// bypassed.
-    Rejected { executable: PathBuf, reason: String },
-}
-
-impl HostBunxCacheFastPath {
-    pub fn is_applied(&self) -> bool {
-        matches!(self, Self::Applied)
-    }
-}
-
-/// How a cached package `bin` target must be launched, decided from the file
-/// content (shebang / executable magic), never from its name or extension
-/// (Issue #3857 AC-2: `opencode-ai` ships a Mach-O/ELF binary as
-/// `bin/opencode.exe` on every platform).
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CachedEntrypointKind {
-    /// A JavaScript entrypoint (node/bun shebang, or a shebang-less text
-    /// file): run it with the Bun runtime.
-    JavaScript,
-    /// A native executable or a script for another interpreter: exec the file
-    /// itself and let the kernel dispatch it.
-    Direct,
-}
-
-#[cfg(unix)]
-fn classify_cached_entrypoint(path: &Path) -> Result<CachedEntrypointKind, String> {
-    use std::io::Read;
-
-    let mut header = [0u8; 512];
-    let mut file =
-        std::fs::File::open(path).map_err(|error| format!("cannot open for reading: {error}"))?;
-    let len = file
-        .read(&mut header)
-        .map_err(|error| format!("cannot read: {error}"))?;
-    let header = &header[..len];
-    if header.is_empty() {
-        return Err("the file is empty".to_string());
-    }
-    if let Some(interpreter) = header.strip_prefix(b"#!") {
-        let line = interpreter
-            .split(|byte| *byte == b'\n')
-            .next()
-            .unwrap_or_default();
-        let line = String::from_utf8_lossy(line);
-        return Ok(if line.contains("node") || line.contains("bun") {
-            CachedEntrypointKind::JavaScript
-        } else {
-            CachedEntrypointKind::Direct
-        });
-    }
-    if is_native_executable_header(header) {
-        return Ok(CachedEntrypointKind::Direct);
-    }
-    if header.contains(&0) {
-        return Err(
-            "the file is neither a script nor a recognized native executable (ELF, Mach-O, PE)"
-                .to_string(),
-        );
-    }
-    Ok(CachedEntrypointKind::JavaScript)
-}
-
-#[cfg(unix)]
-fn is_native_executable_header(header: &[u8]) -> bool {
-    const MAGICS: &[&[u8]] = &[
-        b"\x7fELF",
-        &[0xfe, 0xed, 0xfa, 0xce],
-        &[0xfe, 0xed, 0xfa, 0xcf],
-        &[0xce, 0xfa, 0xed, 0xfe],
-        &[0xcf, 0xfa, 0xed, 0xfe],
-        &[0xca, 0xfe, 0xba, 0xbe],
-        &[0xbe, 0xba, 0xfe, 0xca],
-        b"MZ",
-    ];
-    MAGICS.iter().any(|magic| header.starts_with(magic))
-}
-
-#[cfg(unix)]
-fn apply_host_bunx_cache_fast_path_from(
-    config: &mut LaunchConfig,
-    temp_root: &Path,
-    now: std::time::SystemTime,
-) -> HostBunxCacheFastPath {
-    apply_host_bunx_cache_fast_path_from_uid(config, temp_root, now, current_effective_uid())
-}
-
-#[cfg(unix)]
-fn current_effective_uid() -> u32 {
-    // SAFETY: `geteuid` has no preconditions and does not dereference memory.
-    unsafe { libc::geteuid() }
-}
-
-#[cfg(unix)]
-fn apply_host_bunx_cache_fast_path_from_uid(
-    config: &mut LaunchConfig,
-    temp_root: &Path,
-    now: std::time::SystemTime,
-    effective_uid: u32,
-) -> HostBunxCacheFastPath {
-    use HostBunxCacheFastPath::NotApplicable;
-
-    if config.runtime_target != LaunchRuntimeTarget::Host
-        || command_basename(&config.command) != "bunx"
-    {
-        return NotApplicable;
-    }
-
-    let Some(package) = config.agent_id.npm_package() else {
-        return NotApplicable;
-    };
-    let Some(version) = config
-        .tool_version_selector
-        .as_deref()
-        .or(config.tool_version.as_deref())
-    else {
-        return NotApplicable;
-    };
-    if version.is_empty()
-        || version == "installed"
-        || version.contains('/')
-        || version.contains('\\')
-        || version == "."
-        || version == ".."
-    {
-        return NotApplicable;
-    }
-
-    let version_spec = format!("{package}@{version}");
-    let Some(args) = strip_package_runner_prefix(&config.args, &version_spec) else {
-        return NotApplicable;
-    };
-    let Some(executable) = find_valid_bunx_cached_executable(
-        temp_root,
-        effective_uid,
-        &config.agent_id,
-        package,
-        version,
-        now,
-    ) else {
-        return NotApplicable;
-    };
-
-    let rejected = |reason: String| HostBunxCacheFastPath::Rejected {
-        executable: executable.clone(),
-        reason,
-    };
-    match classify_cached_entrypoint(&executable) {
-        Ok(CachedEntrypointKind::Direct) => {
-            config.command = executable.to_string_lossy().into_owned();
-            config.args = args;
-        }
-        Ok(CachedEntrypointKind::JavaScript) => {
-            let Some(bun_runtime) = resolve_bun_runtime_for_cache_fast_path(config) else {
-                return rejected(format!(
-                    "the entrypoint is a JavaScript file but no Bun runtime was found next to {}",
-                    config.command
-                ));
-            };
-            config.command = bun_runtime.to_string_lossy().into_owned();
-            config.args = std::iter::once(executable.to_string_lossy().into_owned())
-                .chain(args)
-                .collect();
-        }
-        Err(reason) => return rejected(reason),
-    }
-    HostBunxCacheFastPath::Applied
-}
-
-#[cfg(unix)]
-fn resolve_bun_runtime_for_cache_fast_path(config: &LaunchConfig) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cwd = config
-        .working_dir
-        .clone()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let command = Path::new(&config.command);
-    let resolved_bunx = if command.is_absolute() || command.components().count() > 1 {
-        command.to_path_buf()
-    } else {
-        let inherited_path = std::env::var("PATH").ok();
-        let path = config
-            .env_vars
-            .get("PATH")
-            .map(String::as_str)
-            .or(inherited_path.as_deref())?;
-        which::which_in(command, Some(path), &cwd).ok()?
-    };
-    let canonical_bunx = std::fs::canonicalize(resolved_bunx).ok()?;
-    let bun_runtime = if command_basename(canonical_bunx.to_string_lossy().as_ref()) == "bun" {
-        canonical_bunx
-    } else {
-        std::fs::canonicalize(canonical_bunx.parent()?.join("bun")).ok()?
-    };
-    let metadata = std::fs::metadata(&bun_runtime).ok()?;
-    (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).then_some(bun_runtime)
-}
-
-#[cfg(unix)]
-fn strip_package_runner_prefix(args: &[String], version_spec: &str) -> Option<Vec<String>> {
-    if args.first().is_some_and(|arg| arg == "--yes")
-        && args.get(1).is_some_and(|arg| arg == version_spec)
-    {
-        return Some(args[2..].to_vec());
-    }
-    args.first()
-        .is_some_and(|arg| arg == version_spec)
-        .then(|| args[1..].to_vec())
-}
-
-#[cfg(unix)]
-fn find_valid_bunx_cached_executable(
-    temp_root: &Path,
-    effective_uid: u32,
-    agent_id: &AgentId,
-    package: &str,
-    version: &str,
-    now: std::time::SystemTime,
-) -> Option<PathBuf> {
-    let canonical_temp_root = private_bunx_temp_root(temp_root, effective_uid)?;
-    let root = bunx_cache_root(&canonical_temp_root, package, version, effective_uid)?;
-    validate_bunx_cache_root(
-        &root,
-        &canonical_temp_root,
-        effective_uid,
-        agent_id,
-        package,
-        version,
-        now,
-    )
-}
-
-#[cfg(unix)]
-fn private_bunx_temp_root(temp_root: &Path, effective_uid: u32) -> Option<PathBuf> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let canonical = std::fs::canonicalize(temp_root).ok()?;
-    let metadata = std::fs::metadata(&canonical).ok()?;
-    (metadata.is_dir()
-        && bunx_temp_root_permissions_are_trusted(
-            metadata.uid(),
-            metadata.permissions().mode(),
-            effective_uid,
-        ))
-    .then_some(canonical)
-}
-
-#[cfg(unix)]
-fn bunx_temp_root_permissions_are_trusted(owner_uid: u32, mode: u32, effective_uid: u32) -> bool {
-    // Bun's cached JS entrypoints can be mode 0777. A sticky shared /tmp only
-    // protects entry replacement; it does not prevent another user from
-    // opening and rewriting that file. The complete cache ancestry must
-    // therefore start under an effective-user-owned, non-shared temp root.
-    owner_uid == effective_uid && mode & 0o022 == 0
-}
-
-#[cfg(unix)]
-fn bunx_cache_root(
-    temp_root: &Path,
-    package: &str,
-    version: &str,
-    effective_uid: u32,
-) -> Option<PathBuf> {
-    match package
-        .strip_prefix('@')
-        .and_then(|value| value.split_once('/'))
-    {
-        Some((scope, name)) => Some(
-            temp_root
-                .join(format!("bunx-{effective_uid}-@{scope}"))
-                .join(format!("{name}@{version}")),
-        ),
-        None if !package.is_empty() => {
-            Some(temp_root.join(format!("bunx-{effective_uid}-{package}@{version}")))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(unix)]
-fn owned_unwritable_metadata(path: &Path, effective_uid: u32) -> Option<std::fs::Metadata> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let metadata = std::fs::metadata(path).ok()?;
-    (metadata.uid() == effective_uid && metadata.permissions().mode() & 0o022 == 0)
-        .then_some(metadata)
-}
-
-#[cfg(unix)]
-fn owned_unwritable_dir(path: &Path, effective_uid: u32) -> Option<()> {
-    owned_unwritable_metadata(path, effective_uid)?
-        .is_dir()
-        .then_some(())
-}
-
-#[cfg(unix)]
-fn owned_unwritable_file(path: &Path, effective_uid: u32) -> Option<std::fs::Metadata> {
-    let metadata = owned_unwritable_metadata(path, effective_uid)?;
-    metadata.is_file().then_some(metadata)
-}
-
-#[cfg(unix)]
-fn validate_bunx_cache_root(
-    root: &Path,
-    canonical_temp_root: &Path,
-    effective_uid: u32,
-    agent_id: &AgentId,
-    package: &str,
-    version: &str,
-    now: std::time::SystemTime,
-) -> Option<PathBuf> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let canonical_root = std::fs::canonicalize(root).ok()?;
-    if !canonical_root.starts_with(canonical_temp_root) {
-        return None;
-    }
-    owned_unwritable_dir(&canonical_root, effective_uid)?;
-
-    let root_package_path = canonical_root.join("package.json");
-    let root_package_metadata = owned_unwritable_file(&root_package_path, effective_uid)?;
-    if version == "latest" {
-        let age = now
-            .duration_since(root_package_metadata.modified().ok()?)
-            .ok()?;
-        if age > std::time::Duration::from_secs(24 * 60 * 60) {
-            return None;
-        }
-    }
-
-    let root_package: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&root_package_path).ok()?).ok()?;
-    let dependency = root_package
-        .get("dependencies")?
-        .get(package)?
-        .as_str()?
-        .trim();
-    if dependency.is_empty() {
-        return None;
-    }
-
-    let node_modules = canonical_root.join("node_modules");
-    owned_unwritable_dir(&node_modules, effective_uid)?;
-    let bin_dir = node_modules.join(".bin");
-    owned_unwritable_dir(&bin_dir, effective_uid)?;
-
-    let mut installed_package_dir = node_modules.clone();
-    for component in package.split('/') {
-        installed_package_dir.push(component);
-        owned_unwritable_dir(&installed_package_dir, effective_uid)?;
-    }
-    let installed_package_path = installed_package_dir.join("package.json");
-    owned_unwritable_file(&installed_package_path, effective_uid)?;
-    let installed_package: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&installed_package_path).ok()?).ok()?;
-    if installed_package.get("name")?.as_str()? != package {
-        return None;
-    }
-    if version != "latest" && installed_package.get("version")?.as_str()? != version {
-        return None;
-    }
-
-    let binary_name = Path::new(agent_id.command()).file_name()?.to_str()?;
-    let executable = bin_dir.join(binary_name);
-    if std::fs::symlink_metadata(&executable).ok()?.uid() != effective_uid {
-        return None;
-    }
-    let executable_metadata = std::fs::metadata(&executable).ok()?;
-    if executable_metadata.uid() != effective_uid
-        || !executable_metadata.is_file()
-        || executable_metadata.permissions().mode() & 0o111 == 0
-    {
-        return None;
-    }
-
-    let canonical_executable = std::fs::canonicalize(&executable).ok()?;
-    if !canonical_executable.starts_with(canonical_root.join("node_modules")) {
-        return None;
-    }
-    Some(canonical_executable)
-}
-
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
@@ -1115,16 +471,8 @@ pub struct LaunchConfig {
     pub display_name: String,
     pub color: AgentColor,
     pub model: Option<String>,
+    /// Version observed by the final installed-tool probe.
     pub tool_version: Option<String>,
-    /// Requested selector, retained separately from the version observed by
-    /// the final runner probe (including after package-cache optimization).
-    pub tool_version_selector: Option<String>,
-    /// Path-independent identity of the exact official package selected for a
-    /// targeted Windows Host launch. Absolute runner paths remain runtime-only.
-    pub tool_runtime_provenance: Option<ToolRuntimeProvenance>,
-    /// Durable Session whose legacy tool provenance may be atomically upgraded
-    /// after the exact package probe succeeds. This is not execution lineage.
-    pub tool_runtime_source_session_id: Option<String>,
     pub reasoning_level: Option<String>,
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
@@ -1232,9 +580,6 @@ pub struct AgentLaunchBuilder {
     branch: Option<String>,
     base_branch: Option<String>,
     model: Option<String>,
-    version: Option<String>,
-    tool_runtime_provenance: Option<ToolRuntimeProvenance>,
-    tool_runtime_source_session_id: Option<String>,
     fast_mode: bool,
     skip_permissions: bool,
     /// Issue #4543: the permission preference the launch *source* carried, as
@@ -1294,9 +639,6 @@ impl AgentLaunchBuilder {
             branch: None,
             base_branch: None,
             model: None,
-            version: None,
-            tool_runtime_provenance: None,
-            tool_runtime_source_session_id: None,
             fast_mode: false,
             skip_permissions: false,
             requested_skip_permissions: None,
@@ -1392,27 +734,6 @@ impl AgentLaunchBuilder {
 
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
-        self
-    }
-
-    /// Set the version selection ("installed", "latest", or a semver string).
-    pub fn version(mut self, version: impl Into<String>) -> Self {
-        self.version = Some(version.into());
-        self
-    }
-
-    /// Reuse the exact, path-independent package identity persisted by a
-    /// previous Session. New explicit launches leave this unset and resolve
-    /// their requested selector afresh.
-    pub fn tool_runtime_provenance(mut self, provenance: ToolRuntimeProvenance) -> Self {
-        self.tool_runtime_provenance = Some(provenance);
-        self
-    }
-
-    /// Identify the durable Session eligible for a post-probe provenance
-    /// migration without coupling tool resolution to execution continuity.
-    pub fn tool_runtime_source_session_id(mut self, id: impl Into<String>) -> Self {
-        self.tool_runtime_source_session_id = Some(id.into());
         self
     }
 
@@ -1636,7 +957,8 @@ impl AgentLaunchBuilder {
             }
         }
 
-        // Resolve runner (installed binary vs bunx/npx)
+        // Built-in agents use their installed command; custom Bunx definitions
+        // retain their explicitly configured package runner.
         let mut runner_env = self
             .custom_agent
             .as_ref()
@@ -1645,26 +967,9 @@ impl AgentLaunchBuilder {
         runner_env.extend(self.custom_agent_env.clone());
         runner_env.extend(self.env_overrides.clone());
         let runner = self.custom_agent.as_ref().map_or_else(
-            || {
-                // Host Claude/Codex prefer the user's installation. Preparation
-                // resolves it against the final launch environment and retains
-                // the existing checked package fallback when it is unavailable.
-                let version = self.version.as_deref().unwrap_or("installed");
-                let version = if self.runtime_target == LaunchRuntimeTarget::Host
-                    && matches!(self.agent_id, AgentId::ClaudeCode | AgentId::Codex)
-                    && version == "latest"
-                {
-                    "installed"
-                } else {
-                    version
-                };
-                resolve_runner_with_effective_env(
-                    &self.agent_id,
-                    version,
-                    &runner_env,
-                    &[],
-                    self.working_dir.as_deref(),
-                )
+            || ResolvedRunner {
+                executable: self.agent_id.command().to_string(),
+                base_args: Vec::new(),
             },
             |agent| {
                 resolve_custom_runner_with_effective_env(
@@ -1738,12 +1043,6 @@ impl AgentLaunchBuilder {
             .unwrap_or_else(|| self.agent_id.display_name().to_string());
         let color = self.agent_id.default_color();
         let model = self.model.clone();
-        let tool_version = self
-            .version
-            .clone()
-            .filter(|version| version != "installed");
-        let tool_runtime_provenance = self.tool_runtime_provenance.clone();
-        let tool_runtime_source_session_id = self.tool_runtime_source_session_id.clone();
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
@@ -1774,18 +1073,7 @@ impl AgentLaunchBuilder {
             display_name,
             color,
             model,
-            tool_version,
-            tool_version_selector: (self.runtime_target == LaunchRuntimeTarget::Host
-                && matches!(self.agent_id, AgentId::ClaudeCode | AgentId::Codex))
-            .then(|| {
-                self.version
-                    .as_deref()
-                    .filter(|version| !version.is_empty())
-                    .unwrap_or("installed")
-                    .to_string()
-            }),
-            tool_runtime_provenance,
-            tool_runtime_source_session_id,
+            tool_version: None,
             reasoning_level,
             session_mode,
             resume_session_id,
@@ -2022,39 +1310,8 @@ impl AgentLaunchBuilder {
             }
         }
 
-        // Version-dependent flags
-        let version_str = self.version.as_deref().unwrap_or("");
-        let parsed_version = semver::Version::parse(version_str).ok();
-
-        if self.fast_mode
-            && parsed_version
-                .as_ref()
-                .is_some_and(|ver| *ver >= semver::Version::new(0, 110, 0))
-        {
-            args.push("-c".to_string());
-            args.push("service_tier=fast".to_string());
-        }
-
         if self.skip_permissions {
             args.push("--yolo".to_string());
-        }
-
-        // No `--enable goals`: codex-cli removed the flag and rejects unknown
-        // `--enable` values before it reads the config, so emitting it aborts
-        // the launch with `Unknown feature flag: goals` (Issue #4127). Gating on
-        // `parsed_version` is not an option either — `codex@latest` leaves the
-        // version undetected (Issue #3481), which is exactly the launch path
-        // that must keep working.
-
-        // Web search args
-        if let Some(ref ver) = parsed_version {
-            if *ver >= semver::Version::new(0, 90, 0) {
-                args.push("--enable".to_string());
-                args.push("web_search".to_string());
-            } else {
-                args.push("--enable".to_string());
-                args.push("web_search_request".to_string());
-            }
         }
 
         // Sandbox & shell env policies
@@ -2784,10 +2041,9 @@ mod tests {
     fn build_codex_fast_mode() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .fast_mode(true)
-            .version("0.113.0")
             .build();
 
-        assert!(config
+        assert!(!config
             .args
             .windows(2)
             .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
@@ -2906,19 +2162,6 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_fast_mode_omits_service_tier_for_older_versions() {
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .fast_mode(true)
-            .version("0.109.0")
-            .build();
-
-        assert!(!config
-            .args
-            .windows(2)
-            .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
-    }
-
-    #[test]
     fn build_codex_with_reasoning_level() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .model("gpt-5.3-codex")
@@ -2933,24 +2176,6 @@ mod tests {
         assert!(config
             .args
             .contains(&"model_reasoning_summaries=detailed".to_string()));
-    }
-
-    #[test]
-    fn build_codex_version_specific_web_search_new() {
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("0.91.0")
-            .build();
-
-        assert!(config.args.contains(&"web_search".to_string()));
-    }
-
-    #[test]
-    fn build_codex_version_specific_web_search_old() {
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("0.80.0")
-            .build();
-
-        assert!(config.args.contains(&"web_search_request".to_string()));
     }
 
     #[test]
@@ -2975,37 +2200,18 @@ mod tests {
         );
     }
 
-    /// codex-cli 0.116.0 removed the `goals` feature flag and rejects unknown
-    /// `--enable` values before it even reads the config, so emitting it kills
-    /// the launch outright (Issue #4127). Version discovery cannot be trusted to
-    /// gate it either — `codex@latest` leaves `version` empty (Issue #3481) —
-    /// so the flag must never be emitted, detected version or not.
+    /// The removed Codex goals feature must never be emitted.
     #[test]
     fn build_codex_never_enables_goals_feature_flag() {
-        for version in ["", "0.89.0", "0.115.0", "0.116.0"] {
-            let mut builder = AgentLaunchBuilder::new(AgentId::Codex);
-            if !version.is_empty() {
-                builder = builder.version(version);
-            }
-            let config = builder.build();
-
-            assert!(
-                !config
-                    .args
-                    .windows(2)
-                    .any(|pair| pair[0] == "--enable" && pair[1] == "goals"),
-                "Codex launch must not enable the removed `goals` feature flag (version {version:?}): {:?}",
-                config.args
-            );
-            assert!(
-                !config
-                    .args
-                    .iter()
-                    .any(|arg| normalize_config_override_for_test(arg) == "features.goals=true"),
-                "Codex launch must not enable `goals` through a config override (version {version:?}): {:?}",
-                config.args
-            );
-        }
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        assert!(!config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+        assert!(!config
+            .args
+            .iter()
+            .any(|arg| normalize_config_override_for_test(arg) == "features.goals=true"));
     }
 
     #[test]
@@ -3348,29 +2554,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runner_installed_returns_direct_command() {
-        let runner = resolve_runner(&AgentId::ClaudeCode, "installed");
-        assert_eq!(runner.executable, "claude");
-        assert!(runner.base_args.is_empty());
-    }
-
-    #[test]
-    fn host_claude_and_codex_latest_prefer_installed_runner() {
+    fn host_claude_and_codex_use_installed_runner() {
         for agent in [AgentId::ClaudeCode, AgentId::Codex] {
-            let config = AgentLaunchBuilder::new(agent.clone())
-                .version("latest")
-                .build();
+            let config = AgentLaunchBuilder::new(agent.clone()).build();
             assert_eq!(config.command, agent.command());
-            assert!(!config.args.iter().any(|arg| arg.contains("@latest")));
-            let empty = AgentLaunchBuilder::new(agent).version("").build();
-            assert_eq!(empty.tool_version_selector.as_deref(), Some("installed"));
+            assert!(config.tool_version.is_none());
         }
     }
 
     #[test]
     fn installed_claude_backend_keeps_native_auto_updates_enabled() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .version("installed")
             .backend_profile(sample_claude_backend())
             .build();
         for key in [
@@ -3382,49 +2576,6 @@ mod tests {
                 "gwt must not inject {key}"
             );
         }
-    }
-
-    #[test]
-    fn resolve_runner_empty_version_returns_direct_command() {
-        let runner = resolve_runner(&AgentId::Codex, "");
-        assert_eq!(runner.executable, "codex");
-        assert!(runner.base_args.is_empty());
-    }
-
-    #[test]
-    fn resolve_runner_latest_uses_bunx_or_npx() {
-        let runner = resolve_runner(&AgentId::ClaudeCode, "latest");
-        assert!(!runner.executable.is_empty());
-        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
-        assert!(spec_arg.is_some(), "should have @package@latest arg");
-        assert!(spec_arg
-            .unwrap()
-            .contains("@anthropic-ai/claude-code@latest"));
-    }
-
-    #[test]
-    fn resolve_runner_latest_uses_official_grok_build_package() {
-        let runner = resolve_runner(&AgentId::GrokBuild, "latest");
-        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
-        assert_eq!(
-            spec_arg.map(String::as_str),
-            Some("@xai-official/grok@latest")
-        );
-    }
-
-    /// SPEC-3864 FR-009 (AC-8): OpenClaw's distribution route is the vendor's
-    /// own npm package, so a `latest` launch resolves through the bunx/npx
-    /// package runner instead of falling back to a `openclaw` executable that
-    /// is not on PATH.
-    #[test]
-    fn resolve_runner_latest_uses_official_openclaw_package() {
-        let runner = resolve_runner(&AgentId::OpenClaw, "latest");
-        assert_ne!(
-            runner.executable, "openclaw",
-            "a latest launch must not fall back to the direct command"
-        );
-        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
-        assert_eq!(spec_arg.map(String::as_str), Some("openclaw@latest"));
     }
 
     #[test]
@@ -3532,24 +2683,6 @@ mod tests {
             .build();
         assert_eq!(provider_defined.model.as_deref(), Some("DefaultXL"));
         assert_single_option_pair(&provider_defined.args, "--model", "DefaultXL");
-    }
-
-    #[test]
-    fn resolve_runner_specific_version_uses_bunx_or_npx() {
-        let runner = resolve_runner(&AgentId::Codex, "1.5.0");
-        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
-        assert!(spec_arg.is_some());
-        assert!(spec_arg.unwrap().contains("@openai/codex@1.5.0"));
-    }
-
-    #[test]
-    fn resolve_runner_no_npm_package_falls_back_to_direct() {
-        // SPEC-3864: Antigravity has no runtime package route (installer
-        // only), so a versioned request must fall back to the direct command
-        // rather than a package runner.
-        let runner = resolve_runner(&AgentId::Antigravity, "latest");
-        assert_eq!(runner.executable, "agy");
-        assert!(runner.base_args.is_empty());
     }
 
     #[test]
@@ -3760,76 +2893,9 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_targeted_official_provider_candidates_are_npx_only() {
-        // SPEC-1921 Phase 75 / Issue #3456: native bunx on Windows can split a
-        // whitespace-bearing final prompt into multiple argv entries. Official
-        // providers must use only npx so the prompt remains one optional argument.
-        for agent_id in [AgentId::Codex, AgentId::ClaudeCode] {
-            let candidates = package_runner_candidates_for_agent(&agent_id);
-            let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
-            let needs_yes: Vec<bool> = candidates.iter().map(|(_, yes)| *yes).collect();
-
-            assert_eq!(names, vec!["npx.cmd"]);
-            assert_eq!(needs_yes, vec![true]);
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_targeted_runner_resolution_never_returns_bunx_when_npx_is_missing() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("bunx.cmd"), "@echo off\r\n").expect("write bunx.cmd");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        for agent_id in [AgentId::Codex, AgentId::ClaudeCode] {
-            let runner = resolve_runner_with_env(&agent_id, "latest", &env);
-            let executable = command_basename(&runner.executable).to_ascii_lowercase();
-            assert_eq!(
-                executable, "npx.cmd",
-                "targeted runner must fail through the spawnable npx.cmd health check instead of selecting Bunx or a bare shim"
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_opencode_candidates_keep_bunx_first() {
-        let candidates = package_runner_candidates_for_agent(&AgentId::OpenCode);
-        let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
-
-        assert_eq!(names, vec!["bunx.cmd", "bunx", "npx.cmd", "npx"]);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_codex_latest_resolves_npx_cmd_before_bunx_cmd() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("npx.cmd"), "@echo off\r\n").expect("write npx.cmd");
-        std::fs::write(temp.path().join("bunx.cmd"), "@echo off\r\n").expect("write bunx.cmd");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::Codex, "latest", &env);
-
-        assert!(
-            Path::new(&runner.executable)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd")),
-            "expected npx.cmd, got {}",
-            runner.executable
-        );
-        assert_eq!(
-            runner.base_args,
-            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
     fn windows_targeted_codex_issue_prompt_remains_one_argument() {
         let prompt = "$gwt-execute #3152";
         let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
             .extra_arg(prompt)
             .build();
 
@@ -3904,941 +2970,52 @@ mod tests {
     }
 
     #[cfg(all(not(windows), unix))]
-    fn write_test_bun_runtime(temp_root: &Path) -> (PathBuf, PathBuf) {
-        let bin_dir = temp_root.join("test-bun/bin");
-        std::fs::create_dir_all(&bin_dir).expect("create test Bun bin");
-        let bun = bin_dir.join("bun");
-        let bunx = bin_dir.join("bunx");
-        write_test_runner(&bun);
-        std::os::unix::fs::symlink("bun", &bunx).expect("create bunx symlink");
-        (bun, bunx)
-    }
-
-    #[cfg(all(not(windows), unix))]
-    fn write_test_bunx_cache(
-        temp_root: &Path,
-        version: &str,
-        dependency_name: &str,
-        installed_name: &str,
-    ) -> (PathBuf, std::time::SystemTime) {
-        let cache_root = temp_root
-            .join(format!("bunx-{}-@openai", current_effective_uid()))
-            .join(format!("codex@{version}"));
-        let executable = cache_root.join("node_modules/.bin/codex");
-        std::fs::create_dir_all(executable.parent().expect("bin parent")).expect("create bin dir");
-        let installed_package_dir = cache_root.join("node_modules/@openai/codex");
-        std::fs::create_dir_all(&installed_package_dir).expect("create installed package dir");
-        std::fs::write(
-            cache_root.join("package.json"),
-            format!(r#"{{"dependencies":{{"{dependency_name}":"^0.145.0"}}}}"#),
-        )
-        .expect("write cache package");
-        std::fs::write(
-            installed_package_dir.join("package.json"),
-            format!(r#"{{"name":"{installed_name}","version":"0.145.0"}}"#),
-        )
-        .expect("write installed package");
-        let executable_target = installed_package_dir.join("bin/codex.js");
-        std::fs::create_dir_all(
-            executable_target
-                .parent()
-                .expect("executable target parent"),
-        )
-        .expect("create executable target parent");
-        // Mirror the real package bin: a node-shebang JavaScript entrypoint.
-        std::fs::write(
-            &executable_target,
-            "#!/usr/bin/env node\nprocess.exit(0);\n",
-        )
-        .expect("write JavaScript entrypoint");
-        let mut target_permissions = std::fs::metadata(&executable_target)
-            .expect("target metadata")
-            .permissions();
-        use std::os::unix::fs::PermissionsExt;
-        target_permissions.set_mode(0o777);
-        std::fs::set_permissions(&executable_target, target_permissions)
-            .expect("mirror Bun executable target mode");
-        std::os::unix::fs::symlink("../@openai/codex/bin/codex.js", &executable)
-            .expect("create Bun-style executable symlink");
-        let modified = std::fs::metadata(cache_root.join("package.json"))
-            .expect("cache metadata")
-            .modified()
-            .expect("cache modified time");
-        (executable, modified)
-    }
-
-    #[cfg(all(not(windows), unix))]
-    fn codex_latest_package_config() -> LaunchConfig {
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
-            .build();
-        let runner = resolve_runner(&AgentId::Codex, "latest");
-        config.command = runner.executable;
-        config.args.splice(0..0, runner.base_args);
-        config
-    }
-
-    #[cfg(all(not(windows), unix))]
     #[test]
-    fn fresh_bunx_latest_cache_runs_entrypoint_with_bun_and_preserves_agent_args() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let mut config = codex_latest_package_config();
-        config.working_dir = Some(PathBuf::from("/tmp/project"));
-        let (bun, bunx) = write_test_bun_runtime(temp.path());
-        config.command = bunx.to_string_lossy().into_owned();
-        config.env_vars.insert(
-            "PATH".to_string(),
-            bun.parent()
-                .expect("Bun bin")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        config.tool_version = Some("0.145.0".into());
-        let original_working_dir = config.working_dir.clone();
-
-        let changed = apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(60),
-        )
-        .is_applied();
-
-        assert!(changed);
-        assert_eq!(
-            std::fs::canonicalize(&config.command).expect("canonical Bun runtime"),
-            std::fs::canonicalize(bun).expect("canonical expected Bun runtime")
-        );
-        assert_eq!(config.working_dir, original_working_dir);
-        assert_eq!(
-            PathBuf::from(config.args.first().expect("cached entrypoint arg")),
-            std::fs::canonicalize(executable).expect("canonical cached executable")
-        );
-        assert!(!config.args.iter().any(|arg| arg == "@openai/codex@latest"));
-        assert!(config.args.iter().any(|arg| arg == "--no-alt-screen"));
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_falls_back_for_stale_missing_or_wrong_package_cache() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let mut stale = codex_latest_package_config();
-        let original_command = stale.command.clone();
-        let original_args = stale.args.clone();
-
-        assert!(!apply_host_bunx_cache_fast_path_from(
-            &mut stale,
-            temp.path(),
-            modified + std::time::Duration::from_secs(24 * 60 * 60 + 1),
-        )
-        .is_applied());
-        assert_eq!(stale.command, original_command);
-        assert_eq!(stale.args, original_args);
-
-        let missing = tempfile::tempdir().expect("missing tempdir");
-        assert!(!apply_host_bunx_cache_fast_path_from(
-            &mut stale,
-            missing.path(),
-            modified + std::time::Duration::from_secs(60),
-        )
-        .is_applied());
-
-        let wrong = tempfile::tempdir().expect("wrong tempdir");
-        let (_executable, wrong_modified) =
-            write_test_bunx_cache(wrong.path(), "latest", "other", "other");
-        assert!(!apply_host_bunx_cache_fast_path_from(
-            &mut stale,
-            wrong.path(),
-            wrong_modified + std::time::Duration::from_secs(60),
-        )
-        .is_applied());
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_rejects_a_shared_writable_temp_root() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let original_permissions = std::fs::metadata(temp.path())
-            .expect("temp root metadata")
-            .permissions();
-        let mut shared_permissions = original_permissions.clone();
-        shared_permissions.set_mode(0o777);
-        std::fs::set_permissions(temp.path(), shared_permissions).expect("make temp root shared");
-        let mut config = codex_latest_package_config();
-
-        let changed = apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(60),
-        )
-        .is_applied();
-        std::fs::set_permissions(temp.path(), original_permissions)
-            .expect("restore temp root permissions");
-
-        assert!(
-            !changed,
-            "a shared writable temp root must fall back to bunx instead of executing a discovered cache binary"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_temp_root_policy_requires_a_private_effective_user_root() {
-        let current_uid = current_effective_uid();
-
-        assert!(bunx_temp_root_permissions_are_trusted(
-            current_uid,
-            0o700,
-            current_uid
-        ));
-        assert!(
-            !bunx_temp_root_permissions_are_trusted(0, 0o1777, current_uid),
-            "sticky /tmp cannot protect Bun's world-writable cached JS target"
-        );
-        assert!(
-            !bunx_temp_root_permissions_are_trusted(current_uid, 0o777, current_uid),
-            "a user-owned shared directory without sticky-root isolation is untrusted"
-        );
-        assert!(
-            !bunx_temp_root_permissions_are_trusted(42, 0o1777, current_uid),
-            "a sticky temp root owned by an unrelated user is untrusted"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_rejects_a_foreign_effective_uid() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let current_uid = current_effective_uid();
-        let foreign_uid = if current_uid == 0 { 1 } else { 0 };
-        let mut config = codex_latest_package_config();
-
-        assert!(
-            !apply_host_bunx_cache_fast_path_from_uid(
-                &mut config,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-                foreign_uid,
-            )
-            .is_applied(),
-            "a cache temp root not owned by the effective user must be ignored"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_rejects_a_world_writable_cache_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let bin_dir = executable.parent().expect("bin dir");
-        let mut permissions = std::fs::metadata(bin_dir)
-            .expect("bin dir metadata")
-            .permissions();
-        permissions.set_mode(0o777);
-        std::fs::set_permissions(bin_dir, permissions).expect("make bin dir writable");
-        let mut config = codex_latest_package_config();
-
-        assert!(
-            !apply_host_bunx_cache_fast_path_from(
-                &mut config,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-            )
-            .is_applied(),
-            "a replaceable .bin entry must fall back to the package runner"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_ignores_a_misleading_cache_root_name() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let correct_root = temp
-            .path()
-            .join(format!("bunx-{}-@openai", current_effective_uid()));
-        let misleading_root = temp.path().join("bunx-evil-@openai");
-        std::fs::rename(correct_root, misleading_root).expect("rename cache root");
-        let mut config = codex_latest_package_config();
-
-        assert!(
-            !apply_host_bunx_cache_fast_path_from(
-                &mut config,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-            )
-            .is_applied(),
-            "cache lookup must use the exact effective-uid Bun root name"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn pinned_bunx_cache_remains_reusable_after_latest_ttl() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) =
-            write_test_bunx_cache(temp.path(), "0.145.0", "@openai/codex", "@openai/codex");
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("0.145.0")
-            .build();
-        let (bun, bunx) = write_test_bun_runtime(temp.path());
-        config.command = bunx.to_string_lossy().into_owned();
-
-        assert!(apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(30 * 24 * 60 * 60),
-        )
-        .is_applied());
-        assert_eq!(
-            std::fs::canonicalize(&config.command).expect("canonical Bun runtime"),
-            std::fs::canonicalize(bun).expect("canonical expected Bun runtime")
-        );
-        assert_eq!(
-            PathBuf::from(config.args.first().expect("cached entrypoint arg")),
-            std::fs::canonicalize(executable).expect("canonical cached executable")
-        );
-        assert!(!config.args.iter().any(|arg| arg == "@openai/codex@0.145.0"));
-    }
-
-    /// Materialize a Bun-style `bunx` cache whose package `bin` target has the
-    /// given bytes, so tests can drive the entrypoint classification by file
-    /// content rather than by name.
-    #[cfg(all(not(windows), unix))]
-    fn write_test_bunx_cache_with_entrypoint(
-        temp_root: &Path,
-        agent_id: &AgentId,
-        target_relative: &str,
-        target_bytes: &[u8],
-    ) -> (PathBuf, std::time::SystemTime) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let package = agent_id.npm_package().expect("package runner agent");
-        let uid = current_effective_uid();
-        let cache_root = match package.split_once('/') {
-            Some((scope, name)) => temp_root
-                .join(format!("bunx-{uid}-{scope}"))
-                .join(format!("{name}@latest")),
-            None => temp_root.join(format!("bunx-{uid}-{package}@latest")),
-        };
-        let bin_name = Path::new(agent_id.command())
-            .file_name()
-            .expect("bin name")
-            .to_owned();
-        let executable = cache_root.join("node_modules/.bin").join(&bin_name);
-        std::fs::create_dir_all(executable.parent().expect("bin parent")).expect("create bin dir");
-        let installed_package_dir = cache_root.join("node_modules").join(package);
-        std::fs::create_dir_all(&installed_package_dir).expect("create installed package dir");
-        std::fs::write(
-            cache_root.join("package.json"),
-            format!(r#"{{"dependencies":{{"{package}":"^1.0.0"}}}}"#),
-        )
-        .expect("write cache package");
-        std::fs::write(
-            installed_package_dir.join("package.json"),
-            format!(r#"{{"name":"{package}","version":"1.0.0"}}"#),
-        )
-        .expect("write installed package");
-        let target = installed_package_dir.join(target_relative);
-        std::fs::create_dir_all(target.parent().expect("target parent")).expect("target dir");
-        std::fs::write(&target, target_bytes).expect("write entrypoint");
-        let mut permissions = std::fs::metadata(&target)
-            .expect("target metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&target, permissions).expect("chmod entrypoint");
-        let link_target = Path::new("..").join(package).join(target_relative);
-        std::os::unix::fs::symlink(link_target, &executable).expect("create .bin symlink");
-        let modified = std::fs::metadata(cache_root.join("package.json"))
-            .expect("cache metadata")
-            .modified()
-            .expect("cache modified time");
-        (executable, modified)
-    }
-
-    /// Minimal Mach-O 64-bit little-endian header magic (`opencode.exe` on
-    /// macOS arm64 is exactly this kind of file).
-    #[cfg(all(not(windows), unix))]
-    const MACHO_64_LE_MAGIC: &[u8] = &[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01];
-    #[cfg(all(not(windows), unix))]
-    const ELF_MAGIC: &[u8] = &[0x7f, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00];
-
-    // Issue #3857 AC-1: OpenCode's `opencode-ai` package ships a native binary
-    // as its bin target. A fresh Bun cache must exec it directly instead of
-    // handing it to the Bun runtime as a script argument.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn fresh_bunx_latest_cache_execs_native_entrypoint_directly() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) = write_test_bunx_cache_with_entrypoint(
-            temp.path(),
-            &AgentId::OpenCode,
-            "bin/opencode.exe",
-            MACHO_64_LE_MAGIC,
-        );
-        let (bun, bunx) = write_test_bun_runtime(temp.path());
-        let mut config = AgentLaunchBuilder::new(AgentId::OpenCode)
-            .version("latest")
-            .working_dir("/tmp/project")
-            .build();
-        config.command = bunx.to_string_lossy().into_owned();
-        config.args = vec![
-            "opencode-ai@latest".to_string(),
-            "--model".to_string(),
-            "x".to_string(),
-        ];
-
-        let outcome = apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(60),
-        );
-
-        assert_eq!(outcome, HostBunxCacheFastPath::Applied);
-        assert_eq!(
-            PathBuf::from(&config.command),
-            std::fs::canonicalize(&executable).expect("canonical native entrypoint")
-        );
-        assert_eq!(config.args, ["--model", "x"]);
-        assert!(
-            !config
-                .args
-                .iter()
-                .any(|arg| Path::new(arg) == bun.as_path()),
-            "native entrypoint must not be passed to the Bun runtime"
-        );
-        assert_eq!(config.working_dir, Some(PathBuf::from("/tmp/project")));
-    }
-
-    // Issue #3857 AC-2: the native-vs-script decision follows file content
-    // (shebang / executable magic), never the file extension.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_entrypoint_kind_is_decided_by_content_not_extension() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let write = |name: &str, bytes: &[u8]| {
-            let path = temp.path().join(name);
-            std::fs::write(&path, bytes).expect("write entrypoint");
-            path
-        };
-
-        let native_named_js = write("native.js", ELF_MAGIC);
-        let macho_named_exe = write("opencode.exe", MACHO_64_LE_MAGIC);
-        let node_shim_named_exe = write("shim.exe", b"#!/usr/bin/env node\nconsole.log(1)\n");
-        let bun_shim = write("shim", b"#!/usr/bin/env bun\nconsole.log(1)\n");
-        let shell_shim = write("shim.sh", b"#!/bin/sh\nexec true\n");
-        let bare_js = write("entry", b"console.log(1)\n");
-
-        assert_eq!(
-            classify_cached_entrypoint(&native_named_js),
-            Ok(CachedEntrypointKind::Direct)
-        );
-        assert_eq!(
-            classify_cached_entrypoint(&macho_named_exe),
-            Ok(CachedEntrypointKind::Direct)
-        );
-        assert_eq!(
-            classify_cached_entrypoint(&node_shim_named_exe),
-            Ok(CachedEntrypointKind::JavaScript)
-        );
-        assert_eq!(
-            classify_cached_entrypoint(&bun_shim),
-            Ok(CachedEntrypointKind::JavaScript)
-        );
-        assert_eq!(
-            classify_cached_entrypoint(&shell_shim),
-            Ok(CachedEntrypointKind::Direct)
-        );
-        assert_eq!(
-            classify_cached_entrypoint(&bare_js),
-            Ok(CachedEntrypointKind::JavaScript)
-        );
-    }
-
-    // Issue #3857 AC-2 (end to end): a Codex-style `.js` bin that is really a
-    // native binary is exec'd directly, and an `.exe` bin that is really a
-    // node shim still runs through the Bun runtime.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_routes_by_entrypoint_content() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (bun, bunx) = write_test_bun_runtime(temp.path());
-
-        let (native_js, modified) = write_test_bunx_cache_with_entrypoint(
-            temp.path(),
-            &AgentId::Codex,
-            "bin/codex.js",
-            ELF_MAGIC,
-        );
-        let mut codex = codex_latest_package_config();
-        codex.command = bunx.to_string_lossy().into_owned();
-        assert_eq!(
-            apply_host_bunx_cache_fast_path_from(
-                &mut codex,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-            ),
-            HostBunxCacheFastPath::Applied
-        );
-        assert_eq!(
-            PathBuf::from(&codex.command),
-            std::fs::canonicalize(&native_js).expect("canonical native js")
-        );
-
-        let (shim_exe, modified) = write_test_bunx_cache_with_entrypoint(
-            temp.path(),
-            &AgentId::OpenCode,
-            "bin/opencode.exe",
-            b"#!/usr/bin/env node\nconsole.log(1)\n",
-        );
-        let mut opencode = AgentLaunchBuilder::new(AgentId::OpenCode)
-            .version("latest")
-            .build();
-        opencode.command = bunx.to_string_lossy().into_owned();
-        opencode.args = vec!["opencode-ai@latest".to_string()];
-        assert_eq!(
-            apply_host_bunx_cache_fast_path_from(
-                &mut opencode,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-            ),
-            HostBunxCacheFastPath::Applied
-        );
-        assert_eq!(
-            std::fs::canonicalize(&opencode.command).expect("canonical Bun runtime"),
-            std::fs::canonicalize(&bun).expect("canonical expected Bun runtime")
-        );
-        assert_eq!(
-            PathBuf::from(opencode.args.first().expect("script arg")),
-            std::fs::canonicalize(&shim_exe).expect("canonical shim")
-        );
-    }
-
-    // Issue #3857 AC-5: when a validated cache entry resolves to a bin target
-    // that cannot be launched, the outcome names the resolved path and the
-    // reason so the launch surface can show it, and the launch is left on the
-    // package runner.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_reports_an_unlaunchable_entrypoint() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) = write_test_bunx_cache_with_entrypoint(
-            temp.path(),
-            &AgentId::OpenCode,
-            "bin/opencode.exe",
-            &[0u8; 64],
-        );
-        let (_bun, bunx) = write_test_bun_runtime(temp.path());
-        let mut config = AgentLaunchBuilder::new(AgentId::OpenCode)
-            .version("latest")
-            .build();
-        config.command = bunx.to_string_lossy().into_owned();
-        config.args = vec!["opencode-ai@latest".to_string()];
-        let original = (config.command.clone(), config.args.clone());
-
-        let outcome = apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(60),
-        );
-
-        let HostBunxCacheFastPath::Rejected {
-            executable: reported,
-            reason,
-        } = outcome
-        else {
-            panic!("expected a rejected outcome, got {outcome:?}");
-        };
-        assert_eq!(
-            reported,
-            std::fs::canonicalize(&executable).expect("canonical entrypoint")
-        );
-        assert!(
-            reason.contains("neither"),
-            "reason must say why the file is not launchable: {reason}"
-        );
-        assert_eq!((config.command, config.args), original);
-        assert!(!HostBunxCacheFastPath::NotApplicable.is_applied());
-    }
-
-    // Issue #3857 AC-5: a script entrypoint without a resolvable Bun runtime
-    // is reported with the resolved path instead of silently ignored.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_reports_a_missing_bun_runtime_for_script_entrypoints() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) = write_test_bunx_cache_with_entrypoint(
-            temp.path(),
-            &AgentId::OpenCode,
-            "bin/opencode.exe",
-            b"#!/usr/bin/env node\nconsole.log(1)\n",
-        );
-        let mut config = AgentLaunchBuilder::new(AgentId::OpenCode)
-            .version("latest")
-            .build();
-        config.command = temp
-            .path()
-            .join("nowhere/bunx")
-            .to_string_lossy()
-            .into_owned();
-        config.args = vec!["opencode-ai@latest".to_string()];
-
-        let outcome = apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(60),
-        );
-
-        let HostBunxCacheFastPath::Rejected {
-            executable: reported,
-            reason,
-        } = outcome
-        else {
-            panic!("expected a rejected outcome, got {outcome:?}");
-        };
-        assert_eq!(
-            reported,
-            std::fs::canonicalize(&executable).expect("canonical entrypoint")
-        );
-        assert!(reason.contains("Bun runtime"), "{reason}");
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn claude_latest_prefers_npx_over_bunx_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        let npx = temp.path().join("npx");
-        write_test_runner(&bunx);
-        write_test_runner(&npx);
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::ClaudeCode, "latest", &env);
-
-        assert_eq!(PathBuf::from(runner.executable), npx);
-        assert_eq!(
-            runner.base_args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-            ],
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn claude_latest_falls_back_to_bunx_when_npx_is_missing_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        write_test_runner(&bunx);
-        let path = temp.path().display().to_string();
-        let cwd = std::env::current_dir().expect("cwd");
-
-        let (executable, needs_yes) = find_package_runner_in_path(
-            package_runner_candidates_for_agent(&AgentId::ClaudeCode),
-            Some(path.as_str()),
-            &cwd,
-        )
-        .expect("runner");
-
-        assert_eq!(PathBuf::from(executable), bunx);
-        assert!(!needs_yes);
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn codex_latest_keeps_bunx_first_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        let npx = temp.path().join("npx");
-        write_test_runner(&bunx);
-        write_test_runner(&npx);
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::Codex, "latest", &env);
-
-        assert_eq!(PathBuf::from(runner.executable), bunx);
-        assert_eq!(runner.base_args, vec!["@openai/codex@latest".to_string()]);
-    }
-
-    // SPEC-3151 FR-001/FR-002: OpenCode launches through the `opencode-ai` npm
-    // package runner just like Codex/Claude Code. Per the SPEC decision the
-    // runner keeps bunx-first ordering (OpenCode is not on the npx-preference
-    // list), so a versioned launch resolves bunx + `opencode-ai@<version>`.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn opencode_latest_keeps_bunx_first_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        let npx = temp.path().join("npx");
-        write_test_runner(&bunx);
-        write_test_runner(&npx);
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::OpenCode, "latest", &env);
-
-        assert_eq!(PathBuf::from(runner.executable), bunx);
-        assert_eq!(runner.base_args, vec!["opencode-ai@latest".to_string()]);
-    }
-
-    // Issue #2981: the host `bunx`→`npx` fallback must resolve a Windows-spawnable
-    // executable. `find_package_runner_in_path` is the shared resolver, so given
-    // an npx-only candidate list it must prefer the `.cmd` variant ahead of the
-    // bare POSIX shim when both are present on PATH (SPEC-1921 FR-080).
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn npx_fallback_resolution_prefers_cmd_variant_when_both_present() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        write_test_runner(&temp.path().join("npx.cmd"));
-        write_test_runner(&temp.path().join("npx"));
-        let path = temp.path().display().to_string();
-        let cwd = std::env::current_dir().expect("cwd");
-        let candidates: &'static [(&'static str, bool)] = &[("npx.cmd", true), ("npx", true)];
-
-        let (executable, needs_yes) =
-            find_package_runner_in_path(candidates, Some(path.as_str()), &cwd).expect("npx runner");
-
-        assert_eq!(PathBuf::from(&executable), temp.path().join("npx.cmd"));
-        assert!(needs_yes);
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn resolve_host_npx_fallback_executable_resolves_npx_on_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        write_test_runner(&temp.path().join("npx"));
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert_eq!(PathBuf::from(resolved), temp.path().join("npx"));
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn latest_runner_resolves_relative_path_against_launch_cwd() {
+    fn direct_runner_uses_explicit_path_and_launch_cwd() {
         let temp = tempfile::tempdir().expect("tempdir");
         let launch_cwd = temp.path().join("project");
         let bin = launch_cwd.join("tools");
         std::fs::create_dir_all(&bin).expect("create launch PATH directory");
-        let npx = bin.join("npx");
-        write_test_runner(&npx);
+        let claude = bin.join("claude");
+        write_test_runner(&claude);
         let env = HashMap::from([("PATH".to_string(), "tools".to_string())]);
-
-        let runner = resolve_latest_runner_with_effective_env(
-            &AgentId::ClaudeCode,
-            &env,
-            &[],
-            Some(&launch_cwd),
-        );
-
-        assert_eq!(PathBuf::from(runner.executable), npx);
-        assert_eq!(runner.base_args[0], "--yes");
+        let executable =
+            resolve_direct_runner_with_effective_env("claude", &env, &[], Some(&launch_cwd));
+        assert_eq!(executable.map(PathBuf::from), Some(claude));
     }
 
-    #[cfg(all(not(windows), unix))]
     #[test]
-    fn builder_pinned_selection_uses_explicit_path_and_launch_cwd() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let launch_cwd = temp.path().join("project");
-        let bin = launch_cwd.join("tools");
-        std::fs::create_dir_all(&bin).expect("create launch PATH directory");
-        let npx = bin.join("npx");
-        write_test_runner(&npx);
-
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .working_dir(&launch_cwd)
-            .version("2.1.156")
-            .env("PATH", "tools")
-            .build();
-
-        assert_eq!(PathBuf::from(config.command), npx);
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn package_runner_effective_path_applies_remove_before_explicit_override() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let inherited_bin = temp.path().join("inherited");
-        let explicit_bin = temp.path().join("explicit");
-        std::fs::create_dir_all(&inherited_bin).expect("create inherited bin");
-        std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
-        write_test_runner(&inherited_bin.join("npx"));
-        write_test_runner(&explicit_bin.join("npx"));
+    fn launch_effective_path_applies_remove_before_explicit_override() {
         let inherited_consulted = std::cell::Cell::new(false);
-        // The inherited host PATH is injected through the seam instead of
-        // swapping the process-global PATH, which would race every parallel
-        // process spawn in this test binary (Issue #3895).
-        let inherited = resolve_host_npx_fallback_executable_with_host_path(
-            &HashMap::new(),
-            &[],
-            Some(temp.path()),
-            || {
+        let inherited = effective_launch_path_with_host(&HashMap::new(), &[], || {
+            inherited_consulted.set(true);
+            Some("inherited".to_string())
+        });
+        assert!(inherited_consulted.replace(false));
+        let removed =
+            effective_launch_path_with_host(&HashMap::new(), &["PATH".to_string()], || {
                 inherited_consulted.set(true);
-                Some(inherited_bin.display().to_string())
-            },
-        );
-        assert!(
-            inherited_consulted.replace(false),
-            "inherited PATH must consult the host environment"
-        );
-        let removed = resolve_host_npx_fallback_executable_with_host_path(
-            &HashMap::new(),
+                Some("inherited".to_string())
+            });
+        let overridden = effective_launch_path_with_host(
+            &HashMap::from([("PATH".to_string(), "explicit".to_string())]),
             &["PATH".to_string()],
-            Some(temp.path()),
             || {
                 inherited_consulted.set(true);
-                Some(inherited_bin.display().to_string())
+                Some("inherited".to_string())
             },
         );
-        let overridden = resolve_host_npx_fallback_executable_with_host_path(
-            &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
-            &["PATH".to_string()],
-            Some(temp.path()),
-            || {
-                inherited_consulted.set(true);
-                Some(inherited_bin.display().to_string())
-            },
-        );
-
-        assert_eq!(
-            PathBuf::from(inherited),
-            inherited_bin.join("npx"),
-            "host PATH must be honored when nothing removes it"
-        );
-        assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
-        assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
-        assert!(
-            !inherited_consulted.get(),
-            "explicit PATH or PATH removal must not hydrate the inherited host environment"
-        );
-    }
-
-    /// Issue #3972: a launch `PATH` that pins its own runners re-binds the
-    /// stored package runner, while a launch that merely inherits the process
-    /// `PATH` keeps the command the builder already resolved.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn package_runner_rebinds_only_for_a_launch_path_that_overrides_the_process_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let inherited_bin = temp.path().join("inherited");
-        let pinned_bin = temp.path().join("pinned");
-        std::fs::create_dir_all(&inherited_bin).expect("create inherited bin");
-        std::fs::create_dir_all(&pinned_bin).expect("create pinned bin");
-        write_test_runner(&inherited_bin.join("npx"));
-        write_test_runner(&pinned_bin.join("npx"));
-        let host_path = || Some(inherited_bin.display().to_string());
-
-        let inherited = rebind_package_runner_with_host_path(
-            "npx",
-            &HashMap::from([("PATH".to_string(), inherited_bin.display().to_string())]),
-            Some(temp.path()),
-            host_path,
-        );
-        let pinned = rebind_package_runner_with_host_path(
-            "npx",
-            &HashMap::from([("PATH".to_string(), pinned_bin.display().to_string())]),
-            Some(temp.path()),
-            host_path,
-        );
-
-        assert_eq!(
-            inherited, None,
-            "an inherited PATH must not rewrite the resolved command"
-        );
-        assert_eq!(
-            pinned.map(PathBuf::from),
-            Some(pinned_bin.join("npx")),
-            "a pinned launch PATH must select the runner that will be probed"
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn resolve_host_npx_fallback_executable_defaults_to_bare_npx_when_absent() {
-        // Empty PATH dir: no npx anywhere → canonical bare name is preserved so
-        // the launch PTY can still resolve it at spawn time (prior behavior).
-        let temp = tempfile::tempdir().expect("tempdir");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert_eq!(resolved, "npx");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn resolve_host_npx_fallback_executable_prefers_cmd_on_windows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("npx.cmd"), "@echo off\r\n").expect("write npx.cmd");
-        std::fs::write(temp.path().join("npx"), "#!/bin/sh\n").expect("write npx shim");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert!(
-            Path::new(&resolved)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.eq_ignore_ascii_case("npx.cmd"))
-                .unwrap_or(false),
-            "expected npx.cmd, got {resolved}"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn resolve_host_npx_fallback_executable_never_defaults_to_bare_shim_on_windows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("npx"), "#!/bin/sh\n").expect("write bare shim");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert_eq!(resolved, "npx.cmd");
+        assert_eq!(inherited.as_deref(), Some("inherited"));
+        assert_eq!(removed, None);
+        assert_eq!(overridden.as_deref(), Some("explicit"));
+        assert!(!inherited_consulted.get());
     }
 
     #[test]
-    fn docker_build_with_version_latest() {
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .version("latest")
-            .runtime_target(LaunchRuntimeTarget::Docker)
-            .build();
-        assert!(
-            config.command.contains("bunx") || config.command.contains("npx"),
-            "expected bunx/npx but got: {}",
-            config.command
-        );
-        let has_package_spec = config
-            .args
-            .iter()
-            .any(|a| a.contains("@anthropic-ai/claude-code@latest"));
-        assert!(
-            has_package_spec,
-            "args should contain package@latest: {:?}",
-            config.args
-        );
-    }
-
-    #[test]
-    fn build_with_version_installed() {
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .version("installed")
-            .build();
+    fn built_in_launch_uses_direct_command() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
         assert_eq!(config.command, "claude");
+        assert!(config.tool_version.is_none());
     }
 
     #[test]
