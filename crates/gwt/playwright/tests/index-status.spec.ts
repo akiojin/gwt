@@ -351,7 +351,6 @@ test.describe("Project Index status surface", () => {
     await page.goto(APP_URL);
     const { root } = await openIndexSearchPanel(page);
     await root.locator(".index-search-input").fill("memory search loading");
-    await root.locator(".index-run-button").click();
 
     const loading = root.locator(".index-search-loading");
     await expect(loading).toBeVisible({ timeout: 5_000 });
@@ -389,7 +388,6 @@ test.describe("Project Index status surface", () => {
       "All terms required, e.g. Work discussion",
     );
     await root.locator(".index-search-input").fill("Workspace volatile");
-    await root.locator(".index-run-button").click();
 
     const request = await page.waitForFunction(() => {
       const sends = (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
