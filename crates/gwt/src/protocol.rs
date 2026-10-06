@@ -899,6 +899,9 @@ pub enum FrontendEvent {
     SetIssueMonitorMaxActiveAgents {
         max_active_agents: usize,
     },
+    SetIssueMonitorAllowedLabels {
+        allowed_labels: Vec<String>,
+    },
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },

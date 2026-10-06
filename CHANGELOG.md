@@ -1,6 +1,64 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.110.0] - 2026-10-05
+
+### Bug Fixes
+
+- **issue:** Share spec acceptance input with the monitor
+- **codex:** Collect trust for missing generated hooks
+- **agent:** Apply probe environment overrides after removals
+- **issue-monitor:** Retain pending and live launch bindings
+- **verify:** Admit before checking the predecessor snapshot
+- **verify:** 予約の一時読取失敗でもFIFO到着順を保持する
+- **verify:** 空のlibtestフィルターを重い検証として分類する
+- **verify:** Plan不一致をhost待機とコマンド実行前に拒否する
+- **codex:** Verify both hook locations and recognize portable commands
+- **discussion:** 提案の終了操作で origin session と曖昧性を検証
+- **issue-monitor:** 一覧応答と gh 子プロセスの期限を保証する
+- **runtime:** Isolate hook pins and diagnose daemon lease failures
+- **build:** Unassigned な終端 Work の完了を冪等に確認
+- **workspace:** Container 競合の復旧診断を canonical authority に合わせる
+
+### Features
+
+- **gui:** Active カードに全エージェントの最新出力を表示する
+
+### Miscellaneous Tasks
+
+- **work:** Record codex hook cleanup PR
+- **work:** 既存Windowsテストの裁定待ちを記録する
+- **work:** 検証前提のWindowsテスト失敗を再確認する
+- **work:** AC6の既存Windowsテスト失敗と裁定待ちを記録する
+- **work:** Record PR 4977 association
+- **work:** #4984 の再開監査と配送状態を記録
+- **work:** Record PR association for issue 4953
+- **work:** Deliver issue-4918 PR link events
+- **work:** PR #4990 の配送証跡を記録
+- **work:** T-5 の最終 Work 履歴を保存する
+- **work:** T-5 の PR 履歴同期を保存する
+- **work:** T-5 の Ready PR 配送履歴を保存する
+
+### Performance
+
+- **verify:** Heavyコマンド単位で検証リースを取得する
+
+### Refactor
+
+- **migration:** 旧HOME状態の取り込みを廃止し更新手順を案内
+
+### Testing
+
+- Coordinatorとdaemon fixtureの固定待機を除去
+- **app_runtime:** Assert lock-timeout outcome instead of wall-clock bound
+- **daemon:** Retain isolated home until fixture runtime shutdown
+- **gwt:** Keep fail-open scan test off the real GitHub API
+- Cleanup競合テストを旧HOME拒否契約へ更新
+
+### Ci
+
+- **test:** Windows core全件の既定並列5周を復帰
+
 ## [9.109.0] - 2026-10-03
 
 ### Bug Fixes
