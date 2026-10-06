@@ -1882,51 +1882,6 @@ export function createLaunchWizardSurface({
           setupParent.appendChild(section);
         }
 
-        if (
-          showSetupForms &&
-          (
-            launchWizard.show_skip_permissions ||
-            launchWizard.show_fast_mode
-          )
-        ) {
-          const showFastMode = Boolean(
-            launchWizard.show_fast_mode,
-          );
-          const section = createLaunchSection(
-            "Launch settings",
-            "Permissions and tool-specific launch behavior.",
-          );
-          const grid = createNode("div", "launch-form-grid");
-          if (launchWizard.show_skip_permissions) {
-            appendToggleField(
-              grid,
-              "Permissions",
-              "Skip permission prompts",
-              launchWizard.skip_permissions,
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_skip_permissions",
-                  enabled,
-                }),
-            );
-          }
-          if (showFastMode) {
-            appendToggleField(
-              grid,
-              "Fast mode",
-              "Use the agent's Fast mode",
-              Boolean(launchWizard.fast_mode),
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_fast_mode",
-                  enabled,
-                }),
-            );
-          }
-          section.appendChild(grid);
-          setupParent.appendChild(section);
-        }
-
         // SPEC-3152: Hermes-specific launch options, rendered only for the
         // Hermes agent. Provider is a curated dropdown sourced from the user's
         // config; the remaining fields are optional overrides (blank uses the

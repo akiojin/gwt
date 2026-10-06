@@ -212,7 +212,11 @@ owner Issue.
 ## Verification and PR gate
 
 Phase 3 delegates to `gwt-verify --mode full`. Record the selected commands and
-results in the evidence bundle. In an `interactive` launch, UI-affecting work
+results in the evidence bundle. For a releaseable slice in a project with an approved
+CI-backed policy, use `gwt-verify --mode pre-pr` instead: keep the Issue AC tests
+and checks absent from required CI locally, then wait for required CI before
+claiming delivery. Full verification remains available and is the fallback
+when the CI correspondence cannot be established. In an `interactive` launch, UI-affecting work
 requires a concrete user verification handoff and a `User Verification Result`.
 
 Read the launch route from the launch record, not from the environment:
@@ -285,6 +289,15 @@ headed/nextest/admission evidence. Run outstanding Light commands first,
 preserve Heavy commands' original relative order, and keep artifact restoration last.
 The full registered matrix and required headed Chromium evidence in dark/light
 must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
+
+Heavy Cargo admission uses a bounded host slot pool (#5082), with CPU/memory
+defaults and a global `[verification] slots` override. Distinct worktrees and
+effective Cargo target directories may run concurrently. The same worktree or
+target remains serialized, and unknown wrappers and older exclusive holders
+serialize against the entire pool. Disk reservations and isolated child temp
+directories protect concurrent runs. Read `verify.lease.status` for capacity,
+running/available slots, every holder's ETA, and the shared FIFO queue; do not
+infer the whole host state from one representative holder.
 
 ## Legacy aliases
 
