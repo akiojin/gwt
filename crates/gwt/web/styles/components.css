@@ -1167,6 +1167,25 @@ button.op-status-strip__cell {
   display: none;
 }
 
+/* SPEC-4777 T-7a explanations */
+.issue-control-explanation {
+  width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.4;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-2);
+}
+
+.issue-bridge-root [data-issue-explanation]:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+/* /SPEC-4777 T-7a */
+
 .op-runtime-health-detail__summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

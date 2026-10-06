@@ -496,3 +496,111 @@ test("queue detail provenance follows authoritative terminal queue", async (t) =
   surface.renderKnowledgeBridge("win-1");
   assert.equal(body.querySelector(".issue-detail-provenance")?.textContent, "Queued by: Auto-refill");
 });
+
+test("T-7a: current Issue controls explain themselves on focus and hover without acting", async (t) => {
+  const { body, document, surface, state, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  state.entries = [entry(11, "queued", { queue_position: 1, queued_by: "auto-refill" })];
+  state.selectedNumber = 11;
+  state.detail = { number: 11, title: "Issue 11", labels: [], sections: [] };
+  surface.applyIssueMonitorStatus(STATUS);
+  surface.renderKnowledgeBridge("win-1");
+  const root = body.querySelector(".issue-bridge-root");
+  const event = (target, type, extra = {}) => {
+    const e = new window.Event(type, { bubbles: true });
+    Object.assign(e, extra);
+    target.dispatchEvent(e);
+  };
+  const autonomous = root.querySelector('[data-action="monitor-autonomous"]');
+  const before = sent.length;
+  event(autonomous, "focusin");
+  const popup = document.getElementById(autonomous.getAttribute("aria-describedby"));
+  assert.ok(popup, "focused control is associated with its visible explanation");
+  assert.equal(popup.getAttribute("role"), "tooltip");
+  assert.ok(popup.classList.contains("op-runtime-health-detail"), "reuse the existing popover shell");
+  assert.equal(popup.hidden, false);
+  assert.match(popup.textContent, /without waiting for human approval/i);
+  event(autonomous, "keydown", { key: "Escape" });
+  assert.equal(popup.hidden, true, "Escape dismisses without changing focus or settings");
+  event(autonomous, "focusout");
+  const heading = root.querySelector('[data-queue-column="queued"] .issue-queue-heading');
+  assert.equal(heading.getAttribute("tabindex"), "0", "static headings are keyboard reachable");
+  event(heading, "mouseover");
+  assert.equal(popup.hidden, false);
+  assert.match(popup.textContent, /launch order/i);
+  event(heading, "mouseout", { relatedTarget: popup });
+  assert.equal(popup.hidden, false, "the explanation stays visible while reading it");
+  event(popup, "mouseleave");
+  assert.equal(popup.hidden, true);
+  event(heading, "focusin");
+  assert.match(popup.textContent, /launch order/i, "focus exposes the same explanation as hover");
+  assert.equal(sent.length, before, "reading explanations sends no control messages");
+  for (const selector of [
+    '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
+    '[data-action="monitor-auto-refill"]', '[data-action="monitor-auto-apply"]',
+    '[data-action="toggle-issue-preview"]', '.issue-detail-provenance',
+  ]) {
+    assert.ok(root.querySelector(selector)?.getAttribute("aria-description"), `${selector} has an accessible explanation`);
+  }
+  const select = root.querySelector('.knowledge-row[data-issue-number="11"] .knowledge-row-select');
+  assert.match(select.getAttribute("aria-description"), /Auto-refill/i);
+  assert.equal(select.querySelectorAll('[tabindex="0"]').length, 0, "no extra tab stops inside a button");
+  event(heading, "focusout");
+  event(heading, "mouseover");
+  event(document, "keydown", { key: "Escape" });
+  assert.equal(popup.hidden, true, "Escape also dismisses a hovered explanation when focus is outside the window");
+  const selectBadge = select.querySelector(".knowledge-row-badge");
+  event(selectBadge, "mouseover");
+  event(selectBadge, "mouseout", { relatedTarget: select });
+  assert.equal(popup.hidden, false, "moving from a badge through its card keeps the explanation readable");
+  event(select, "mouseout", { relatedTarget: popup });
+  assert.equal(popup.hidden, false, "card explanation is reachable beyond the card's actions");
+  event(popup, "mouseleave");
+  event(heading, "mouseover");
+  event(heading, "pointerdown");
+  assert.equal(popup.hidden, true, "beginning a pointer action dismisses the explanation");
+  event(heading, "mouseover", { buttons: 1 });
+  assert.equal(popup.hidden, true, "pointer movement with a held button cannot obstruct dragging");
+  event(heading, "dragstart");
+  event(heading, "mouseover");
+  assert.equal(popup.hidden, true, "native dragging suppresses hover explanations");
+  event(heading, "dragend");
+  event(heading, "mouseover");
+  assert.equal(popup.hidden, false, "hover explanations resume after the drag");
+  surface.clearKnowledgeBridgeState("win-1");
+  assert.equal(popup.isConnected, false, "closing a window removes its detached explanation");
+});
+
+test("T-7a: two Issue windows keep independent explanation identities and cleanup", async (t) => {
+  const { body, document, surface } = await makeFixture();
+  const second = document.createElement("div");
+  document.body.appendChild(second);
+  surface.mountKnowledgeWindow({ id: "win-2", preset: "issue" }, second);
+  t.after(() => { surface.clearKnowledgeBridgeState("win-1"); surface.clearKnowledgeBridgeState("win-2"); });
+  const focus = target => target.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+  const firstControl = body.querySelector('[data-action="monitor-autonomous"]');
+  const secondControl = second.querySelector('[data-action="monitor-auto-refill"]');
+  focus(firstControl);
+  focus(secondControl);
+  const firstId = firstControl.getAttribute("aria-describedby");
+  const secondId = secondControl.getAttribute("aria-describedby");
+  assert.ok(firstId && secondId);
+  assert.notEqual(firstId, secondId);
+  surface.clearKnowledgeBridgeState("win-1");
+  assert.equal(document.getElementById(firstId), null);
+  assert.match(document.getElementById(secondId)?.textContent, /queue/i);
+});
+
+test("T-7a: explanation styling extends the shared popover with Operator tokens", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const block = css.match(/\/\* SPEC-4777 T-7a explanations \*\/([\s\S]*?)\/\* \/SPEC-4777 T-7a \*\//)?.[1];
+  assert.ok(block, "the targeted explanation styling exists");
+  assert.match(block, /var\(--font-body\)/);
+  assert.match(block, /var\(--type-sm\)/);
+  assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b|\brgba?\(|position:\s*fixed/);
+  const tokens = readFileSync(resolve(here, "../styles/tokens.css"), "utf8")
+    + readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+  for (const [, name] of block.matchAll(/var\((--[a-z-]+)\)/g)) {
+    assert.ok(tokens.includes(`${name}:`), `${name} is a defined Operator token`);
+  }
+});

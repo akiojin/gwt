@@ -80,6 +80,94 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   await expect(column(page,"queued")).toContainText("Nothing will launch until an issue is queued.");
 });
 
+test("T-7a: current labels explain themselves with keyboard focus and hover", async ({ page }) => {
+  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const controlMessages = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
+    message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")));
+  const before = await controlMessages();
+  const queueMetric = page.locator('[data-metric="queue"]');
+  await queueMetric.focus();
+  await page.keyboard.press("Tab");
+  const autonomous = page.getByRole("switch", { name: "Autonomous mode" });
+  await expect(autonomous).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveText("Allow eligible issues to run without waiting for human approval.");
+  await expect(autonomous).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  await expect(autonomous).toBeFocused();
+
+  for (const phase of ["backlog", "queued", "active", "done"]) {
+    const heading = column(page, phase).locator(".issue-queue-heading");
+    await heading.focus();
+    await expect(heading).toBeFocused();
+    await expect(popup).toBeVisible();
+    await expect(popup).toHaveText(await heading.getAttribute("aria-description") as string);
+  }
+  const queued = column(page, "queued").locator(".issue-queue-heading");
+  await queued.focus();
+  await confirm(page, [3, 4, 1]);
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toHaveText("Queued · 3");
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toBeFocused();
+  await expect(popup).toContainText("launch order");
+  await page.locator(".knowledge-search").focus();
+  await page.mouse.move(1590, 1090);
+  await queued.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText("launch order");
+  const box = await popup.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(1600);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(1100);
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await expect(popup).toBeVisible();
+  await page.mouse.move(1590, 1090);
+  await expect(popup).not.toBeVisible();
+  await page.locator("#op-notifications-button").focus();
+  await queued.hover();
+  await expect(popup).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  for (const selector of [
+    '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
+    '[data-action="monitor-auto-refill"]', '[data-action="monitor-auto-apply"]',
+    '[data-action="toggle-issue-preview"]',
+  ]) {
+    const target = page.locator(selector);
+    await target.focus();
+    await expect(popup).toBeVisible();
+    await expect(popup).toHaveText(await target.getAttribute("aria-description") as string);
+  }
+  const select = row(page, 4).locator(".knowledge-row-select");
+  await select.focus();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  expect(await controlMessages()).toEqual(before);
+  await page.keyboard.press("Enter");
+  const source = page.locator(".issue-detail-provenance");
+  await source.focus();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  await page.evaluate(() => (window as any).__queueRefreshDetail());
+  await expect(page.locator(".issue-detail-title")).toHaveText("Refreshed issue");
+  await expect(source).toBeFocused();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  await page.locator(".knowledge-search").focus();
+  await row(page, 4).locator(".knowledge-row-badge").hover();
+  await expect(popup).toBeVisible();
+  const cardBox = await row(page, 4).boundingBox();
+  const cardPopup = await popup.boundingBox();
+  await page.mouse.move(cardBox!.x + 20, cardBox!.y + cardBox!.height - 1);
+  await expect(popup).toBeVisible();
+  await page.mouse.move(cardPopup!.x + 20, cardPopup!.y + 10);
+  await expect(popup).toBeVisible();
+  await source.focus();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  await expect(popup).toBeVisible();
+});
+
 
 test("card selection keeps issue body, acceptance and provenance beside switchable output", async ({page}) => {
   const detail=page.locator(".knowledge-detail-pane");
@@ -193,7 +281,9 @@ async function installBackend(page: Page) {
       constructor(public readonly url:string) { super(); fixture.__queueConfirm=(numbers:number[],extra:any)=>{
         Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
-      }; setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
+      }; fixture.__queueRefreshDetail=()=>this.emit({...fixture.__queueLastDetail,
+        detail:{...fixture.__queueLastDetail.detail,title:"Refreshed issue"}});
+        setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
       emit(payload:unknown) {const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}
       send(raw:string) {
         const message=JSON.parse(raw);fixture.__queueMessages.push(message);
@@ -203,7 +293,10 @@ async function installBackend(page: Page) {
             geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false}]} }],active_tab_id:"tab-queue",recent_projects:[]}});
         else if(message.kind==="list_issue_monitor") this.emit({kind:"issue_monitor_status",status});
         else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) this.emit({kind:"knowledge_entries",id:message.id,knowledge_kind:"issue",request_id:message.request_id,entries,selected_number:null,refresh_enabled:true});
-        else if(message.kind==="select_knowledge_bridge_entry") this.emit({kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}});
+        else if(message.kind==="select_knowledge_bridge_entry") {
+          fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
+          this.emit(fixture.__queueLastDetail);
+        }
       }
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }

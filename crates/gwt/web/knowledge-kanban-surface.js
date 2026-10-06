@@ -629,6 +629,129 @@ export function createKnowledgeKanbanSurface({
 }) {
       const knowledgeBridgeStateMap = new Map();
       const terminalPreviewText = new Map();
+      const issueControlExplanations = new Map();
+
+      // SPEC-4777 T-7a: use one existing popover shell per Issue window. Root
+      // delegation also covers cards and headings replaced by cache refreshes.
+      function explainIssueControl(node, text, key, focusable = true) {
+        node.dataset.issueExplanation = text;
+        node.setAttribute("aria-description", text);
+        if (key) node.dataset.issueExplanationKey = key;
+        if (focusable && !node.matches("button, input, select, textarea, a[href], summary")) {
+          node.setAttribute("tabindex", "0");
+        }
+        return node;
+      }
+
+      function bindIssueControlExplanations(windowId, root) {
+        issueControlExplanations.get(windowId)?.dispose();
+        const popup = createNode("div", "op-runtime-health-detail issue-control-explanation");
+        popup.id = `issue-control-explanation-${windowId}`;
+        popup.setAttribute("role", "tooltip");
+        popup.hidden = true;
+        document.body.appendChild(popup);
+        let anchor = null;
+        let focused = null;
+        let hovered = null;
+        let dragging = false;
+        const target = event => event.target?.closest?.("[data-issue-explanation]");
+        const hide = () => {
+          if (anchor) {
+            const ids = (anchor.getAttribute("aria-describedby") || "").split(/\s+/)
+              .filter(id => id && id !== popup.id);
+            if (ids.length) anchor.setAttribute("aria-describedby", ids.join(" "));
+            else anchor.removeAttribute("aria-describedby");
+          }
+          anchor = null;
+          popup.hidden = true;
+        };
+        const show = node => {
+          if (!node?.isConnected || !root.contains(node)) { hide(); return; }
+          hide();
+          anchor = node;
+          popup.textContent = node.dataset.issueExplanation;
+          popup.hidden = false;
+          node.setAttribute("aria-describedby", [node.getAttribute("aria-describedby"), popup.id].filter(Boolean).join(" "));
+          // Keep the popup outside a draggable card so its pointer hit area
+          // cannot cover the card itself (including its action buttons).
+          const rect = (node.closest(".knowledge-row") || node).getBoundingClientRect?.();
+          if (!rect) return;
+          const viewport = document.defaultView || {};
+          const width = viewport.innerWidth || 1024;
+          const height = viewport.innerHeight || 768;
+          const size = popup.getBoundingClientRect();
+          popup.style.left = `${Math.max(8, Math.min(rect.left, width - size.width - 8))}px`;
+          const top = rect.bottom + size.height <= height - 8
+            ? rect.bottom - 1 : rect.top - size.height + 1;
+          popup.style.top = `${Math.max(8, Math.min(top, height - size.height - 8))}px`;
+        };
+        const over = event => {
+          if (dragging || event.buttons) return;
+          const node = target(event);
+          if (!node || node.contains(event.relatedTarget)) return;
+          hovered = node;
+          show(node);
+        };
+        const out = event => {
+          if (!hovered) return;
+          const boundary = hovered.closest(".knowledge-row") || hovered;
+          if (!boundary.contains(event.target) || boundary.contains(event.relatedTarget)) return;
+          hovered = null;
+          if (popup.contains(event.relatedTarget)) return;
+          if (focused) show(focused); else hide();
+        };
+        const focus = event => { focused = target(event); if (focused) show(focused); };
+        const blur = () => { focused = null; if (hovered) show(hovered); else hide(); };
+        const escape = event => {
+          if (event.key !== "Escape" || popup.hidden) return;
+          hide();
+          event.preventDefault();
+          event.stopPropagation();
+        };
+        const leavePopup = () => { if (focused) show(focused); else hide(); };
+        const pointerDown = () => { hovered = null; hide(); };
+        const dragStart = () => { dragging = true; pointerDown(); };
+        const dragEnd = () => { dragging = false; };
+        const listeners = { mouseover: over, mouseout: out, focusin: focus, focusout: blur,
+          pointerdown: pointerDown, dragstart: dragStart, dragend: dragEnd };
+        for (const [type, listener] of Object.entries(listeners)) root.addEventListener(type, listener);
+        popup.addEventListener("mouseleave", leavePopup);
+        document.addEventListener("keydown", escape);
+        document.addEventListener("scroll", hide, true);
+        document.defaultView?.addEventListener("resize", hide);
+        issueControlExplanations.set(windowId, {
+          refresh() { if (anchor) show(anchor); },
+          dispose() {
+            hide();
+            for (const [type, listener] of Object.entries(listeners)) root.removeEventListener(type, listener);
+            document.removeEventListener("scroll", hide, true);
+            document.removeEventListener("keydown", escape);
+            document.defaultView?.removeEventListener("resize", hide);
+            popup.remove();
+          },
+        });
+      }
+
+      function issueQueueSourceExplanation(entry) {
+        switch (entry.queued_by) {
+          case "auto-refill": return "Auto-refill added this issue to the launch queue automatically.";
+          case "urgent": return "The urgent label added this issue to the launch queue.";
+          case "operator": return "An operator added this issue to the launch queue.";
+          default: return entry.queued_by ? `Reported queue source: ${entry.queued_by}.` : "The queue source has not been reported.";
+        }
+      }
+
+      function issueStateExplanation(primary) {
+        const meanings = {
+          "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
+          "monitor:launching": "The monitor is starting an agent for this issue.",
+          "monitor:launched": "The monitor launched an agent for this issue.",
+          "monitor:needs_human": "This issue needs a human decision before automatic work can continue.",
+          "issue:open": "The issue is open on GitHub; this alone does not mean an agent is running.",
+          "issue:closed": "The issue is closed on GitHub.",
+        };
+        return meanings[primary.key] || `Reported issue state: ${primary.label}.`;
+      }
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
       // is re-broadcast constantly, so only a CHANGED text is a new event) and
       // remember which of the two sources changed last for the summary line.
@@ -840,10 +963,12 @@ export function createKnowledgeKanbanSurface({
               : state === "quota_hold"
                 ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}`
                 : "";
+          explainIssueControl(pill, `Issue Monitor status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
         }
         const active = bar.querySelector('[data-metric="active"]');
         if (active) {
           active.textContent = `Active ${issueMonitorStatus.active_count || 0}/${maxActive}`;
+          explainIssueControl(active, "Running issue agents / maximum agents the monitor may run at once.");
         }
         const queue = bar.querySelector('[data-metric="queue"]');
         if (queue) {
@@ -851,6 +976,7 @@ export function createKnowledgeKanbanSurface({
           queue.title = issueMonitorStatus.total_candidates
             ? `Total ${issueMonitorStatus.total_candidates}`
             : "";
+          explainIssueControl(queue, `Issues waiting in the launch queue. ${queue.title}`.trim());
         }
         // Issue #4366 AC-6b: the saved settings and the held fallback stay two
         // separate lines, now of the ⚙ tooltip.
@@ -867,6 +993,7 @@ export function createKnowledgeKanbanSurface({
           );
           if (effective) lines.push(effective);
           settings.title = lines.join("\n");
+          explainIssueControl(settings, settings.title);
         }
         const setup = bar.querySelector('[data-action="monitor-setup"]');
         if (setup) {
@@ -1106,6 +1233,7 @@ export function createKnowledgeKanbanSurface({
         for (const [windowId, state] of knowledgeBridgeStateMap) {
           if (normalizeKnowledgeKind(state.kind) !== "issue") continue;
           renderIssueMonitorControls(windowMap.get(windowId));
+          issueControlExplanations.get(windowId)?.refresh();
         }
       }
 
@@ -1641,6 +1769,8 @@ export function createKnowledgeKanbanSurface({
       }
 
       function clearKnowledgeBridgeState(windowId) {
+        issueControlExplanations.get(windowId)?.dispose();
+        issueControlExplanations.delete(windowId);
         terminalPreviewText.delete(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
         if (state?.reportedError) {
@@ -2877,7 +3007,16 @@ export function createKnowledgeKanbanSurface({
           column.setAttribute("aria-label", `${label} column`);
           const items = entries.filter(entry => issueQueueColumn(entry) === phase);
           if (phase === "queued") items.sort((a,b) => a.queue_position - b.queue_position);
-          column.appendChild(createNode("h3", "issue-queue-heading", `${label} · ${items.length}`));
+          const explanations = {
+            backlog: "Open issues that are not queued and have no running agent.",
+            queued: "Issues waiting to launch. Their queue positions show the launch order.",
+            active: "Issues with an agent launching or running. Card output is a read-only preview.",
+            done: "Closed issues or issues the monitor reports as merged or released.",
+          };
+          column.appendChild(explainIssueControl(
+            createNode("h3", "issue-queue-heading", `${label} · ${items.length}`),
+            explanations[phase], `column-${phase}`,
+          ));
           if (!items.length) column.appendChild(createNode("div", "knowledge-empty", phase === "queued"
             ? "Nothing will launch until an issue is queued." : `No ${phase} items`));
           for (const entry of items) {
@@ -3624,6 +3763,7 @@ export function createKnowledgeKanbanSurface({
         const pill = createNode("span", "knowledge-row-badge", row.primary.label);
         pill.dataset.tone = row.primary.tone;
         pill.dataset.stateKey = row.primary.key;
+        explainIssueControl(pill, issueStateExplanation(row.primary), `detail-state-${number}`);
         status.appendChild(pill);
         if (work?.pr_number) {
           const prState = String(work.pr_state || "").trim();
@@ -3642,7 +3782,10 @@ export function createKnowledgeKanbanSurface({
         if (entry.queued_by) {
           const source = entry.queued_by === "auto-refill" ? "Auto-refill"
             : entry.queued_by === "urgent" ? "Urgent label" : "Operator";
-          header.appendChild(createNode("div", "issue-detail-provenance", `Queued by: ${source}`));
+          header.appendChild(explainIssueControl(
+            createNode("div", "issue-detail-provenance", `Queued by: ${source}`),
+            issueQueueSourceExplanation(entry), `provenance-${number}`,
+          ));
         }
         if (queue) {
           header.appendChild(createNode("div", "issue-detail-priority", `Priority: ${issueQueuePriorityLabel(entry)}`));
@@ -3679,7 +3822,11 @@ export function createKnowledgeKanbanSurface({
 
       function renderKnowledgeDetailPane(windowId, state, detailPane, { agentPreview = true } = {}) {
         if (state.kind === "issue") {
+          const focusedKey = detailPane.contains(document.activeElement)
+            ? document.activeElement?.dataset.issueExplanationKey : null;
           renderIssueDetailPane(windowId, state, detailPane, { agentPreview });
+          if (focusedKey) detailPane.querySelector(`[data-issue-explanation-key="${focusedKey}"]`)?.focus();
+          issueControlExplanations.get(windowId)?.refresh();
           return;
         }
         detailPane.innerHTML = "";
@@ -4197,6 +4344,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
         badge.dataset.stateKey = model.primary.key;
+        explainIssueControl(badge, issueStateExplanation(model.primary), null, false);
         main.appendChild(badge);
         select.appendChild(main);
 
@@ -4209,10 +4357,16 @@ export function createKnowledgeKanbanSurface({
             if (item.title) {
               node.title = item.title;
             }
+            if (item.key === "queue") {
+              explainIssueControl(node, `Position ${entry.queue_position} in the launch queue. ${issueQueueSourceExplanation(entry)}`, null, false);
+            }
             secondary.appendChild(node);
           }
           select.appendChild(secondary);
         }
+        explainIssueControl(select,
+          [issueStateExplanation(model.primary), Number.isFinite(entry.queue_position) ? issueQueueSourceExplanation(entry) : ""].filter(Boolean).join("\n"),
+          `issue-${entry.number}`);
 
         row.addEventListener("click", (event) => {
           if (event.target?.closest?.(".knowledge-row-actions")) return;
@@ -4246,6 +4400,8 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderIssueKnowledgeBridge(windowId, element, state) {
+        const focusedKey = element.contains(document.activeElement)
+          ? document.activeElement?.dataset.issueExplanationKey : null;
         const list = element.querySelector(".knowledge-list");
         const detailPane = element.querySelector(".knowledge-detail-pane");
         const refreshButton = element.querySelector("[data-action='refresh-knowledge']");
@@ -4320,6 +4476,8 @@ export function createKnowledgeKanbanSurface({
         }
         renderOtherWork(list, windowId, { laneFilter: state.issueLaneFilter || "all" });
         renderKnowledgeDetailPane(windowId, state, detailPane, { agentPreview: !splitMode });
+        if (focusedKey) element.querySelector(`[data-issue-explanation-key="${focusedKey}"]`)?.focus();
+        issueControlExplanations.get(windowId)?.refresh();
       }
 
       function renderKnowledgeBridge(windowId) {
@@ -4590,6 +4748,20 @@ export function createKnowledgeKanbanSurface({
           ) {
             state.selectedNumber = pendingIndexTarget.number;
             pendingIndexOpenTargetsByPreset.delete(windowData.preset);
+          }
+          if (knowledgeKind === "issue") {
+            bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
+            for (const [selector, text] of [
+              ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
+              ['[data-action="monitor-auto-refill"]', "Fill the launch queue automatically with eligible issues."],
+              ['[data-action="monitor-auto-apply"]', "Apply a staged gwt update once agents finish. Its default follows Autonomous mode."],
+              ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
+              ['[data-action="toggle-issue-preview"]', "Show or hide the selected issue's details and read-only output preview."],
+              ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],
+              ['[data-issue-view="split"]', "Pair issues with interactive terminal views."],
+              ['.knowledge-monitor-max-active input', "Maximum number of issue agents the monitor may run at once."],
+              ['.knowledge-monitor-refill-limit input', "Target number of queued issues when Auto-refill is on."],
+            ]) explainIssueControl(body.querySelector(selector), text);
           }
           const search = body.querySelector(".knowledge-search");
           search.value = state.query;
