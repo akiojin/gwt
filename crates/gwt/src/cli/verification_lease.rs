@@ -989,6 +989,29 @@ fn automatic_slot_capacity(logical_cores: usize, memory_bytes: u64) -> usize {
         .clamp(1, 4) // Largest all-PASS canonical capacity measured for #5082.
 }
 
+pub(super) fn cargo_subcommand(args: &[String]) -> Option<&str> {
+    let mut globals = args.iter().skip(1).take_while(|arg| arg.as_str() != "--");
+    loop {
+        let argument = globals.next()?;
+        if argument.starts_with('+')
+            || matches!(
+                argument.as_str(),
+                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
+            )
+        {
+            continue;
+        }
+        if matches!(argument.as_str(), "--config" | "-Z") {
+            globals.next();
+            continue;
+        }
+        if argument.starts_with("--config=") {
+            continue;
+        }
+        return Some(argument.as_str());
+    }
+}
+
 pub(super) fn effective_cargo_target(
     worktree: &Path,
     command: &str,
@@ -1006,27 +1029,8 @@ pub(super) fn effective_cargo_target(
         .collect();
     // Cargo plugins can choose their own build roots. Keep those commands
     // exclusive unless their artifact directory can be established.
-    let mut globals = cargo_args.iter().copied();
-    let subcommand = loop {
-        let Some(argument) = globals.next() else {
-            return Ok(None);
-        };
-        if argument.starts_with('+')
-            || matches!(
-                argument.as_str(),
-                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
-            )
-        {
-            continue;
-        }
-        if matches!(argument.as_str(), "--config" | "-Z") {
-            globals.next();
-            continue;
-        }
-        if argument.starts_with("--config=") {
-            continue;
-        }
-        break argument.as_str();
+    let Some(subcommand) = cargo_subcommand(&args) else {
+        return Ok(None);
     };
     if !matches!(
         subcommand,
@@ -1551,8 +1555,11 @@ mod tests {
 
     #[test]
     fn cargo_target_resolution_respects_configuration_and_command_overrides() {
-        let _lock = gwt_core::test_support::env_lock();
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::create_dir_all(dir.path().join(".cargo")).unwrap();
         std::fs::write(
@@ -1568,10 +1575,10 @@ mod tests {
         .unwrap();
         let _target = gwt_core::test_support::ScopedEnvVar::unset("CARGO_TARGET_DIR");
         assert_eq!(
-            super::effective_cargo_target(dir.path(), "cargo test --workspace", false).unwrap(),
-            Some(dir.path().join("configured-target"))
+            super::effective_cargo_target(&root, "cargo test --workspace", false).unwrap(),
+            Some(root.join("configured-target"))
         );
-        assert_eq!(super::effective_cargo_target(dir.path(), "CARGO_TARGET_DIR=assigned-target cargo test --workspace --target-dir selected-target", false).unwrap(), Some(dir.path().join("selected-target")));
+        assert_eq!(super::effective_cargo_target(&root, "CARGO_TARGET_DIR=assigned-target cargo test --workspace --target-dir selected-target", false).unwrap(), Some(root.join("selected-target")));
         assert_eq!(
             super::effective_cargo_target(dir.path(), "python runner.py", false).unwrap(),
             None

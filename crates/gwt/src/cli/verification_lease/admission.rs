@@ -1199,7 +1199,9 @@ mod tests {
 
     #[test]
     fn independent_worktrees_use_two_slots_but_a_shared_cargo_target_waits() {
-        let _lock = gwt_core::test_support::env_lock();
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let original_home = dirs::home_dir().unwrap();
         let cargo_home = std::env::var_os("CARGO_HOME")

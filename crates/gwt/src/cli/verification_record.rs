@@ -3293,14 +3293,34 @@ fn execute_command_with_isolation(
     // Heavy admission already holds this guard. Light Cargo and operational
     // artifact restoration participate in the same GC boundary without a slot.
     let _artifacts = if progress.is_none() {
-        crate::cli::verification_lease::effective_cargo_target(
+        match crate::cli::verification_lease::effective_cargo_target(
             worktree,
             command,
             isolated_baseline,
-        )?
-        .map(|target| crate::cli::verification_lease::lock_build_artifacts(&target))
-        .transpose()
-        .map_err(|error| format!("build artifact coordination failed: {error}"))?
+        )? {
+            Some(target) => Some(
+                crate::cli::verification_lease::lock_build_artifacts(&target)
+                    .map_err(|error| format!("build artifact coordination failed: {error}"))?,
+            ),
+            None if Path::new(&args[0])
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                == Some("cargo")
+                && !matches!(
+                    crate::cli::verification_lease::cargo_subcommand(&args),
+                    Some("fmt" | "metadata")
+                ) =>
+            {
+                return Err(
+                    "Cargo artifact target is unresolved; refusing slotless execution without \
+                     the build artifact/GC lock. Run `cargo metadata --offline --no-deps \
+                     --format-version 1` with this command's configuration, fix its failure, \
+                     and retry verify.run."
+                        .to_string(),
+                );
+            }
+            None => None,
+        }
     } else {
         None
     };
@@ -6710,8 +6730,58 @@ pub(crate) mod tests {
         assert!(paths.iter().all(|path| !Path::new(path).exists()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn non_admitted_cargo_rejects_unresolved_artifact_target() {
+        let worktree = tempfile::tempdir().unwrap();
+        let cargo = worktree.path().join("cargo");
+        gwt_core::test_support::write_executable_script(
+            &cargo,
+            "#!/bin/sh\ncase \"$*\" in metadata*--format-version*) exit 1;; esac\nprintf '%s\\n' \"$*\" >> executed\n",
+        )
+        .unwrap();
+        let execute = |arguments: &str| {
+            execute_command_with_isolation(
+                worktree.path(),
+                &format!("{} {arguments}", serde_json::to_string(&cargo).unwrap()),
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+        };
+
+        for arguments in [
+            "build -p gwt --bin gwtd --target-dir target",
+            "doc --no-deps",
+            "--config fmt test -p metadata",
+        ] {
+            let result = execute(arguments);
+            assert!(
+                !worktree.path().join("executed").exists(),
+                "unresolved artifact command must not spawn: {arguments} / {result:?}"
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("Cargo artifact target is unresolved"),
+                "{arguments}"
+            );
+        }
+        for arguments in ["--config test fmt --all --check", "metadata --no-deps"] {
+            assert_eq!(execute(arguments).unwrap().0, 0, "{arguments}");
+        }
+        assert_eq!(
+            fs::read_to_string(worktree.path().join("executed")).unwrap(),
+            "--config test fmt --all --check\nmetadata --no-deps\n"
+        );
+    }
+
     #[test]
     fn non_admitted_cargo_holds_the_build_artifact_boundary() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let worktree = tempfile::tempdir().unwrap();
@@ -6953,6 +7023,9 @@ pub(crate) mod tests {
 
     #[test]
     fn failed_cargo_test_output_is_bounded_and_persisted() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Cargo.toml"),
@@ -7006,6 +7079,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn gwtd_artifact_restoration_failure_is_recorded_after_passing_tests() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src")).unwrap();
@@ -7688,7 +7764,16 @@ mod tests {
     // typed owner/base/PR disposition receives its own delivery status.
     #[test]
     fn typed_quarantine_is_distinct_from_raw_pass_and_plain_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='quarantine-target-fixture'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
         let test_identity = "app_runtime::tests::bounded_sync";
         let command = "cargo test -p definitely-missing-package --lib".to_string();
         let baseline_command = format!("{command} {test_identity} -- --exact");
@@ -8821,10 +8906,16 @@ mod tests {
             )
             .unwrap();
 
-        // Narrowed to one named integration test of one package, and pointed
-        // at a directory with no manifest so cargo answers immediately: the
+        // Narrowed to one named integration test of one package. Metadata
+        // resolves the target, but the missing test answers immediately: the
         // command's outcome is irrelevant here, its classification is not.
         let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='gwt'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
         let (_code, out) = crate::cli::run_collect(
             &mut env,
@@ -13017,18 +13108,36 @@ mod tests {
 
     // Issue #4349 (AC-1): the run record itself binds the superset run to the
     // registered (derived) plan, so the completion gate never sees
-    // plan_not_covered / plan_changed for it. The commands fail fast here
-    // (no Cargo.toml in the fixture) — coverage is independent of exit codes.
+    // plan_not_covered / plan_changed for it. The missing packages fail fast
+    // here — coverage is independent of exit codes, with a resolved target.
     #[test]
     fn verify_run_covers_derived_plan_with_package_superset() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_home = dirs::home_dir().unwrap();
+        let _cargo_home = ScopedEnvVar::set(
+            "CARGO_HOME",
+            std::env::var_os("CARGO_HOME")
+                .unwrap_or_else(|| original_home.join(".cargo").into_os_string()),
+        );
+        let _rustup_home = ScopedEnvVar::set(
+            "RUSTUP_HOME",
+            std::env::var_os("RUSTUP_HOME")
+                .unwrap_or_else(|| original_home.join(".rustup").into_os_string()),
+        );
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='superset-target-fixture'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
+        fs::write(dir.path().join(".gitignore"), "/target\nCargo.lock\n").unwrap();
         let planned = "cargo test -p gwt --all-features".to_string();
         let ran = "cargo test -p gwt-core -p gwt --all-features".to_string();
         save_plan(
