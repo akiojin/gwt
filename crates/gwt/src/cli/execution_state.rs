@@ -11227,14 +11227,14 @@ pub(crate) fn settle_completed_with_evidence_locked(
     let verification = match vr::load(worktree) {
         Ok(Some(verification)) => verification,
         Ok(None) => return Ok(Err(vr::EvidenceStatus::MissingRecord)),
-        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+        Err(error) => return Ok(Err(vr::evidence_read_error(&error))),
     };
     if expected_verification_hash.is_some_and(|expected| verification.content_hash != expected) {
         return Ok(Err(vr::EvidenceStatus::PlanChanged));
     }
     let plan = match vr::load_plan(worktree) {
         Ok(plan) => plan,
-        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+        Err(error) => return Ok(Err(vr::evidence_read_error(&error))),
     };
     let status = vr::evaluate_evidence_snapshot(
         worktree,
@@ -11896,6 +11896,7 @@ fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus)
         }
         EvidenceStatus::Failing => "failing",
         EvidenceStatus::Unreadable => "unreadable",
+        EvidenceStatus::UnsupportedFormat { .. } => "unsupported_format",
         EvidenceStatus::Tampered => "tampered",
         EvidenceStatus::PlanNotCovered => "plan_not_covered",
         EvidenceStatus::PlanChanged | EvidenceStatus::PlanChangedFields(_) => "plan_changed",
@@ -13814,6 +13815,9 @@ fn evaluate_execution_reopen_prerequisites(
     use crate::cli::verification_record as vr;
     let plan = vr::load_plan(worktree)
         .map_err(|error| {
+            if matches!(vr::evidence_read_error(&error), vr::EvidenceStatus::UnsupportedFormat { .. }) {
+                return unavailable_recovery_prerequisite(GovernanceCause::DomainInvalid, error.to_string());
+            }
             RecoveryPrerequisiteRefusal::agent_recoverable(
                 "verification_plan_unreadable",
                 "verify.plan",
@@ -13856,6 +13860,15 @@ fn evaluate_execution_reopen_prerequisites(
     }
     let verification = vr::load(worktree)
         .map_err(|error| {
+            if matches!(
+                vr::evidence_read_error(&error),
+                vr::EvidenceStatus::UnsupportedFormat { .. }
+            ) {
+                return unavailable_recovery_prerequisite(
+                    GovernanceCause::DomainInvalid,
+                    error.to_string(),
+                );
+            }
             RecoveryPrerequisiteRefusal::agent_recoverable(
                 "verification_run_unreadable",
                 "verify.run",
@@ -13984,7 +13997,7 @@ fn probe_execution_reopen(
                     "execution.reopen:{}:{}:{}",
                     record.owner_number, plan.content_hash, verification.content_hash
                 )),
-                audit_id: Some(verification.record_id),
+                audit_id: Some(verification.record_id.clone()),
                 execution_generation: binding.map(|binding| binding.generation_id),
                 ..protected_recovery_metadata(None, true)
             },
@@ -15711,7 +15724,7 @@ fn run_impl<E: CliEnv>(
                 ));
                 return Ok(2);
             }
-            expected_verification_hash = Some(verification.content_hash);
+            expected_verification_hash = Some(verification.content_hash.clone());
         }
         return run_reopen_with_session_snapshot_governed(
             recovery_worktree,
@@ -15818,7 +15831,7 @@ fn run_impl<E: CliEnv>(
                     ));
                     return Ok(2);
                 }
-                expected_verification_hash = Some(verification.content_hash);
+                expected_verification_hash = Some(verification.content_hash.clone());
             }
             let settlement = match settle_completed_with_evidence(
                 &worktree,
@@ -26610,19 +26623,22 @@ exit 1
                 .expect("write generated output fixture");
             crate::cli::verification_record::save_plan(
                 active_repo.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "projection-active".to_string(),
-                    owner_number: Some(owner.number),
-                    execution_binding: None,
-                    commands: vec!["git --version".to_string()],
-                    derived: true,
-                    surfaces: vec!["rust".to_string()],
-                    generated_outputs: vec!["projection-artifact.json".to_string()],
-                    quarantines: Vec::new(),
-                    worktree_fingerprint: String::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "projection-active".to_string(),
+                        owner_number: Some(owner.number),
+                        execution_binding: None,
+                        commands: vec!["git --version".to_string()],
+                        derived: true,
+                        surfaces: vec!["rust".to_string()],
+                        generated_outputs: vec!["projection-artifact.json".to_string()],
+                        quarantines: Vec::new(),
+                        worktree_fingerprint: String::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             crate::cli::verification_record::run_verification(
@@ -28446,7 +28462,8 @@ exit 1
             use crate::cli::verification_record as vr;
             vr::save_plan(
                 repo,
-                &vr::VerificationPlanRecord {
+                &vr::VerificationPlanRecord::from(vr::VerificationPlanData {
+                    format_version: Some(1),
                     session_id: session.to_string(),
                     owner_number: Some(3248),
                     execution_binding: None,
@@ -28458,12 +28475,12 @@ exit 1
                     quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
-                },
+                }),
             )
             .unwrap();
             let (record, _) =
                 vr::run_verification(repo, session, &["git --version".to_string()]).unwrap();
-            record.record_id
+            record.record_id.clone()
         }
 
         // SPEC-3248 FR-194..FR-196 / AS-172, AS-175, AS-176: a terminal
@@ -28826,19 +28843,22 @@ exit 1
             let commands = vec!["git --version".to_string()];
             crate::cli::verification_record::save_plan(
                 dir.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "sess-reopen".to_string(),
-                    owner_number: Some(3248),
-                    execution_binding: None,
-                    commands: commands.clone(),
-                    derived: true,
-                    surfaces: vec!["rust(gwt)".to_string()],
-                    generated_outputs: vec!["artifacts/report.json".to_string()],
-                    quarantines: Vec::new(),
-                    worktree_fingerprint: String::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "sess-reopen".to_string(),
+                        owner_number: Some(3248),
+                        execution_binding: None,
+                        commands: commands.clone(),
+                        derived: true,
+                        surfaces: vec!["rust(gwt)".to_string()],
+                        generated_outputs: vec!["artifacts/report.json".to_string()],
+                        quarantines: Vec::new(),
+                        worktree_fingerprint: String::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             crate::cli::verification_record::run_verification(dir.path(), "sess-reopen", &commands)
@@ -29338,19 +29358,22 @@ exit 1
             save_covering_evidence(explicit_then_derived.path(), "sess-reopen", false);
             crate::cli::verification_record::save_plan(
                 explicit_then_derived.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "sess-reopen".to_string(),
-                    owner_number: Some(3248),
-                    execution_binding: None,
-                    commands: vec!["git --version".to_string()],
-                    derived: true,
-                    worktree_fingerprint: String::new(),
-                    surfaces: Vec::new(),
-                    generated_outputs: Vec::new(),
-                    quarantines: Vec::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "sess-reopen".to_string(),
+                        owner_number: Some(3248),
+                        execution_binding: None,
+                        commands: vec!["git --version".to_string()],
+                        derived: true,
+                        worktree_fingerprint: String::new(),
+                        surfaces: Vec::new(),
+                        generated_outputs: Vec::new(),
+                        quarantines: Vec::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             let (code, out) = run_cmd(
@@ -29368,19 +29391,22 @@ exit 1
             save_covering_evidence(derived_a_then_b.path(), "sess-reopen", true);
             crate::cli::verification_record::save_plan(
                 derived_a_then_b.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "sess-reopen".to_string(),
-                    owner_number: Some(3248),
-                    execution_binding: None,
-                    commands: vec!["git --exec-path".to_string()],
-                    derived: true,
-                    worktree_fingerprint: String::new(),
-                    surfaces: Vec::new(),
-                    generated_outputs: Vec::new(),
-                    quarantines: Vec::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "sess-reopen".to_string(),
+                        owner_number: Some(3248),
+                        execution_binding: None,
+                        commands: vec!["git --exec-path".to_string()],
+                        derived: true,
+                        worktree_fingerprint: String::new(),
+                        surfaces: Vec::new(),
+                        generated_outputs: Vec::new(),
+                        quarantines: Vec::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             let (code, out) = run_cmd(
@@ -29787,7 +29813,8 @@ exit 1
             let failing_command = "git definitely-not-a-subcommand".to_string();
             vr::save_plan(
                 failing.path(),
-                &vr::VerificationPlanRecord {
+                &vr::VerificationPlanRecord::from(vr::VerificationPlanData {
+                    format_version: Some(1),
                     session_id: "sess-reopen".to_string(),
                     owner_number: Some(3248),
                     execution_binding: None,
@@ -29799,7 +29826,7 @@ exit 1
                     quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
-                },
+                }),
             )
             .unwrap();
             vr::run_verification(failing.path(), "sess-reopen", &[failing_command]).unwrap();
@@ -29819,7 +29846,8 @@ exit 1
             let uncovered_before = load(uncovered.path()).unwrap().unwrap();
             vr::save_plan(
                 uncovered.path(),
-                &vr::VerificationPlanRecord {
+                &vr::VerificationPlanRecord::from(vr::VerificationPlanData {
+                    format_version: Some(1),
                     session_id: "sess-reopen".to_string(),
                     owner_number: Some(3248),
                     execution_binding: None,
@@ -29831,7 +29859,7 @@ exit 1
                     quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
-                },
+                }),
             )
             .unwrap();
             vr::run_verification(
@@ -29922,23 +29950,48 @@ exit 1
             settle_blocked(dir.path(), "sess-reopen");
             save_covering_evidence(dir.path(), "sess-reopen", true);
 
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-            let mut workers = Vec::new();
-            for reason in ["concurrent recovery A", "concurrent recovery B"] {
-                let worktree = dir.path().to_path_buf();
-                let barrier = barrier.clone();
-                workers.push(std::thread::spawn(move || {
-                    barrier.wait();
-                    let mut out = String::new();
-                    let code = run_reopen(&worktree, "sess-reopen", reason, &mut out).unwrap();
-                    (code, out)
-                }));
-            }
-            barrier.wait();
-            let results: Vec<(i32, String)> = workers
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .collect();
+            let blocked_before = fs::read(state_path(dir.path())).unwrap();
+            // Hold the first writer until the contender observes T-149; a
+            // barrier alone assumes the write finishes inside the lease wait.
+            let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let worktree = dir.path().to_path_buf();
+            let worker = std::thread::spawn(move || {
+                crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                    acquired_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                });
+                let mut out = String::new();
+                let code = run_reopen(&worktree, "sess-reopen", "concurrent recovery A", &mut out)
+                    .unwrap();
+                (code, out)
+            });
+            acquired_rx.recv().unwrap();
+            let mut out = String::new();
+            let mut refusal = None;
+            let contention = run_reopen_impl(
+                dir.path(),
+                "sess-reopen",
+                None,
+                None,
+                "concurrent recovery B",
+                &mut out,
+                &mut refusal,
+            );
+            let blocked_after = fs::read(state_path(dir.path())).unwrap();
+            // Release and join before asserting, including on unexpected results.
+            release_tx.send(()).unwrap();
+            let first = worker.join().unwrap();
+            let error = contention.expect_err("the held writer must refuse the contender");
+            assert!(error.to_string().contains("T-149"), "{error}");
+            let refusal = refusal.expect("typed writer contention refusal");
+            assert_eq!(refusal.reason_code, "execution_reopen_store_busy");
+            assert_eq!(refusal.recovery_action.as_deref(), Some("execution.reopen"));
+            assert_eq!(blocked_after, blocked_before);
+
+            let code =
+                run_reopen(dir.path(), "sess-reopen", "concurrent recovery B", &mut out).unwrap();
+            let results = vec![first, (code, out)];
             assert!(results.iter().all(|(code, _)| *code == 0), "{results:?}");
             assert!(
                 results.iter().any(|(_, out)| out.contains("reopened")),
@@ -30375,7 +30428,8 @@ exit 1
             use crate::cli::verification_record as vr;
             vr::save_plan(
                 dir.path(),
-                &vr::VerificationPlanRecord {
+                &vr::VerificationPlanRecord::from(vr::VerificationPlanData {
+                    format_version: Some(1),
                     session_id: "sess-b".to_string(),
                     owner_number: Some(3248),
                     execution_binding: None,
@@ -30387,7 +30441,7 @@ exit 1
                     quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
-                },
+                }),
             )
             .unwrap();
             let (run_record, _) =
@@ -30622,19 +30676,22 @@ exit 1
             // Fresh all-passing evidence (plan + covering run) unlocks it.
             crate::cli::verification_record::save_plan(
                 dir.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "sess-op".to_string(),
-                    owner_number: Some(3248),
-                    execution_binding: None,
-                    commands: vec!["git --version".to_string()],
-                    derived: false,
-                    worktree_fingerprint: String::new(),
-                    surfaces: Vec::new(),
-                    generated_outputs: Vec::new(),
-                    quarantines: Vec::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "sess-op".to_string(),
+                        owner_number: Some(3248),
+                        execution_binding: None,
+                        commands: vec!["git --version".to_string()],
+                        derived: false,
+                        worktree_fingerprint: String::new(),
+                        surfaces: Vec::new(),
+                        generated_outputs: Vec::new(),
+                        quarantines: Vec::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             crate::cli::verification_record::run_verification(
@@ -30669,19 +30726,22 @@ exit 1
             save(dir.path(), &active_record("sess-op")).unwrap();
             crate::cli::verification_record::save_plan(
                 dir.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "sess-op".to_string(),
-                    owner_number: Some(3248),
-                    execution_binding: None,
-                    commands: vec!["git --version".to_string()],
-                    derived: false,
-                    worktree_fingerprint: String::new(),
-                    surfaces: Vec::new(),
-                    generated_outputs: Vec::new(),
-                    quarantines: Vec::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "sess-op".to_string(),
+                        owner_number: Some(3248),
+                        execution_binding: None,
+                        commands: vec!["git --version".to_string()],
+                        derived: false,
+                        worktree_fingerprint: String::new(),
+                        surfaces: Vec::new(),
+                        generated_outputs: Vec::new(),
+                        quarantines: Vec::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             let (original, _) = crate::cli::verification_record::run_verification(
@@ -31542,19 +31602,22 @@ exit 1
             .unwrap();
             crate::cli::verification_record::save_plan(
                 dir.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "sess-op".to_string(),
-                    owner_number: Some(3248),
-                    execution_binding: None,
-                    commands: vec!["git --version".to_string()],
-                    derived: false,
-                    worktree_fingerprint: String::new(),
-                    surfaces: Vec::new(),
-                    generated_outputs: Vec::new(),
-                    quarantines: Vec::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "sess-op".to_string(),
+                        owner_number: Some(3248),
+                        execution_binding: None,
+                        commands: vec!["git --version".to_string()],
+                        derived: false,
+                        worktree_fingerprint: String::new(),
+                        surfaces: Vec::new(),
+                        generated_outputs: Vec::new(),
+                        quarantines: Vec::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             crate::cli::verification_record::run_verification(
@@ -32441,19 +32504,22 @@ exit 1
             // Settlement now works from the adopting session (with evidence).
             crate::cli::verification_record::save_plan(
                 dir.path(),
-                &crate::cli::verification_record::VerificationPlanRecord {
-                    session_id: "sess-new".to_string(),
-                    owner_number: Some(3248),
-                    execution_binding: None,
-                    commands: vec!["git --version".to_string()],
-                    derived: false,
-                    worktree_fingerprint: String::new(),
-                    surfaces: Vec::new(),
-                    generated_outputs: Vec::new(),
-                    quarantines: Vec::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
-                },
+                &crate::cli::verification_record::VerificationPlanRecord::from(
+                    crate::cli::verification_record::VerificationPlanData {
+                        format_version: Some(1),
+                        session_id: "sess-new".to_string(),
+                        owner_number: Some(3248),
+                        execution_binding: None,
+                        commands: vec!["git --version".to_string()],
+                        derived: false,
+                        worktree_fingerprint: String::new(),
+                        surfaces: Vec::new(),
+                        generated_outputs: Vec::new(),
+                        quarantines: Vec::new(),
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                ),
             )
             .unwrap();
             crate::cli::verification_record::run_verification(
