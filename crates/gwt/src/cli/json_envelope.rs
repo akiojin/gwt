@@ -1053,23 +1053,42 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             let quarantines = verification_quarantine_requests(params)?;
-            if commands.is_empty() && !derive {
-                return Err(CliParseError::MissingFlag("commands"));
-            }
-            if generated_outputs.is_empty() && quarantines.is_empty() {
-                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+            let mode = optional_string(params, "mode")?.unwrap_or_else(|| "full".into());
+            let acceptance_commands = optional_string_vec(params, "acceptance_commands")?;
+            if mode == "pre-pr" {
+                if !derive {
+                    return Err(CliParseError::InvalidJson(
+                        "verify.plan mode pre-pr requires derive:true".into(),
+                    ));
+                }
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::PrePrPlan {
                     commands,
-                    derive,
+                    acceptance_commands,
+                    generated_outputs,
+                    quarantines,
                 })
             } else {
-                CliCommand::Verify(
-                    crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                if mode != "full" || !acceptance_commands.is_empty() {
+                    return Err(CliParseError::InvalidJson("verify.plan mode must be full or pre-pr; acceptance_commands requires mode pre-pr".into()));
+                }
+                if commands.is_empty() && !derive {
+                    return Err(CliParseError::MissingFlag("commands"));
+                }
+                if generated_outputs.is_empty() && quarantines.is_empty() {
+                    CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
                         commands,
                         derive,
-                        generated_outputs,
-                        quarantines,
-                    },
-                )
+                    })
+                } else {
+                    CliCommand::Verify(
+                        crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                            commands,
+                            derive,
+                            generated_outputs,
+                            quarantines,
+                        },
+                    )
+                }
             }
         }
         // SPEC #3576: host-wide verification lease.
@@ -5480,6 +5499,40 @@ mod tests {
             CliParseError::InvalidJson(message)
                 if message.contains("does not accept the parameter unexpected")
         ));
+    }
+
+    #[test]
+    fn verification_pre_pr_plan_preserves_acceptance_and_non_ci_commands() {
+        let command = ok(
+            "verify.plan",
+            json!({
+                "mode": "pre-pr", "derive": true,
+                "acceptance_commands": ["cargo test -p gwt --test ci_pre_pr_contract_test"],
+                "commands": ["bash scripts/verify-local-only.sh"]
+            }),
+        );
+        let typed = format!("{command:?}");
+        assert!(
+            typed.contains("PrePrPlan"),
+            "pre-pr must not silently use full: {typed}"
+        );
+        assert!(
+            typed.contains("ci_pre_pr_contract_test"),
+            "AC tests were discarded: {typed}"
+        );
+        assert!(
+            typed.contains("verify-local-only.sh"),
+            "non-CI check was discarded: {typed}"
+        );
+    }
+
+    #[test]
+    fn verification_plan_rejects_unknown_mode() {
+        let error = err(
+            "verify.plan",
+            json!({"mode": "pretend-fast", "derive": true}),
+        );
+        assert!(error.to_string().contains("mode"));
     }
 
     #[test]

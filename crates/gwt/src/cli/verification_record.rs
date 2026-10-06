@@ -723,6 +723,7 @@ fn derive_and_register_plan_for_caller(
     generated_outputs: Vec<String>,
     quarantines: Vec<VerificationQuarantineRequest>,
     authority: &VerificationCallerAuthority,
+    pre_pr: Option<(&[String], &[String])>,
 ) -> Result<
     (
         crate::cli::verify_derivation::DerivedPlan,
@@ -734,7 +735,10 @@ fn derive_and_register_plan_for_caller(
         let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
-        let derived = crate::cli::verify_derivation::derive(worktree)
+        let derived = match pre_pr {
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, acceptance, local),
+            None => crate::cli::verify_derivation::derive(worktree),
+        }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
         validate_quarantine_requests(&quarantines, &derived.commands)?;
         let fingerprint_after =
@@ -5320,6 +5324,14 @@ pub enum VerifyCommand {
     /// Full T-130 core: `derive` classifies changed surfaces and derives the
     /// matrix when no explicit commands are given.
     Plan { commands: Vec<String>, derive: bool },
+    /// Explicit CI-backed pre-PR policy; existing full/explicit plans keep
+    /// their semantics and the trusted persisted record shape is unchanged.
+    PrePrPlan {
+        commands: Vec<String>,
+        acceptance_commands: Vec<String>,
+        generated_outputs: Vec<String>,
+        quarantines: Vec<VerificationQuarantineRequest>,
+    },
     /// Explicit plan with an exact generated-file allowlist.
     PlanWithOutputs {
         commands: Vec<String>,
@@ -5392,6 +5404,36 @@ pub(super) fn run<E: CliEnv>(
         other => other,
     };
     match command {
+        VerifyCommand::PrePrPlan {
+            commands,
+            acceptance_commands,
+            generated_outputs,
+            quarantines,
+        } => {
+            let (derived, plan) = derive_and_register_plan_for_caller(
+                &worktree,
+                &session_id,
+                generated_outputs,
+                quarantines,
+                &authority,
+                Some((&acceptance_commands, &commands)),
+            )
+            .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            out.push_str(&format!(
+                "verify: pre-pr derived matrix [{}]\n",
+                derived.surfaces.join(", ")
+            ));
+            for command in &derived.commands {
+                out.push_str(&format!("  - {command}\n"));
+            }
+            out.push_str(&format!(
+                "verify: plan registered — {} command(s) for session {} (owner {:?}, derived)\n",
+                plan.commands.len(),
+                session_id,
+                plan.owner_number
+            ));
+            Ok(0)
+        }
         VerifyCommand::PlanWithOutputs {
             commands,
             derive,
@@ -5411,6 +5453,7 @@ pub(super) fn run<E: CliEnv>(
                     generated_outputs,
                     quarantines,
                     &authority,
+                    None,
                 )
                 .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
                 out.push_str(&format!(
@@ -5870,6 +5913,7 @@ pub(crate) mod tests {
             vec!["artifacts/report.json".to_string()],
             Vec::new(),
             &authority,
+            None,
         )
         .unwrap();
         assert!(!derived.surfaces.is_empty());
