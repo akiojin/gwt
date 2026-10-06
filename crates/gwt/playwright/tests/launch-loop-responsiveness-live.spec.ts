@@ -17,7 +17,9 @@ const AGENT = "launch-loop-probe";
 
 test.describe("launch-loop responsiveness (live backend)", () => {
   test.skip(!BASE, "requires the isolated browser-check instance");
-  test.setTimeout(360_000);
+  // Twenty real Git materializations and launches can exceed six minutes on a
+  // busy Windows host. Keep the operation/latency bounds below unchanged.
+  test.setTimeout(600_000);
   test.use({ actionTimeout: 30_000, navigationTimeout: 30_000 });
 
   test("pane observations and PM requests survive repeated launches with 60 windows", async ({ page }, info) => {
