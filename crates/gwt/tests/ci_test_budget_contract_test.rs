@@ -44,15 +44,6 @@ const RUST_JOB: &str = "  test:\n";
 const RUN_TESTS_STEP: &str = "Run tests";
 const DEFAULT_PARALLEL_JOB: &str = "  test-windows-default-parallel:";
 const AGENT_LAUNCH_JOB: &str = "  test-windows-agent-launch-e2e:";
-/// The four provider/selector combinations the deterministic Windows launch
-/// E2E has to cover, previously one matrix shard each.
-const AGENT_LAUNCH_COMBINATIONS: [&str; 4] = [
-    "codex/latest",
-    "codex/exact",
-    "claude/latest",
-    "claude/exact",
-];
-
 /// Measured p95 of the `Run tests` step (21 green develop-bound runs on
 /// 2026-09-06) is ~660s; +50% rounds to 17 minutes, and the Issue asks for
 /// a budget that also absorbs a 2.5x-slow runner, hence 25.
@@ -372,15 +363,15 @@ fn nightly_determinism_failures_have_an_explicit_notification_target() {
 }
 
 /// Issue #4134 AC-2: four matrix shards each paid a 279s cold build to run
-/// 137s of tests. One job builds once and runs every combination, and a
-/// failure still says which combination failed.
+/// 137s of tests. The installed-only job still builds once, runs both
+/// providers, and attributes a failure to its provider.
 #[test]
-fn windows_agent_launch_e2e_builds_once_and_runs_every_combination() {
+fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, AGENT_LAUNCH_JOB);
     assert!(
         !job.contains("matrix:"),
-        "the agent-launch combinations share one cold build now, so the job \
+        "the installed provider cases share one cold build, so the job \
          must not fan out over a matrix (Issue #4134 AC-2)"
     );
     let build_at = job
@@ -391,22 +382,20 @@ fn windows_agent_launch_e2e_builds_once_and_runs_every_combination() {
         .expect("the agent-launch job must still run the deterministic E2E");
     assert!(
         build_at < run_at,
-        "the shared build must precede the combination loop"
+        "the shared build must precede the installed provider loop"
     );
-    for combination in AGENT_LAUNCH_COMBINATIONS {
-        assert!(
-            job.contains(combination),
-            "the single agent-launch job must still cover {combination}"
-        );
-    }
+    assert!(
+        job.contains("for provider in codex claude; do"),
+        "the shared launch job must run both installed providers"
+    );
     assert!(
         job.contains("::error::"),
-        "collapsing the matrix must not cost per-combination attribution; a \
-         failing combination has to annotate itself"
+        "collapsing the matrix must not cost per-provider attribution; a \
+         failing provider has to annotate itself"
     );
     assert!(
         job.contains("status=1"),
         "the loop must keep the matrix's fail-fast: false semantics and run \
-         every combination before failing"
+         every provider before failing"
     );
 }

@@ -6,7 +6,6 @@ pub fn initialize_launch_session(
     worktree: &Path,
     project_root: &Path,
     config: &gwt_agent::LaunchConfig,
-    durable_command: Option<String>,
 ) -> gwt_agent::Session {
     let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
     let mut session = gwt_agent::Session::new(worktree, branch_name, config.agent_id.clone());
@@ -15,7 +14,6 @@ pub fn initialize_launch_session(
     ));
     session.display_name = config.display_name.clone();
     session.tool_version = config.tool_version.clone();
-    session.tool_version_selector = config.tool_version_selector.clone();
     session.model = config.model.clone();
     session.reasoning_level = config.reasoning_level.clone();
     session.session_mode = config.session_mode;
@@ -27,11 +25,10 @@ pub fn initialize_launch_session(
     session.docker_lifecycle_intent = config.docker_lifecycle_intent;
     session.linked_issue_number = config.linked_issue_number;
     session.launch_route = config.launch_route;
-    session.launch_command = durable_command.unwrap_or_else(|| config.command.clone());
+    session.launch_command = config.command.clone();
     session.launch_args = config.args.clone();
     session.codex_auth_root = config.validated_codex_auth_root_for_cwd(worktree);
     session.windows_shell = config.windows_shell;
-    session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
     apply_resume_identity_to_session(&mut session, config);
     session.update_status(gwt_agent::AgentStatus::Running);
     session
@@ -187,21 +184,15 @@ mod tests {
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
         config.tool_version = Some("2.1.156".into());
-        config.tool_version_selector = Some("latest".into());
         config.session_mode = gwt_agent::SessionMode::Resume;
         config.resume_session_id = Some("conversation".to_string());
         config.branch = Some("work/example".to_string());
         let project = tmp.path().join("project");
         let worktree = tmp.path().join("worktree");
-        let mut session = initialize_launch_session(
-            &worktree,
-            &project,
-            &config,
-            Some("durable-command".to_string()),
-        );
+        let mut session = initialize_launch_session(&worktree, &project, &config);
         assert_eq!(session.project_state_root.as_ref(), Some(&project));
         assert_eq!(session.exact_resume_session_id(), Some("conversation"));
-        assert_eq!(session.launch_command, "durable-command");
+        assert_eq!(session.launch_command, "claude");
         let sessions = tmp.path().join("sessions");
         let runtime = gwt_agent::runtime_state_path(&sessions, &session.id);
         persist_finalized_launch_session(&sessions, &runtime, &mut session, None)
@@ -211,8 +202,8 @@ mod tests {
         assert_eq!(saved.status, gwt_agent::AgentStatus::Running);
         assert_eq!(saved.exact_resume_session_id(), Some("conversation"));
         assert_eq!(saved.tool_version.as_deref(), Some("2.1.156"));
-        assert_eq!(saved.tool_version_selector.as_deref(), Some("latest"));
-        assert_eq!(saved.launch_tool_version().as_deref(), Some("latest"));
+        assert!(saved.tool_version_selector.is_none());
+        assert!(saved.tool_runtime_provenance.is_none());
         assert!(runtime.exists());
     }
     #[test]
