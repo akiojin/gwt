@@ -19,10 +19,10 @@
 //! `changes` would let a PR merge without ever having run it — the same
 //! property `ci_concurrency_contract_test.rs` pins for the docs-only filter.
 
+use gwt_core::process::{resolved_command, ProcessPlanRequest};
 use serde_yaml::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 const ORPHAN_SCRIPT: &str = "scripts/ci-check-orphan-processes.sh";
@@ -407,7 +407,8 @@ fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
     .unwrap();
     fs::write(source.join("unrelated.rs"), "fn unrelated_test() {}\n").unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new("git")
+        let output = resolved_command(ProcessPlanRequest::new("git"))
+            .expect("resolve git for the isolated fixture")
             .args([
                 "-c",
                 "user.name=CI fixture",
@@ -439,11 +440,16 @@ fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
     let test_list = repo.path().join("test-list.txt");
     fs::write(&test_list, "changed::tests::relevant_test: test\nunrelated::tests::unrelated_test: test\nhelper::tests::unrelated_test: test\nchanged::tests::relevant_test_extra: test\n").unwrap();
     let select = |base: &str| {
-        Command::new(if cfg!(windows) { "python" } else { "python3" })
-            .args(["-c", code, "gwt|lib|", test_list.to_str().unwrap(), base])
-            .current_dir(repo.path())
-            .output()
-            .expect("run the real Python selector")
+        resolved_command(ProcessPlanRequest::new(if cfg!(windows) {
+            "python"
+        } else {
+            "python3"
+        }))
+        .expect("resolve Python for the real selector")
+        .args(["-c", code, "gwt|lib|", test_list.to_str().unwrap(), base])
+        .current_dir(repo.path())
+        .output()
+        .expect("run the real Python selector")
     };
     let selected = select(base.trim());
     assert!(
