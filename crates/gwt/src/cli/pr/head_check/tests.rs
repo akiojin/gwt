@@ -157,7 +157,8 @@ impl RemoteFixture {
         let commands = vec!["git --version".to_string()];
         verification::save_plan(
             &self.verified_repo,
-            &verification::VerificationPlanRecord {
+            &verification::VerificationPlanData {
+                format_version: None,
                 session_id: "head-check-read-session".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -169,7 +170,8 @@ impl RemoteFixture {
                 worktree_fingerprint: String::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
-            },
+            }
+            .into(),
         )
         .unwrap();
         verification::run_verification(&self.verified_repo, "head-check-read-session", &commands)

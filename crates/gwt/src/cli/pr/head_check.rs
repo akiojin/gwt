@@ -151,7 +151,7 @@ pub(super) fn read<E: crate::cli::CliEnv>(
         }
         Err(error) => return unprovable(out, "passed", &error.to_string(), Some(&record)),
     };
-    check.record_id = Some(record.record_id);
+    check.record_id = Some(record.record_id.clone());
     let mut report = serde_json::to_value(check)
         .map_err(|error| gwt_github::client::ApiError::Unexpected(error.to_string()))?;
     report["schema_version"] = serde_json::json!(1);
