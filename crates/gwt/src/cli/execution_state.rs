@@ -975,13 +975,13 @@ fn sidecar_host_is_alive(host_pid: u32, runtime: &gwt_agent::SessionRuntimeState
     if !crate::process::is_host_process_alive(host_pid) {
         return false;
     }
-    let Some(started_at) = crate::process::host_process_start_time(host_pid) else {
-        return true;
-    };
     match runtime.host_started_at.filter(|value| *value > 0) {
-        Some(recorded) => started_at == recorded,
-        None => i64::try_from(started_at).map_or(true, |started_at| {
-            started_at <= runtime.updated_at.timestamp() + SIDECAR_HOST_START_TOLERANCE_SECS
+        Some(recorded) => crate::process::host_process_start_time(host_pid)
+            .is_none_or(|started_at| started_at == recorded),
+        None => crate::process::host_process_start_epoch_secs(host_pid).is_none_or(|started_at| {
+            i64::try_from(started_at).map_or(true, |started_at| {
+                started_at <= runtime.updated_at.timestamp() + SIDECAR_HOST_START_TOLERANCE_SECS
+            })
         }),
     }
 }
