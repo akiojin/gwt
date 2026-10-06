@@ -12566,6 +12566,8 @@ mod tests {
                         issue_number: Some(42),
                         window_id: Some("tab-1::agent-42".to_string()),
                         screen_text: Some("You've hit your usage limit".to_string()),
+                        screen_region: Some("provider_response".to_string()),
+                        matched_pattern: Some("codex_usage_limit".to_string()),
                         account_id: None,
                         poller_observed_at: None,
                         poller_state: Some("ok".to_string()),
@@ -12606,6 +12608,17 @@ mod tests {
             listed["provider_quota_holds"][0]["evidence"]["screen_text"],
             "You've hit your usage limit"
         );
+        let evidence = &listed["provider_quota_holds"][0]["evidence"];
+        assert_eq!(evidence["window_id"], "tab-1::agent-42");
+        assert_eq!(evidence["screen_region"], "provider_response");
+        assert_eq!(evidence["matched_pattern"], "codex_usage_limit");
+        let mut legacy = evidence.clone();
+        legacy.as_object_mut().unwrap().remove("screen_region");
+        legacy.as_object_mut().unwrap().remove("matched_pattern");
+        let legacy: crate::IssueMonitorProviderQuotaHoldEvidence =
+            serde_json::from_value(legacy).expect("legacy evidence remains readable");
+        assert_eq!(legacy.screen_region, None);
+        assert_eq!(legacy.matched_pattern, None);
         assert_eq!(
             listed["provider_quota_holds"][0]["evidence"]["poller_windows"][0]["used_percent"],
             26

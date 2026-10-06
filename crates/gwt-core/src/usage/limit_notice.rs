@@ -6,11 +6,9 @@
 //! also state when access returns, so this is the one stall whose cause and
 //! duration can be read directly instead of inferred from elapsed time.
 //!
-//! Detection is deliberately conservative. An agent transcript can legitimately
-//! *contain* the sentence (an agent working on this very Issue prints it), so a
-//! match requires the provider's distinctive phrase plus a corroborating clause,
-//! and only within the tail of the screen — the notice is the last thing a
-//! quota-exhausted CLI writes before exiting.
+//! Detection requires the CLI's refusal response or rate-limit-options menu.
+//! A quotation anywhere in an agent transcript is not refusal evidence, even
+//! when it persists at the bottom of the screen (Issue #5037).
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 
@@ -34,6 +32,14 @@ pub struct ProviderLimitNotice {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// A native screen match and the structural evidence that authenticated it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLimitScreenMatch {
+    pub notice: ProviderLimitNotice,
+    pub region: &'static str,
+    pub pattern: &'static str,
+}
+
 /// Classify the tail of `screen` as a provider usage-limit notice.
 ///
 /// `now` supplies both the reference instant and the offset that bare
@@ -43,25 +49,78 @@ pub fn detect_provider_limit_notice<Tz: TimeZone>(
     screen: &str,
     now: &DateTime<Tz>,
 ) -> Option<ProviderLimitNotice> {
-    let tail = normalize_tail(screen);
-    // ASCII lowercasing preserves byte length, so offsets found in `haystack`
-    // index `tail` correctly. `to_lowercase` would not, and the reset clause is
-    // sliced out of `tail` to keep its original casing for month names.
-    let haystack = tail.to_ascii_lowercase();
+    detect_provider_limit_screen_match(screen, now).map(|matched| matched.notice)
+}
 
-    if !states_a_limit_was_reached(&haystack) {
-        return None;
+/// Preserve the whole rendered screen when calling this: leading indentation
+/// and Markdown fences distinguish tool/code quotations from native responses.
+pub fn detect_provider_limit_screen_match<Tz: TimeZone>(
+    screen: &str,
+    now: &DateTime<Tz>,
+) -> Option<ProviderLimitScreenMatch> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let start = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())?
+        .saturating_sub(TAIL_LINES - 1);
+    let mut fenced = false;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || index < start || *line != line.trim_start() {
+            continue;
+        }
+        let text = normalize_tail(&lines[index..].join("\n"));
+        let haystack = text.to_ascii_lowercase();
+        let (provider, region, pattern) = if trimmed == "What do you want to do?"
+            && lines[index + 1..].iter().any(|line| {
+                let option = line.trim();
+                option.starts_with("❯ ") && option.contains("Wait for limit to reset")
+            }) {
+            (
+                UsageProvider::ClaudeCode,
+                "rate_limit_options",
+                "claude_wait_for_reset",
+            )
+        } else {
+            let heading = &text;
+            let native = if heading.starts_with("■ You've hit your usage limit.") {
+                Some((UsageProvider::Codex, "codex_usage_limit"))
+            } else if heading.starts_with("Claude usage limit reached.") {
+                Some((UsageProvider::ClaudeCode, "claude_usage_limit"))
+            } else if heading.starts_with("You've hit your ")
+                && lines[index + 1..]
+                    .iter()
+                    .any(|line| line.trim_start().starts_with("/usage-credits "))
+            {
+                Some((UsageProvider::ClaudeCode, "claude_usage_credits"))
+            } else {
+                None
+            };
+            let Some((provider, pattern)) = native else {
+                continue;
+            };
+            if !states_a_limit_was_reached(&haystack)
+                || !states_a_consequence(&haystack)
+                || is_model_fallback(&haystack)
+            {
+                continue;
+            }
+            (provider, "provider_response", pattern)
+        };
+        return Some(ProviderLimitScreenMatch {
+            notice: ProviderLimitNotice {
+                provider: Some(provider),
+                resets_at: parse_reset(&text, &haystack, now),
+            },
+            region,
+            pattern,
+        });
     }
-    if is_model_fallback(&haystack) {
-        return None;
-    }
-    if !states_a_consequence(&haystack) {
-        return None;
-    }
-    Some(ProviderLimitNotice {
-        provider: provider_hint(&haystack),
-        resets_at: parse_reset(&tail, &haystack, now),
-    })
+    None
 }
 
 /// The account-limit half of a notice, across every wording both providers are
@@ -102,18 +161,6 @@ fn states_a_consequence(haystack: &str) -> bool {
         || haystack.contains("usage-credits")
         || haystack.contains("purchase more credits")
         || haystack.contains("upgrade to")
-}
-
-/// Which account the notice is about, when its own wording says so. Callers
-/// with a pane in hand should prefer that pane's agent id.
-fn provider_hint(haystack: &str) -> Option<UsageProvider> {
-    if haystack.contains("chatgpt.com") || haystack.contains("codex") {
-        return Some(UsageProvider::Codex);
-    }
-    if haystack.contains("claude") || haystack.contains("usage-credits") {
-        return Some(UsageProvider::ClaudeCode);
-    }
-    None
 }
 
 /// Join the trailing non-empty lines into one whitespace-collapsed string so a
@@ -451,7 +498,8 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
     /// read in January does not schedule a hold eleven months in the past.
     #[test]
     fn a_year_less_date_rolls_into_the_next_year_when_it_has_already_passed() {
-        let screen = "You've hit your weekly limit · resets Jan 2 at 6am";
+        let screen =
+            "You've hit your weekly limit · resets Jan 2 at 6am\n/usage-credits to continue.";
 
         let notice = detect_provider_limit_notice(screen, &jst("2026-12-30T09:00:00+09:00"))
             .expect("claude weekly notice");
@@ -492,6 +540,47 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
                 None,
                 "false positive for: {screen}"
             );
+        }
+    }
+
+    /// Issue #5037: terminal persistence and full telemetry do not turn quoted
+    /// agent/tool output into the provider's own refusal.
+    #[test]
+    fn quoted_provider_refusals_are_not_notices() {
+        for screen in [
+            r#"{"body":"旧 Claude PM pane: You've hit your weekly limit · resets Oct 8, 6am"}"#,
+            "• The Board quoted \"You've hit your weekly limit · resets Oct 8, 6am\".",
+            "```text\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n  to purchase more credits or try again at Oct 8, 2026 6am.\n```",
+            "⏺ Read(log.txt)\n  ⎿ You've hit your weekly limit · resets Oct 8, 6am\n    /usage-credits to finish what you're working on.\n❯",
+        ] {
+            assert_eq!(
+                detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00")),
+                None,
+                "quoted output is not a native refusal: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_native_rate_limit_options_identify_the_waiting_provider() {
+        // Wording read from the installed Claude Code 2.1.291 menu.
+        let screen =
+            "What do you want to do?\n❯ 1. Wait for limit to reset\n  2. Upgrade to Max 20x";
+        let notice = detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00"))
+            .expect("the CLI's rate-limit-options menu is a structural refusal");
+        assert_eq!(notice.provider, Some(UsageProvider::ClaudeCode));
+        assert_eq!(notice.resets_at, None);
+    }
+
+    #[test]
+    fn native_refusals_remain_recognizable_when_the_pane_soft_wraps() {
+        for (screen, provider) in [
+            ("■ You've hit your\nusage limit. Visit https://chatgpt.com/codex/settings/usage\nto purchase more credits or try again at Oct 8, 2026 6am.", UsageProvider::Codex),
+            ("You've hit your weekly limit · resets Aug 20 at\n6am (Asia/Tokyo)\n/usage-credits to finish what you're working on.", UsageProvider::ClaudeCode),
+        ] {
+            let notice = detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00"))
+                .expect("wrapping preserves the native refusal region");
+            assert_eq!(notice.provider, Some(provider));
         }
     }
 

@@ -111,8 +111,7 @@ fn parse_rate_limits_at(
     let limit_reached = rate_limits
         .get("rate_limit_reached_type")
         .map(|v| !v.is_null())
-        .unwrap_or(false)
-        || windows.iter().any(|w| w.used_percent >= 100.0);
+        .unwrap_or(false);
     Some(CodexAccount {
         windows,
         plan,
@@ -709,6 +708,29 @@ mod tests {
         });
         let acc = parse_rate_limits(&rl, now()).unwrap();
         assert!(acc.limit_reached);
+    }
+
+    /// Issue #5037: the live account continued serving requests at 100% with
+    /// credits, and the provider explicitly reported no refusal.
+    #[test]
+    fn a_full_subscription_with_credits_is_not_a_provider_refusal() {
+        let mut limits = serde_json::json!({
+            "primary": {"used_percent": 100, "window_minutes": 10080},
+            "rate_limit_reached_type": null,
+            "credits": {"has_credits": true, "unlimited": false}
+        });
+        let account = parse_rate_limits(&limits, now()).unwrap();
+        assert_eq!(account.windows[0].used_percent, 100.0);
+        assert!(
+            !account.limit_reached,
+            "available credits keep the account usable"
+        );
+
+        limits["rate_limit_reached_type"] = serde_json::json!("usage_limit");
+        assert!(
+            parse_rate_limits(&limits, now()).unwrap().limit_reached,
+            "an explicit provider refusal still takes precedence"
+        );
     }
 
     #[test]

@@ -182,6 +182,56 @@ test.describe("Provider usage status summary", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  test("keeps weekly 100% separate from a provider refusal (Issue #5037)", async ({
+    page,
+  }, testInfo) => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
+    const baseURL = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const projectKey = process.env.GWT_PLAYWRIGHT_PROJECT_KEY;
+    const liveURL = baseURL && projectKey
+      ? new URL(`/p/${projectKey}`, baseURL).href
+      : null;
+    if (!liveURL) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    await page.goto(liveURL ?? APP_URL);
+
+    const expectedTheme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
+
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    const account = {
+      provider: "codex",
+      plan: "pro",
+      windows: [{ kind: "weekly", used_percent: 100, window_minutes: 10080 }],
+      limit_reached: false,
+      state: { kind: "ok" },
+    };
+    await emitProviderUsage(page, [account]);
+    await expect(strip).toContainText("CX 100%");
+
+    await strip.hover();
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeVisible();
+    const codex = popover.locator('.op-usage-card[data-provider="codex"]');
+    await expect(codex).toContainText(/Weekly\s*100%/);
+    await expect(codex.locator(".op-usage-card__limit")).toHaveCount(0);
+
+    await emitProviderUsage(page, [{ ...account, limit_reached: true }]);
+    await expect(strip).toContainText("CX 100%");
+    await expect(codex).toContainText(/Weekly\s*100%/);
+    await expect(codex.locator(".op-usage-card__limit")).toBeVisible();
+    await expect(codex.locator(".op-usage-card__limit")).toHaveText("Limit reached");
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
+  });
+
   test("keeps a stable width and compacts three providers to the critical one", async ({
     page,
   }) => {
