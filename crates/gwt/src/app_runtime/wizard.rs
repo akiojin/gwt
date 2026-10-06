@@ -5842,25 +5842,26 @@ impl AppRuntime {
         wizard_id: String,
         result: Result<gwt::AgentOption, String>,
     ) -> Vec<OutboundEvent> {
-        // Updating the installed CLI is Host-wide, even if its form was closed.
-        if result.is_ok() {
-            self.launch_wizard_cache.refresh_agent_options();
-        }
-        let Some(context) = self.project_states.values().find_map(|state| {
+        let refresh = result.is_ok();
+        let context = self.project_states.values().find_map(|state| {
             state
                 .launch_wizard
                 .as_ref()
                 .filter(|session| session.wizard_id == wizard_id)
                 .map(|session| session.project_context.clone())
-        }) else {
-            return Vec::new();
-        };
-        let Some(mut session) = self.take_launch_wizard(&context) else {
-            return Vec::new();
-        };
-        session.wizard.finish_agent_update(result);
-        self.store_launch_wizard(session);
-        vec![self.launch_wizard_state_outbound(&context)]
+        });
+        let event = context.and_then(|context| {
+            let mut session = self.take_launch_wizard(&context)?;
+            session.wizard.finish_agent_update(result);
+            self.store_launch_wizard(session);
+            Some(self.launch_wizard_state_outbound(&context))
+        });
+        // The pool view reads the cache: render before starting a Loading slot.
+        // Refresh remains Host-wide, even if the form was closed.
+        if refresh {
+            self.launch_wizard_cache.refresh_agent_options();
+        }
+        event.into_iter().collect()
     }
 
     pub(crate) fn handle_launch_wizard_runtime_resolved(
