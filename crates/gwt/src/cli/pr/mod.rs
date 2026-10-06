@@ -56,6 +56,12 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Current)
         }
+        Some("head-check") => {
+            let base = it.next().ok_or(CliParseError::MissingFlag("base"))?.clone();
+            let head = it.next().cloned();
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::HeadCheck { base, head })
+        }
         Some("list") => parse_pr_list_args(it.collect::<Vec<_>>().as_slice()),
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
@@ -633,6 +639,7 @@ pub(super) fn run<E: CliEnv>(
     }
     let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
+        PrCommand::HeadCheck { base, head } => head_check::read(env, &base, head.as_deref(), out)?,
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
                 Some(pr) => {
