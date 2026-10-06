@@ -165,11 +165,17 @@ impl IssueMonitorUrgentQueue {
 
 impl IssueMonitorState {
     pub fn urgent_queue_projection(&self, terminal: &str) -> IssueMonitorUrgentQueueProjection {
-        self.urgent_queue.projection(
-            self.terminal_queues
-                .get(terminal)
-                .unwrap_or(&IssueMonitorTerminalQueue::default()),
-        )
+        let mut queue = self
+            .terminal_queues
+            .get(terminal)
+            .cloned()
+            .unwrap_or_default();
+        if terminal == crate::process::current_hostname() {
+            queue
+                .entries
+                .retain(|entry| !self.label_excluded_issues.contains(&entry.number));
+        }
+        self.urgent_queue.projection(&queue)
     }
 
     pub(crate) fn observe_urgent_issue(&mut self, issue: &IssueMonitorIssue, now: &str) {
@@ -229,13 +235,17 @@ impl IssueMonitorState {
     pub(super) fn admit_urgent_candidates(&mut self, issues: &[IssueMonitorIssue], now: &str) {
         for issue in issues {
             self.observe_urgent_issue(issue, now);
-            if issue_monitor_candidate_exclusion(issue).is_none() {
+            if self.allows_issue_labels(issue) && issue_monitor_candidate_exclusion(issue).is_none()
+            {
                 self.admit_observed_urgent(issue.number, now);
             }
         }
     }
 
     pub(super) fn admit_observed_urgent(&mut self, number: u64, now: &str) {
+        if self.label_excluded_issues.contains(&number) {
+            return;
+        }
         let host = crate::process::current_hostname();
         if !self
             .urgent_queue

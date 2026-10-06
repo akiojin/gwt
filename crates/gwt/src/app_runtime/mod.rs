@@ -540,7 +540,7 @@ pub(crate) use launch::PreparedAgentLaunch;
 use launch::{
     codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
-    codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
+    codex_hook_discovery_mode_from_detected_codex_version, dispatch_agent_launch_success,
     effective_host_codex_config_path, issue_monitor_trust_candidate_from_feedback,
     maybe_register_codex_managed_hook_trust_for_launch,
     register_codex_managed_project_trust_for_resolved_launch_with_host_context,
@@ -1663,12 +1663,6 @@ pub struct AppRuntime {
     /// for. Consumed by [`AppRuntime::launch_error_events`] and dropped once
     /// the PTY is live or the window closes.
     pub(crate) restore_launch_windows: HashMap<String, Option<String>>,
-    /// Legacy official-provider provenance is staged during preparation and
-    /// committed only after the exact launched Session emits authenticated
-    /// SessionStart. Any earlier route failure leaves the source Session bytes
-    /// unchanged and retryable.
-    pub(crate) pending_tool_runtime_migrations:
-        HashMap<String, launch::PendingToolRuntimeMigration>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
@@ -3559,7 +3553,6 @@ impl AppRuntime {
             pending_startup_restore_log: None,
             pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
-            pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             issue_monitor_review_dispatch_windows: HashSet::new(),
@@ -8539,6 +8532,7 @@ impl AppRuntime {
             | FrontendEvent::IssueMonitorQueueRemove { .. }
             | FrontendEvent::IssueMonitorQueueMove { .. }
             | FrontendEvent::SetIssueMonitorAutoRefill { .. }
+            | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
             | FrontendEvent::IssueMonitorRequeue { .. }
             | FrontendEvent::IssueMonitorConfigureIssue { .. }
             | FrontendEvent::QuickRegisterIssue { .. } => {
@@ -9548,6 +9542,21 @@ impl AppRuntime {
                     "auto-apply-updates",
                     |monitor| {
                         monitor.set_auto_apply_updates(Some(enabled));
+                    },
+                )
+            }
+            FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels } => {
+                let publication = self.publish_project_issue_monitor_control(
+                    context,
+                    serde_json::json!({ "config_set": { "allowed_labels": allowed_labels } }),
+                );
+                self.issue_monitor_control_result_events(
+                    context,
+                    &client_id,
+                    publication,
+                    "allowed-labels",
+                    |monitor| {
+                        monitor.set_allowed_labels(allowed_labels);
                     },
                 )
             }

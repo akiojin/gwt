@@ -98,7 +98,6 @@ pub struct ProcessLaunch {
     pub(crate) env: HashMap<String, String>,
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
-    pub(crate) pending_tool_runtime_migration: Option<PendingToolRuntimeMigration>,
     /// SPEC #1921 Phase 86 (#3813): resource policy applied to the PTY tree
     /// through the start gate before the target runs. `None` keeps the direct
     /// spawn route (Shell panes, or isolation disabled).
@@ -152,13 +151,6 @@ fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
         "--nocapture".to_string(),
     ];
     Ok((gate_program, gate_args))
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingToolRuntimeMigration {
-    source: gwt_agent::Session,
-    provenance: gwt_agent::ToolRuntimeProvenance,
-    target_session_id: String,
 }
 
 fn private_launch_env_key(key: &str) -> bool {
@@ -638,29 +630,6 @@ impl std::fmt::Debug for ProcessLaunch {
             .field("remove_env", &self.remove_env)
             .field("cwd", &self.cwd)
             .finish()
-    }
-}
-
-impl AppRuntime {
-    pub(crate) fn finalize_tool_runtime_migration_session_start(
-        &mut self,
-        window_id: &str,
-    ) -> Result<(), String> {
-        let Some(pending) = self.pending_tool_runtime_migrations.get(window_id).cloned() else {
-            return Ok(());
-        };
-        let active_session = self.active_agent_sessions.get(window_id).ok_or_else(|| {
-            "the launched pane has no active Session for provenance migration".to_string()
-        })?;
-        if active_session.session_id != pending.target_session_id {
-            return Err(format!(
-                "tool runtime provenance migration target changed from Session {} to {}",
-                pending.target_session_id, active_session.session_id
-            ));
-        }
-        persist_lazy_tool_runtime_provenance_migration(&self.sessions_dir, &pending)?;
-        self.pending_tool_runtime_migrations.remove(window_id);
-        Ok(())
     }
 }
 
@@ -2005,7 +1974,6 @@ struct PreparedAgentLaunchSuccess {
     capability_token: Option<String>,
     pending_fresh_execution: Option<PendingFreshExecutionLaunch>,
     pending_continue_work: Option<PendingContinueWork>,
-    pending_tool_runtime_migration: Option<PendingToolRuntimeMigration>,
     workspace_projection_updated: bool,
     pm_registration: Option<(
         PathBuf,
@@ -2227,7 +2195,7 @@ fn prepare_agent_launch_inner(
     launch: AgentLaunchCompletion,
 ) -> Result<PreparedAgentLaunchSuccess, String> {
     let (
-        mut process_launch,
+        process_launch,
         session_id,
         branch_name,
         display_name,
@@ -2288,7 +2256,6 @@ fn prepare_agent_launch_inner(
         .env
         .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
         .cloned();
-    let pending_tool_runtime_migration = process_launch.pending_tool_runtime_migration.take();
     let readiness_nonce = process_launch
         .env
         .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
@@ -2656,7 +2623,6 @@ fn prepare_agent_launch_inner(
         capability_token,
         pending_fresh_execution,
         pending_continue_work: input.pending_continue_work.clone(),
-        pending_tool_runtime_migration,
         workspace_projection_updated,
         pm_registration,
         cached_session,
@@ -2906,9 +2872,6 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(model) = session.model.clone() {
         builder = builder.model(model);
     }
-    if let Some(version) = session.launch_tool_version() {
-        builder = builder.version(version);
-    }
     if let Some(level) = session.reasoning_level.clone() {
         builder = builder.reasoning_level(level);
     }
@@ -2929,10 +2892,6 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(linked) = session.linked_issue_number {
         builder = builder.linked_issue_number(linked);
     }
-    if let Some(provenance) = session.tool_runtime_provenance.clone() {
-        builder = builder.tool_runtime_provenance(provenance);
-    }
-    builder = builder.tool_runtime_source_session_id(session.id.clone());
     // Issue #4217 FR-002: a rebuilt config keeps the route the launcher
     // originally stamped, so a restored or resumed monitor launch does not
     // quietly become a human-driven one.
@@ -2971,9 +2930,6 @@ pub(super) fn launch_config_from_persisted_session(
     }
 
     let mut config = builder.build();
-    if let Some(version) = session.launch_tool_version() {
-        config.tool_version = Some(version);
-    }
     if !session.display_name.is_empty() {
         config.display_name = session.display_name.clone();
     }
@@ -2985,122 +2941,6 @@ pub(super) fn launch_config_from_persisted_session(
         config.suppress_execution_control = true;
     }
     config
-}
-
-fn hydrate_tool_runtime_provenance_from_source_session(
-    sessions_dir: &Path,
-    config: &mut gwt_agent::LaunchConfig,
-) -> Result<Option<gwt_agent::Session>, String> {
-    let Some(source_session_id) = config.tool_runtime_source_session_id.as_deref() else {
-        return Ok(None);
-    };
-    gwt_agent::validate_session_id_path_component(source_session_id)?;
-    let path = sessions_dir.join(format!("{source_session_id}.toml"));
-    let source = match gwt_agent::Session::load(&path) {
-        Ok(source) => source,
-        Err(error) => {
-            return Err(format!(
-                "failed to restore tool runtime provenance from Session {source_session_id}: {error}"
-            ));
-        }
-    };
-    if source.id != source_session_id {
-        return Err(format!(
-            "tool runtime provenance Session id mismatch: requested {source_session_id}, loaded {}",
-            source.id
-        ));
-    }
-    if source.agent_id != config.agent_id {
-        return Err(format!(
-            "tool runtime provenance agent mismatch for Session {source_session_id}"
-        ));
-    }
-    if let Some(config_provenance) = config.tool_runtime_provenance.as_ref() {
-        if source.tool_runtime_provenance.as_ref() != Some(config_provenance) {
-            return Err(format!(
-                "tool runtime provenance changed for source Session {source_session_id}; retry launch"
-            ));
-        }
-        return Ok(None);
-    }
-    if let Some(provenance) = source.tool_runtime_provenance.clone() {
-        config.tool_runtime_provenance = Some(provenance);
-        Ok(None)
-    } else {
-        Ok(Some(source))
-    }
-}
-
-/// Stage the legacy provenance backfill for a source Session, when the launch
-/// actually resolved a provenance to backfill.
-///
-/// Issue #3527: runner resolution legitimately produces no provenance — a
-/// healthy direct runner returns early, and only the Windows targeted package
-/// plan mints one at all, so no macOS or Linux launch ever carries one. The
-/// migration exists to record what the launch resolved; with nothing resolved
-/// there is nothing to record, and that must degrade to "skip the migration"
-/// rather than abort the launch before PTY.
-fn pending_lazy_tool_runtime_provenance_migration(
-    source: gwt_agent::Session,
-    config: &gwt_agent::LaunchConfig,
-    target_session_id: String,
-) -> Result<Option<PendingToolRuntimeMigration>, String> {
-    let Some(provenance) = config.tool_runtime_provenance.clone() else {
-        tracing::debug!(
-            session = %source.id,
-            agent = %config.agent_id,
-            "launch resolved no tool runtime provenance; leaving the legacy Session unmigrated"
-        );
-        return Ok(None);
-    };
-    Ok(Some(PendingToolRuntimeMigration {
-        source,
-        provenance,
-        target_session_id,
-    }))
-}
-
-fn persist_lazy_tool_runtime_provenance_migration(
-    sessions_dir: &Path,
-    pending: &PendingToolRuntimeMigration,
-) -> Result<(), String> {
-    let source = &pending.source;
-    let mut migrated = source.clone();
-    migrated.migrate_legacy_launch_args();
-    migrated.tool_runtime_provenance = Some(pending.provenance.clone());
-    match migrated.save_if_unchanged(sessions_dir, source) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(format!(
-            "tool runtime provenance migration raced with another Session {} update; retry launch",
-            source.id
-        )),
-        Err(error) => Err(format!(
-            "failed to persist tool runtime provenance migration for Session {}: {error}",
-            source.id
-        )),
-    }
-}
-
-fn apply_post_resolution_bun_cache_fast_path(
-    config: &mut gwt_agent::LaunchConfig,
-) -> gwt_agent::HostBunxCacheFastPath {
-    if config.tool_runtime_provenance.is_some() {
-        return gwt_agent::HostBunxCacheFastPath::NotApplicable;
-    }
-    gwt_agent::apply_host_bunx_cache_fast_path(config)
-}
-
-/// Issue #3857 AC-5: terminal line shown in the agent window when a validated
-/// Bun package cache entry resolved to a bin target gwt could not launch. It
-/// names the resolved path and the reason, then states that the launch falls
-/// back to the package runner.
-fn bun_cache_fast_path_rejection_terminal_bytes(executable: &Path, reason: &str) -> Vec<u8> {
-    format!(
-        "[gwt] Bun package cache entry {} was not launched directly: {}. Falling back to the bunx package runner.\r\n",
-        executable.display(),
-        reason.trim().trim_end_matches('.')
-    )
-    .into_bytes()
 }
 
 fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
@@ -3325,9 +3165,7 @@ impl LaunchWizardMemoryCache {
     }
 
     fn load_agent_options() -> Vec<gwt::AgentOption> {
-        gwt::load_agent_options(&gwt_agent::VersionCache::load(
-            &gwt::default_wizard_version_cache_path(),
-        ))
+        gwt::load_agent_options()
     }
 
     /// Start install detection on a background thread so `load` (and thus
@@ -3845,7 +3683,7 @@ pub(super) fn codex_hook_discovery_mode_for_launch_config(
         return gwt_skills::CodexHookDiscoveryMode::WorkspaceHome;
     }
     if let Some(mode) =
-        codex_hook_discovery_mode_from_selected_codex_version(config.tool_version.as_deref())
+        codex_hook_discovery_mode_from_detected_codex_version(config.tool_version.as_deref())
     {
         return mode;
     }
@@ -3855,9 +3693,6 @@ pub(super) fn codex_hook_discovery_mode_for_launch_config(
     let Some(report) = health_report else {
         return gwt_skills::CodexHookDiscoveryMode::Both;
     };
-    // Issue #3481 AC-2: measured evidence from the runner probe outranks the
-    // "we switched to the latest package, so it must be new" heuristic. Both
-    // describe the same launch, but only the probe ran the executable.
     if let Some(mode) = report
         .version_output
         .as_deref()
@@ -3865,24 +3700,13 @@ pub(super) fn codex_hook_discovery_mode_for_launch_config(
     {
         return mode;
     }
-    if report.switched_to_fallback {
-        return gwt_skills::CodexHookDiscoveryMode::WorkspaceHome;
-    }
     gwt_skills::CodexHookDiscoveryMode::Both
 }
 
-pub(super) fn codex_hook_discovery_mode_from_selected_codex_version(
+pub(super) fn codex_hook_discovery_mode_from_detected_codex_version(
     version: Option<&str>,
 ) -> Option<gwt_skills::CodexHookDiscoveryMode> {
     let version = version?.trim();
-    // Issue #3481 AC-1: `installed` and `latest` are selectors, not versions.
-    // Neither states what the resolved binary can do, so both defer to the
-    // runner-probe evidence gathered for this launch. Only an explicitly
-    // pinned version is already the exact identity of the package that the
-    // launch argv will materialize.
-    if version.is_empty() || version == "installed" || version == "latest" {
-        return None;
-    }
     codex_hook_discovery_mode_from_semver(version)
 }
 
@@ -4818,10 +4642,6 @@ impl AppRuntime {
                 .insert(window_id.clone(), fresh);
             self.arm_continue_work_readiness_deadline(&window_id, operation_id);
         }
-        if let Some(migration) = success.pending_tool_runtime_migration {
-            self.pending_tool_runtime_migrations
-                .insert(window_id.clone(), migration);
-        }
         self.install_process_window(
             &window_id,
             success.incarnation,
@@ -4929,7 +4749,6 @@ impl AppRuntime {
         detail: String,
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
-        self.pending_tool_runtime_migrations.remove(&window_id);
         let is_answered_handoff = launch_feedback_context
             .as_ref()
             .is_some_and(|context| context.issue_monitor_autonomous_handoff.is_some());
@@ -5206,7 +5025,6 @@ impl AppRuntime {
                 env,
                 remove_env,
                 cwd: Some(project_root),
-                pending_tool_runtime_migration: None,
                 resource_policy,
             },
             console_kind,
@@ -5945,22 +5763,12 @@ impl AppRuntime {
                 }
             }
             resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
-            let tool_runtime_migration_source =
-                hydrate_tool_runtime_provenance_from_source_session(&sessions_dir, &mut config)?;
             phases.mark("environment");
             let runner_health_report = (config.runtime_target
                 == gwt_agent::LaunchRuntimeTarget::Host)
                 .then(|| resolve_host_runner_health_checked(&mut config))
                 .transpose()?;
             phases.mark("runner_health");
-            if let Some(report) = &runner_health_report {
-                for message in &report.messages {
-                    proxy.send(UserEvent::LaunchProgress {
-                        window_id: window_id.clone(),
-                        message: message.clone(),
-                    });
-                }
-            }
             let codex_hook_discovery_mode =
                 codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref());
             let managed_assets =
@@ -6008,33 +5816,6 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
-                match apply_post_resolution_bun_cache_fast_path(&mut config) {
-                    gwt_agent::HostBunxCacheFastPath::Applied => {
-                        tracing::debug!(
-                            agent = %config.agent_id,
-                            command = %config.command,
-                            "reusing fresh Bun agent package cache"
-                        );
-                    }
-                    gwt_agent::HostBunxCacheFastPath::Rejected { executable, reason } => {
-                        tracing::warn!(
-                            agent = %config.agent_id,
-                            executable = %executable.display(),
-                            reason = %reason,
-                            "Bun agent package cache entry is not launchable; falling back to the package runner"
-                        );
-                        proxy.send(UserEvent::LaunchTerminalOutput {
-                            window_id: window_id.clone(),
-                            data: bun_cache_fast_path_rejection_terminal_bytes(
-                                &executable,
-                                &reason,
-                            ),
-                        });
-                    }
-                    gwt_agent::HostBunxCacheFastPath::NotApplicable => {}
-                }
-            }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
             // build parallelism before Docker materializes the exec environment
@@ -6052,21 +5833,13 @@ impl AppRuntime {
                 config.entrypoint_args(),
                 config.session_mode == gwt_agent::SessionMode::Resume,
             );
-            let durable_tool_runtime_command = config
-                .tool_runtime_provenance
-                .as_ref()
-                .map(|_| gwt_agent::durable_session_launch_command(&config));
             apply_windows_host_shell_wrapper(&mut config)?;
 
             let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
 
             let agent_id = config.agent_id.clone();
-            let mut session = initialize_launch_session(
-                &worktree_path,
-                Path::new(&project_root),
-                &config,
-                durable_tool_runtime_command,
-            );
+            let mut session =
+                initialize_launch_session(&worktree_path, Path::new(&project_root), &config);
             // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
             // recovers producing authority through the continuation
             // coordinator before spawn. Failure degrades to an unbound,
@@ -6174,22 +5947,6 @@ impl AppRuntime {
             }
 
             let session_id = session.id.clone();
-            let mut pending_tool_runtime_migration = tool_runtime_migration_source
-                .map(|source| {
-                    pending_lazy_tool_runtime_provenance_migration(
-                        source,
-                        &config,
-                        session_id.clone(),
-                    )
-                })
-                .transpose()?
-                .flatten();
-            if pending_tool_runtime_migration
-                .as_ref()
-                .is_some_and(|pending| pending.source.id == session_id)
-            {
-                session.tool_runtime_provenance = None;
-            }
             let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
@@ -6364,19 +6121,6 @@ impl AppRuntime {
                     ),
                 });
             }
-            if let Some(pending) = pending_tool_runtime_migration.as_mut() {
-                if pending.source.id == session_id {
-                    pending.source = gwt_agent::Session::load(
-                        &sessions_dir.join(format!("{session_id}.toml")),
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "failed to stage same-Session tool runtime provenance migration for Session {session_id}: {error}"
-                        )
-                    })?;
-                }
-            }
-
             let expected_execution_identity =
                 gwt_agent::SessionExecutionIdentity::from_session(&session)?;
 
@@ -6387,7 +6131,6 @@ impl AppRuntime {
                 env: config.env_vars.clone(),
                 remove_env: config.remove_env.clone(),
                 cwd: pm_provider_runtime_dir(&config).or_else(|| config.working_dir.clone()),
-                pending_tool_runtime_migration,
                 resource_policy,
             };
             // Issue #3490 AC-1: without a Backend Override profile every Codex
@@ -7010,7 +6753,6 @@ mod docker_session_persistence_tests {
             env: config.env_vars,
             remove_env: config.remove_env,
             cwd: config.working_dir,
-            pending_tool_runtime_migration: None,
             resource_policy: None,
         };
         assert_eq!(process_launch.command, runtime.binary());
@@ -9943,251 +9685,9 @@ mod lazy_session_ledger_tests {
     }
 }
 
-#[cfg(test)]
-mod tool_runtime_integration_tests {
+#[cfg(all(test, windows))]
+mod agent_window_status_tests {
     use super::*;
-
-    fn provenance() -> gwt_agent::ToolRuntimeProvenance {
-        gwt_agent::ToolRuntimeProvenance {
-            schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "@openai/codex".to_string(),
-            requested_selector: "latest".to_string(),
-            resolved_exact_version: "0.116.0".to_string(),
-            runner_kind: gwt_agent::ToolRuntimeRunnerKind::Npx,
-            resolution_reason: gwt_agent::ToolRuntimeResolutionReason::RequestedSelector,
-        }
-    }
-
-    #[test]
-    fn quick_start_source_session_hydrates_tool_runtime_provenance_before_prepare() {
-        let sessions_dir = tempfile::tempdir().expect("sessions dir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
-        let worktree = tempfile::tempdir().expect("worktree");
-        let mut session = gwt_agent::Session::new(
-            worktree.path(),
-            "work/issue-3456",
-            gwt_agent::AgentId::Codex,
-        );
-        session.tool_runtime_provenance = Some(provenance());
-        session.save(sessions_dir.path()).expect("save session");
-
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .tool_runtime_source_session_id(session.id.clone())
-            .build();
-        let migration =
-            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
-                .expect("hydrate provenance");
-
-        assert!(migration.is_none());
-        assert_eq!(
-            config.tool_runtime_provenance,
-            session.tool_runtime_provenance
-        );
-    }
-
-    #[test]
-    fn legacy_source_session_migration_is_staged_until_authenticated_commit() {
-        let sessions_dir = tempfile::tempdir().expect("sessions dir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
-        let worktree = tempfile::tempdir().expect("worktree");
-        let mut session = gwt_agent::Session::new(
-            worktree.path(),
-            "work/issue-3456",
-            gwt_agent::AgentId::Codex,
-        );
-        session.schema_version = 0;
-        session.save(sessions_dir.path()).expect("save session");
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .tool_runtime_source_session_id(session.id.clone())
-            .build();
-
-        let migration =
-            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
-                .expect("load migration source")
-                .expect("legacy source");
-        assert!(
-            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
-                .expect("reload before resolution")
-                .tool_runtime_provenance
-                .is_none(),
-            "loading a legacy source must not mutate it before health succeeds"
-        );
-
-        config.tool_runtime_provenance = Some(provenance());
-        let pending = pending_lazy_tool_runtime_provenance_migration(
-            migration,
-            &config,
-            "target-session".to_string(),
-        )
-        .expect("stage migration")
-        .expect("a resolved provenance stages a migration");
-        assert!(
-            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
-                .expect("reload staged source")
-                .tool_runtime_provenance
-                .is_none(),
-            "staging an exact plan must not mutate the legacy source before authenticated SessionStart"
-        );
-        persist_lazy_tool_runtime_provenance_migration(sessions_dir.path(), &pending)
-            .expect("commit migration");
-
-        assert_eq!(
-            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
-                .expect("reload migrated session")
-                .tool_runtime_provenance,
-            config.tool_runtime_provenance
-        );
-    }
-
-    /// Issue #3527: a healthy direct runner resolves no package provenance —
-    /// `resolve_host_runner_health_checked` returns early for direct, non-Host,
-    /// and non-builtin launches. A legacy source Session then has nothing to
-    /// backfill, which must skip the migration rather than fail the launch
-    /// before PTY.
-    #[test]
-    fn unresolved_provenance_skips_the_legacy_migration_instead_of_failing_the_launch() {
-        let sessions_dir = tempfile::tempdir().expect("sessions dir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
-        let worktree = tempfile::tempdir().expect("worktree");
-        let session = gwt_agent::Session::new(
-            worktree.path(),
-            "work/issue-3527",
-            gwt_agent::AgentId::ClaudeCode,
-        );
-        session.save(sessions_dir.path()).expect("save session");
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
-            .tool_runtime_source_session_id(session.id.clone())
-            .build();
-
-        let migration =
-            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
-                .expect("load migration source")
-                .expect("legacy source");
-        assert!(
-            config.tool_runtime_provenance.is_none(),
-            "a direct runner launch resolves no package provenance"
-        );
-
-        let pending = pending_lazy_tool_runtime_provenance_migration(
-            migration,
-            &config,
-            "target-session".to_string(),
-        )
-        .expect("an unresolved provenance must not abort the launch");
-
-        assert!(
-            pending.is_none(),
-            "there is nothing to backfill, so no migration may be staged"
-        );
-        assert!(
-            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
-                .expect("reload source session")
-                .tool_runtime_provenance
-                .is_none(),
-            "skipping the migration must leave the legacy Session untouched"
-        );
-    }
-
-    #[test]
-    fn missing_explicit_source_session_fails_closed_before_package_resolution() {
-        let sessions_dir = tempfile::tempdir().expect("sessions dir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .tool_runtime_source_session_id("missing-session")
-            .tool_runtime_provenance(provenance())
-            .build();
-
-        let error =
-            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
-                .expect_err("an explicit missing source must fail closed");
-
-        assert!(error.contains("missing-session"));
-        assert_eq!(config.tool_runtime_provenance, Some(provenance()));
-    }
-
-    #[test]
-    fn lazy_provenance_migration_cas_failure_preserves_current_session_bytes() {
-        let sessions_dir = tempfile::tempdir().expect("sessions dir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
-        let worktree = tempfile::tempdir().expect("worktree");
-        let session = gwt_agent::Session::new(
-            worktree.path(),
-            "work/issue-3456",
-            gwt_agent::AgentId::Codex,
-        );
-        session.save(sessions_dir.path()).expect("save session");
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .tool_runtime_source_session_id(session.id.clone())
-            .build();
-        let migration =
-            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
-                .expect("load migration source")
-                .expect("legacy source");
-
-        let mut concurrent = session.clone();
-        concurrent.display_name = "Concurrent update".to_string();
-        concurrent
-            .save_if_unchanged(sessions_dir.path(), &session)
-            .expect("concurrent save");
-        let path = sessions_dir.path().join(format!("{}.toml", session.id));
-        let expected_bytes = std::fs::read(&path).expect("read concurrent bytes");
-        config.tool_runtime_provenance = Some(provenance());
-        let pending = pending_lazy_tool_runtime_provenance_migration(
-            migration,
-            &config,
-            "target-session".to_string(),
-        )
-        .expect("stage migration")
-        .expect("a resolved provenance stages a migration");
-
-        let error = persist_lazy_tool_runtime_provenance_migration(sessions_dir.path(), &pending)
-            .expect_err("stale migration must fail closed");
-
-        assert!(error.contains("raced"));
-        assert_eq!(
-            std::fs::read(path).expect("read bytes after rejected migration"),
-            expected_bytes
-        );
-    }
-
-    #[test]
-    fn exact_tool_runtime_plan_is_not_rewritten_by_bun_cache_fast_path() {
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .tool_runtime_provenance(provenance())
-            .build();
-        config.command = "npx.cmd".to_string();
-        config.args = vec!["--yes".to_string(), "@openai/codex@0.116.0".to_string()];
-        let expected = (config.command.clone(), config.args.clone());
-
-        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config).is_applied());
-        assert_eq!((config.command, config.args), expected);
-    }
-
-    // Issue #3857 AC-5: a rejected cache entry is explained in the agent
-    // terminal with the resolved path and the reason it could not be launched.
-    #[test]
-    fn bun_cache_fast_path_rejection_names_the_path_and_reason_in_the_terminal() {
-        let executable =
-            Path::new("/tmp/bunx-501-opencode-ai@latest/node_modules/opencode-ai/bin/opencode.exe");
-
-        let bytes = bun_cache_fast_path_rejection_terminal_bytes(
-            executable,
-            "the file is neither a script nor a recognized native executable (ELF, Mach-O, PE).",
-        );
-        let text = String::from_utf8(bytes).expect("utf8 terminal line");
-
-        assert!(text.starts_with("[gwt] "), "{text}");
-        assert!(text.contains("opencode-ai/bin/opencode.exe"), "{text}");
-        assert!(
-            text.contains("neither a script nor a recognized native executable"),
-            "{text}"
-        );
-        assert!(
-            text.contains("Falling back to the bunx package runner"),
-            "{text}"
-        );
-        assert!(text.ends_with("\r\n"), "{text}");
-    }
 
     #[cfg(windows)]
     #[test]
