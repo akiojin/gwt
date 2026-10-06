@@ -29962,23 +29962,48 @@ exit 1
             settle_blocked(dir.path(), "sess-reopen");
             save_covering_evidence(dir.path(), "sess-reopen", true);
 
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-            let mut workers = Vec::new();
-            for reason in ["concurrent recovery A", "concurrent recovery B"] {
-                let worktree = dir.path().to_path_buf();
-                let barrier = barrier.clone();
-                workers.push(std::thread::spawn(move || {
-                    barrier.wait();
-                    let mut out = String::new();
-                    let code = run_reopen(&worktree, "sess-reopen", reason, &mut out).unwrap();
-                    (code, out)
-                }));
-            }
-            barrier.wait();
-            let results: Vec<(i32, String)> = workers
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .collect();
+            let blocked_before = fs::read(state_path(dir.path())).unwrap();
+            // Hold the first writer until the contender observes T-149; a
+            // barrier alone assumes the write finishes inside the lease wait.
+            let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let worktree = dir.path().to_path_buf();
+            let worker = std::thread::spawn(move || {
+                crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                    acquired_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                });
+                let mut out = String::new();
+                let code = run_reopen(&worktree, "sess-reopen", "concurrent recovery A", &mut out)
+                    .unwrap();
+                (code, out)
+            });
+            acquired_rx.recv().unwrap();
+            let mut out = String::new();
+            let mut refusal = None;
+            let contention = run_reopen_impl(
+                dir.path(),
+                "sess-reopen",
+                None,
+                None,
+                "concurrent recovery B",
+                &mut out,
+                &mut refusal,
+            );
+            let blocked_after = fs::read(state_path(dir.path())).unwrap();
+            // Release and join before asserting, including on unexpected results.
+            release_tx.send(()).unwrap();
+            let first = worker.join().unwrap();
+            let error = contention.expect_err("the held writer must refuse the contender");
+            assert!(error.to_string().contains("T-149"), "{error}");
+            let refusal = refusal.expect("typed writer contention refusal");
+            assert_eq!(refusal.reason_code, "execution_reopen_store_busy");
+            assert_eq!(refusal.recovery_action.as_deref(), Some("execution.reopen"));
+            assert_eq!(blocked_after, blocked_before);
+
+            let code =
+                run_reopen(dir.path(), "sess-reopen", "concurrent recovery B", &mut out).unwrap();
+            let results = vec![first, (code, out)];
             assert!(results.iter().all(|(code, _)| *code == 0), "{results:?}");
             assert!(
                 results.iter().any(|(_, out)| out.contains("reopened")),
