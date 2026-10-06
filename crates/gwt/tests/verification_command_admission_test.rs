@@ -66,6 +66,8 @@ impl Arena {
         for path in [&home, &signals, &bin, &first] {
             std::fs::create_dir_all(path).unwrap();
         }
+        std::fs::create_dir_all(home.join(".gwt")).unwrap();
+        std::fs::write(home.join(".gwt/config.toml"), "[verification]\nslots = 1\n").unwrap();
         let source = root.path().join("cargo_fixture.rs");
         std::fs::write(&source, FIXTURE).unwrap();
         let output = hidden_command("rustc")
@@ -418,4 +420,336 @@ fn dev_host_reservation_to_admission_probe() {
             .expect("Heavy admission telemetry");
         eprintln!("per-command admission: contender_pid={contender_pid} queue_wait_ms={wait}; clippy admitted while first matrix fmt remained active");
     }
+}
+
+/// PM ruling for #5082: four real canonical matrices, with identical warmed
+/// independent targets. This is a developer-host measurement, not a CI timing
+/// assertion or a substitute for the final worktree's verification matrix.
+#[test]
+#[ignore = "real Cargo throughput and disk measurement; preserves machine-local evidence"]
+fn canonical_four_matrix_throughput_probe() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    };
+
+    #[cfg(windows)]
+    const MATRIX: [&str; 3] = [
+        "cargo clippy -p gwt-core -p gwt-config --all-targets -- -D warnings",
+        "cargo nextest run --profile gwt-verify -p gwt-core --all-features --retries 0",
+        "cargo nextest run --profile gwt-verify -p gwt-config --lib",
+    ];
+    #[cfg(not(windows))]
+    const MATRIX: [&str; 3] = [
+        "cargo clippy -p gwt-core -p gwt-config --all-targets -- -D warnings",
+        "cargo test -p gwt-core --all-features",
+        "cargo test -p gwt-config --lib",
+    ];
+
+    fn bytes(path: &Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => bytes(&entry.path()),
+                Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().map(Result::unwrap) {
+            let destination = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &destination);
+            } else {
+                // Independent files, so Cargo cannot mutate another target.
+                std::fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = tempfile::Builder::new()
+        .prefix("gwt-5082-canonical-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    eprintln!("canonical benchmark evidence: {}", root.display());
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".gwt")).unwrap();
+    let config = home.join(".gwt/config.toml");
+    let set_slots = |slots| {
+        std::fs::write(&config, format!("[verification]\nslots = {slots}\n")).unwrap();
+    };
+    set_slots(1);
+    let tracked = hidden_command("git")
+        .current_dir(&source)
+        .args(["ls-files", "-z"])
+        .output()
+        .unwrap();
+    assert!(tracked.status.success());
+    let files: Vec<_> = tracked
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| std::str::from_utf8(path).unwrap())
+        .filter(|path| !path.starts_with(".gwt/work/events"))
+        .collect();
+    let workers: Vec<_> = (0..4)
+        .map(|index| root.join(format!("worker-{index}")))
+        .collect();
+    // Snapshot once before creating the four test-only repositories. These
+    // fixtures never create or switch the agent's managed worktree/branches.
+    let snapshot = root.join("source-snapshot");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    for relative in files {
+        let from = source.join(relative);
+        if from.is_file() {
+            let to = snapshot.join(relative);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(from, to).unwrap();
+        }
+    }
+    for (index, worker) in workers.iter().enumerate() {
+        copy_tree(&snapshot, worker);
+        git(worker, &["init", "-q", "-b", "benchmark"]);
+        git(worker, &["config", "user.email", "test@example.com"]);
+        git(worker, &["config", "user.name", "Test"]);
+        git(worker, &["config", "core.autocrlf", "false"]);
+        git(worker, &["add", "."]);
+        git(worker, &["commit", "-qm", "benchmark source snapshot"]);
+        git(
+            worker,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        // Non-repository temp fixtures must not discover the worker's Git root.
+        std::fs::create_dir_all(root.join(format!("tmp-{index}"))).unwrap();
+    }
+
+    let binary = std::env::var_os("GWT_ADMISSION_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_gwtd").into());
+    let cargo_home = std::env::var_os("CARGO_HOME").unwrap_or_else(|| {
+        dirs::home_dir()
+            .expect("original Cargo home")
+            .join(".cargo")
+            .into_os_string()
+    });
+    let rustup_home = std::env::var_os("RUSTUP_HOME").unwrap_or_else(|| {
+        dirs::home_dir()
+            .expect("original Rust toolchain home")
+            .join(".rustup")
+            .into_os_string()
+    });
+    let spawn = |index: usize, phase: &str, operation: &str| {
+        let worker = &workers[index];
+        let temporary = root.join(format!("tmp-{index}"));
+        let mut command = hidden_command(&binary);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GWT_") {
+                command.env_remove(key);
+            }
+        }
+        let stdout =
+            std::fs::File::create(root.join(format!("{phase}-{index}-{operation}.log"))).unwrap();
+        let stderr = stdout.try_clone().unwrap();
+        let mut child = command
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("GWT_HOME", home.join(".gwt"))
+            .env(
+                "GWT_SESSION_ID",
+                format!("canonical-benchmark-{phase}-{index}"),
+            )
+            .env("GWT_VERIFY_SPAWN_HOST", "inherit")
+            .env("CARGO_HOME", &cargo_home)
+            .env("RUSTUP_HOME", &rustup_home)
+            .env("CARGO_BUILD_JOBS", "1")
+            .env("CARGO_TARGET_DIR", worker.join("target"))
+            .env("TMPDIR", &temporary)
+            .env("TEMP", &temporary)
+            .env("TMP", &temporary)
+            .current_dir(worker)
+            .stdin(Stdio::piped())
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .unwrap();
+        let params = if operation == "verify.plan" {
+            json!({"commands": MATRIX})
+        } else {
+            json!({"commands": MATRIX, "max_wait_secs": 600})
+        };
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({"schema_version": 1, "operation": operation, "params": params})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        child
+    };
+    let run = |index: usize, phase: &str| {
+        assert!(spawn(index, phase, "verify.plan").wait().unwrap().success());
+        spawn(index, phase, "verify.run")
+    };
+    let finish = |mut child: Child, index: usize, phase: &str| {
+        let status = child.wait().unwrap();
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(workers[index].join(".gwt/skill-state/verification-run.json")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(format!("{phase}-{index}-record.json")),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            status.success(),
+            "{phase} worker {index}: see {}",
+            root.display()
+        );
+        assert_eq!(
+            record["all_passed"], true,
+            "{phase} worker {index}: {record}"
+        );
+        assert_eq!(record["commands"].as_array().unwrap().len(), MATRIX.len());
+        record
+    };
+
+    // Cold growth is measured independently of the warmed speed comparison.
+    let measuring = Arc::new(AtomicBool::new(true));
+    let tmp_peak = Arc::new(AtomicU64::new(0));
+    let target_peak = Arc::new(AtomicU64::new(0));
+    let target_before_bytes = bytes(&workers[0].join("target"));
+    let temporary = root.join("tmp-0");
+    let tmp_before_bytes = bytes(&temporary);
+    let poll = {
+        let measuring = measuring.clone();
+        let tmp_peak = tmp_peak.clone();
+        let target_peak = target_peak.clone();
+        let worker = workers[0].clone();
+        let temporary = temporary.clone();
+        std::thread::spawn(move || {
+            let mut next_target_sample = Instant::now();
+            while measuring.load(Ordering::Relaxed) {
+                tmp_peak.fetch_max(bytes(&temporary), Ordering::Relaxed);
+                if Instant::now() >= next_target_sample {
+                    target_peak.fetch_max(bytes(&worker.join("target")), Ordering::Relaxed);
+                    next_target_sample = Instant::now() + Duration::from_secs(5);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })
+    };
+    let cold_started = Instant::now();
+    finish(run(0, "cold"), 0, "cold");
+    measuring.store(false, Ordering::Relaxed);
+    poll.join().unwrap();
+    target_peak.fetch_max(bytes(&workers[0].join("target")), Ordering::Relaxed);
+    let target_bytes = target_peak
+        .load(Ordering::Relaxed)
+        .saturating_sub(target_before_bytes);
+    let tmp_bytes = tmp_peak
+        .load(Ordering::Relaxed)
+        .saturating_sub(tmp_before_bytes);
+    let budget_bytes = target_bytes
+        .saturating_add(tmp_bytes)
+        .saturating_mul(12)
+        .div_ceil(10);
+    let disk = json!({
+        "matrix": MATRIX,
+        "cold_elapsed_ms": cold_started.elapsed().as_millis(),
+        "target_before_bytes": target_before_bytes,
+        "tmp_before_bytes": tmp_before_bytes,
+        "target_peak_bytes": target_bytes,
+        "tmp_peak_bytes": tmp_bytes,
+        "tmp_sample_ms": 100,
+        "target_sample_ms": 5000,
+        "proposed_disk_budget_bytes": budget_bytes,
+        "target_path": workers[0].join("target"),
+        "tmp_path": temporary,
+        "target_volume_root": root.ancestors().last().unwrap(),
+        "tmp_volume_root": root.ancestors().last().unwrap(),
+        "volume_total_bytes": fs2::total_space(&root).unwrap(),
+        "measurement_limit": "sampled peaks; representative changed-package matrix, not whole workspace"
+    });
+    std::fs::write(
+        root.join("disk-measurement.json"),
+        serde_json::to_vec_pretty(&disk).unwrap(),
+    )
+    .unwrap();
+    eprintln!("cold disk measurement: {disk}");
+    // Reuse dependency downloads/builds by copying bytes, then warm every
+    // independent target with the same actual canonical matrix before timing.
+    for worker in workers.iter().skip(1) {
+        copy_tree(&workers[0].join("target"), &worker.join("target"));
+    }
+    for index in 0..4 {
+        finish(run(index, "warm"), index, "warm");
+    }
+    let serial_started = Instant::now();
+    let mut serial = Vec::new();
+    for index in 0..4 {
+        serial.push(finish(run(index, "serial"), index, "serial"));
+    }
+    let serial_ms = serial_started.elapsed().as_millis();
+    set_slots(4);
+    let ledger = home.join(".gwt/runtime/verification-coordinator/lease-events.jsonl");
+    let parallel_ledger_start = std::fs::metadata(&ledger).unwrap().len() as usize;
+    let parallel_started = Instant::now();
+    let children: Vec<_> = (0..4).map(|index| run(index, "parallel")).collect();
+    let parallel: Vec<_> = children
+        .into_iter()
+        .enumerate()
+        .map(|(index, child)| finish(child, index, "parallel"))
+        .collect();
+    let parallel_ms = parallel_started.elapsed().as_millis();
+    let events = std::fs::read_to_string(ledger).unwrap();
+    let mut active = std::collections::BTreeSet::new();
+    let mut maximum_parallel_holders = 0;
+    for event in events[parallel_ledger_start..]
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+    {
+        let lease = event["lease_id"].as_str().unwrap();
+        match event["kind"].as_str().unwrap() {
+            "acquired" => {
+                active.insert(lease.to_owned());
+                maximum_parallel_holders = maximum_parallel_holders.max(active.len());
+            }
+            "released" | "expired" | "reclaimed" => {
+                active.remove(lease);
+            }
+            _ => {}
+        }
+    }
+    let summary = json!({
+        "matrix": MATRIX,
+        "completed_serial": serial.len(),
+        "completed_parallel": parallel.len(),
+        "all_passed_serial": serial.iter().all(|record| record["all_passed"] == true),
+        "all_passed_parallel": parallel.iter().all(|record| record["all_passed"] == true),
+        "serial_slots": 1,
+        "parallel_slots": 4,
+        "maximum_parallel_holders": maximum_parallel_holders,
+        "serial_elapsed_ms": serial_ms,
+        "parallel_elapsed_ms": parallel_ms,
+        "parallel_to_serial_ratio": parallel_ms as f64 / serial_ms as f64,
+        "one_third_target_met": parallel_ms.saturating_mul(3) <= serial_ms,
+        "disk_measurement": disk,
+    });
+    std::fs::write(
+        root.join("summary.json"),
+        serde_json::to_vec_pretty(&summary).unwrap(),
+    )
+    .unwrap();
+    eprintln!("canonical throughput measurement: {summary}");
 }
