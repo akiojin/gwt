@@ -986,8 +986,7 @@ pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
 fn automatic_slot_capacity(logical_cores: usize, memory_bytes: u64) -> usize {
     (logical_cores / 8)
         .min((memory_bytes / (16 * 1024 * 1024 * 1024)) as usize)
-        .min(4) // Largest all-PASS canonical capacity measured for #5082.
-        .max(1)
+        .clamp(1, 4) // Largest all-PASS canonical capacity measured for #5082.
 }
 
 pub(super) fn effective_cargo_target(
