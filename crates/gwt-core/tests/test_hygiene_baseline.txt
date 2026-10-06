@@ -109,9 +109,7 @@ short-wall-clock|crates/gwt/src/app_runtime/tests.rs|stop_window_runtime_records
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_prepare_completions
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_knowledge_view_dispatch
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_path
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_recorded_event_with_timeout
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_scheduled_scan_completion
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|write_fake_gh_issue_list
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_cold_remote_client_construction
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_remote_board_requests
