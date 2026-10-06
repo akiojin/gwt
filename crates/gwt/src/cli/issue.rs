@@ -9562,6 +9562,73 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_priority_operations_select_the_next_runnable_issue() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let now = "2026-10-06T00:00:00Z";
+        let candidates = [1, 2, 3].map(|number| crate::IssueMonitorIssue {
+            number,
+            title: format!("Issue {number}"),
+            labels: vec!["bug".to_string()],
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        for (command, expected_head) in [
+            (
+                IssueCommand::MonitorPrioritySet {
+                    project_root: Some(repo.clone()),
+                    issue_numbers: vec![3, 1],
+                },
+                3,
+            ),
+            (
+                IssueCommand::MonitorPriorityMove {
+                    project_root: Some(repo.clone()),
+                    number: 2,
+                    position: crate::cli::IssueMonitorPriorityPosition::Head,
+                },
+                2,
+            ),
+        ] {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::IssueMonitorPrefs {
+                    enabled: true,
+                    ..Default::default()
+                },
+            );
+            monitor.set_gui_connected(true);
+            monitor.terminal_queue_push(&[1, 2, 3], "operation", now);
+            crate::scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+            assert_eq!(monitor.queued_issue_numbers(), vec![1, 2, 3]);
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+                .expect("seed FIFO queue");
+
+            run(&mut env, command, &mut String::new()).expect("priority operation");
+            let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("read priority update");
+            // The scan driver must pick up the write, rather than re-sorting
+            // through set_priority_order in a test-only candidate helper.
+            monitor.rebase_daemon_driver_prefs(&prefs);
+            crate::scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+            assert_eq!(
+                monitor
+                    .next_launch_request(now)
+                    .expect("free slot")
+                    .issue_number,
+                expected_head,
+                "the next scan must select the priority head instead of FIFO issue 1"
+            );
+        }
+    }
+
+    #[test]
     fn issue_monitor_priority_operations_roundtrip_and_reject_out_of_range() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
