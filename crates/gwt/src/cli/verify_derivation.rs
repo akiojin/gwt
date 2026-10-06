@@ -555,18 +555,14 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
             &format!("unfiltered {name} PR trigger"),
         )?;
     }
-    let runs = |job: &Value| -> Vec<String> {
-        job["steps"]
-            .as_sequence()
-            .into_iter()
-            .flatten()
-            .filter_map(|s| s["run"].as_str().map(str::to_string))
-            .collect()
-    };
     let contains = |job: &Value, command: &str| {
-        runs(job)
-            .iter()
-            .any(|run| run.lines().any(|line| line.trim() == command))
+        job["steps"].as_sequence().into_iter().flatten().any(|s| {
+            s.get("if").is_none()
+                && s.get("continue-on-error").is_none()
+                && s["run"]
+                    .as_str()
+                    .is_some_and(|run| run.lines().any(|line| line.trim() == command))
+        })
     };
     let depends = |job: &Value, dependency: &str| {
         job["needs"].as_str() == Some(dependency)
@@ -944,6 +940,26 @@ mod tests {
             )
             .is_err());
         }
+        write(dir.path(), ".github/workflows/lint.yml", &original);
+        let coverage =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage.yml")).unwrap();
+        let mutation = coverage.replace(
+            "      - name: Enforce coverage threshold (gwt-core + gwt @ 90%)\n",
+            "      - name: Generate lcov\n        if: github.event_name == 'schedule'\n",
+        );
+        assert_ne!(mutation, coverage);
+        write(dir.path(), ".github/workflows/coverage.yml", &mutation);
+        assert!(
+            derive_pre_pr_for_host(
+                dir.path(),
+                VerificationHost::Other,
+                &required,
+                &["cargo test -p gwt --test ci_pre_pr_contract_test".into()],
+                &[]
+            )
+            .is_err(),
+            "a display name must not permit skipping the required coverage threshold"
+        );
     }
 
     #[test]
