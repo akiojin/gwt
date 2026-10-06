@@ -186,12 +186,66 @@ pub fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
     false
 }
 
-/// Return the OS-reported start time for one host process.
+/// Return the start identity of one host process incarnation.
 ///
 /// A PID by itself is not a durable process identity because operating
 /// systems recycle it. Cross-process launch fences persist this value beside
 /// the PID and compare both before treating a previous Host as still live.
+///
+/// The value is an opaque token compared only for equality. On Linux it is
+/// the `starttime` tick count from `/proc/<pid>/stat`: the wall-clock start
+/// time is `btime + ticks / CLK_TCK`, and WSL moves `btime` while the process
+/// lives, so a live Host would otherwise read as a different incarnation
+/// (Issue #5089). Elsewhere the OS start time is already fixed per process.
+/// Use [`host_process_start_epoch_secs`] when wall-clock seconds are needed.
 pub fn host_process_start_time(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        proc_stat_start_identity(&stat)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        host_process_start_epoch_secs(pid)
+    }
+}
+
+/// Start identity of a process already present in a `sysinfo` snapshot: the
+/// same token as [`host_process_start_time`], or `0` when it is unreadable.
+pub fn snapshot_process_start_identity(pid: u32, process: &sysinfo::Process) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = process;
+        host_process_start_time(pid).unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        process.start_time()
+    }
+}
+
+/// Parse the `starttime` field (22) of a `/proc/<pid>/stat` line. `comm` may
+/// contain spaces and parentheses, so fields are counted after the last `)`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_stat_start_identity(stat: &str) -> Option<u64> {
+    let (_, fields) = stat.rsplit_once(')')?;
+    fields
+        .split_whitespace()
+        .nth(19)?
+        .parse::<u64>()
+        .ok()
+        .filter(|ticks| *ticks > 0)
+}
+
+/// Return the wall-clock start time of one host process in Unix seconds.
+///
+/// Only ordering checks against wall-clock stamps should use this; it is not
+/// stable across clock steps on Linux and must not be compared for identity.
+pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
     }
@@ -332,6 +386,67 @@ mod tests {
         assert!(host_process_start_time(std::process::id()).is_some_and(|value| value > 0));
         assert_eq!(host_process_start_time(0), None);
         assert_eq!(host_process_start_time(i32::MAX as u32), None);
+    }
+
+    /// `/proc/<pid>/stat` line for one incarnation; `comm` may contain spaces
+    /// and parentheses, so parsing must anchor on the last `)`.
+    fn proc_stat_line(pid: u32, start_ticks: u64) -> String {
+        format!(
+            "{pid} (gwt (host) x) S 1 {pid} {pid} 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 4 0 \
+             {start_ticks} 123456789 2048 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0"
+        )
+    }
+
+    #[test]
+    fn process_start_identity_does_not_move_when_the_boot_time_moves() {
+        // Issue #5089: WSL reported btime 1791187159 -> 160 -> 161 for one
+        // live PID whose start_ticks stayed 10546425. An identity derived
+        // from `btime + start_ticks / CLK_TCK` changes with each reading;
+        // the identity must come from the per-process tick count alone.
+        let stat = proc_stat_line(1_471_923, 10_546_425);
+        let wall_clock_identities: std::collections::BTreeSet<u64> =
+            [1_791_187_159u64, 1_791_187_160, 1_791_187_161]
+                .into_iter()
+                .map(|btime| btime + 10_546_425 / 100)
+                .collect();
+        assert_eq!(wall_clock_identities.len(), 3);
+
+        // The stat line carries no boot time, so the identity is the tick
+        // count for every one of those readings.
+        assert_eq!(proc_stat_start_identity(&stat), Some(10_546_425));
+    }
+
+    #[test]
+    fn process_start_identity_rejects_a_reused_pid_and_malformed_stat() {
+        let original = proc_stat_start_identity(&proc_stat_line(4_242, 10_546_425));
+        let reused = proc_stat_start_identity(&proc_stat_line(4_242, 10_546_426));
+        assert!(original.is_some());
+        assert_ne!(original, reused);
+        assert_eq!(proc_stat_start_identity(""), None);
+        assert_eq!(proc_stat_start_identity("4242 (gwt) S 1 2"), None);
+        assert_eq!(proc_stat_start_identity(&proc_stat_line(4_242, 0)), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_host_process_start_time_is_the_proc_start_tick_count() {
+        let pid = std::process::id();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        assert_eq!(
+            host_process_start_time(pid),
+            proc_stat_start_identity(&stat)
+        );
+    }
+
+    #[test]
+    fn host_process_start_epoch_secs_is_wall_clock_seconds() {
+        let started = host_process_start_epoch_secs(std::process::id()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(started <= now + 5 && started > 1_600_000_000);
+        assert_eq!(host_process_start_epoch_secs(0), None);
     }
 
     #[test]

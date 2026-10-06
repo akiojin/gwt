@@ -147,6 +147,23 @@ operation ID を必須とします。更新前から開いているタブは再�
 Linux デスクトップ版のビルドには WebKitGTK 系の依存が必要です。CI と同じ依存は
 [docs/docker-usage.md](docs/docker-usage.md) を参照してください。
 
+### 対応する組み込みエージェント
+
+gwt は次の組み込みエージェントに対応しています。Launch Agent には、gwt が検出した
+インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
+カスタムエージェントとして引き続き利用できます。
+
+| エージェント | CLI コマンド |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
+
 ## 使い方
 
 `gwt` を起動するとタスクトレイ (macOS は menubar、Windows は notification

@@ -152,6 +152,23 @@ preferences are retained.
 Linux desktop builds also require WebKitGTK-related system packages. See
 [docs/docker-usage.md](docs/docker-usage.md) for the dependency set used in CI.
 
+### Supported built-in agents
+
+gwt supports the following built-in agents. Launch Agent lists only installed
+built-in agents that gwt detects; other CLI commands remain available through
+custom agents.
+
+| Agent | CLI command |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
+
 ## Usage
 
 Launching `gwt` installs a system-tray icon (macOS menubar / Windows

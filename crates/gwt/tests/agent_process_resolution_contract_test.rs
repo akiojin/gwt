@@ -130,30 +130,6 @@ fn function_source_requires_an_exact_function_name() {
     );
 }
 
-fn block_source_after_marker<'a>(source: &'a str, marker: &str) -> &'a str {
-    let start = source
-        .find(marker)
-        .unwrap_or_else(|| panic!("missing block marker {marker}"));
-    let open = source[start..]
-        .find('{')
-        .map(|offset| start + offset)
-        .unwrap_or_else(|| panic!("missing block body for {marker}"));
-    let mut depth = 0_u32;
-    for (offset, ch) in source[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &source[start..=open + offset];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("unterminated block for {marker}");
-}
-
 fn production_web_sources(root: &Path) -> Vec<(PathBuf, String)> {
     let mut pending = vec![root.to_path_buf()];
     let mut sources = Vec::new();
@@ -216,25 +192,11 @@ fn production_web_sources_excludes_test_dependency_and_build_directories() {
 }
 
 #[test]
-fn targeted_windows_official_providers_have_no_bunx_fallback_source_path() {
-    let path = repo_root().join("crates/gwt-agent/src/launch.rs");
-    let source = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let candidates = function_source(&source, "package_runner_candidates_for_agent");
-    let targeted = block_source_after_marker(
-        candidates,
-        "if matches!(agent_id, AgentId::Codex | AgentId::ClaudeCode)",
-    );
-
-    assert!(targeted.contains("npx.cmd"));
-    assert!(
-        !targeted.contains("(\"npx\", true)"),
-        "targeted Windows Host Codex/Claude must never expose the bare POSIX npx shim"
-    );
-    assert!(
-        !targeted.contains("(\"bunx"),
-        "targeted Windows Host Codex/Claude must never expose a Bunx fallback"
-    );
+fn builtin_package_runner_resolution_stays_absent() {
+    let source = fs::read_to_string(repo_root().join("crates/gwt-agent/src/launch.rs"))
+        .expect("read launch implementation");
+    assert!(!source.contains("fn package_runner_candidates_for_agent("));
+    assert!(!source.contains("fn resolve_host_npx_fallback_executable("));
 }
 
 #[test]
@@ -372,10 +334,8 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
     assert!(placement.contains("Self::spawn_agent_window_async_with_claim("));
     let asynchronous = function_source(&launch, "spawn_agent_window_async_with_claim");
     for boundary in [
-        "hydrate_tool_runtime_provenance_from_source_session(",
         "resolve_host_runner_health_checked(&mut config)",
         "apply_windows_host_shell_wrapper(&mut config)",
-        "pending_lazy_tool_runtime_provenance_migration(",
     ] {
         assert!(
             asynchronous.contains(boundary),
@@ -385,7 +345,7 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
 }
 
 #[test]
-fn agent_and_package_runner_probes_use_the_shared_resolved_process_adapter() {
+fn agent_probes_use_the_shared_resolved_process_adapter() {
     let root = repo_root();
     let forbidden = [
         "hidden_command(",
@@ -441,7 +401,7 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
         "node scripts/ci-windows-tests.mjs run gwt-core test process_adapter_parity",
         "node scripts/ci-windows-tests.mjs run gwt-core test windows_claude_user_agent",
         "node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent real_bun_global_placeholder_fixture",
-        "node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent package_runner_resolution_failure_still_emits_an_end_summary",
+        "node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary",
         "node scripts/ci-windows-tests.mjs run gwt bin gwt real_bun_global_placeholder_fixture",
         "node scripts/ci-windows-tests.mjs run gwt bin gwt command_prompt_agent_wrapper",
         "node scripts/ci-windows-tests.mjs run gwt-terminal lib gwt_terminal pty::windows_spawn::tests",
@@ -469,31 +429,16 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
             "ordinary deterministic Windows CI must stay credential-free: {secret}"
         );
     }
-    // Issue #4134 AC-2: the four combinations used to be four matrix shards,
-    // each paying its own 279s cold build for 137s of tests. They now share one
-    // build inside a single job, so the coverage lives in the loop the job
-    // iterates rather than in matrix entries.
     assert!(
         shard_job.contains("cargo test -p gwt --test windows_agent_launch_e2e --no-run"),
-        "the four combinations must share one build step"
+        "installed provider cases must share one build step"
     );
-    for shard in [
-        ("codex", "latest"),
-        ("codex", "exact"),
-        ("claude", "latest"),
-        ("claude", "exact"),
-    ] {
-        let entry = format!("{}/{}", shard.0, shard.1);
-        assert!(
-            shard_job.contains(&entry),
-            "Windows deterministic E2E must still cover {entry}"
-        );
-    }
+    assert!(shard_job.contains("for provider in codex claude"));
     assert!(
-        shard_job.contains("GWT_WINDOWS_AGENT_PROVIDER=\"$provider\"")
-            && shard_job.contains("GWT_WINDOWS_AGENT_SELECTOR=\"$selector\""),
-        "each iteration must select its own provider and selector"
+        shard_job.contains("GWT_WINDOWS_AGENT_PROVIDER=\"$provider\""),
+        "each iteration must select its installed provider"
     );
+    assert!(!shard_job.contains("GWT_WINDOWS_AGENT_SELECTOR"));
     assert!(
         shard_job.contains("::error::") && shard_job.contains("status=1"),
         "one job must keep the matrix's per-shard attribution and its \

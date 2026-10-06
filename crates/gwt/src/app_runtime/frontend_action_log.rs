@@ -507,7 +507,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 | LaunchWizardAction::SetBranchType { prefix: value }
                 | LaunchWizardAction::SetModel { model: value }
                 | LaunchWizardAction::SetReasoning { reasoning: value }
-                | LaunchWizardAction::SetVersion { version: value }
                 | LaunchWizardAction::SetExecutionMode { mode: value }
                 | LaunchWizardAction::SetDockerService { service: value } => {
                     log = log.target(value);

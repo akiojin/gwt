@@ -1935,7 +1935,8 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             agent_id: profile.agent_id,
             model: profile.model,
             reasoning: profile.reasoning,
-            version: profile.version,
+            // SPEC-1921 FR-1921-L8: `profile.version` stays in the saved pool
+            // but is not read. Every launch uses the resolved executable.
             session_mode: profile.session_mode,
             skip_permissions: profile.skip_permissions,
             fast_mode: profile.fast_mode,
@@ -19044,10 +19045,8 @@ impl IssueMonitorState {
         if self.rebind_revoked_launch_to_a_surviving_window(issue_number, &message, now) {
             return;
         }
-        // Issue #3941 AC-3: a launch aborted by transient infrastructure (exact
-        // package probe timeout with no cached version, a remote-tracking ref
-        // race between concurrent fetches) is neither an agent failure nor an
-        // attempt: it is requeued behind a short backoff in every mode.
+        // A remote-tracking ref race between concurrent fetches is neither an
+        // agent failure nor an attempt: retry behind a short backoff in every mode.
         if gwt_agent::is_transient_launch_failure(&message) {
             self.record_transient_launch_retry(issue_number, message, now);
             return;
@@ -31951,10 +31950,9 @@ mod tests {
     fn issue_monitor_launch_profile_round_trips_all_launch_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("issue-monitor.json");
-        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .model("gpt-5.5")
             .reasoning_level("high")
-            .version("0.121.0")
             .session_mode(gwt_agent::SessionMode::Resume)
             .skip_permissions(true)
             .fast_mode(true)
@@ -31963,6 +31961,7 @@ mod tests {
             .docker_lifecycle_intent(gwt_agent::DockerLifecycleIntent::Restart)
             .windows_shell(gwt_agent::WindowsShellKind::PowerShell7)
             .build();
+        config.tool_version = Some("0.121.0".to_string());
         let prefs = IssueMonitorPrefs {
             launch_profile: Some(IssueMonitorLaunchProfile::from(&config)),
             ..IssueMonitorPrefs::default()
@@ -31997,7 +31996,8 @@ mod tests {
         assert_eq!(previous.agent_id, "codex");
         assert_eq!(previous.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(previous.reasoning.as_deref(), Some("high"));
-        assert_eq!(previous.version.as_deref(), Some("0.121.0"));
+        // SPEC-1921 FR-1921-L8: the stored `version` round-trips above and is
+        // not handed to the wizard. Launches use the resolved executable.
         assert_eq!(previous.session_mode, gwt_agent::SessionMode::Resume);
         assert!(previous.skip_permissions);
         assert!(previous.fast_mode);
@@ -36556,12 +36556,11 @@ mod tests {
 
     #[test]
     fn transient_launch_failure_requeues_without_consuming_an_attempt() {
-        // Issue #3941 AC-3: a launch aborted by transient infrastructure (probe
-        // timeout with no cached version, concurrent fetch ref race) is not an
-        // agent failure. It goes back to the queue behind a backoff, keeps its
+        // A concurrent fetch ref race is not an agent failure.
+        // It goes back to the queue behind a backoff, keeps its
         // reason visible, and spends no attempt — no PM requeue needed.
         let now = "2026-09-04T00:39:39Z";
-        let message = "exact npx package probe timed out for @openai/codex@0.153.2 after 120 seconds and the requested version is not in the local package cache; launch was aborted before spawn. Next: warm the cache; gwt retries this launch automatically without spending an attempt.";
+        let message = "failed to fetch origin: error: cannot lock ref 'refs/remotes/origin/develop': is at a but expected b";
         for autonomous in [true, false] {
             let mut monitor = if autonomous {
                 autonomous_state()
