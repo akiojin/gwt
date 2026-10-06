@@ -2,7 +2,8 @@ import { surfaceForWindow } from "./surface-rail.js";
 
 // The grid owns presentation only. Sessions and terminal runtimes remain shared
 // with the existing window model; column changes never persist canvas geometry.
-export function createAgentsSurface({ document, mountTerminal, onLayout, onFocus = () => {} }) {
+export function createAgentsSurface({ document, mountTerminal, mountPreview, onLayout,
+  onFocus = () => {}, onPreviewFocus = onFocus }) {
   const element = document.createElement("section");
   element.className = "agents-surface";
   element.setAttribute("aria-label", "Agents");
@@ -15,7 +16,65 @@ export function createAgentsSurface({ document, mountTerminal, onLayout, onFocus
   const columns = element.querySelector("input");
   const tiles = new Map();
   const tabs = new Map();
+  const previews = new Map();
+  let previewElement = null;
   let selectedId = null;
+  function syncPreview() {
+    if (!previewElement) return;
+    const previewGrid = previewElement.querySelector(".agents-grid");
+    for (const [id, preview] of previews) {
+      if (!tiles.has(id)) { preview.cleanup?.(); preview.tile.remove(); previews.delete(id); }
+    }
+    for (const [id, source] of tiles) {
+      let preview = previews.get(id);
+      if (!preview) {
+        const tile = document.createElement("article");
+        tile.className = "agent-tile";
+        tile.dataset.agentId = id;
+        tile.tabIndex = 0;
+        tile.innerHTML = `<header class="agent-tile__header"><h3></h3><span>Read-only preview</span></header>
+          <div class="agent-tile__terminal terminal-root"></div>`;
+        for (const event of ["pointerdown", "focusin"]) {
+          tile.addEventListener(event, event => {
+            // The preview moves to the other pane during activation. Do not
+            // let the browser focus that moved node after focusing the xterm.
+            if (event.type === "pointerdown") event.preventDefault();
+            // Native events can run microtasks between listeners. Focus only
+            // after the ancestor pane has activated and moved the live host.
+            requestAnimationFrame(() => {
+              if (previewElement && tiles.has(id)) onPreviewFocus(id);
+            });
+          });
+        }
+        previewGrid.appendChild(tile);
+        preview = { tile, cleanup: mountPreview(id, tile.querySelector(".terminal-root")) };
+        previews.set(id, preview);
+      }
+      preview.tile.querySelector("h3").textContent = source.querySelector("h3").textContent;
+      preview.tile.hidden = source.hidden;
+    }
+    previewGrid.classList.toggle("is-single", selectedId !== null);
+    previewGrid.style.gridTemplateColumns = grid.style.gridTemplateColumns;
+    previewElement.querySelector(".agents-empty").hidden = tiles.size > 0;
+  }
+  function setPreviewHost(host) {
+    if (!host) {
+      for (const preview of previews.values()) preview.cleanup?.();
+      previews.clear();
+      previewElement?.remove();
+      previewElement = null;
+      return;
+    }
+    if (!previewElement) {
+      previewElement = document.createElement("section");
+      previewElement.className = "agents-surface agents-surface--preview";
+      previewElement.setAttribute("aria-label", "Agents read-only preview");
+      previewElement.innerHTML = `<header class="agents-toolbar"><h2>Agents</h2><span>Read-only preview · Select this pane to interact</span></header>
+        <div class="agents-grid"></div><p class="agents-empty">No agents. Launch an agent from Issues.</p>`;
+    }
+    if (previewElement.parentElement !== host) host.appendChild(previewElement);
+    syncPreview();
+  }
   function updateSelection() {
     for (const [id, tile] of tiles) {
       tile.hidden = selectedId !== null && id !== selectedId;
@@ -29,6 +88,7 @@ export function createAgentsSurface({ document, mountTerminal, onLayout, onFocus
     grid.classList.toggle("is-single", selectedId !== null);
     columns.closest("label").hidden = selectedId !== null;
     grid.style.gridTemplateColumns = `repeat(${selectedId === null ? columns.value : 1}, minmax(0, 1fr))`;
+    syncPreview();
   }
   function select(id) {
     if (selectedId === id) return;
@@ -155,7 +215,7 @@ export function createAgentsSurface({ document, mountTerminal, onLayout, onFocus
     element.querySelector(".agents-empty").hidden = agents.length > 0;
     if (changed) onLayout();
   }
-  return { element, sync, contains: (id) => tiles.has(id),
+  return { element, sync, setPreviewHost, contains: (id) => tiles.has(id),
     isVisible: (id) => tiles.has(id) && !tiles.get(id).hidden,
     reveal: (id) => { if (tiles.has(id) && (!tabs.has(id) || selectedId !== null)) openTab(id); },
   };

@@ -1243,7 +1243,7 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
-### Serializing heavy verification
+### Capacity for heavy verification
 
 Only canonical `verify.run` acquires the host-wide verification lease.
 Register the verification matrix with `verify.plan`, then run it with
@@ -1264,7 +1264,25 @@ to its immutable predecessor by id/hash and retains its original start time and
 per-command headed E2E, nextest and admission evidence. The full matrix and
 required headed Chromium results in dark/light must pass before Overall PASS
 or Ready.
-Inspect the holder before retrying:
+Heavy Cargo commands in independent worktrees and build directories share a
+bounded host pool. Its default capacity is the smallest of one slot per eight
+logical CPUs, one per 16 GiB of memory, and four, with a minimum of one. To override
+the capacity, set the following in `~/.gwt/config.toml`:
+
+```toml
+[verification]
+slots = 4
+```
+
+The same worktree or effective Cargo target directory stays serialized.
+Unknown command wrappers and older binaries retain exclusive admission.
+Each child gets its own temporary directory. Admission reserves disk space for
+the target and temporary volumes above the configured build-artifact GC floor;
+`verification.disk_budget_bytes` overrides the measured per-run byte budget.
+The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
+volume, based on measured target and temporary growth plus 20% headroom.
+`verify.lease.status` reports `capacity`, `running`, `available`, each holder in
+`slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 
 ```bash
 gwtd <<'JSON'

@@ -53,6 +53,19 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
+test("two Settings System panels keep labels associated with controls in their own window", () => {
+  const { document } = parseHTML(`<main><section id="settings-left-system"></section><section id="settings-right-system"></section></main>`);
+  const scopeSettingsControlIds = loadFunction("scopeSettingsControlIds");
+  const panels = [...document.querySelectorAll("section")];
+  for (const panel of panels) {
+    panel.innerHTML = '<label for="settings-system-language">Output Language</label><select id="settings-system-language"><option>English</option></select>';
+    scopeSettingsControlIds(panel);
+    const target = panel.querySelector("label").getAttribute("for");
+    assert.equal(document.getElementById(target), panel.querySelector("select"));
+  }
+  assert.notEqual(panels[0].querySelector("select").id, panels[1].querySelector("select").id);
+});
+
 test("components.css declares the settings tab and panel surfaces under :root[data-theme]", () => {
   // Every Settings primitive must live inside the dual-theme scope so it
   // honors Dark Operator / Light Drafting alongside the rest of the shell.

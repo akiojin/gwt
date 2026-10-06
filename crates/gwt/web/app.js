@@ -7586,8 +7586,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
-      function setAgentsHost(host) {
-        if (agentsHost === host) return;
+      function setAgentsHost(host, previewHost = null) {
+        if (agentsHost === host) { agentsSurface.setPreviewHost(previewHost); return; }
         agentsHost = host;
         const area = stage.closest(".canvas-area");
         area.classList.toggle("is-agents", host === area);
@@ -7604,6 +7604,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           agentPreviousHosts.clear();
           cleanupTextPreviews(true);
         }
+        agentsSurface.setPreviewHost(previewHost);
         renderedIssuePreviewBodyKeys.clear();
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
@@ -7616,7 +7617,14 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           }
           createTerminalRuntime(id, root);
         },
+        mountPreview: (id, root) => createTerminalTextPreview({
+          document, terminal: terminalMap.get(id).terminal, container: root,
+        }),
         onFocus: focusWindowLocally,
+        onPreviewFocus: (id) => {
+          focusWindowLocally(id);
+          terminalMap.get(id)?.terminal.focus();
+        },
         onLayout: () => requestAnimationFrame(() => {
           if (!agentsHost) return;
           for (const id of terminalMap.keys()) {
