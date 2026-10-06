@@ -63,8 +63,7 @@ pub(super) fn with_launch_wizard_error_log_capture<T>(operation: impl FnOnce() -
 /// entry maps the spawn command token that appears in the raw error
 /// (`Unable to spawn <command>`) to the user-facing guidance.
 ///
-/// SPEC-3151 FR-003: OpenCode joined the table so a missing `opencode` binary
-/// with no available package runner surfaces install guidance rather than
+/// SPEC-3151 FR-003: a missing `opencode` binary surfaces install guidance rather than
 /// `No viable candidates found in PATH`.
 /// Recovery route appended to the owner-mismatch binding refusal.
 ///
@@ -90,9 +89,8 @@ const MISSING_BINARY_INSTALL_HINTS: &[(&str, &str)] = &[
     (
         "opencode",
         concat!(
-            "OpenCode (`opencode`) was not found and no npm package runner (bunx/npx) is available. ",
-            "Select a non-`Installed` version in the Launch wizard to run it via bunx/npx, ",
-            "or install it with: npm i -g opencode-ai ",
+            "OpenCode (`opencode`) was not found in PATH. ",
+            "Install it with: npm i -g opencode-ai ",
             "(or: curl -fsSL https://opencode.ai/install | bash, ",
             "or: brew install anomalyco/tap/opencode). ",
             "If it is already installed, ensure the install directory is on PATH and restart gwt."
@@ -148,7 +146,6 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetWindowsShell { .. } => "set_windows_shell",
             gwt::LaunchWizardAction::SetDockerService { .. } => "set_docker_service",
             gwt::LaunchWizardAction::SetDockerLifecycle { .. } => "set_docker_lifecycle",
-            gwt::LaunchWizardAction::SetVersion { .. } => "set_version",
             gwt::LaunchWizardAction::SetExecutionMode { .. } => "set_execution_mode",
             gwt::LaunchWizardAction::SetLinkedIssue { .. } => "set_linked_issue",
             gwt::LaunchWizardAction::ClearLinkedIssue => "clear_linked_issue",
@@ -226,7 +223,6 @@ impl AppRuntime {
             selected_agent_id = %view.selected_agent_id,
             selected_launch_target = %view.selected_launch_target,
             selected_runtime_target = %view.selected_runtime_target,
-            selected_tool_version = %view.selected_version,
             selected_docker_service = %selected_docker_service,
             linked_issue_number = %linked_issue_number,
             holder_session_id = %holder_session_id,
@@ -620,14 +616,8 @@ impl AppRuntime {
             .map(|(_, hint)| *hint)
     }
 
-    /// SPEC-3864 FR-008: the preflight health check
-    /// (`resolve_host_runner_health_checked`) fails before any PTY spawn with
-    /// `<Display name> installed runner failed its health check ... direct
-    /// runner executable not resolved ...`. That is the same "binary is
-    /// missing" condition as `Unable to spawn <command>`, so the install
-    /// guidance must fire for it too — but only when no package fallback
-    /// could stand in (a resolvable-but-broken fallback is a different
-    /// failure whose diagnostic must stay visible).
+    /// A missing installed executable fails the preflight health check before
+    /// PTY spawn and receives the same install guidance as a spawn failure.
     fn is_unresolved_preflight_runner_error(detail: &str, command: &str) -> bool {
         let Some(descriptor) = gwt_agent::builtin_agent_descriptor_for_command(command) else {
             return false;
@@ -635,9 +625,7 @@ impl AppRuntime {
         detail.contains(&format!(
             "{} installed runner failed its health check",
             descriptor.display_name
-        )) && detail.contains("direct runner executable not resolved")
-            && (detail.contains("No runtime package route is available")
-                || detail.contains("could not be resolved"))
+        )) && detail.contains("installed executable not resolved")
     }
 
     fn is_missing_binary_error(detail: &str, command: &str) -> bool {
@@ -719,21 +707,22 @@ mod install_hint_tests {
     /// PTY spawn, so the install guidance must also fire on that shape.
     #[test]
     fn preflight_unresolved_runner_maps_to_install_hint() {
-        let detail = "Antigravity CLI installed runner failed its health check. Probe detail: direct runner executable not resolved. No runtime package route is available. Setup required: install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` and relaunch.";
+        let detail = "Antigravity CLI installed runner failed its health check. installed executable not resolved. Install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` and relaunch.";
         let user = AppRuntime::user_facing_launch_error_detail(detail);
         assert!(user.contains("antigravity.google/cli/install.sh"), "{user}");
         assert!(user.contains("not found in PATH"), "{user}");
 
-        let opencode = "OpenCode installed runner failed its health check. Probe detail: direct runner executable not resolved. Latest package fallback 'opencode-ai@latest' could not be resolved.";
+        let opencode = "OpenCode installed runner failed its health check. installed executable not resolved. Install it with `npm i -g opencode-ai` and relaunch.";
         let user = AppRuntime::user_facing_launch_error_detail(opencode);
         assert!(user.contains("npm i -g opencode-ai"), "{user}");
     }
 
     #[test]
-    fn preflight_failure_with_healthy_fallback_route_keeps_raw_detail() {
+    fn preflight_failure_with_resolved_broken_runner_keeps_raw_detail() {
         // A resolvable-but-broken runner is a different failure; the raw
         // diagnostic must not be replaced by install guidance.
-        let detail = "OpenCode installed runner failed its health check. Probe detail: exit status 1; runner broken. Latest package fallback 'opencode-ai@latest' is also unhealthy: bunx exploded";
+        let detail =
+            "OpenCode installed runner failed its health check. exit status 1; runner broken";
         assert_eq!(AppRuntime::user_facing_launch_error_detail(detail), detail);
     }
 }

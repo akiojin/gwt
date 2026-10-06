@@ -1,14 +1,14 @@
 /**
- * SPEC-3864 (AC-12) — install detection drives the Launch Wizard.
+ * SPEC-1921 Phase L1a / SPEC-3864 — detection drives the Launch Wizard.
  *
- * Runs against a real gwt browser-server backend launched with `agy` and
- * `openclaw` removed from PATH:
+ * Runs against this checkout's real backend with a fresh isolated HOME,
+ * Claude, Codex and Hermes detected, and `agy` plus GWT_E2E_NPM_AGENT absent
+ * from the effective PATH:
  *
- *   - Antigravity CLI (installer-only route): no `Installed` entry, no Version
- *     picker, and the agent-independent setup affordance with an
- *     "Install Antigravity CLI" action is rendered.
- *   - OpenClaw (npm route): no `Installed` entry, but `latest` is offered and
- *     no setup affordance is shown.
+ *   - Detected agents show their version in the launch summary without a
+ *     Version picker. Claude and Codex retain their Update affordance.
+ *   - Undetected built-ins are absent regardless of distribution route.
+ *   - Installed Hermes without first-time config retains its Configure action.
  *
  * Like the other live specs, the suite is gated on GWT_PLAYWRIGHT_BASE_URL and
  * never submits a launch. Since SPEC-3245 Stage E removed the deprecated Intake
@@ -21,7 +21,6 @@ import {
   gotoLiveGwt,
   openLiveGwtProject,
   openLiveLaunchWizardForBranch,
-  sendLiveGwtEvent,
   type LiveLaunchWizardFixture,
 } from "./_helpers/live-gwt";
 
@@ -38,10 +37,14 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
   let wizardFixture: LiveLaunchWizardFixture | undefined;
+  let errors: ReturnType<typeof collectErrors>;
 
   test.beforeEach(async ({ page }, testInfo) => {
+    errors = collectErrors(page);
     releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
@@ -50,105 +53,88 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
   test.afterEach(async ({ page }) => {
     if (!releaseBackendLock) return;
     try {
-      await clearLiveLaunchWizard(page);
-      await wizardFixture?.cleanup();
+      try {
+        await clearLiveLaunchWizard(page);
+      } finally {
+        await wizardFixture?.cleanup();
+      }
     } finally {
       wizardFixture = undefined;
       await releaseBackendLock();
       releaseBackendLock = undefined;
     }
+    expect(errors.pageErrors, "page errors across the live flow").toEqual([]);
+    expect(errors.consoleErrors, "console errors across the live flow").toEqual([]);
   });
 
   for (const [agentId, displayName] of [["claude", "Claude Code"], ["codex", "Codex"]]) {
-    test(`${displayName} shows installed preference, detected version and setup action`, async ({ page }, testInfo) => {
-      const { pageErrors, consoleErrors } = collectErrors(page);
+    test(`${displayName} shows detected version and Update without a Version picker`, async ({ page }, testInfo) => {
       wizardFixture = await openLiveLaunchWizardForBranch(page);
       await enterManualSetupSettings(page);
       await selectWizardAgent(page, agentId);
       const wizard = page.locator("#wizard-modal");
-      const version = wizard.getByLabel("Version", { exact: true });
-      await expect(version).toHaveValue("installed");
-      const installed = version.locator('option[value="installed"]');
-      await expect(installed).toContainText("package fallback");
+      await expect(wizard.getByLabel("Version", { exact: true })).toHaveCount(0);
+      await expect(summaryValue(page, "Agent")).toHaveText(displayName);
+      const version = summaryValue(page, "Version");
+      await expect(version).toBeVisible();
+      await expect(version).toHaveText(/\d+\.\d+/);
       const setup = wizard.locator(`.launch-agent-setup[data-agent-id="${agentId}"]`);
       await expect(setup).toBeVisible();
-      const missing = (await installed.textContent())?.includes("not found");
-      await expect(setup).toHaveAttribute("data-setup-kind", missing ? "install" : "update");
-      await expect(setup.getByRole("button", { name: `${missing ? "Install" : "Update"} ${displayName}` })).toBeVisible();
-      if (!missing) {
-        await expect(installed).toContainText(/\d+\.\d+/);
-        await expect(installed).toContainText("PATH");
-      }
+      await expect(setup).toHaveAttribute("data-setup-kind", "update");
+      await expect(setup).toContainText("Launch uses the detected CLI directly");
+      await expect(setup).not.toContainText("package runner");
+      await expect(setup.getByRole("button", { name: `Update ${displayName}`, exact: true })).toBeVisible();
       await page.evaluate(() => new Promise(requestAnimationFrame));
-      expect(pageErrors).toEqual([]);
-      expect(consoleErrors).toEqual([]);
       await setup.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath(`${agentId}-setup.png`), fullPage: true });
       await version.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: testInfo.outputPath(`${agentId}-installed-preference.png`), fullPage: true });
+      await page.screenshot({ path: testInfo.outputPath(`${agentId}-detected-version.png`), fullPage: true });
     });
   }
 
-  test("uninstalled installer-only agent shows setup affordance and no Installed entry", async ({
+  test("uninstalled built-ins are absent for installer and npm distribution routes", async ({
     page,
   }) => {
-    const { pageErrors, consoleErrors } = collectErrors(page);
     wizardFixture = await openLiveLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
-    await expect(wizard).toBeVisible();
     await enterManualSetupSettings(page);
 
-    await selectWizardAgent(page, "agy");
-
-    const setup = wizard.locator('.launch-agent-setup[data-agent-id="agy"]');
-    await expect(setup).toBeVisible({ timeout: 15_000 });
-    await expect(setup).toHaveAttribute("data-setup-kind", "install");
-    await expect(setup.locator(".launch-agent-setup__title")).toContainText(
-      "Antigravity CLI is not installed",
-    );
-    await expect(setup.locator(".launch-agent-setup__detail")).toContainText(
-      "antigravity.google/cli/install.sh",
-    );
-    await expect(
-      setup.getByRole("button", { name: "Install Antigravity CLI" }),
-    ).toBeVisible();
-
-    // FR-003: neither `Installed` nor a version picker is offered.
+    const agents = wizard.getByLabel("Agent", { exact: true });
+    await expect(agents).toBeVisible();
+    for (const agentId of ["agy", NPM_AGENT]) {
+      await expect(agents.locator(`option[value="${agentId}"], .launch-segmented__option[data-value="${agentId}"]`)).toHaveCount(0);
+      await expect(wizard.locator(`.launch-agent-setup[data-agent-id="${agentId}"]`)).toHaveCount(0);
+    }
     await expect(wizard.getByLabel("Version", { exact: true })).toHaveCount(0);
-    await expect(wizard.locator('option[value="installed"]')).toHaveCount(0);
-
-    await page.evaluate(() => new Promise(requestAnimationFrame));
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+    await expect(wizard.locator('option[value="installed"], option[value="latest"]')).toHaveCount(0);
   });
 
-  test("uninstalled npm-routed agent offers latest but not Installed", async ({
+  test("installed Hermes retains first-time Configure without a Version picker", async ({
     page,
-  }) => {
-    const { pageErrors, consoleErrors } = collectErrors(page);
+  }, testInfo) => {
     wizardFixture = await openLiveLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
-    await expect(wizard).toBeVisible();
     await enterManualSetupSettings(page);
 
-    await selectWizardAgent(page, NPM_AGENT);
-
-    const version = wizard.getByLabel("Version", { exact: true });
-    await expect(version).toBeVisible({ timeout: 15_000 });
-    await expect(version.locator('option[value="latest"]')).toHaveCount(1);
-    await expect(version.locator('option[value="installed"]')).toHaveCount(0);
-    await expect(version).toHaveValue("latest");
-    // A configure affordance may still appear when the agent's first-time
-    // setup is missing on this host; only the install kind is ruled out.
-    await expect(
-      wizard.locator('.launch-agent-setup[data-setup-kind="install"]'),
-    ).toHaveCount(0);
-
+    await selectWizardAgent(page, "hermes");
+    await expect(wizard.getByLabel("Version", { exact: true })).toHaveCount(0);
+    await expect(summaryValue(page, "Agent")).toHaveText("Hermes Agent");
+    const setup = wizard.locator('.launch-agent-setup[data-agent-id="hermes"]');
+    await expect(setup).toBeVisible();
+    await expect(setup).toHaveAttribute("data-setup-kind", "configure");
+    await expect(setup.locator(".launch-agent-setup__detail")).toContainText("hermes setup");
+    await expect(setup.getByRole("button", { name: "Run Hermes Agent setup", exact: true })).toBeVisible();
     await page.evaluate(() => new Promise(requestAnimationFrame));
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+    await setup.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("hermes-configure.png"), fullPage: true });
   });
 });
+
+function summaryValue(page: Page, label: string) {
+  return page.locator("#wizard-summary .wizard-summary-item")
+    .filter({ has: page.locator(".wizard-summary-label", { hasText: new RegExp(`^${label}$`) }) })
+    .locator(".wizard-summary-value");
+}
 
 function collectErrors(page: Page) {
   const pageErrors: string[] = [];
@@ -186,11 +172,12 @@ async function enterManualSetupSettings(page: Page): Promise<void> {
   if (await target.isVisible().catch(() => false)) {
     return;
   }
-  await sendLiveGwtEvent(page, {
-    kind: "launch_wizard_action",
-    action: { kind: "use_start_method", method: "configure_and_start" },
-    bounds: null,
-  });
+  // #4963: cold Issue Monitor cache preparation can delay the first wizard.
+  // Let only this readiness fence use the existing 120s outer test deadline.
+  const configure = wizard.getByRole("button", { name: /^Configure and start/ });
+  await configure.waitFor({ state: "visible", timeout: 0 });
+  await expect(configure).toBeEnabled();
+  await configure.click();
   await expect(target).toBeVisible({ timeout: 10_000 });
 }
 

@@ -1872,6 +1872,7 @@ enum IssueMonitorControl {
         expected_reset_at: String,
     },
     ConfigSet {
+        allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active_agents: Option<usize>,
@@ -2246,6 +2247,7 @@ fn try_apply_issue_monitor_control(
             .set_autonomous_mode_with_effect_revocation(enabled)
             .map(|_| true),
         IssueMonitorControl::ConfigSet {
+            allowed_labels,
             enabled,
             autonomous_mode,
             max_active_agents,
@@ -2257,7 +2259,8 @@ fn try_apply_issue_monitor_control(
             if enabled == Some(true)
                 || autonomous_mode == Some(true)
                 || max_active_agents == Some(0)
-                || (enabled.is_none()
+                || (allowed_labels.is_none()
+                    && enabled.is_none()
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
                     && auto_close_merged_issues.is_none()
@@ -2268,6 +2271,9 @@ fn try_apply_issue_monitor_control(
                 return None;
             }
             let mut candidate = monitor.clone();
+            if let Some(allowed_labels) = allowed_labels {
+                candidate.set_allowed_labels(allowed_labels);
+            }
             if let Some(launch_agent) = launch_agent.as_deref() {
                 // Issue #3923 AC-5: a switch without a saved profile has
                 // nothing to switch; refuse the whole control unapplied.
@@ -3052,6 +3058,10 @@ fn decode_issue_monitor_control_in_repo(
                 .get("config_set")
                 .and_then(serde_json::Value::as_object)
             {
+                let allowed_labels = match config.get("allowed_labels") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(serde_json::from_value::<Vec<String>>(value.clone()).ok()?),
+                };
                 let enabled = match config.get("enabled") {
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
@@ -3113,7 +3123,8 @@ fn decode_issue_monitor_control_in_repo(
                     });
                 if (!resident_pm && (enabled == Some(true) || autonomous_mode == Some(true)))
                     || max_active_agents == Some(0)
-                    || (enabled.is_none()
+                    || (allowed_labels.is_none()
+                        && enabled.is_none()
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
                         && auto_close_merged_issues.is_none()
@@ -3124,6 +3135,7 @@ fn decode_issue_monitor_control_in_repo(
                     return None;
                 }
                 return Some(IssueMonitorControl::ConfigSet {
+                    allowed_labels,
                     enabled,
                     autonomous_mode,
                     max_active_agents,
@@ -10532,6 +10544,54 @@ exit 0
     }
 
     #[test]
+    fn issue_monitor_config_set_allowed_labels_commits_atomically() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        for (labels, expected) in [
+            (
+                serde_json::json!(["Server", "backend"]),
+                serde_json::json!(["Server", "backend"]),
+            ),
+            (
+                serde_json::json!([" Server ", "server", "", "Tools"]),
+                serde_json::json!(["Server", "Tools"]),
+            ),
+            (serde_json::json!([]), serde_json::json!([])),
+        ] {
+            let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set": {"allowed_labels": labels}}),
+                std::process::id() + 1,
+            );
+            let control = decode_issue_monitor_control(payload).expect("allowed labels control");
+            assert!(super::apply_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                control
+            ));
+            let saved = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+            assert!(saved.enabled && saved.autonomous_mode);
+            let saved = serde_json::to_value(saved).expect("serialize prefs");
+            assert_eq!(
+                saved
+                    .get("allowed_labels")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn issue_monitor_config_set_decodes_and_commits_atomically() {
         let _prefs_budget = pin_prefs_hang_guard();
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
@@ -10549,6 +10609,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
@@ -10570,6 +10631,7 @@ exit 0
         assert_eq!(
             auto_apply_control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -10597,6 +10659,7 @@ exit 0
         assert_eq!(
             raise_control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -10668,6 +10731,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -10906,6 +10970,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -11167,6 +11232,7 @@ exit 0
             &prefs_path,
             &mut monitor,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
