@@ -2415,9 +2415,6 @@ impl AppRuntime {
         if let Some(reasoning) = profile.reasoning.as_deref() {
             builder = builder.reasoning_level(reasoning);
         }
-        if let Some(version) = profile.version.as_deref().filter(|value| !value.is_empty()) {
-            builder = builder.version(version);
-        }
         let mut config = builder.build();
         config.suppress_execution_control = true;
         if let Some(scratch) = pm_registry::pm_scratch_dir_for_pm_worktree(worktree) {

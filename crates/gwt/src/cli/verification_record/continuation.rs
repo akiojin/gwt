@@ -256,7 +256,7 @@ mod tests {
         )
         .unwrap();
         let mut calls = 0;
-        let mut admission = |_: &str| {
+        let mut admission = |_: &str, _: &VerificationHost| {
             calls += 1;
             if calls == 2 {
                 Err("verify: deferred — admission timeout".into())

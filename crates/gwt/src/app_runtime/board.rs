@@ -307,9 +307,6 @@ impl AppRuntime {
         if let Some(model) = non_empty(session.model.as_deref()) {
             builder = builder.model(model.to_string());
         }
-        if let Some(tool_version) = non_empty(session.launch_tool_version().as_deref()) {
-            builder = builder.version(tool_version.to_string());
-        }
         if let Some(reasoning_level) = non_empty(session.reasoning_level.as_deref()) {
             builder = builder.reasoning_level(reasoning_level.to_string());
         }
@@ -328,10 +325,6 @@ impl AppRuntime {
         if let Some(windows_shell) = session.windows_shell {
             builder = builder.windows_shell(windows_shell);
         }
-        if let Some(provenance) = session.tool_runtime_provenance.clone() {
-            builder = builder.tool_runtime_provenance(provenance);
-        }
-        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         let mut config = builder.build();
         if !session.display_name.trim().is_empty() {
