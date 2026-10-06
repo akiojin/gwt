@@ -797,13 +797,6 @@ impl IndexCoordinator {
                     let waiters_dir = self.target_waiters_dir(key);
                     fs::create_dir_all(&waiters_dir)?;
                     let waiter_path = waiters_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
-                    // Write the payload BEFORE taking the liveness lock: a
-                    // Windows shared lock denies writes through the owning
-                    // handle too. The sweep leaves any registration younger
-                    // than `REGISTRATION_RESIDUE_GRACE` alone, so the window
-                    // between the write and the lock is never mistaken for
-                    // crash residue.
-                    let waiter_file = open_lock_file(&waiter_path)?;
                     let registration = Registration {
                         schema_version: COORDINATOR_SCHEMA_VERSION,
                         owner: OwnerIdentity::current(),
@@ -818,13 +811,7 @@ impl IndexCoordinator {
                         queue_seq: None,
                         position_until_ms: None,
                     };
-                    {
-                        let mut handle = &waiter_file;
-                        handle
-                            .write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
-                        handle.flush()?;
-                    }
-                    waiter_file.lock_shared()?;
+                    let waiter_file = publish_live_registration(&waiter_path, &registration)?;
                     return Ok(JobAdmission::Joined(JobWaiter {
                         state_path: self.target_state_path(key),
                         lock_path,
@@ -1248,7 +1235,6 @@ fn acquire_heavy_at(
         present: true,
     };
     let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
-    let pending_file = open_lock_file(&pending_path)?;
     let registration = Registration {
         schema_version: COORDINATOR_SCHEMA_VERSION,
         owner: OwnerIdentity::current(),
@@ -1261,14 +1247,7 @@ fn acquire_heavy_at(
         queue_seq,
         position_until_ms: None,
     };
-    // Payload first, liveness lock second — see the waiter registration
-    // above for why a Windows shared lock cannot come first.
-    {
-        let mut handle = &pending_file;
-        handle.write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
-        handle.flush()?;
-    }
-    pending_file.lock_shared()?;
+    let pending_file = publish_live_registration(&pending_path, &registration)?;
     let cleanup_pending = |file: File, path: &Path| {
         drop(file);
         let _ = fs::remove_file(path);
@@ -2078,6 +2057,27 @@ struct LiveRegistration {
     locked: bool,
 }
 
+/// Publish only after both the payload and its liveness lock are ready. The
+/// temporary name is invisible to sweeps; Windows shared locks forbid writes,
+/// so writing must finish before taking the lock and renaming the file.
+fn publish_live_registration(path: &Path, registration: &Registration) -> io::Result<File> {
+    let temporary = path.with_extension("tmp");
+    let file = open_lock_file(&temporary)?;
+    let result = (|| {
+        let mut handle = &file;
+        handle.write_all(&serde_json::to_vec(registration).map_err(io_invalid)?)?;
+        handle.flush()?;
+        fs2::FileExt::lock_shared(&file)?;
+        fs::rename(&temporary, path)
+    })();
+    if let Err(err) = result {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(err);
+    }
+    Ok(file)
+}
+
 /// Scan a registration dir, sweep entries nothing keeps alive, and return what
 /// remains. Liveness is the kernel shared lock its claimant holds, or — for a
 /// heavy queue entry, which has no process behind it by design — a window that
@@ -2101,6 +2101,8 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(RESERVATION_PREFIX));
         if is_reservation {
+            #[cfg(test)]
+            tests::after_registration_snapshot(&path);
             // Durable reservations have an expiry, not a process liveness
             // lock. A Windows probe lock on their JSON would itself prevent
             // admission from reading it. Serialize the read/check/delete with
@@ -2115,27 +2117,50 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
         }
         // A claimant may remove this entry after read_dir. Never recreate it
         // as an empty registration that cannot establish its expiry.
-        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(CoordinatorError::Io(err)),
         };
+        // UUID registrations stay on this inode. Read under a shared lock;
+        // another sweeper's exclusive probe keeps the waiter visible without
+        // attempting a Windows range-locked read. Reservations are refreshed
+        // by replacing their fixed path, so read them only after the probe.
+        let registration = if is_reservation {
+            None
+        } else {
+            match fs2::FileExt::try_lock_shared(&file) {
+                Ok(()) => {}
+                Err(err) if is_contended(&err) => {
+                    live.push(LiveRegistration {
+                        registration: None,
+                        locked: true,
+                    });
+                    continue;
+                }
+                Err(err) => return Err(CoordinatorError::Io(err)),
+            }
+            let mut raw = Vec::new();
+            file.read_to_end(&mut raw)?;
+            fs2::FileExt::unlock(&file)?;
+            serde_json::from_slice::<Registration>(&raw).ok()
+        };
+        #[cfg(test)]
+        tests::after_registration_snapshot(&path);
+
+        // A waiter's snapshot does not establish current liveness. Probe
+        // afterward and keep its lock through cleanup so it cannot become
+        // live between the probe and removal.
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
-                // Release the probe lock before reading: Windows refuses reads
-                // through a second handle while this one holds the range.
-                let _ = fs2::FileExt::unlock(&file);
-                let registration = match read_registration(&path) {
-                    // A process may crash before finishing its temporary
-                    // registration. Keep the existing grace cleanup for that
-                    // residue; a reservation must never be expired by a read
-                    // or parse failure.
-                    Err(CoordinatorError::Io(err))
-                        if !is_reservation && err.kind() == io::ErrorKind::InvalidData =>
-                    {
-                        None
-                    }
-                    result => result?,
+                let registration = if is_reservation {
+                    // Windows forbids reading through a second handle while
+                    // this one owns the range. Preserve the reservation's
+                    // path read so a completed atomic refresh is observed.
+                    fs2::FileExt::unlock(&file)?;
+                    read_registration(&path)?
+                } else {
+                    registration
                 };
                 if let Some(entry) = &registration {
                     if entry.outlives(now)
@@ -2166,11 +2191,9 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
                         continue;
                     }
                 }
-                // No holder and no window. A freshly created registration is
-                // briefly lockable while its owner writes the payload and then
-                // takes the shared lock — leave it alone so a concurrent sweep
-                // never unlinks a live claimant. Anything still lockable after
-                // the grace window is real crash residue.
+                // Older registrants can still publish before locking. Leave
+                // their grace-period file alone; only an old, unlocked
+                // registration is crash residue.
                 let age = file
                     .metadata()
                     .ok()
@@ -2178,13 +2201,16 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
                     .and_then(|modified| modified.elapsed().ok())
                     .unwrap_or_default();
                 if age > REGISTRATION_RESIDUE_GRACE {
-                    drop(file);
                     let _ = fs::remove_file(&path);
                 }
             }
             Err(err) if is_contended(&err) => {
                 live.push(LiveRegistration {
-                    registration: read_registration(&path)?,
+                    registration: if is_reservation {
+                        read_registration(&path)?
+                    } else {
+                        registration
+                    },
                     locked: true,
                 });
             }
@@ -2241,6 +2267,94 @@ fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorErr
 mod tests {
     use super::*;
     use crate::deadline_budget::HANG_GUARD;
+
+    type RegistrationSnapshotHook = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        static REGISTRATION_SNAPSHOT_HOOK: std::cell::RefCell<Option<RegistrationSnapshotHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_registration_snapshot(path: &Path) {
+        let hook = REGISTRATION_SNAPSHOT_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(path);
+        }
+    }
+
+    #[test]
+    fn live_waiter_registered_after_snapshot_survives_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::verification("repo", "waiter");
+        let dir = coordinator.target_waiters_dir(&key);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("waiter.json");
+        let registration = heavy_queue_entry(&dir, "waiter", JobPriority::Background).unwrap();
+        fs::write(&path, serde_json::to_vec(&registration).unwrap()).unwrap();
+        open_lock_file(&path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+
+        let waiter = std::rc::Rc::new(std::cell::RefCell::new(None));
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            let waiter = std::rc::Rc::clone(&waiter);
+            *hook.borrow_mut() = Some(Box::new(move |path| {
+                let file = open_lock_file(path).unwrap();
+                fs2::FileExt::try_lock_shared(&file).unwrap();
+                *waiter.borrow_mut() = Some(file);
+            }));
+        });
+
+        let live = sweep_live_registrations(&dir).unwrap();
+        assert_eq!(
+            live.len(),
+            1,
+            "the snapshot must not drop a now-live waiter"
+        );
+        assert!(live[0].locked);
+        assert!(path.exists(), "a live waiter's registration must survive");
+    }
+
+    #[test]
+    fn concurrent_registration_probe_keeps_the_waiter_visible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("waiter.json");
+        let probe = open_lock_file(&path).unwrap();
+        fs2::FileExt::lock_exclusive(&probe).unwrap();
+        let live = sweep_live_registrations(tmp.path()).unwrap();
+        assert_eq!(live.len(), 1);
+        assert!(live[0].locked);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn reservation_refreshed_after_snapshot_survives_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::verification("repo", "reservation");
+        let path = coordinator.heavy_reservation_path(&key);
+        let mut registration = heavy_queue_entry(
+            &coordinator.heavy_pending_dir(),
+            &key.file_stem(),
+            JobPriority::Background,
+        )
+        .unwrap();
+        registration.reserved_until_ms = Some(0);
+        write_json_atomic(&path, &registration).unwrap();
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                coordinator
+                    .reserve_heavy(&key, JobPriority::Background, HANG_GUARD, None)
+                    .unwrap();
+            }));
+        });
+
+        let live = sweep_live_registrations(path.parent().unwrap()).unwrap();
+        assert_eq!(live.len(), 1, "a refreshed reservation must remain live");
+        assert!(path.exists(), "the refresh must survive the sweep");
+    }
 
     fn open(root: &Path) -> IndexCoordinator {
         IndexCoordinator::open(root).expect("open coordinator")

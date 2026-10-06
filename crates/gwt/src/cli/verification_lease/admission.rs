@@ -395,6 +395,7 @@ pub(crate) fn admit<E: CliEnv>(
     env: &mut E,
     worktree: &Path,
     max_wait: Duration,
+    on_host_deferred: impl FnOnce() -> String,
 ) -> Result<Admission, SpecOpsError> {
     let key = verification_lease::verification_key(env)?;
     let coordinator = verification_lease::open_coordinator()?;
@@ -418,7 +419,8 @@ pub(crate) fn admit<E: CliEnv>(
                     return Err(deferred(
                         started,
                         max_wait,
-                        "another verification claimant in this worktree owns the target job",
+                        "another verification claimant in this worktree owns the target job; \
+                         gwtd artifact restoration: skipped (another verification owns the target job)",
                         None,
                     ));
                 }
@@ -440,18 +442,33 @@ pub(crate) fn admit<E: CliEnv>(
             Err(CoordinatorError::Timeout { .. }) => {
                 let holder = describe_holder(&coordinator, &mut probe, worktree);
                 if Instant::now() >= deadline {
-                    let _ = guard.complete(JobOutcome::Failed {
-                        message: "host admission deferred".to_string(),
-                    });
                     // Issue #4086 AC-1: the rerun must be admitted before any
-                    // background index job that queues in the meantime.
+                    // background job that queues while recovery is running.
+                    let _ = coordinator.reserve_heavy(
+                        &key,
+                        JobPriority::ManualRebuild,
+                        VERIFICATION_RESERVATION_TTL,
+                        Some("verify.run deferred"),
+                    );
+                    // Issue #4982: recover before releasing this worktree's
+                    // target guard, so another admitted run cannot rearm the
+                    // operational artifact while recovery is in progress.
+                    let recovery = on_host_deferred();
+                    // A long recovery may outlive the reservation's existing
+                    // TTL. Refresh it before reporting the rerun's final state.
                     let reserved = coordinator.reserve_heavy(
                         &key,
                         JobPriority::ManualRebuild,
                         VERIFICATION_RESERVATION_TTL,
                         Some("verify.run deferred"),
                     );
+                    let _ = guard.complete(JobOutcome::Failed {
+                        message: "host admission deferred".to_string(),
+                    });
                     let mut detail = holder.detail;
+                    if !recovery.is_empty() {
+                        detail.push_str(&format!("; {recovery}"));
+                    }
                     // Issue #4337 AC-3: name the reservation outcome outright.
                     // `queue_position` below only ever appears on success, so
                     // on its own it leaves the rerun unable to tell a failed
@@ -936,7 +953,7 @@ mod tests {
             worktree: &Path,
             budget: Duration,
         ) -> Result<Admission, SpecOpsError> {
-            super::admit(env, worktree, budget)
+            super::admit(env, worktree, budget, String::new)
                 .map_err(|err| unexpected(format!("{err}; {}", self.describe())))
         }
 
@@ -1164,7 +1181,9 @@ mod tests {
         let first = lease_root
             .admit(&mut env, worktree.path(), Duration::ZERO)
             .unwrap();
-        let second = lease_root.admit(&mut env, worktree.path(), Duration::ZERO);
+        let second = super::admit(&mut env, worktree.path(), Duration::ZERO, || {
+            panic!("a contender must not restore another verifier's artifact")
+        });
         assert!(
             second.is_err(),
             "a second canonical run must not borrow the first run's lease: {second:?}; {}",
@@ -1172,6 +1191,12 @@ mod tests {
         );
         let refusal = second.unwrap_err().to_string();
         assert!(refusal.contains("deferred"), "{refusal}");
+        assert!(
+            refusal.contains(
+                "gwtd artifact restoration: skipped (another verification owns the target job)"
+            ),
+            "{refusal}"
+        );
         drop(first);
         lease_root.assert_free("the first run releases its own lease");
         let next = lease_root
@@ -1377,11 +1402,42 @@ mod tests {
             .unwrap();
 
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let err = lease_root
-            .admit(&mut env, worktree.path(), Duration::from_secs(1))
-            .unwrap_err();
+        let key = verification_lease::verification_key(&mut env).unwrap();
+        let recovery_calls = std::cell::Cell::new(0);
+        let recover = || {
+            recovery_calls.set(recovery_calls.get() + 1);
+            let reservation = lease_root.coordinator.heavy_reservation_path(&key);
+            assert!(reservation.exists());
+            assert!(
+                matches!(
+                    lease_root
+                        .coordinator
+                        .request_job(&key, JobPriority::ManualRebuild, Duration::ZERO,)
+                        .unwrap(),
+                    JobAdmission::Joined(_)
+                ),
+                "recovery must retain the target lock"
+            );
+            // Model a long build without waiting for the reservation's TTL.
+            let mut entry: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&reservation).unwrap()).unwrap();
+            entry["reserved_until_ms"] = 0.into();
+            std::fs::write(&reservation, serde_json::to_vec(&entry).unwrap()).unwrap();
+            "gwtd artifact restoration: restored".to_string()
+        };
+        let err = super::admit(&mut env, worktree.path(), Duration::ZERO, recover).unwrap_err();
 
         let message = err.to_string();
+        assert_eq!(recovery_calls.get(), 1);
+        let reservation: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(lease_root.coordinator.heavy_reservation_path(&key)).unwrap(),
+        )
+        .unwrap();
+        assert!(reservation["reserved_until_ms"].as_u64().unwrap() > 0);
+        assert!(
+            message.contains("gwtd artifact restoration: restored"),
+            "{message}"
+        );
         assert!(message.contains("deferred"), "{message}");
         assert!(message.contains("rerun `verify.run`"), "{message}");
         assert!(message.contains("queue_position: 1"), "{message}");
@@ -1399,7 +1455,6 @@ mod tests {
         );
         // Issue #4086: a deferred run leaves its turn reserved so the rerun
         // is admitted before any background index job.
-        let key = verification_lease::verification_key(&mut env).unwrap();
         assert!(
             lease_root.coordinator.heavy_reservation_path(&key).exists(),
             "a deferred admission must reserve the next turn — {}",
@@ -1422,10 +1477,10 @@ mod tests {
                 Some("later arrival"),
             )
             .unwrap();
-        let again = lease_root
-            .admit(&mut env, worktree.path(), Duration::ZERO)
+        let again = super::admit(&mut env, worktree.path(), Duration::ZERO, recover)
             .unwrap_err()
             .to_string();
+        assert_eq!(recovery_calls.get(), 2);
         assert!(again.contains("next_turn_reserved: yes"), "{again}");
         let after = lease_root.coordinator.heavy_lease_status().unwrap().queue;
         assert_eq!(after.len(), 2);

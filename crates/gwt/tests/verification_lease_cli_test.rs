@@ -497,6 +497,44 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
         );
     }
 
+    // A different fixture target takes the host while this claimant remains
+    // queued. Handoff sweeps must not assign the claimant a new arrival.
+    lease.release().unwrap();
+    guard.complete(JobOutcome::Completed).unwrap();
+    let successor = TargetKey::verification(project.as_str(), "successor-holder");
+    let JobAdmission::Owner(guard) = coordinator
+        .request_job(&successor, JobPriority::InteractiveSearch, Duration::ZERO)
+        .unwrap()
+    else {
+        panic!("successor fixture must own its target");
+    };
+    let lease = guard.acquire_heavy(Duration::ZERO).unwrap();
+    let mixed_request = serde_json::json!({
+        "schema_version": 1,
+        "operation": "verify.run",
+        "params": {
+            "commands": [format!("\"{}\" fmt --version", env!("CARGO")), "git --version".to_string()],
+            "max_wait_secs": 0
+        }
+    }).to_string();
+    let (ok, mixed) = gwtd(arena.home.path(), arena.worktree.path(), &mixed_request);
+    assert!(!ok && mixed.contains("next_turn_reserved: yes"), "{mixed}");
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            arena
+                .worktree
+                .path()
+                .join(".gwt/skill-state/verification-run.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["commands"][0]["exit_code"], 0, "{record}");
+    assert!(record["commands"][0]["admission"].is_null(), "{record}");
+    let queue = coordinator.heavy_lease_status().unwrap().queue;
+    assert_eq!(queue[0].target, early.target);
+    assert_eq!(queue[0].queued_at_ms, early.queued_at_ms);
+
     // Another process is materialized after the first one has returned.
     let (ok, resubmitted) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
     assert!(!ok && resubmitted.contains("deferred"), "{resubmitted}");
