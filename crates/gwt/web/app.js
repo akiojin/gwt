@@ -6454,6 +6454,9 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             // Issue #3906 AC-12: the update CTA shows the drain progress.
             updateCtaController.handleIssueMonitorStatus(event.status || {});
             break;
+          case "issue_monitor_allowed_labels_write_failed":
+            applyKnowledgeReceiveEvent(event);
+            break;
           case "issue_monitor_inbox":
             scheduleIssueMonitorProjectionRefresh();
             break;
