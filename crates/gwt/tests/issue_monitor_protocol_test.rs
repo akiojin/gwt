@@ -15,10 +15,38 @@ fn frontend_issue_monitor_allowed_labels_use_snake_case_wire_shape() {
         });
         let event: FrontendEvent = serde_json::from_value(wire).expect("allowed labels event");
         assert!(
-            matches!(event, FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels }
+            matches!(event, FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels, request_id: None }
             if serde_json::to_value(&allowed_labels).expect("serialize labels") == labels)
         );
     }
+}
+
+#[test]
+fn allowed_labels_failure_has_request_identity_and_lossless_reply_policy() {
+    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+        "kind": "set_issue_monitor_allowed_labels", "allowed_labels": ["Server"], "request_id": 41,
+    }))
+    .expect("correlated label command");
+    assert!(matches!(
+        event,
+        FrontendEvent::SetIssueMonitorAllowedLabels {
+            request_id: Some(41),
+            ..
+        }
+    ));
+    let failure = BackendEvent::IssueMonitorAllowedLabelsWriteFailed {
+        request_id: 41,
+        outcome_unknown: true,
+    };
+    let policy = failure.delivery_policy();
+    assert_eq!(policy.kind, "issue_monitor_allowed_labels_write_failed");
+    assert_eq!(format!("{:?}", policy.backpressure), "ClientScopedSnapshot");
+    assert_eq!(
+        serde_json::to_value(failure).expect("failure wire shape"),
+        serde_json::json!({
+            "kind": "issue_monitor_allowed_labels_write_failed", "request_id": 41, "outcome_unknown": true,
+        })
+    );
 }
 
 #[test]
