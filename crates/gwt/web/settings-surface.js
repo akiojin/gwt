@@ -39,6 +39,16 @@ function linkSettingsPanel(panel, windowId, tabId) {
   panel.setAttribute("aria-labelledby", settingsTabId(windowId, tabId));
 }
 
+function scopeSettingsControlIds(panel) {
+  for (const control of panel.querySelectorAll("input[id], select[id]")) {
+    const id = control.id;
+    control.id = `${panel.id}-${id}`;
+    for (const label of panel.querySelectorAll("label[for]")) {
+      if (label.getAttribute("for") === id) label.setAttribute("for", control.id);
+    }
+  }
+}
+
 export function mountProjectManagerSettingsPanel(
   document,
   parent,
@@ -1280,6 +1290,7 @@ export function createSettingsSurface({
         panel.appendChild(resourceSection);
         panel.appendChild(boardSection);
         panel.appendChild(autostartSection);
+        scopeSettingsControlIds(panel);
         renderSystemPanelStatus(panel);
       }
 

@@ -638,8 +638,9 @@ fn plan_pane_recovery(
                     .filter(|window| window.session_id.as_deref() == Some(&session.session_id))
                     .count()
                     != 1
-                || i64::try_from(session.child_started_at)
+                || chrono::DateTime::parse_from_rfc3339(&session.started_at)
                     .ok()
+                    .map(|started| started.timestamp())
                     .is_none_or(|started| started < after || started > before)
             {
                 return None;

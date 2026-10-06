@@ -7125,6 +7125,8 @@ button.workspace-board-ref:focus-visible {
   overflow: hidden;
 }
 .agent-tile:focus-within { border-color: var(--color-focus-ring); }
+.agents-surface--preview .agent-tile:focus-visible { outline: 2px solid var(--color-focus-ring); }
+.agents-surface--preview .agents-toolbar span { color: var(--color-text-muted); font-size: var(--type-xs); }
 .agent-tile__header { border-bottom: 1px solid var(--color-border); }
 .issue-preview-mode { grid-column: 1 / -1; }
 .agent-tile__header span, .issue-preview-mode { color: var(--color-text-muted); font-size: var(--type-xs); }

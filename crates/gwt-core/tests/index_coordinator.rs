@@ -64,9 +64,43 @@ fn run_helper_role(role: &str) {
         return;
     }
 
-    let coordinator = IndexCoordinator::open(&root).expect("helper: open coordinator");
+    let coordinator = match std::env::var("GWT_COORD_CAPACITY") {
+        Ok(capacity) => IndexCoordinator::open_verification(
+            &root,
+            capacity.parse().expect("helper: numeric capacity"),
+        ),
+        Err(_) => IndexCoordinator::open(&root),
+    }
+    .expect("helper: open coordinator");
     match role {
         "exit-now" => {}
+        "pool-verification-until-signal" => {
+            let key = verification_target_from_env();
+            let ready = PathBuf::from(required_env("GWT_COORD_MARKER"));
+            let release = PathBuf::from(required_env("GWT_COORD_SIGNAL"));
+            let ledger = PathBuf::from(required_env("GWT_COORD_LEDGER"));
+            let guard = expect_owner(
+                coordinator
+                    .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(20))
+                    .expect("helper: request pooled verification"),
+            );
+            let lease = guard
+                .acquire_heavy_with_ttl(Duration::from_secs(20), Duration::from_secs(300))
+                .expect("helper: acquire pooled verification");
+            lease
+                .publish_progress(1, 3, 400)
+                .expect("publish slot progress");
+            locked_counter_add(&ledger, 1);
+            publish_marker(&ready, b"ready").expect("helper: publish pool admission");
+            poll_until(Duration::from_secs(20), || release.exists());
+            locked_counter_add(&ledger, -1);
+            lease
+                .release()
+                .expect("helper: release pooled verification");
+            guard
+                .complete(JobOutcome::Completed)
+                .expect("helper: complete pool job");
+        }
         "heavy-job" => {
             let key = target_from_env();
             let hold = Duration::from_millis(required_env_u64("GWT_COORD_HOLD_MS"));
@@ -710,6 +744,434 @@ fn write_stale_ticket(path: &Path, target: &TargetKey, pid: u32, start_id: &str)
     fs::write(path, serde_json::to_vec(&ticket).expect("ticket json")).expect("write ticket");
 }
 
+/// Issue #5082 T-2: measure admission independently of workload CPU demand.
+/// Twelve real processes use the same one-second workload and distinct targets.
+/// This is a benchmark, not a timing assertion in the regular regression suite.
+#[test]
+#[ignore = "explicit twelve-claimant admission baseline"]
+fn verification_twelve_claimant_serial_baseline() {
+    let arena = TestArena::new();
+    let ledger = arena.path("throughput-ledger.json");
+    let started = Instant::now();
+    let mut children = Vec::new();
+    for index in 0..12 {
+        let label = format!("verification-{index}");
+        let result = arena.path(&format!("result-{index}"));
+        children.push(spawn_helper(
+            &label,
+            &[
+                ("GWT_COORD_ROLE", "verification-job".to_string()),
+                arena.coord_env(),
+                ("GWT_COORD_VERIFY_TARGET", format!("repo|worktree-{index}")),
+                ("GWT_COORD_HOLD_MS", "1000".to_string()),
+                ("GWT_COORD_TTL_MS", "60000".to_string()),
+                ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+                ("GWT_COORD_RESULT", result.to_string_lossy().into_owned()),
+            ],
+        ));
+    }
+    for child in children {
+        wait_success(child, Duration::from_secs(60));
+    }
+    for index in 0..12 {
+        assert_eq!(
+            fs::read_to_string(arena.path(&format!("result-{index}"))).unwrap(),
+            "done"
+        );
+    }
+    let (current, maximum) = read_counter(&ledger);
+    assert_eq!((current, maximum), (0, 1));
+    println!(
+        "Issue #5082 serial admission: claimants=12 completed=12 maximum={maximum} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+}
+
+fn verification_owner(
+    coordinator: &IndexCoordinator,
+    worktree: &str,
+) -> gwt_core::index_coordinator::TargetJobGuard {
+    expect_owner(
+        coordinator
+            .request_job(
+                &TargetKey::verification("pool-repo", worktree),
+                JobPriority::ManualRebuild,
+                Duration::ZERO,
+            )
+            .expect("own verification target"),
+    )
+}
+
+#[test]
+fn verification_pool_admits_two_processes_and_bounds_all_later_claimants() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let ledger = arena.path("pool-ledger");
+    let release = arena.path("release-pool");
+    let mut helpers = Vec::new();
+    for index in 0..6 {
+        let ready = arena.path(&format!("pool-ready-{index}"));
+        helpers.push(spawn_helper(
+            &format!("pool-{index}"),
+            &[
+                (
+                    "GWT_COORD_ROLE",
+                    "pool-verification-until-signal".to_string(),
+                ),
+                arena.coord_env(),
+                ("GWT_COORD_CAPACITY", "2".to_string()),
+                ("GWT_COORD_VERIFY_TARGET", format!("pool-repo|wt-{index}")),
+                ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+                ("GWT_COORD_SIGNAL", release.to_string_lossy().into_owned()),
+                ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+            ],
+        ));
+        if index < 2 {
+            wait_for_file(&ready, Duration::from_secs(20));
+        }
+    }
+    poll_until(Duration::from_secs(20), || {
+        coordinator.heavy_pool_status().unwrap().queue.len() == 4
+    });
+    let status = coordinator.heavy_pool_status().unwrap();
+    assert_eq!((status.capacity, status.used, status.available), (2, 2, 0));
+    assert_eq!(
+        status.slots.iter().filter(|slot| slot.status.held).count(),
+        2
+    );
+    assert_eq!(read_counter(&ledger), (2, 2));
+    publish_marker(&release, b"release").unwrap();
+    for helper in helpers {
+        wait_success(helper, Duration::from_secs(20));
+    }
+    assert_eq!(read_counter(&ledger), (0, 2));
+}
+
+#[test]
+fn verification_pool_keeps_fifo_reservations_and_counts_holders_after_capacity_decreases() {
+    use gwt_core::index_coordinator::CoordinatorError;
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let first = verification_owner(&coordinator, "first");
+    let second = verification_owner(&coordinator, "second");
+    let early = verification_owner(&coordinator, "early");
+    let later = verification_owner(&coordinator, "later");
+    let first_lease = first.acquire_heavy(Duration::ZERO).unwrap();
+    let second_lease = second.acquire_heavy(Duration::ZERO).unwrap();
+    assert!(matches!(
+        early.acquire_heavy(Duration::ZERO),
+        Err(CoordinatorError::Timeout { .. })
+    ));
+    let arrival = coordinator.heavy_pool_status().unwrap().queue[0].queued_at_ms;
+    assert!(matches!(
+        later.acquire_heavy(Duration::ZERO),
+        Err(CoordinatorError::Timeout { .. })
+    ));
+    drop(first_lease);
+    let reduced = IndexCoordinator::open_verification(&arena.coord_root, 1).unwrap();
+    assert_eq!(
+        (
+            reduced.heavy_pool_status().unwrap().used,
+            reduced.heavy_pool_status().unwrap().available
+        ),
+        (1, 0)
+    );
+    let reduced_later = verification_owner(&reduced, "reduced-later");
+    assert!(matches!(
+        reduced_later.acquire_heavy(Duration::ZERO),
+        Err(CoordinatorError::Timeout { .. })
+    ));
+    assert!(matches!(
+        later.acquire_heavy(Duration::ZERO),
+        Err(CoordinatorError::Timeout { .. })
+    ));
+    assert!(
+        matches!(
+            early.acquire_heavy(Duration::ZERO),
+            Err(CoordinatorError::Timeout { .. })
+        ),
+        "an old handle must obey the lowered capacity"
+    );
+    assert_eq!(coordinator.heavy_pool_status().unwrap().capacity, 1);
+    assert_eq!(
+        coordinator.heavy_pool_status().unwrap().queue[0].queued_at_ms,
+        arrival
+    );
+    drop(second_lease);
+    let early_lease = early
+        .acquire_heavy(Duration::ZERO)
+        .expect("earlier deferred reservation gets free slot");
+    drop(early_lease);
+    let later_lease = later
+        .acquire_heavy(Duration::ZERO)
+        .expect("later follows early");
+    drop(later_lease);
+}
+
+#[test]
+fn verification_pool_reserves_disk_before_grant_and_restores_it_on_release() {
+    use gwt_core::index_coordinator::{CoordinatorError, VerificationDiskBudget};
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let available = fs2::available_space(&arena.root).unwrap();
+    let budget = VerificationDiskBudget {
+        volume: "arena-volume".to_string(),
+        path: arena.root.clone(),
+        bytes: available / 4 * 3,
+        floor_bytes: 0,
+    };
+    let first = verification_owner(&coordinator, "disk-first");
+    let second = verification_owner(&coordinator, "disk-second");
+    let first_lease = first
+        .acquire_heavy_with_disk_budget(Duration::ZERO, Duration::from_secs(60), &budget)
+        .unwrap();
+    assert!(
+        matches!(
+            second.acquire_heavy_with_disk_budget(Duration::ZERO, Duration::from_secs(60), &budget),
+            Err(CoordinatorError::Timeout { .. })
+        ),
+        "two reservations cannot spend the same free bytes"
+    );
+    drop(first_lease);
+    second
+        .acquire_heavy_with_disk_budget(Duration::ZERO, Duration::from_secs(60), &budget)
+        .expect("released slot returns its disk reservation");
+}
+
+#[test]
+fn verification_pool_checks_every_volume_before_granting_any_reservation() {
+    use gwt_core::index_coordinator::{CoordinatorError, VerificationDiskBudget};
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let guard = verification_owner(&coordinator, "multiple-volumes");
+    let mut budgets = [
+        VerificationDiskBudget {
+            volume: "target-volume".into(),
+            path: arena.root.clone(),
+            bytes: 0,
+            floor_bytes: 0,
+        },
+        VerificationDiskBudget {
+            volume: "temp-volume".into(),
+            path: arena.root.clone(),
+            bytes: 0,
+            floor_bytes: u64::MAX,
+        },
+    ];
+    assert!(matches!(
+        guard.acquire_heavy_with_disk_budgets(Duration::ZERO, Duration::from_secs(60), &budgets),
+        Err(CoordinatorError::Timeout { .. })
+    ));
+    assert_eq!(
+        coordinator.heavy_pool_status().unwrap().used,
+        0,
+        "a refused volume must publish no partial grant"
+    );
+    budgets[1].floor_bytes = 0;
+    guard
+        .acquire_heavy_with_disk_budgets(Duration::ZERO, Duration::from_secs(60), &budgets)
+        .expect("retry acquires both valid volume reservations together");
+}
+
+#[test]
+fn verification_unknown_resource_fallback_excludes_every_pool_slot() {
+    use gwt_core::index_coordinator::{CoordinatorError, VerificationDiskBudget};
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let fallback = verification_owner(&coordinator, "unknown-command");
+    let known = verification_owner(&coordinator, "known-command");
+    let budgets = [VerificationDiskBudget {
+        volume: "arena-volume".into(),
+        path: arena.root.clone(),
+        bytes: 0,
+        floor_bytes: 0,
+    }];
+    let lease = fallback
+        .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, Duration::from_secs(60), &budgets)
+        .unwrap();
+    assert!(
+        matches!(
+            known.acquire_heavy(Duration::ZERO),
+            Err(CoordinatorError::Timeout { .. })
+        ),
+        "unknown resources require exclusion of the entire pool"
+    );
+    let status = coordinator.heavy_pool_status().unwrap();
+    assert_eq!(status.available, 0);
+    assert!(status
+        .slots
+        .iter()
+        .any(|slot| slot.slot.is_none() && slot.status.lease_id.as_deref() == Some(lease.id())));
+    drop(lease);
+    known
+        .acquire_heavy(Duration::ZERO)
+        .expect("known command resumes after fallback release");
+}
+
+#[test]
+fn verification_pool_isolates_tickets_progress_and_renewal_per_slot() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let first = verification_owner(&coordinator, "first");
+    let second = verification_owner(&coordinator, "second");
+    let mut first_lease = first
+        .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+        .unwrap();
+    let second_lease = second
+        .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+        .unwrap();
+    first_lease.publish_progress(1, 3, 400).unwrap();
+    second_lease.publish_progress(2, 6, 900).unwrap();
+    first_lease
+        .extend_until(first_lease.expires_at_ms().unwrap() + 60_000)
+        .unwrap();
+    let status = coordinator.heavy_pool_status().unwrap();
+    let first_status = &status
+        .slots
+        .iter()
+        .find(|slot| slot.status.lease_id.as_deref() == Some(first_lease.id()))
+        .unwrap()
+        .status;
+    let second_status = &status
+        .slots
+        .iter()
+        .find(|slot| slot.status.lease_id.as_deref() == Some(second_lease.id()))
+        .unwrap()
+        .status;
+    assert_eq!(
+        (
+            first_status.remaining_batches,
+            first_status.estimated_remaining_ms,
+            first_status.ttl_renewed
+        ),
+        (Some(2), Some(800), Some(true))
+    );
+    assert_eq!(
+        (
+            second_status.remaining_batches,
+            second_status.estimated_remaining_ms,
+            second_status.ttl_renewed
+        ),
+        (Some(4), Some(3600), Some(false))
+    );
+    assert!(
+        !coordinator.heavy_ticket_path().exists(),
+        "pool must not overwrite the legacy ticket"
+    );
+    drop(first_lease);
+    assert!(coordinator
+        .heavy_pool_status()
+        .unwrap()
+        .slots
+        .iter()
+        .any(|slot| slot.status.lease_id.as_deref() == Some(second_lease.id())));
+    assert_eq!(
+        coordinator
+            .lease_events()
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == LeaseEventKind::Acquired)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn verification_pool_and_legacy_exclusive_holders_cannot_overlap() {
+    use gwt_core::index_coordinator::CoordinatorError;
+    let arena = TestArena::new();
+    let legacy = IndexCoordinator::open(&arena.coord_root).unwrap();
+    let pool = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let legacy_owner = verification_owner(&legacy, "legacy");
+    let new_owner = verification_owner(&pool, "new");
+    let old_lease = legacy_owner.acquire_heavy(Duration::ZERO).unwrap();
+    assert!(matches!(
+        new_owner.acquire_heavy(Duration::ZERO),
+        Err(CoordinatorError::Timeout { .. })
+    ));
+    assert_eq!(
+        pool.heavy_pool_status()
+            .unwrap()
+            .slots
+            .iter()
+            .filter(|slot| slot.slot.is_none() && slot.status.held)
+            .count(),
+        1
+    );
+    drop(old_lease);
+    let new_lease = new_owner.acquire_heavy(Duration::ZERO).unwrap();
+    assert!(matches!(
+        legacy_owner.acquire_heavy(Duration::ZERO),
+        Err(CoordinatorError::Timeout { .. })
+    ));
+    drop(new_lease);
+    legacy_owner
+        .acquire_heavy(Duration::ZERO)
+        .expect("legacy resumes after pool release");
+}
+
+#[test]
+fn verification_pool_unknown_legacy_lock_is_held_and_kernel_release_reclaims_only_its_slot() {
+    let arena = TestArena::new();
+    let pool = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let root_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(pool.heavy_lock_path())
+        .unwrap();
+    root_lock.lock_exclusive().unwrap();
+    let status = pool.heavy_pool_status().unwrap();
+    assert_eq!(
+        (status.used, status.available),
+        (1, 0),
+        "unknown legacy holder excludes the whole pool"
+    );
+    assert!(status
+        .slots
+        .iter()
+        .any(|slot| slot.slot.is_none() && slot.status.held));
+    root_lock.unlock().unwrap();
+    let ready = arena.path("crash-ready");
+    let mut parked = spawn_helper(
+        "pool-crash",
+        &[
+            ("GWT_COORD_ROLE", "hold-verification-and-park".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_CAPACITY", "2".to_string()),
+            ("GWT_COORD_VERIFY_TARGET", "pool-repo|crashed".to_string()),
+            ("GWT_COORD_TTL_MS", "3600000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(20));
+    let live = verification_owner(&pool, "live");
+    let live_lease = live.acquire_heavy(Duration::ZERO).unwrap();
+    let live_id = live_lease.id().to_owned();
+    parked.child.kill().unwrap();
+    parked.child.wait().unwrap();
+    let replacement = verification_owner(&pool, "replacement");
+    let replacement_lease = replacement
+        .acquire_heavy(Duration::ZERO)
+        .expect("crashed slot is immediately reusable");
+    let status = pool.heavy_pool_status().unwrap();
+    assert_eq!(status.used, 2);
+    assert!(status
+        .slots
+        .iter()
+        .any(|slot| slot.status.lease_id.as_deref() == Some(&live_id)));
+    assert!(status
+        .slots
+        .iter()
+        .any(|slot| slot.status.lease_id.as_deref() == Some(replacement_lease.id())));
+    assert!(pool
+        .lease_events()
+        .unwrap()
+        .iter()
+        .any(|event| event.reason.as_deref() == Some("holder lock released without settlement")));
+}
+
 // ---------------------------------------------------------------------------
 // T-IDX-382: host-wide exclusion / coalesce / queue / waiter departure
 // ---------------------------------------------------------------------------
@@ -765,38 +1227,52 @@ fn heavy_lease_is_host_wide_exclusive_across_processes() {
 /// Worktree hashes also sort opposite to the required grant order.
 #[test]
 fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
+    assert_heavy_queue_arrival_order(None);
+}
+
+#[test]
+fn verification_pool_preserves_reverse_retry_fifo_across_processes() {
+    assert_heavy_queue_arrival_order(Some(2));
+}
+
+fn assert_heavy_queue_arrival_order(capacity: Option<usize>) {
     let arena = TestArena::new();
-    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let coordinator = match capacity {
+        Some(capacity) => IndexCoordinator::open_verification(&arena.coord_root, capacity),
+        None => IndexCoordinator::open(&arena.coord_root),
+    }
+    .expect("open coordinator");
     let order = arena.path("order.log");
     let spawn_queued = |label: &'static str, worktree: &'static str| {
-        spawn_helper(
-            label,
-            &[
-                ("GWT_COORD_ROLE", "queue-for-heavy".to_string()),
-                arena.coord_env(),
-                ("GWT_COORD_VERIFY_TARGET", format!("repo|{worktree}")),
-                ("GWT_COORD_LABEL", label.to_string()),
-                ("GWT_COORD_ORDER", order.to_string_lossy().into_owned()),
-                (
-                    "GWT_COORD_MARKER",
-                    arena.path(&format!("retry-{label}")).display().to_string(),
-                ),
-                (
-                    "GWT_COORD_SIGNAL",
-                    arena
-                        .path(&format!("release-{label}"))
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "GWT_COORD_RESULT",
-                    arena
-                        .path(&format!("result-{label}"))
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-            ],
-        )
+        let mut envs = vec![
+            ("GWT_COORD_ROLE", "queue-for-heavy".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_VERIFY_TARGET", format!("repo|{worktree}")),
+            ("GWT_COORD_LABEL", label.to_string()),
+            ("GWT_COORD_ORDER", order.to_string_lossy().into_owned()),
+            (
+                "GWT_COORD_MARKER",
+                arena.path(&format!("retry-{label}")).display().to_string(),
+            ),
+            (
+                "GWT_COORD_SIGNAL",
+                arena
+                    .path(&format!("release-{label}"))
+                    .display()
+                    .to_string(),
+            ),
+            (
+                "GWT_COORD_RESULT",
+                arena
+                    .path(&format!("result-{label}"))
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ];
+        if let Some(capacity) = capacity {
+            envs.push(("GWT_COORD_CAPACITY", capacity.to_string()));
+        }
+        spawn_helper(label, &envs)
     };
 
     // This process holds the lease while three worktrees reserve their turns.
@@ -813,6 +1289,13 @@ fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
     let heavy = holder
         .acquire_heavy_with_ttl(Duration::from_secs(20), Duration::from_secs(300))
         .expect("hold the host-wide lease");
+
+    // Keep the other slot occupied while the same three-process chronology
+    // observes FIFO moving through the one slot released below.
+    let pool_holder = capacity.map(|_| verification_owner(&coordinator, "fifo-pool-holder"));
+    let _pool_lease = pool_holder
+        .as_ref()
+        .map(|guard| guard.acquire_heavy(Duration::ZERO).unwrap());
 
     for worktree in ["wt-c", "wt-b", "wt-a"] {
         coordinator
