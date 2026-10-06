@@ -701,6 +701,8 @@ export function createKnowledgeKanbanSurface({
       let monitorProjectionRefreshTimer = null;
       let pendingIssueMonitorAllowedLabels = null;
       let inFlightIssueMonitorAllowedLabels = null;
+      let inFlightIssueMonitorAllowedLabelsRequestId = null;
+      let nextIssueMonitorAllowedLabelsRequestId = 1;
       let issueMonitorStatus = {
         enabled: false,
         state: "disabled",
@@ -923,7 +925,9 @@ export function createKnowledgeKanbanSurface({
       function sendPendingIssueMonitorAllowedLabels() {
         if (inFlightIssueMonitorAllowedLabels !== null || pendingIssueMonitorAllowedLabels === null) return;
         inFlightIssueMonitorAllowedLabels = pendingIssueMonitorAllowedLabels;
-        send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: inFlightIssueMonitorAllowedLabels });
+        inFlightIssueMonitorAllowedLabelsRequestId = nextIssueMonitorAllowedLabelsRequestId++;
+        send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: inFlightIssueMonitorAllowedLabels,
+          request_id: inFlightIssueMonitorAllowedLabelsRequestId });
       }
 
       // #4158: display only saved server labels. Reuse each label's row so a
@@ -1126,6 +1130,7 @@ export function createKnowledgeKanbanSurface({
           && inFlightIssueMonitorAllowedLabels.length === nextStatus.allowed_labels.length
           && inFlightIssueMonitorAllowedLabels.every((label, index) => label === nextStatus.allowed_labels[index])) {
           inFlightIssueMonitorAllowedLabels = null;
+          inFlightIssueMonitorAllowedLabelsRequestId = null;
           if (pendingIssueMonitorAllowedLabels.length === nextStatus.allowed_labels.length
             && pendingIssueMonitorAllowedLabels.every((label, index) => label === nextStatus.allowed_labels[index])) {
             pendingIssueMonitorAllowedLabels = null;
@@ -1679,6 +1684,7 @@ export function createKnowledgeKanbanSurface({
         if (![...knowledgeBridgeStateMap.values()].some(state => normalizeKnowledgeKind(state.kind) === "issue")) {
           pendingIssueMonitorAllowedLabels = null;
           inFlightIssueMonitorAllowedLabels = null;
+          inFlightIssueMonitorAllowedLabelsRequestId = null;
         }
         if (
           knowledgeBridgeStateMap.size === 0 &&
@@ -2065,6 +2071,7 @@ export function createKnowledgeKanbanSurface({
       function handleKnowledgeTransportChange(online) {
         pendingIssueMonitorAllowedLabels = null;
         inFlightIssueMonitorAllowedLabels = null;
+        inFlightIssueMonitorAllowedLabelsRequestId = null;
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
           if (!isSilentSemanticKind(state.kind)) {
             continue;
@@ -4677,6 +4684,17 @@ export function createKnowledgeKanbanSurface({
       // moved verbatim from app.js; the case arms in app.js delegate here.
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
+          case "issue_monitor_allowed_labels_write_failed": {
+            if (inFlightIssueMonitorAllowedLabelsRequestId === null
+              || event.request_id !== inFlightIssueMonitorAllowedLabelsRequestId) break;
+            if (!event.outcome_unknown) {
+              pendingIssueMonitorAllowedLabels = null;
+              inFlightIssueMonitorAllowedLabels = null;
+              inFlightIssueMonitorAllowedLabelsRequestId = null;
+            }
+            send({ kind: "list_issue_monitor" });
+            break;
+          }
           case "terminal_preview": {
             terminalPreviewText.set(event.id, event.text);
             for (const element of windowMap.values()) {

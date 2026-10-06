@@ -70,6 +70,11 @@ impl Renewal {
         worktree: PathBuf,
         commands: Arc<CommandProgress>,
     ) -> std::io::Result<Self> {
+        let lease_id = lease
+            .lock()
+            .map_err(|_| std::io::Error::other("verification lease renewal mutex poisoned"))?
+            .id()
+            .to_owned();
         let (stop, receiver) = mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("verification-renewal".to_string())
@@ -78,12 +83,14 @@ impl Renewal {
                 let mut pressure = QueuePressure::load(coordinator.root());
                 // Observe immediately so a holder handoff does not add another
                 // full polling interval to the gap between queue readings.
-                observe_pressure(&coordinator, &worktree, &mut pressure);
+                observe_pressure(&coordinator, &worktree, &lease_id, &mut pressure);
                 while matches!(
                     receiver.recv_timeout(OBSERVE_EVERY),
                     Err(mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    let status = coordinator.heavy_lease_status().ok();
+                    let status = super::holder_for_lease(&coordinator, &lease_id)
+                        .ok()
+                        .flatten();
                     pressure.publish(coordinator.root(), &worktree, status.as_ref(), epoch_ms());
                     let activity = commands.observe(|pid| {
                         probe.observe(
@@ -130,8 +137,15 @@ fn epoch_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-fn observe_pressure(coordinator: &IndexCoordinator, worktree: &Path, pressure: &mut QueuePressure) {
-    let status = coordinator.heavy_lease_status().ok();
+fn observe_pressure(
+    coordinator: &IndexCoordinator,
+    worktree: &Path,
+    lease_id: &str,
+    pressure: &mut QueuePressure,
+) {
+    let status = super::holder_for_lease(coordinator, lease_id)
+        .ok()
+        .flatten();
     pressure.publish(coordinator.root(), worktree, status.as_ref(), epoch_ms());
 }
 
@@ -162,7 +176,28 @@ impl QueuePressure {
         status: Option<&HeavyLeaseStatus>,
         now: u64,
     ) {
-        if self.observe(status.map(|status| status.pending), now) {
+        let update = || -> std::io::Result<(Self, bool)> {
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(root.join("verification-pressure.lock"))?;
+            fs2::FileExt::lock_exclusive(&lock)?;
+            let mut current = Self::load(root);
+            let report = current.observe(status.map(|status| status.pending), now);
+            current.save(root)?;
+            Ok((current, report))
+        };
+        let (current, report) = match update() {
+            Ok(update) => update,
+            Err(error) => {
+                tracing::warn!(%error, "verification pressure state publication failed");
+                return;
+            }
+        };
+        *self = current;
+        if report {
             if let Some(status) = status {
                 record_pressure(
                     worktree,
@@ -171,11 +206,6 @@ impl QueuePressure {
                     Duration::from_millis(now.saturating_sub(self.since.unwrap_or(now))),
                 );
             }
-        }
-        // Only the heavy lease holder writes this host-wide state. Its monitor
-        // is joined before release, so a successor cannot race this publication.
-        if let Err(error) = self.save(root) {
-            tracing::warn!(%error, "verification pressure state publication failed");
         }
     }
 
@@ -393,6 +423,20 @@ mod tests {
             Some(now - 1),
             "another verification's CPU must not renew this stopped holder"
         );
+    }
+
+    #[test]
+    fn concurrent_pressure_monitors_do_not_overwrite_persisted_observations() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = QueuePressure::default();
+        let mut second = QueuePressure::default();
+        let status = HeavyLeaseStatus {
+            pending: 3,
+            ..Default::default()
+        };
+        first.publish(root.path(), root.path(), Some(&status), 0);
+        second.publish(root.path(), root.path(), Some(&status), 30_000);
+        assert_eq!(QueuePressure::load(root.path()).since, Some(0));
     }
 
     #[test]
