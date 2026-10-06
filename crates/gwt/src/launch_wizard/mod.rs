@@ -295,6 +295,15 @@ pub struct LaunchWizardAgentSetupView {
     pub detail: String,
     /// Button label; absent when gwt cannot run the setup itself.
     pub action_label: Option<String>,
+    pub pending: bool,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentUpdateState {
+    agent_id: String,
+    pending: bool,
+    status: String,
 }
 
 /// Issue #4079 AC-2: what an Issue Monitor Agent Settings save will do to the
@@ -964,8 +973,14 @@ mod autonomous_launch_tests {
 #[derive(Debug, Clone)]
 pub enum LaunchWizardCompletion {
     Launch(Box<LaunchWizardLaunchRequest>),
+    UpdateAgent {
+        agent_id: String,
+        config: Box<ShellLaunchConfig>,
+    },
     ResolveRuntime(Box<LaunchWizardLaunchRequest>),
-    FocusWindow { window_id: String },
+    FocusWindow {
+        window_id: String,
+    },
     Cancelled,
 }
 
@@ -1164,6 +1179,7 @@ pub struct LaunchWizardState {
     /// (Hermes credentials, OpenCode provider auth, ...). Drives the
     /// `configure` setup affordance; never blocks launch.
     pub needs_configuration: std::collections::BTreeSet<String>,
+    agent_update: Option<AgentUpdateState>,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.

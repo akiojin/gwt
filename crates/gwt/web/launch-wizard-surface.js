@@ -204,12 +204,19 @@ export function createLaunchWizardSurface({
         note.dataset.agentId = setup.agent_id || "";
         note.dataset.setupKind = setup.kind || "";
         note.setAttribute("role", "note");
+        note.setAttribute("aria-busy", String(Boolean(setup.pending)));
         note.appendChild(
           createNode("div", "launch-agent-setup__title", setup.title || ""),
         );
         note.appendChild(
           createNode("div", "launch-agent-setup__detail", setup.detail || ""),
         );
+        if (setup.status) {
+          const status = createNode("div", "launch-agent-setup__detail", setup.status);
+          status.setAttribute("role", "status");
+          status.setAttribute("aria-live", "polite");
+          note.appendChild(status);
+        }
         if (setup.action_label) {
           const button = createNode(
             "button",
@@ -217,6 +224,7 @@ export function createLaunchWizardSurface({
             setup.action_label,
           );
           button.type = "button";
+          button.disabled = Boolean(setup.pending);
           button.addEventListener("click", () =>
             sendWizardAction({ kind: "run_agent_setup" }),
           );
@@ -2170,7 +2178,7 @@ export function createLaunchWizardSurface({
 
         setLaunchWizardPendingDisabled(
           panel,
-          isRuntimeResolutionPending || isLaunchActionPending,
+          isRuntimeResolutionPending || isLaunchActionPending || launchWizard.agent_setup?.pending,
         );
         wizardContentPane.appendChild(panel);
         wizardMain.appendChild(wizardContentPane);

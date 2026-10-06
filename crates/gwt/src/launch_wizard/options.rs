@@ -1166,6 +1166,8 @@ pub(super) fn no_detected_agent_setup_view() -> super::LaunchWizardAgentSetupVie
                  make sure it is on PATH, then reopen this wizard. Shell launches stay available."
             .to_string(),
         action_label: None,
+        pending: false,
+        status: None,
     }
 }
 

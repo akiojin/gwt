@@ -344,6 +344,12 @@ impl LaunchWizardState {
             title: affordance.title,
             detail: affordance.detail,
             action_label: affordance.action_label,
+            pending: self.agent_update_pending(),
+            status: self
+                .agent_update
+                .as_ref()
+                .filter(|update| update.agent_id == agent.id)
+                .map(|update| update.status.clone()),
         })
     }
 
@@ -606,6 +612,7 @@ impl LaunchWizardState {
         if self.is_hydrating
             || self.runtime_resolution_pending
             || self.launch_materialization_pending
+            || self.agent_update_pending()
             || self.show_start_methods()
             || self.holder_decision.is_some()
         {

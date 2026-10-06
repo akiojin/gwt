@@ -27,6 +27,68 @@ use gwt::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// CLI updates are maintenance commands, never launch/profile-save requests.
+/// This runs entirely on the worker, including the fresh version probe.
+fn run_wizard_agent_update(
+    agent_id: &str,
+    config: &gwt::ShellLaunchConfig,
+    config_path: Option<&Path>,
+) -> Result<gwt::AgentOption, String> {
+    let config_path = config_path
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            gwt::profile_dispatch::config_path().map_err(|error| error.to_string())
+        })?;
+    let (env, remove_env) = gwt_agent::LaunchEnvironment::from_active_profile(
+        &config_path,
+        gwt_agent::LaunchRuntimeTarget::Host,
+    )?
+    .into_parts();
+    let program = config
+        .command_override
+        .as_deref()
+        .ok_or("Update command is unavailable")?;
+    let mut command = gwt_core::process::hidden_command(program);
+    command
+        .args(config.command_args_override.as_deref().unwrap_or_default())
+        .envs(&env)
+        .stdin(std::process::Stdio::null());
+    for key in &remove_env {
+        command.env_remove(key);
+    }
+    if let Some(cwd) = &config.working_dir {
+        command.current_dir(cwd);
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let detail = if output.stderr.is_empty() {
+            &output.stdout
+        } else {
+            &output.stderr
+        };
+        return Err(format!(
+            "{agent_id} updater exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(detail).trim()
+        ));
+    }
+    let detected = gwt_agent::AgentDetector::detect_by_command_with_environment(
+        agent_id,
+        &env,
+        &remove_env,
+        config.working_dir.as_deref(),
+    )
+    .filter(|agent| agent.version.is_some())
+    .ok_or_else(|| {
+        format!("{agent_id} updated, but its installed version could not be detected")
+    })?;
+    gwt::build_builtin_agent_options(vec![detected])
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| format!("Unknown updated agent: {agent_id}"))
+}
+
 use super::continuation::{
     provider_conversation_availability, provider_conversation_availability_with_grok_home,
     session_matches_project_state, ProviderConversationAvailability,
@@ -4334,6 +4396,9 @@ impl AppRuntime {
         };
         match completion {
             LaunchWizardCompletion::Launch(config) => Ok(*config),
+            LaunchWizardCompletion::UpdateAgent { .. } => {
+                Err("A CLI update is not an Issue Monitor launch".to_string())
+            }
             LaunchWizardCompletion::FocusWindow { window_id } => Err(format!(
                 "Issue Monitor launch resolved to existing window {window_id}"
             )),
@@ -4782,6 +4847,12 @@ impl AppRuntime {
         let Some(mut session) = self.take_launch_wizard(context) else {
             return Vec::new();
         };
+        if session.wizard.agent_update_pending()
+            && !matches!(action, gwt::LaunchWizardAction::Cancel)
+        {
+            self.store_launch_wizard(session);
+            return vec![self.launch_wizard_state_outbound(context)];
+        }
         let action_stage = Self::launch_wizard_action_error_stage(&action);
         let action_label = Self::launch_wizard_action_label(&action);
         let requested_agent_id = match &action {
@@ -5123,6 +5194,27 @@ impl AppRuntime {
         }
 
         match session.wizard.completion.take() {
+            Some(LaunchWizardCompletion::UpdateAgent {
+                agent_id,
+                mut config,
+            }) => {
+                config
+                    .working_dir
+                    .get_or_insert(context.project_root.clone());
+                let wizard_id = session.wizard_id.clone();
+                let config_path = self.profile_config_path.clone();
+                let proxy = self.proxy.for_project(context.clone());
+                thread::spawn(move || {
+                    let result =
+                        run_wizard_agent_update(&agent_id, &config, config_path.as_deref());
+                    proxy.send(UserEvent::LaunchWizardAgentUpdated {
+                        wizard_id,
+                        result: Box::new(result),
+                    });
+                });
+                self.store_launch_wizard(session);
+                vec![self.launch_wizard_state_outbound(context)]
+            }
             Some(LaunchWizardCompletion::Cancelled) => {
                 vec![self.launch_wizard_state_broadcast(context, None)]
             }
@@ -5743,6 +5835,32 @@ impl AppRuntime {
         ];
         events.extend(self.local_issue_monitor_events_for(&context, Some(&client_id), |_| {}));
         events
+    }
+
+    pub(crate) fn handle_launch_wizard_agent_updated(
+        &mut self,
+        wizard_id: String,
+        result: Result<gwt::AgentOption, String>,
+    ) -> Vec<OutboundEvent> {
+        // Updating the installed CLI is Host-wide, even if its form was closed.
+        if result.is_ok() {
+            self.launch_wizard_cache.refresh_agent_options();
+        }
+        let Some(context) = self.project_states.values().find_map(|state| {
+            state
+                .launch_wizard
+                .as_ref()
+                .filter(|session| session.wizard_id == wizard_id)
+                .map(|session| session.project_context.clone())
+        }) else {
+            return Vec::new();
+        };
+        let Some(mut session) = self.take_launch_wizard(&context) else {
+            return Vec::new();
+        };
+        session.wizard.finish_agent_update(result);
+        self.store_launch_wizard(session);
+        vec![self.launch_wizard_state_outbound(&context)]
     }
 
     pub(crate) fn handle_launch_wizard_runtime_resolved(
