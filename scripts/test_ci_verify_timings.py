@@ -58,6 +58,15 @@ class PairedEvidenceTests(unittest.TestCase):
         self.assertEqual(trace["credential_children"], 1)
         self.assertEqual(trace["credential_seconds"], 2.0)
 
+    def test_failed_junit_identifies_test_and_measurement_phase(self):
+        listed = inventory([("targeted_refresh", False)])
+        passed = junit([("targeted_refresh", 1)])
+        failed = passed.replace('/>', '><failure/></testcase>')
+        for phase, before, after in (("before", failed, passed), ("after", passed, failed)):
+            with self.subTest(phase=phase), self.assertRaisesRegex(
+                    ValueError, rf"{phase}: JUnit contains failed, retried or skipped test: .*gwt.*targeted_refresh"):
+                timings.compare(listed, listed, before, after)
+
 
 if __name__ == "__main__":
     unittest.main()
