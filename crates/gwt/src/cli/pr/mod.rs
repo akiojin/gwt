@@ -4468,6 +4468,7 @@ mod tests {
     #[test]
     fn autonomous_ready_format_skew_does_not_request_reverification() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         crate::cli::trusted_store::init_git_repo_with_origin(tmp.path());
         assert!(gwt_core::process::hidden_command("git")
             .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
