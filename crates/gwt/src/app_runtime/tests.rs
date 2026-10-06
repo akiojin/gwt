@@ -52688,7 +52688,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
-        repo,
+        repo.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
@@ -52701,7 +52701,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
-            issue_monitor_project_root: None,
+            issue_monitor_project_root: Some(repo),
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
@@ -52744,6 +52744,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
         item.error_message.as_deref(),
         Some("Stop-block hit an error")
     );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
 }
 
 /// Every place a launch can carry its command text, in one searchable list.
