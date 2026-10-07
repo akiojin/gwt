@@ -443,13 +443,15 @@ mod tests {
         let now = Utc::now();
         let old_time: std::time::SystemTime = (now - Duration::days(31)).into();
         let old = fs::FileTimes::new().set_modified(old_time);
-        for name in [".tmp123.toml", ".expired.toml.tmp-4294967295-abandoned"] {
+        // Keep the unused PID positive after Unix's pid_t cast: u32::MAX
+        // becomes -1 and probes all processes instead of a dead writer.
+        for name in [".tmp123.toml", ".expired.toml.tmp-2147483647-abandoned"] {
             let file = fs::File::create(dir.path().join(name)).unwrap();
             file.set_times(old).unwrap();
         }
         for name in [
             ".tmp456.toml",
-            ".fresh.toml.tmp-4294967295-current",
+            ".fresh.toml.tmp-2147483647-current",
             "settings.toml",
         ] {
             fs::write(dir.path().join(name), "display_mode = \"grid\"").unwrap();
@@ -460,11 +462,11 @@ mod tests {
         assert!(!dir.path().join(".tmp123.toml").exists());
         assert!(!dir
             .path()
-            .join(".expired.toml.tmp-4294967295-abandoned")
+            .join(".expired.toml.tmp-2147483647-abandoned")
             .exists());
         for name in [
             ".tmp456.toml",
-            ".fresh.toml.tmp-4294967295-current",
+            ".fresh.toml.tmp-2147483647-current",
             "settings.toml",
         ] {
             assert!(dir.path().join(name).exists(), "{name}");
