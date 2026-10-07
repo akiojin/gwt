@@ -216,7 +216,8 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     assert!(job.contains("shared-key: linux-workspace"));
     assert!(job.contains("cargo-nextest@"));
     assert!(job.contains("scripts/ci-apt.sh gtk-deps"));
-    assert!(!job.contains("needs:"));
+    assert!(job.contains("needs: source-sync"));
+    assert!(job.contains("if: ${{ !cancelled() }}"));
     let prepare = job
         .find("cargo test -p gwt --all-features --lib --test gwtd_cli_test --no-run")
         .expect("a fresh job must build the guarded gwtd and stress harness");
@@ -239,9 +240,9 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     }
     let required = job_body(&workflow, "  test-rust-required:");
     assert!(required.contains("name: Test (Rust)\n"));
-    assert!(
-        required.contains("needs: [test, test-linux-infrastructure, test-windows-verify-timings]")
-    );
+    assert!(required.contains(
+        "needs: [test, test-linux-infrastructure, test-windows-verify-timings, source-sync]"
+    ));
     assert!(required.contains("if: ${{ !cancelled() }}"));
     assert!(required.contains("RUST_RESULT: ${{ needs.test.result }}"));
     assert!(required.contains("INFRA_RESULT: ${{ needs.test-linux-infrastructure.result }}"));
@@ -253,10 +254,11 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
 fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, "  test-windows-verify-timings:");
-    assert!(job.contains("runs-on: windows-latest"));
-    assert!(job.contains("needs: changes"));
+    assert!(job.contains("runs-on: ${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}"));
+    assert!(job.contains("needs: [changes, source-sync]"));
+    assert!(job.contains("if: ${{ !cancelled() }}"));
     // Unknown/failed classification must measure, not silently skip.
-    assert!(job.contains("!cancelled() && needs.changes.outputs.verify_timings != 'false'"));
+    assert!(job.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
     assert!(job.contains("cargo-nextest@0.9.146"));
     let (_, measure) = named_steps(job)
         .into_iter()
@@ -264,11 +266,14 @@ fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
         .expect("both schedules run in one step on the same host");
     assert!(measure.contains("python scripts/ci_verify_timings.py --output target/verify-timings"));
     assert!(!measure.contains("continue-on-error"));
+    assert!(measure.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
     let (_, upload) = named_steps(job)
         .into_iter()
         .find(|(name, _)| name == "Upload both measurements even on failure")
         .expect("preserve raw evidence when a measurement fails");
-    assert!(upload.contains("if: always()"));
+    assert!(
+        upload.contains("if: ${{ always() && needs.changes.outputs.verify_timings != 'false' }}")
+    );
     assert!(upload.contains("path: target/verify-timings/"));
     assert!(upload.contains("if-no-files-found: error"));
     let required = job_body(&workflow, "  test-rust-required:");
