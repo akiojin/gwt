@@ -3355,6 +3355,9 @@ impl AppRuntime {
             .retain(|root, _| !same_worktree_path(root, project_root));
         self.work_cleanup_ready_branches
             .retain(|root, _| !same_worktree_path(root, project_root));
+        self.work_merge_status_cache
+            .borrow_mut()
+            .retain(|root, _| !same_worktree_path(root, project_root));
         self.work_tip_subjects
             .retain(|root, _| !same_worktree_path(root, project_root));
         self.work_pr_titles
