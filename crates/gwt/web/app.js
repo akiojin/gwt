@@ -6451,6 +6451,9 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             applyKnowledgeIssueMonitorStatus(event.status || {});
             // Issue #3906 AC-12: the update CTA shows the drain progress.
             break;
+          case "issue_monitor_allowed_labels_write_failed":
+            applyKnowledgeReceiveEvent(event);
+            break;
           case "issue_monitor_inbox":
             applyKnowledgeIssueMonitorInbox(event.items);
             scheduleIssueMonitorProjectionRefresh();
@@ -7581,8 +7584,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
-      function setAgentsHost(host) {
-        if (agentsHost === host) return;
+      function setAgentsHost(host, previewHost = null) {
+        if (agentsHost === host) { agentsSurface.setPreviewHost(previewHost); return; }
         agentsHost = host;
         const area = stage.closest(".canvas-area");
         area.classList.toggle("is-agents", host === area);
@@ -7599,6 +7602,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           agentPreviousHosts.clear();
           cleanupTextPreviews(true);
         }
+        agentsSurface.setPreviewHost(previewHost);
         renderedIssuePreviewBodyKeys.clear();
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
@@ -7611,7 +7615,14 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           }
           createTerminalRuntime(id, root);
         },
+        mountPreview: (id, root) => createTerminalTextPreview({
+          document, terminal: terminalMap.get(id).terminal, container: root,
+        }),
         onFocus: focusWindowLocally,
+        onPreviewFocus: (id) => {
+          focusWindowLocally(id);
+          terminalMap.get(id)?.terminal.focus();
+        },
         onLayout: () => requestAnimationFrame(() => {
           if (!agentsHost) return;
           for (const id of terminalMap.keys()) {

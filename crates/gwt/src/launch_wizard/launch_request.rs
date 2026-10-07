@@ -81,10 +81,8 @@ impl LaunchWizardState {
             builder = builder.reasoning_level(reasoning_level.to_string());
         }
 
-        // Issue #4543 AC-3 / AC-6: always tell the builder what this surface
-        // stored, including an explicit `false`. Only calling the setter when
-        // the answer is `true` is what made "the user turned it off" and "no
-        // preference was ever saved" the same input to launch materialization.
+        // L2 interprets manual wizard preferences before launch materialization.
+        // Monitor profile purposes retain their own stored input and source.
         builder = builder
             .permission_launch_source(self.permission_launch_source())
             .skip_permissions(self.effective_skip_permissions());
@@ -407,7 +405,7 @@ mod tests {
             config.args.contains(&"--yolo".to_string()),
             "a Resume launch must carry Codex's skip-permissions flag"
         );
-        assert!(config.codex_fast_mode);
+        assert!(!config.codex_fast_mode);
     }
 
     #[test]
@@ -586,7 +584,7 @@ mod tests {
         state.agent_id = "claude".to_string();
         state.mode = "resume".to_string();
         state.resume_session_id = Some("session-123".to_string());
-        state.skip_permissions = true;
+        state.skip_permissions = false;
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
@@ -612,7 +610,7 @@ mod tests {
         );
         state.agent_id = "codex".to_string();
         state.mode = "continue".to_string();
-        state.skip_permissions = true;
+        state.skip_permissions = false;
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
@@ -680,14 +678,14 @@ mod tests {
             decision.source,
             gwt_agent::PermissionLaunchSource::StartWork
         );
-        assert!(decision.skip_forced);
-        assert!(decision.interactive_request_ignored);
-        assert_eq!(decision.requested_skip_permissions, Some(false));
+        assert!(!decision.skip_forced);
+        assert!(!decision.interactive_request_ignored);
+        assert_eq!(decision.requested_skip_permissions, Some(true));
     }
 
-    /// The same wizard, launching a branch with no owner, is untouched.
+    /// L2: old interactive preferences cannot change a manual wizard launch.
     #[test]
-    fn wizard_unlinked_launch_keeps_its_stored_interactive_preference() {
+    fn wizard_unlinked_launch_uses_fixed_skip_permissions() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -698,11 +696,11 @@ mod tests {
 
         let config = state.build_launch_config().expect("launch config");
 
-        assert!(!config.skip_permissions);
-        assert!(!config.args.contains(&"--yolo".to_string()));
+        assert!(config.skip_permissions);
+        assert!(config.args.contains(&"--yolo".to_string()));
         assert_eq!(
             config.permission_decision.outcome,
-            gwt_agent::PermissionModeOutcome::InteractiveRetained
+            gwt_agent::PermissionModeOutcome::SkipForcedReady
         );
     }
 
@@ -739,6 +737,7 @@ mod tests {
             Vec::new(),
         );
         state.agent_id = "codex".to_string();
+        state.use_profile_launch_preferences();
         state.skip_permissions = false;
 
         let mut request = state.build_launch_request().expect("launch request");
@@ -843,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_fast_mode_is_exposed_and_applied_to_launch_config() {
+    fn claude_legacy_fast_mode_is_hidden_and_disabled() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -863,18 +862,17 @@ mod tests {
 
         let view = state.view();
         assert_eq!(view.selected_agent_id, "claude");
-        assert!(view.show_fast_mode);
-        assert!(view.fast_mode);
+        assert!(!view.show_fast_mode);
+        assert!(!view.fast_mode);
         assert!(view
             .launch_summary
             .iter()
-            .any(|item| item.label == "Fast mode" && item.value == "on"));
+            .any(|item| item.label == "Fast mode" && item.value == "off"));
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
-        // SPEC-2014 FR-106: host launches deliver fastMode via a materialized
-        // settings file path instead of inline JSON.
-        assert!(config
+        assert!(!config.fast_mode);
+        assert!(!config
             .args
             .windows(2)
             .any(|pair| pair[0] == "--settings" && pair[1].ends_with("claude-settings-fast.json")));
@@ -900,7 +898,7 @@ mod tests {
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
         assert!(!config.codex_fast_mode);
-        assert!(!config.skip_permissions);
+        assert!(config.skip_permissions);
     }
 
     /// Issue #4228 AC-2: the reported reproduction, end to end. A Codex launch
@@ -950,6 +948,7 @@ mod tests {
             agent_id: "claude".to_string(),
         });
 
+        state.use_profile_launch_preferences();
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
         assert!(
@@ -989,6 +988,7 @@ mod tests {
             agent_id: "claude".to_string(),
         });
 
+        state.use_profile_launch_preferences();
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
         assert!(

@@ -7395,7 +7395,7 @@ mod tests {
                     CoordinationEvent::MessageAppended { entry }
                 })
                 .collect::<Vec<_>>();
-            write_events(&coordination_events_path(dir.path()), &events);
+            write_prompt_board_fixture(&legacy_coordination_dir(dir.path()), &events);
 
             let (view, refresh) = refresh_scoped_board_view(dir.path(), &scope, None).unwrap();
             assert_eq!(refresh, ScopedBoardRefresh::Rebuilt, "board size {total}");
