@@ -30944,6 +30944,65 @@ fn queued_continue_work_completion_fixture(
 }
 
 #[test]
+fn launch_failure_status_preserves_worker_profile_and_uses_background_snapshot_order() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = &result.as_ref().expect("fixture launch").1;
+    let mut session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("fixture Session");
+    session.model = Some("worker-profile".into());
+    runtime.launch_wizard_cache.record_session(session.clone());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), issue_monitor_feedback(42));
+    assert!(runtime
+        .handle_launch_complete(window_id, Err("binary missing".into()))
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    session.model = Some("gui-profile".into());
+    session.updated_at += chrono::Duration::seconds(1);
+    runtime.launch_wizard_cache.record_session(session);
+
+    let outbound = runtime.handle_agent_launch_prepared(prepared);
+    assert!(outbound.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::IssueMonitorLaunchFailed {
+            issue_number: 42,
+            ..
+        }
+    )));
+    assert!(
+        !outbound
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })),
+        "prepared apply must leave the single status broadcast to the background route"
+    );
+    let snapshots = recorded
+        .lock()
+        .expect("event log")
+        .iter()
+        .filter_map(|event| match recorded_project_payload(event) {
+            UserEvent::IssueMonitorDaemonStatus { status, .. } => {
+                Some(("status", Some(status.launch_profile_summary.clone())))
+            }
+            UserEvent::IssueMonitorDaemonInbox { .. } => Some(("inbox", None)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].0, "status");
+    assert_eq!(snapshots[1], ("inbox", None));
+    let summary = snapshots[0].1.as_ref().expect("prepared profile summary");
+    assert!(summary.contains("worker-profile"));
+    assert!(!summary.contains("gui-profile"));
+}
+
+#[test]
 fn launch_failure_dispatch_uses_worker_receipt_when_owner_ledger_is_unreadable() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());

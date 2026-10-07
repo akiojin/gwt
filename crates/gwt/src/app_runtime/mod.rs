@@ -3317,7 +3317,12 @@ impl AppRuntime {
     pub(crate) fn project_context_for_root(&self, root: &Path) -> Option<ProjectContext> {
         self.tabs
             .iter()
-            .find(|tab| same_worktree_path(&tab.project_root, root))
+            .find(|tab| tab.project_root == root)
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .find(|tab| same_worktree_path(&tab.project_root, root))
+            })
             .and_then(|tab| self.project_context(&tab.id))
     }
 
@@ -3376,10 +3381,18 @@ impl AppRuntime {
     }
 
     pub(crate) fn project_state_for_root(&self, root: &Path) -> Option<&ProjectRuntimeState> {
-        self.project_states.values().find(|state| {
-            same_worktree_path(&state.context.project_root, root)
-                && self.project_context_is_current(&state.context)
-        })
+        self.project_states
+            .values()
+            .find(|state| {
+                state.context.project_root == root
+                    && self.project_context_is_current(&state.context)
+            })
+            .or_else(|| {
+                self.project_states.values().find(|state| {
+                    same_worktree_path(&state.context.project_root, root)
+                        && self.project_context_is_current(&state.context)
+                })
+            })
     }
 
     pub(crate) fn project_state_for_root_mut(
@@ -5027,21 +5040,17 @@ impl AppRuntime {
                     pane_blockers.append(&mut drain.blocking);
                     drain.blocking = pane_blockers;
                 }
-                self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
                 if let Some(root) = project_root {
-                    self.replace_knowledge_terminal_queue(root, &status.terminal_queue);
-                    self.replace_knowledge_monitor_snapshot(root, &monitor.inbox);
                     if let Some(context) = self.project_context_for_root(root) {
-                        self.proxy.for_project(context.clone()).send(
-                            crate::UserEvent::IssueMonitorDaemonInbox {
-                                project_root: root.to_path_buf(),
-                                items: monitor.inbox,
-                            },
-                        );
-                        return vec![OutboundEvent::project(
-                            context.project_key,
-                            BackendEvent::IssueMonitorStatus { status },
-                        )];
+                        let proxy = self.proxy.for_project(context);
+                        proxy.send(crate::UserEvent::IssueMonitorDaemonStatus {
+                            project_root: root.to_path_buf(),
+                            status,
+                        });
+                        proxy.send(crate::UserEvent::IssueMonitorDaemonInbox {
+                            project_root: root.to_path_buf(),
+                            items: monitor.inbox,
+                        });
                     }
                 }
                 Vec::new()
@@ -7738,15 +7747,26 @@ impl AppRuntime {
         status: &mut gwt::IssueMonitorStatusView,
         project_root: Option<&Path>,
     ) {
+        Self::apply_issue_monitor_launch_profile_status_from_cache(
+            status,
+            project_root,
+            &self.launch_wizard_cache,
+        );
+    }
+
+    pub(super) fn apply_issue_monitor_launch_profile_status_from_cache(
+        status: &mut gwt::IssueMonitorStatusView,
+        project_root: Option<&Path>,
+        cache: &launch::LaunchWizardMemoryCache,
+    ) {
         if status.launch_profile_source == gwt::IssueMonitorLaunchProfileSource::Saved {
             return;
         }
-        // `status_view` already carries any saved Monitor profile. The only
-        // remaining fallback is prior Session history, which is fully held by
-        // the Launch Wizard memory cache; never reopen prefs on the Tao thread.
+        // Session history is cached, but resolving its repo scope may read Git
+        // and path aliases. Prepared launch failures call this on their worker.
         let previous_profiles = project_root
             .map(|project_root| {
-                let profiles = self.launch_wizard_cache.previous_profiles(project_root);
+                let profiles = cache.previous_profiles(project_root);
                 if profiles.repo_local().is_some() {
                     profiles
                 } else {
@@ -7754,7 +7774,7 @@ impl AppRuntime {
                     profiles.with_repo_local(fallback_profile)
                 }
             })
-            .unwrap_or_else(|| self.launch_wizard_cache.agent_preferences());
+            .unwrap_or_else(|| cache.agent_preferences());
         if let Some(profile) = previous_profiles.preferred_profile() {
             status.launch_profile_source = gwt::IssueMonitorLaunchProfileSource::LastSettings;
             status.launch_profile_summary = gwt::issue_monitor_launch_profile_summary(profile);

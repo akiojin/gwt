@@ -166,6 +166,11 @@ pub(super) fn prepare_launch_error(
             );
             if let Some(monitor) = prepared.monitor.as_ref() {
                 let mut status = monitor.status_view();
+                AppRuntime::apply_issue_monitor_launch_profile_status_from_cache(
+                    &mut status,
+                    project_root.as_deref(),
+                    &input.session_cache,
+                );
                 if let Some(drain) = status.update_drain.as_mut() {
                     let (panes, worktrees) = input.update_observations;
                     let snapshot =
