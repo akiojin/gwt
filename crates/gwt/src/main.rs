@@ -1985,6 +1985,7 @@ enum UserEvent {
         operation_id: String,
         binding: gwt_agent::SessionExecutionBinding,
     },
+    FreshExecutionFinalized(Box<app_runtime::continuation::FreshExecutionFinalization>),
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeApprovalOverlay {
@@ -4303,6 +4304,7 @@ mod tests {
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
+            pending_fresh_execution_finalizations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
             project_open_started: None,
@@ -11079,6 +11081,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::FreshExecutionFinalized(completion)) => {
+                clients.dispatch(app.handle_fresh_execution_finalized(*completion));
             }
             Event::UserEvent(UserEvent::PmWorktreePrepared {
                 continuation,
