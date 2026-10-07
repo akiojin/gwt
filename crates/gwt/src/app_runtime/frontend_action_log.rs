@@ -553,6 +553,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ListCustomAgents => {
             FrontendUserActionLog::new("list_custom_agents", "custom_agents")
         }
+        FrontendEvent::ListSupportedAgents => {
+            FrontendUserActionLog::new("list_supported_agents", "settings")
+        }
         FrontendEvent::ListCustomAgentPresets => {
             FrontendUserActionLog::new("list_custom_agent_presets", "custom_agents")
         }
