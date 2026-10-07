@@ -182,8 +182,12 @@ function repositoryFindings(base) {
   return files.flatMap(file => scanModule(modules.get(file), file, { modules }));
 }
 
-export function checkRepository({ writeBaseline = false, base = process.env.GWT_PULL_RENDER_BASE_SHA || "origin/develop" } = {}) {
-  git("rev-parse", "--verify", base + "^{commit}");
+export function checkRepository({ writeBaseline = false, base = process.env.GWT_PULL_RENDER_BASE_SHA } = {}) {
+  // Local checks compare against integrated history, so unrelated remote
+  // advances cannot change the verdict for the same HEAD. CI's explicit base
+  // remains authoritative. Resolve either choice once before reading any tree.
+  const comparison = base || git("merge-base", "HEAD", "origin/develop");
+  base = git("rev-parse", "--verify", comparison + "^{commit}");
   // Detailed fingerprints are computed from Git source, never persisted. Only
   // the shrinking receiver/case list is committed; first introduction is
   // bounded by actual base findings. Missing refs/read failures fail closed.
