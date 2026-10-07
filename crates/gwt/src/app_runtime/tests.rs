@@ -4300,6 +4300,7 @@ fn sample_runtime_with_events(
         daemon_supervisor: Arc::new(gwt::daemon_supervisor::DaemonSupervisor::disabled()),
         pending_continue_work: HashMap::new(),
         pending_fresh_execution_launches: HashMap::new(),
+        pending_fresh_execution_finalizations: HashMap::new(),
 
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_restore_log: None,
@@ -17549,9 +17550,10 @@ fn continue_work_ready_timeout_late_session_start_still_activates_after_a_handof
             .contains_key(&fixture.window_id),
         "the handoff must leave a diagnostic a reconnecting client can replay",
     );
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(
         !events.is_empty(),
@@ -23169,7 +23171,10 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
     session_start.continuation_readiness_nonce = Some(readiness_nonce.to_string());
     session_start.project_root = Some(repo.display().to_string());
     session_start.branch = Some("work/issue-2359".to_string());
-    let events = runtime.handle_runtime_hook_event(session_start);
+    let (spawner, _) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut events = runtime.handle_runtime_hook_event(session_start);
+    events.extend(commit_pending_fresh_execution(&mut runtime));
 
     assert!(
         !events.is_empty(),
@@ -23576,6 +23581,8 @@ fn pending_fresh_execution_fixture_with_owner_kind(
     );
     let runtime_root = temp_root.join(".gwt");
     let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let (spawner, _) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let window_id = combined_window_id("tab-1", "agent-1");
     let mut candidate =
         gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
@@ -23655,6 +23662,311 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         binding,
         issuer,
         token,
+    }
+}
+
+fn take_fresh_execution_finalization(
+    runtime: &AppRuntime,
+) -> super::continuation::FreshExecutionFinalization {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("fresh execution test needs a queued worker");
+    };
+    drain_queued_blocking_tasks(tasks);
+    let AppEventProxy::Stub(events) = &runtime.proxy else {
+        panic!("fresh execution test needs a stub proxy");
+    };
+    let mut events = events.lock().expect("fresh execution completions");
+    let index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::FreshExecutionFinalized(_)
+            )
+        })
+        .expect("fresh execution worker completion");
+    let event = events.remove(index);
+    drop(events);
+    match into_recorded_project_payload(event) {
+        UserEvent::FreshExecutionFinalized(completion) => *completion,
+        _ => unreachable!("matched fresh execution finalization"),
+    }
+}
+
+fn commit_pending_fresh_execution(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let completion = take_fresh_execution_finalization(runtime);
+    runtime.handle_fresh_execution_finalized(completion)
+}
+
+#[test]
+fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-worker-readiness");
+    let (spawner, queue) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+        .readiness_nonce
+        .clone();
+
+    for _ in 0..2 {
+        let events = fixture
+            .runtime
+            .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+        assert!(
+            events.is_empty(),
+            "readiness dispatch must return before I/O"
+        );
+    }
+    assert!(fixture
+        .issuer
+        .prepared_token_is_current(&fixture.token, &fixture.binding));
+    assert_eq!(
+        queue.lock().expect("worker queue").len(),
+        1,
+        "duplicate authenticated readiness must schedule one transaction"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.predecessor_binding.clone())
+    );
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
+    assert!(!events.is_empty());
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.generations.len(), 2);
+    let work_events = load_tracked_work_events(&fixture.repo);
+    assert_eq!(
+        work_events
+            .iter()
+            .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
+            .count(),
+        1,
+        "duplicate readiness must publish one Work start"
+    );
+    let queued_after_completion = queue.lock().unwrap().len();
+    assert!(fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce))
+        .is_empty());
+    assert_eq!(queue.lock().unwrap().len(), queued_after_completion);
+    assert_eq!(load_tracked_work_events(&fixture.repo), work_events);
+}
+
+#[test]
+fn fresh_execution_finalization_rejects_replaced_window_pending_and_token() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    for replacement in ["window", "pending", "token"] {
+        let mut fixture = pending_fresh_execution_fixture(temp.path(), replacement);
+        let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+            .readiness_nonce
+            .clone();
+        fixture
+            .runtime
+            .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+        let completion = take_fresh_execution_finalization(&fixture.runtime);
+        let work_events = load_tracked_work_events(&fixture.repo);
+        match replacement {
+            "window" => {
+                fixture
+                    .runtime
+                    .window_lifecycle_generations
+                    .lock()
+                    .unwrap()
+                    .insert(fixture.window_id.clone(), u64::MAX);
+            }
+            "pending" => {
+                fixture
+                    .runtime
+                    .pending_fresh_execution_launches
+                    .get_mut(&fixture.window_id)
+                    .unwrap()
+                    .operation_id = "replacement-operation".to_string();
+            }
+            "token" => {
+                fixture
+                    .runtime
+                    .agent_capability_tokens
+                    .insert(fixture.window_id.clone(), "replacement-token".to_string());
+            }
+            _ => unreachable!(),
+        }
+        let current_token = fixture.runtime.agent_capability_tokens[&fixture.window_id].clone();
+        assert!(
+            fixture
+                .runtime
+                .handle_fresh_execution_finalized(completion)
+                .is_empty(),
+            "{replacement} replacement must fence GUI completion"
+        );
+        assert!(fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&fixture.window_id));
+        assert_eq!(
+            fixture.runtime.active_agent_sessions[&fixture.window_id].session_id,
+            fixture.candidate_session_id
+        );
+        assert_eq!(
+            fixture.runtime.agent_capability_tokens[&fixture.window_id],
+            current_token
+        );
+        assert_eq!(load_tracked_work_events(&fixture.repo), work_events);
+    }
+}
+
+#[test]
+fn fresh_execution_queued_readiness_cannot_revive_an_exact_rollback() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-worker-rollback");
+    let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+        .readiness_nonce
+        .clone();
+    fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+    fixture.runtime.handle_launch_complete_and_drain(
+        fixture.window_id.clone(),
+        Err("spawn failed before readiness worker".to_string()),
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_finalizations
+        .contains_key(&fixture.window_id));
+    assert!(commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+    assert!(load_tracked_work_events(&fixture.repo).is_empty());
+}
+
+#[test]
+fn fresh_execution_queued_session_start_rejects_foreign_identity() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-early-readiness");
+    let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+        .readiness_nonce
+        .clone();
+    let mut early = runtime_hook_state_for_event("Working", "SessionStart", "foreign-session");
+    early.agent_session_id = Some(fixture.candidate_session_id.clone());
+    early.continuation_readiness_nonce = Some(nonce);
+    early.project_root = Some(fixture.repo.display().to_string());
+    early.branch = Some("work/issue-2359".to_string());
+    fixture.runtime.handle_runtime_hook_event(early.clone());
+    let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+        unreachable!();
+    };
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "foreign identity cannot authenticate readiness"
+    );
+    early.gwt_session_id = Some(fixture.candidate_session_id.clone());
+    fixture.runtime.handle_runtime_hook_event(early);
+    assert!(fixture
+        .issuer
+        .prepared_token_is_current(&fixture.token, &fixture.binding));
+    assert!(!commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.binding.identity)
+    );
+}
+
+#[test]
+fn fresh_execution_queued_readiness_rolls_back_after_pane_or_project_close() {
+    for (operation, project_close, close_worker_first) in [
+        ("pane-readiness-first", false, false),
+        ("pane-close-first", false, true),
+        ("project-close-first", true, true),
+    ] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let mut fixture = pending_fresh_execution_fixture(temp.path(), operation);
+        insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+        let generation = fixture.runtime.runtimes[&fixture.window_id].incarnation;
+        fixture
+            .runtime
+            .window_lifecycle_generations
+            .lock()
+            .unwrap()
+            .insert(fixture.window_id.clone(), generation);
+        let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+            .readiness_nonce
+            .clone();
+        fixture
+            .runtime
+            .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+        let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+            unreachable!();
+        };
+        let tasks = tasks.clone();
+        if project_close {
+            fixture.runtime.close_project_tab_events("tab-1");
+        } else {
+            fixture.runtime.close_window_events(&fixture.window_id);
+        }
+        assert!(
+            !fixture
+                .runtime
+                .pending_fresh_execution_finalizations
+                .contains_key(&fixture.window_id),
+            "{operation}: close must forget its in-flight entry"
+        );
+        if !close_worker_first {
+            // Run readiness while the closing generation is still present.
+            let readiness = tasks.lock().unwrap().remove(0);
+            readiness();
+        }
+        // The queued test spawner drains last-in first-out, so otherwise
+        // detached close completes before the earlier readiness transaction.
+        assert!(commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner,)
+                .unwrap(),
+            Some(fixture.predecessor_binding.clone()),
+            "{operation}"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &fixture.repo,
+                fixture.owner,
+                &fixture.operation_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
+            "{operation}: a closed Prepared candidate must release its owner fence"
+        );
+        assert!(
+            !fixture
+                .runtime
+                .sessions_dir
+                .join(format!("{}.toml", fixture.candidate_session_id))
+                .exists(),
+            "{operation}"
+        );
+        assert!(
+            !durable_launch_recovery_exists(
+                &fixture.runtime.sessions_dir,
+                &fixture.candidate_session_id,
+            ),
+            "{operation}"
+        );
+        assert!(
+            load_tracked_work_events(&fixture.repo).is_empty(),
+            "{operation}"
+        );
     }
 }
 
@@ -23810,6 +24122,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
     let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = ack_spawner;
     fixture.runtime.handle_runtime_hook_event(session_start);
+    commit_pending_fresh_execution(&mut fixture.runtime);
     fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
 
     let active_prefs =
@@ -24030,9 +24343,10 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
 
     let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = ack_spawner;
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(
         !events.is_empty(),
@@ -24087,9 +24401,10 @@ fn fresh_execution_session_start_preserves_spec_owner_kind_in_work_projection() 
         .readiness_nonce
         .clone();
 
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(!events.is_empty(), "SPEC launch must complete");
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
@@ -24131,9 +24446,10 @@ fn fresh_execution_session_start_overrides_mis_kinded_resume_context_owner() {
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(!events.is_empty(), "SPEC successor must complete");
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
@@ -24201,9 +24517,10 @@ fn fresh_execution_session_replacement_before_work_commit_preserves_predecessor_
         .expect("pending fresh launch")
         .readiness_nonce
         .clone();
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(
         events.is_empty(),
@@ -24511,6 +24828,7 @@ fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_ackno
             fixture.runtime.handle_runtime_hook_event(event);
         }
     }
+    commit_pending_fresh_execution(&mut fixture.runtime);
     fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
     server.shutdown();
     assert_eq!(
@@ -24613,10 +24931,53 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
                 reply,
             }) = event
             {
-                let (result, _) = fixture
+                let prepared = grant.principal().prepared_execution_binding().is_some();
+                let (ready_reply, ready_result) = std::sync::mpsc::channel();
+                fixture
                     .runtime
-                    .resend_fresh_execution_ready(&grant, &request);
-                reply.send(result).unwrap();
+                    .resend_fresh_execution_ready(&grant, &request, ready_reply);
+                if prepared {
+                    assert!(
+                        matches!(
+                            ready_result.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ),
+                        "the same request must wait for its queued finalization"
+                    );
+                    let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+                        unreachable!();
+                    };
+                    let worker = tasks.lock().unwrap().remove(0);
+                    worker();
+                    let (active_reply, active_result) = std::sync::mpsc::channel();
+                    fixture.runtime.resend_fresh_execution_ready(
+                        &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
+                        &gwt::AgentExecutionContinuationRequest {
+                            schema_version: 1,
+                            operation_id: "active-inflight-retry".to_string(),
+                            readiness_nonce: None,
+                        },
+                        active_reply,
+                    );
+                    assert!(
+                        matches!(
+                            active_result.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ),
+                        "Active resend must join the pending GUI completion"
+                    );
+                    commit_pending_fresh_execution(&mut fixture.runtime);
+                    let active_receipt = active_result.try_recv().unwrap().unwrap().unwrap();
+                    assert_eq!(active_receipt.operation_id, "active-inflight-retry");
+                    assert_eq!(active_receipt.execution_binding, fixture.binding.identity);
+                }
+                reply
+                    .send(
+                        ready_result
+                            .try_recv()
+                            .expect("readiness completion must reply"),
+                    )
+                    .unwrap();
                 break;
             }
             assert!(
@@ -24712,15 +25073,19 @@ fn fresh_execution_continue_repairs_activated_response_loss_before_acknowledging
         &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
     );
     leave_fresh_execution_activated_before_projection_commit(&mut fixture);
-    let (result, _) = fixture.runtime.resend_fresh_execution_ready(
+    let (reply, response) = std::sync::mpsc::channel();
+    fixture.runtime.resend_fresh_execution_ready(
         &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
         &gwt::AgentExecutionContinuationRequest {
             schema_version: 1,
             operation_id: "retry-ready-request".to_string(),
             readiness_nonce: None,
         },
+        reply,
     );
-    assert!(result
+    assert!(response
+        .try_recv()
+        .unwrap()
         .expect("Active capability retry must repair the matching pending fresh coordinator")
         .is_some());
     assert!(!fixture
@@ -24764,15 +25129,17 @@ fn fresh_execution_continue_refuses_wrong_nonce_without_mutation() {
         diagnosis.recovery_hint.as_deref(),
         Some("prepared_launch_readiness_required")
     );
-    let (result, events) = fixture.runtime.resend_fresh_execution_ready(
+    let (reply, response) = std::sync::mpsc::channel();
+    let events = fixture.runtime.resend_fresh_execution_ready(
         &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
         &gwt::AgentExecutionContinuationRequest {
             schema_version: 1,
             operation_id: "continue-ready-request".to_string(),
             readiness_nonce: Some("wrong-nonce".to_string()),
         },
+        reply,
     );
-    assert!(result.is_err());
+    assert!(response.try_recv().unwrap().is_err());
     assert!(events.is_empty());
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner).unwrap(),
@@ -24795,13 +25162,25 @@ fn fresh_execution_wrong_session_start_nonce_aborts_candidate_and_preserves_bloc
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-wrong-nonce");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    let pane = Arc::clone(&fixture.runtime.runtimes[&fixture.window_id].pane);
     let mut session_start =
         runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
     session_start.continuation_readiness_nonce = Some("wrong-readiness".to_string());
     session_start.project_root = Some(fixture.repo.display().to_string());
     session_start.branch = Some("work/issue-2359".to_string());
 
-    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+    let mut events = fixture.runtime.handle_runtime_hook_event(session_start);
+    events.extend(commit_pending_fresh_execution(&mut fixture.runtime));
+    let detached_teardown = Arc::strong_count(&pane) > 1;
+    if let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks {
+        drain_queued_blocking_tasks(tasks);
+    }
+    assert!(
+        detached_teardown,
+        "rollback GUI apply must hand PTY ownership to the detached close finalizer"
+    );
+    assert!(load_tracked_work_events(&fixture.repo).is_empty());
 
     assert!(
         events.iter().any(|event| matches!(
@@ -24828,7 +25207,8 @@ fn fresh_execution_missing_session_start_nonce_aborts_candidate_and_preserves_bl
     session_start.project_root = Some(fixture.repo.display().to_string());
     session_start.branch = Some("work/issue-2359".to_string());
 
-    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+    let mut events = fixture.runtime.handle_runtime_hook_event(session_start);
+    events.extend(commit_pending_fresh_execution(&mut fixture.runtime));
 
     assert!(
         events.iter().any(|event| matches!(
@@ -24876,7 +25256,8 @@ fn fresh_execution_session_start_via_daemon_fanout_preserves_readiness_nonce() {
         panic!("expected runtime hook fanout");
     };
 
-    let events = fixture.runtime.handle_daemon_runtime_hook_event(event);
+    let mut events = fixture.runtime.handle_daemon_runtime_hook_event(event);
+    events.extend(commit_pending_fresh_execution(&mut fixture.runtime));
 
     assert!(
         !events.is_empty(),
@@ -25607,8 +25988,12 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
             if detail == "Waiting for authenticated SessionStart..."
     )));
     let candidate_binding = pending.binding.identity.clone();
-    let ready_events =
+    let (spawner, _) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let queued_events =
         runtime.finalize_fresh_execution_launch_session_start(&window_id, Some(&readiness_nonce));
+    assert!(queued_events.is_empty());
+    let ready_events = commit_pending_fresh_execution(&mut runtime);
     assert!(
         !ready_events.is_empty(),
         "authenticated readiness must finish the manual successor"
@@ -26000,9 +26385,10 @@ fn fresh_execution_prevalidation_conflict_leaves_work_writable_and_retains_candi
         .readiness_nonce
         .clone();
 
-    let _events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let _events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     let attempt = gwt::cli::execution_state::continuation_attempt_for_operation(
         &fixture.repo,
