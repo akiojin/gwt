@@ -138,6 +138,14 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       // Let the SessionStart runtime state land first so it cannot race the exit.
       await expect.poll(async () => (await codexWindows(page)).find((entry) => entry.id === firstWindow.id)?.status,
         { timeout: 60_000, message: "SessionStart runtime state reaches the window" }).toBe("idle");
+      const wizardCursor = await cursor(page);
+      await openLiveLaunchWizardForBranch(page, fixture.branch);
+      const { wizard } = await latestWizard(page, wizardCursor, true);
+      await testInfo.attach("quick-start-cache-view", {
+        body: JSON.stringify(wizard.quick_start_entries), contentType: "application/json" });
+      await expect(page.locator("#wizard-modal .start-method-list")).toBeVisible();
+      await testInfo.attach(`quick-start-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await wizardAction(page, { kind: "cancel" });
       // The provider dies (a clean exit closes the window instead); the window
       // runtime turns error and the Restart agent control appears.
       process.kill(first.pid, "SIGTERM");
