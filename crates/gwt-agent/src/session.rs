@@ -2766,7 +2766,7 @@ fn apply_agent_session_id(session: &mut Session, agent_session_id: &str) {
 }
 
 /// Persist one hook event and an optional provider Session id under one
-/// lease. SessionStart with a supplied provider id uses the authoritative
+/// bounded lease. SessionStart with a supplied provider id uses the durable
 /// durable Session transaction: readiness cannot precede its identity commit.
 /// Other bookkeeping uses a bounded lease and returns `WouldBlock` unchanged
 /// so latency-critical hooks can fail open within their wall-clock budget.
@@ -2792,7 +2792,7 @@ pub fn persist_session_hook_metadata_with_wait(
         Ok(())
     };
     if event == "SessionStart" && agent_session_id.is_some() {
-        update_session(sessions_dir, session_id, update)
+        update_session_with_wait(sessions_dir, session_id, wait, update)
     } else {
         // Issue #3777: liveness must not wait for the device inside the
         // UserPromptSubmit budget.
@@ -4089,7 +4089,9 @@ display_name = "Codex"
                 std::time::Duration::from_secs(1),
                 |_| {
                     lease_acquired_tx.send(()).expect("signal Session lease");
-                    release_lease_rx.recv().expect("release Session lease");
+                    // Release obsolete blocking writers on RED; assertions
+                    // check their result rather than elapsed wall-clock time.
+                    let _ = release_lease_rx.recv_timeout(Duration::from_secs(10));
                     Ok(())
                 },
             )
@@ -4110,8 +4112,22 @@ display_name = "Codex"
         assert!(timeout.to_string().contains("retry"));
         assert!(!timeout.to_string().contains(&session_id));
 
-        release_lease_tx.send(()).expect("release Session lease");
+        let identity_commit = persist_session_hook_metadata_with_wait(
+            dir.path(),
+            &session_id,
+            "SessionStart",
+            Some("provider-bounded-start"),
+            None,
+            Duration::ZERO,
+        );
+        let _ = release_lease_tx.send(());
         lease_worker.join().expect("join Session lease holder");
+        assert_eq!(
+            identity_commit
+                .expect_err("SessionStart identity commit must respect its lease wait")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
         with_session_lease_wait(
             dir.path(),
             &session_id,
