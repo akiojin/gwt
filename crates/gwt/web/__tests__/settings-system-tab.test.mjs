@@ -53,6 +53,46 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
+test("Supported Agents renders installed versions, unavailable versions, and missing agents distinctly", () => {
+  const { document } = parseHTML("<html><body><section></section></body></html>");
+  const panel = document.querySelector("section");
+  const render = loadFunction("renderSupportedAgentsPanel");
+  render(panel, [
+    { id: "claude", name: "Claude Code", installed: true, installed_version: "2.1.0" },
+    { id: "codex", name: "Codex", installed: true, installed_version: null },
+    { id: "grok", name: "Grok Build", installed: false, installed_version: null },
+  ]);
+  const rows = panel.querySelectorAll("[data-agent-id]");
+  assert.equal(rows.length, 3);
+  assert.match(rows[0].textContent, /Claude Code.*Installed.*2\.1\.0/);
+  assert.match(rows[1].textContent, /Codex.*Installed.*Unknown \(version unavailable\)/);
+  assert.match(rows[2].textContent, /Grok Build.*Not installed/);
+  assert.doesNotMatch(rows[2].textContent, /Unknown/);
+  assert.equal(panel.querySelectorAll("th[scope='col']").length, 3);
+  render(panel, null);
+  assert.match(panel.textContent, /Loading agent detection/);
+  assert.equal(panel.querySelectorAll("[data-agent-id]").length, 0);
+});
+
+test("Supported Agents uses the shared Settings tab and refreshes from its backend snapshot", () => {
+  assert.match(settingsSource, /buildSettingsTab\("supported-agents",\s*"Supported Agents"/);
+  assert.match(settingsSource, /linkSettingsPanel\(panelSupportedAgents, windowData\.id, "supported-agents"\)/);
+  assert.match(settingsSource, /send\(\{\s*kind:\s*"list_supported_agents"\s*\}\)/);
+  assert.match(appSource, /case "supported_agent_list":[\s\S]{0,200}applySupportedAgentList\(event\)/);
+});
+
+test("Supported Agents table uses Operator tokens in both themes", () => {
+  const table = componentsCss.match(/:root\[data-theme\]\s+\.settings-supported-agents\s*\{([^}]*)\}/);
+  assert.ok(table, "Supported Agents table must use the shared dual-theme scope");
+  assert.match(table[1], /var\(--font-body\)/);
+  assert.match(table[1], /var\(--color-text\)/);
+  const cells = componentsCss.match(/\.settings-supported-agents td\s*\{([^}]*)\}/);
+  assert.ok(cells, "Supported Agents cells must have token-based spacing");
+  assert.match(cells[1], /var\(--space-/);
+  assert.match(cells[1], /var\(--color-border\)/);
+  assert.doesNotMatch(table[1] + cells[1], /#[\da-f]{3,8}\b|\brgba?\(/i);
+});
+
 test("two Settings System panels keep labels associated with controls in their own window", () => {
   const { document } = parseHTML(`<main><section id="settings-left-system"></section><section id="settings-right-system"></section></main>`);
   const scopeSettingsControlIds = loadFunction("scopeSettingsControlIds");
