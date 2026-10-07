@@ -56,6 +56,12 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Current)
         }
+        Some("head-check") => {
+            let base = it.next().ok_or(CliParseError::MissingFlag("base"))?.clone();
+            let head = it.next().cloned();
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::HeadCheck { base, head })
+        }
         Some("list") => parse_pr_list_args(it.collect::<Vec<_>>().as_slice()),
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
@@ -653,6 +659,7 @@ pub(super) fn run<E: CliEnv>(
     }
     let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
+        PrCommand::HeadCheck { base, head } => head_check::read(env, &base, head.as_deref(), out)?,
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
                 Some(pr) => {
@@ -2853,6 +2860,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        // Shard delivery evidence is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-pr-shard-delivery";
@@ -3135,6 +3150,14 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        // Lifecycle receipt acceptance is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-completed-settled-handoff";
@@ -3292,6 +3315,14 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        // Receipt independence is unrelated to the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-receipt-independent-pr";
@@ -5261,6 +5292,14 @@ mod tests {
         }
         if detached_delivery {
             if let PrCommand::Ready { number } = &command {
+                // Ready metadata delivery is independent of the host's free disk space.
+                gwt_config::Settings::update_global(|settings| {
+                    settings.verification.disk_budget_bytes = Some(0);
+                    settings.build_artifact_gc.below_bytes = 0;
+                    settings.build_artifact_gc.below_percent = 0;
+                    Ok(())
+                })
+                .expect("fixture disk admission");
                 env.pr_quarantine_contexts.insert(
                     *number,
                     PrQuarantineContext {

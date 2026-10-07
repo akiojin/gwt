@@ -4798,6 +4798,27 @@ button.workspace-board-ref:focus-visible {
   display: none;
 }
 
+:root[data-theme] .settings-supported-agents {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  color: var(--color-text);
+}
+
+:root[data-theme] .settings-supported-agents th,
+:root[data-theme] .settings-supported-agents td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+:root[data-theme] .settings-supported-agents th {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  font-weight: 600;
+}
+
 :root[data-theme] .settings-section {
   display: flex;
   flex-direction: column;
