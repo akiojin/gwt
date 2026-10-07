@@ -18,7 +18,7 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
   if (!liveUrl) await installEmbeddedRoutes(page);
-  await installBackend(page);
+  await installBackend(page, info.title.startsWith("four columns preserve"));
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
@@ -43,6 +43,10 @@ async function drag(page: Page, number: number, target: Locator) {
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {
   await expect(page.locator("[data-queue-column]")).toHaveCount(4);
   await expect(column(page,"backlog")).toContainText("First backlog issue");
+  await expect(row(page,1)).toContainText("Skipped");
+  await expect(row(page,1)).toContainText("not selected in this terminal queue");
+  await expect(row(page,1)).toBeVisible();
+  await page.screenshot({path:test.info().outputPath("queue-observations.png")});
   await expect(column(page,"queued")).toContainText("operator");
   await expect(column(page,"queued")).toContainText("auto-refill");
   await expect(column(page,"active")).toContainText("Running issue");
@@ -173,16 +177,17 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect(page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true})).toHaveValue("5");
 });
 
-async function installBackend(page: Page) {
+async function installBackend(page: Page, observeSkipped: boolean) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey})=>{
+  await page.addInitScript(({projectKey,observeSkipped})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
       launch_profile_source:"saved",launch_profile_summary:"Fixture agent",terminal_queue_auto_refill:false,
       terminal_queue_auto_refill_limit:3,terminal_queue:[{number:3,queued_by:"operator"},{number:4,queued_by:"auto-refill"}],queue_len:2};
     const entries=[
-      {number:1,title:"First backlog issue"},{number:2,title:"Second backlog issue"},
+      {number:1,title:"First backlog issue",...(observeSkipped ? {labels:["gwt-queued"],monitor_state:"skipped",
+        exclusion_reason:"not selected in this terminal queue"} : {})},{number:2,title:"Second backlog issue"},
       {number:3,title:"Operator queued issue",monitor_state:"queued",queue_position:1,queued_by:"operator"},
       {number:4,title:"Auto-refilled issue",monitor_state:"queued",queue_position:2,queued_by:"auto-refill"},
       {number:5,title:"Running issue",monitor_state:"launched"},{number:6,title:"Completed issue",state:"closed"},
@@ -208,5 +213,5 @@ async function installBackend(page: Page) {
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey});
+  },{projectKey,observeSkipped});
 }
