@@ -134,7 +134,8 @@ impl Poller {
             self.codex_account(&config, now),
             self.claude_account(&config, now, force).await,
         ];
-        let consumption = self.consumption(&config, &accounts, now, force);
+        let consumption =
+            tokio::task::block_in_place(|| self.consumption(&config, &accounts, now, force));
         UsageSnapshot {
             accounts,
             sessions: collect_sessions(&config),
