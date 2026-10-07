@@ -103,6 +103,12 @@ struct Arena {
 impl Arena {
     fn new() -> Self {
         let home = tempfile::tempdir().expect("home tempdir");
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let root = tempfile::tempdir().expect("repo root tempdir");
         let repo = root.path().join("main");
         let sibling = root.path().join("sibling");

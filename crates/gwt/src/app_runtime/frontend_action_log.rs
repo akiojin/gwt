@@ -697,7 +697,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_max_active_agents", "issue_monitor")
                 .target(max_active_agents.to_string())
         }
-        FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels } => {
+        FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels, .. } => {
             FrontendUserActionLog::new("set_issue_monitor_allowed_labels", "issue_monitor")
                 .count(allowed_labels.len())
         }

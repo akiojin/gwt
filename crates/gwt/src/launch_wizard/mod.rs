@@ -108,8 +108,6 @@ pub enum LaunchWizardStep {
     DockerServiceSelect,
     DockerLifecycle,
     ExecutionMode,
-    SkipPermissions,
-    CodexFastMode,
 }
 
 /// SPEC-2014 FR-126/FR-128: progress rail クリックジャンプ（GotoStep）の対象フェーズ。
@@ -1203,6 +1201,9 @@ pub struct LaunchWizardState {
     /// setting came from. Recorded on the launch so a forced skip names the
     /// setting it overrode instead of appearing out of nowhere.
     permission_launch_source: gwt_agent::PermissionLaunchSource,
+    /// Monitor profile editing and silent launches retain their own preferences.
+    /// Ordinary wizard launches interpret legacy inputs as skip on / Fast off.
+    preserve_profile_launch_preferences: bool,
     manual_setup_initialized: bool,
     /// SPEC-2014 FR-126/FR-127: ManualSetup で Runtime ステップから Confirm へ
     /// 進んだか。Runtime(編集) と Confirm(サマリ+Launch) を区別する。QuickStart /

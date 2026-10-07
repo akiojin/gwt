@@ -89,7 +89,7 @@ pub(super) fn run<E: CliEnv>(
                 ));
                 return Ok(2);
             }
-            completion_verification_hash = verification.map(|record| record.content_hash);
+            completion_verification_hash = verification.map(|record| record.content_hash.clone());
             completion_session_id = Some(session_id);
         }
     }
@@ -1905,19 +1905,22 @@ mod tests {
         crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
         crate::cli::verification_record::save_plan(
             repo.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "session-missing".to_string(),
-                owner_number: None,
-                execution_binding: None,
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "session-missing".to_string(),
+                    owner_number: None,
+                    execution_binding: None,
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .unwrap();
         let (mut verification, _) = crate::cli::verification_record::run_verification(
@@ -1995,27 +1998,30 @@ mod tests {
         let baseline_command = format!("{command} {test_identity} -- --exact");
         crate::cli::verification_record::save_plan(
             repo.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: session_id.to_string(),
-                owner_number: Some(3248),
-                execution_binding: binding.clone(),
-                commands: vec![command.clone()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: vec![
-                    crate::cli::verification_record::VerificationQuarantineRequest {
-                        failed_command: command.clone(),
-                        test_identity: test_identity.to_string(),
-                        baseline_command: baseline_command.clone(),
-                        owner_issue: 3755,
-                        pr_number: 3854,
-                    },
-                ],
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: session_id.to_string(),
+                    owner_number: Some(3248),
+                    execution_binding: binding.clone(),
+                    commands: vec![command.clone()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: vec![
+                        crate::cli::verification_record::VerificationQuarantineRequest {
+                            failed_command: command.clone(),
+                            test_identity: test_identity.to_string(),
+                            baseline_command: baseline_command.clone(),
+                            owner_issue: 3755,
+                            pr_number: 3854,
+                        },
+                    ],
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .unwrap();
         let plan = crate::cli::verification_record::load_plan(repo.path())
@@ -2024,7 +2030,8 @@ mod tests {
         let marker = crate::cli::verification_record::quarantine_marker(test_identity, 3755);
         crate::cli::verification_record::save(
             repo.path(),
-            &crate::cli::verification_record::VerificationRunRecord {
+            &crate::cli::verification_record::VerificationRunRecord::from(crate::cli::verification_record::VerificationRunData {
+format_version: Some(1),
                 continuation: None,
                 lifecycle: None,
                 record_id: "vrr-typed-build".to_string(),
@@ -2070,11 +2077,11 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 plan_covered: true,
                 planned_missing: Vec::new(),
-                verification_plan_hash: plan.content_hash,
+                verification_plan_hash: plan.content_hash.clone(),
                 verification_plan_snapshot: None,
                 plan_derived: false,
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 

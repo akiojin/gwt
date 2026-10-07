@@ -94,6 +94,7 @@ impl LaunchWizardState {
             linked_issue_number: context.linked_issue_number,
             start_method_selected: false,
             permission_launch_source: gwt_agent::PermissionLaunchSource::StartWork,
+            preserve_profile_launch_preferences: false,
             manual_setup_initialized: false,
             runtime_confirmed: false,
             settings_revisited: false,
@@ -694,13 +695,6 @@ impl LaunchWizardState {
                 if let Some(option) = options.get(self.selected) {
                     self.mode = option.value.to_string();
                 }
-            }
-            LaunchWizardStep::SkipPermissions => {
-                self.skip_permissions = self.selected == 0;
-            }
-            LaunchWizardStep::CodexFastMode => {
-                self.codex_fast_mode =
-                    self.selected == 0 && self.current_agent_supports_fast_mode();
             }
             LaunchWizardStep::BranchNameInput => {}
         }
@@ -1384,14 +1378,18 @@ impl LaunchWizardState {
         }
     }
 
-    /// Issue #3462: Resume / Continue launches inherit the Skip Permissions
-    /// preference from the same source as Normal launches. The former
-    /// `mode == "normal"` gate silently dropped the flag on resume, leaving
-    /// restored agents stuck at permission prompts and persisting
-    /// `skip_permissions = false` into the relaunched Session, which then
-    /// poisoned every later restore of the same lineage.
+    /// Use saved launch choices only for Monitor profile editing and silent
+    /// Monitor launches. This purpose survives runtime hydration without
+    /// rewriting the profile or changing direct Session resume semantics.
+    pub fn use_profile_launch_preferences(&mut self) {
+        self.preserve_profile_launch_preferences = true;
+    }
+
+    /// L2: ordinary wizard launches silently interpret old interactive values
+    /// as the fixed permission setting, including Resume and Continue.
     pub(super) fn effective_skip_permissions(&self) -> bool {
-        self.skip_permissions
+        self.launch_target_is_agent()
+            && (!self.preserve_profile_launch_preferences || self.skip_permissions)
     }
 
     fn reset_default_launch_path(&mut self) {
@@ -1825,7 +1823,9 @@ impl LaunchWizardState {
     }
 
     pub(super) fn fast_mode_enabled_for_current_agent(&self) -> bool {
-        self.codex_fast_mode && self.current_agent_supports_fast_mode()
+        self.preserve_profile_launch_preferences
+            && self.codex_fast_mode
+            && self.current_agent_supports_fast_mode()
     }
 
     /// SPEC-2014 2026-05-18 amendment FR-D: filtered Execution Mode option
@@ -2011,7 +2011,7 @@ impl LaunchWizardState {
                 mode: self.mode.clone(),
                 resume_session_id: self.resume_session_id.clone(),
                 skip_permissions: self.skip_permissions,
-                codex_fast_mode: self.fast_mode_enabled_for_current_agent(),
+                codex_fast_mode: self.codex_fast_mode && self.current_agent_supports_fast_mode(),
             },
         );
     }
@@ -3018,7 +3018,7 @@ mod tests {
                 model: Some("gpt-6-astra".to_string()),
                 reasoning: Some("high".to_string()),
                 session_mode: gwt_agent::SessionMode::Continue,
-                skip_permissions: true,
+                skip_permissions: false,
                 fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
@@ -3040,15 +3040,14 @@ mod tests {
         // SPEC-2014 FR-034: saved docker_service が現 context にあれば saved を採用する。
         assert_eq!(view.selected_docker_service.as_deref(), Some("gwt"));
         assert_eq!(view.selected_docker_lifecycle, "restart");
-        // Issue #3462: Continue inherits the saved Skip Permissions preference.
         assert!(
-            state.skip_permissions,
-            "the saved preference remains stored"
+            !state.skip_permissions,
+            "the legacy preference remains stored"
         );
         assert!(view.skip_permissions);
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.fast_mode);
+        assert!(!view.fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
@@ -3576,9 +3575,9 @@ mod tests {
             "hydration preserves the saved preference"
         );
         assert!(view.skip_permissions);
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.fast_mode);
+        assert!(!view.fast_mode);
     }
 
     #[test]
@@ -3960,7 +3959,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_context_resolution_preserves_claude_fast_mode_draft() {
+    fn runtime_context_resolution_disables_legacy_claude_fast_mode() {
         let mut state = LaunchWizardState::open_start_work_with_previous_profile(
             context(branch("origin/develop"), "work/20260527-fast"),
             "origin/develop".to_string(),
@@ -3977,14 +3976,14 @@ mod tests {
             agent_id: "claude".to_string(),
         });
         state.apply(LaunchWizardAction::SetFastMode { enabled: true });
-        assert!(state.view().fast_mode);
+        assert!(!state.view().fast_mode);
 
         state.apply(LaunchWizardAction::Submit);
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::ResolveRuntime(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
-                    assert!(config.fast_mode);
+                    assert!(!config.fast_mode);
                 }
                 other => panic!("expected agent runtime resolve request, got {other:?}"),
             },
@@ -4005,19 +4004,19 @@ mod tests {
             open_branch_candidates: Vec::new(),
         });
 
-        assert!(state.view().fast_mode);
+        assert!(!state.view().fast_mode);
         // SPEC-2014 FR-127: ConfigureAndStart は Runtime→Confirm→Launch の3段。
         state.apply(LaunchWizardAction::Submit); // Runtime -> Confirm
         assert!(state.completion.is_none());
         assert!(state.view().show_confirm);
-        assert!(state.view().fast_mode);
+        assert!(!state.view().fast_mode);
         state.apply(LaunchWizardAction::Submit); // Confirm -> Launch
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
-                    assert!(config.fast_mode);
-                    assert!(config.args.windows(2).any(|pair| {
+                    assert!(!config.fast_mode);
+                    assert!(!config.args.windows(2).any(|pair| {
                         pair[0] == "--settings" && pair[1].ends_with("claude-settings-fast.json")
                     }));
                 }
@@ -4103,7 +4102,7 @@ mod tests {
         assert_eq!(claude_view.selected_model, "sonnet");
         assert_eq!(claude_view.selected_reasoning, "low");
         assert_eq!(claude_view.selected_execution_mode, "normal");
-        assert!(!claude_view.skip_permissions);
+        assert!(claude_view.skip_permissions);
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "codex".to_string(),
@@ -4120,9 +4119,13 @@ mod tests {
             "the Codex draft retains its preference"
         );
         assert!(codex_view.skip_permissions);
-        // Toggle visibility still follows the manual-setup launch path.
+        assert!(
+            state.codex_fast_mode,
+            "the legacy draft retains its raw Fast preference"
+        );
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!codex_view.show_skip_permissions);
-        assert!(codex_view.fast_mode);
+        assert!(!codex_view.fast_mode);
 
         state.apply(LaunchWizardAction::SetExecutionMode {
             mode: "normal".to_string(),

@@ -7376,7 +7376,7 @@ pub(crate) mod tests {
         let (code, output) = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
-                commands: plan.commands,
+                commands: plan.commands.clone(),
                 max_wait_secs: None,
                 headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
@@ -9034,7 +9034,7 @@ pub(crate) mod tests {
         let (run_code, run_out) = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
-                commands: plan.commands,
+                commands: plan.commands.clone(),
                 max_wait_secs: None,
                 headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
