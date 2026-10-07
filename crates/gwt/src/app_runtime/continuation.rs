@@ -157,7 +157,7 @@ fn prepare_fresh_execution_launch_session_start(
     window_is_current: impl Fn() -> bool,
 ) -> Result<bool, String> {
     if !window_is_current() {
-        return Ok(false);
+        return Err("fresh launch window changed before activation".to_string());
     }
     if readiness_nonce != Some(pending.readiness_nonce.as_str()) {
         return Err("the authenticated SessionStart readiness nonce did not match".to_string());

@@ -777,6 +777,7 @@ impl AppRuntime {
             self_close_ticket,
             closing_window_generation,
         );
+        self.pending_fresh_execution_finalizations.remove(id);
         self.profile_selections.remove(id);
     }
 

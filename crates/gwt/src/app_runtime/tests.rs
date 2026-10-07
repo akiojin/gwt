@@ -23770,6 +23770,94 @@ fn fresh_execution_queued_session_start_rejects_foreign_identity() {
 }
 
 #[test]
+fn fresh_execution_queued_readiness_rolls_back_after_pane_or_project_close() {
+    for (operation, project_close, close_worker_first) in [
+        ("pane-readiness-first", false, false),
+        ("pane-close-first", false, true),
+        ("project-close-first", true, true),
+    ] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let mut fixture = pending_fresh_execution_fixture(temp.path(), operation);
+        insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+        let generation = fixture.runtime.runtimes[&fixture.window_id].incarnation;
+        fixture
+            .runtime
+            .window_lifecycle_generations
+            .lock()
+            .unwrap()
+            .insert(fixture.window_id.clone(), generation);
+        let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+            .readiness_nonce
+            .clone();
+        fixture
+            .runtime
+            .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+        let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+            unreachable!();
+        };
+        let tasks = tasks.clone();
+        if project_close {
+            fixture.runtime.close_project_tab_events("tab-1");
+        } else {
+            fixture.runtime.close_window_events(&fixture.window_id);
+        }
+        assert!(
+            !fixture
+                .runtime
+                .pending_fresh_execution_finalizations
+                .contains_key(&fixture.window_id),
+            "{operation}: close must forget its in-flight entry"
+        );
+        if !close_worker_first {
+            // Run readiness while the closing generation is still present.
+            let readiness = tasks.lock().unwrap().remove(0);
+            readiness();
+        }
+        // The queued test spawner drains last-in first-out, so otherwise
+        // detached close completes before the earlier readiness transaction.
+        assert!(commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner,)
+                .unwrap(),
+            Some(fixture.predecessor_binding.clone()),
+            "{operation}"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &fixture.repo,
+                fixture.owner,
+                &fixture.operation_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
+            "{operation}: a closed Prepared candidate must release its owner fence"
+        );
+        assert!(
+            !fixture
+                .runtime
+                .sessions_dir
+                .join(format!("{}.toml", fixture.candidate_session_id))
+                .exists(),
+            "{operation}"
+        );
+        assert!(
+            !durable_launch_recovery_exists(
+                &fixture.runtime.sessions_dir,
+                &fixture.candidate_session_id,
+            ),
+            "{operation}"
+        );
+        assert!(
+            load_tracked_work_events(&fixture.repo).is_empty(),
+            "{operation}"
+        );
+    }
+}
+
+#[test]
 fn durable_launch_recovery_receipt_is_monotonic_and_replays_base_write_without_downgrade() {
     let _env_guard = env_test_lock()
         .lock()
