@@ -1,6 +1,97 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.112.0] - 2026-10-07
+
+### Bug Fixes
+
+- **ci:** Preserve long jobs across base synchronization
+- **pr:** WireRecord の記録 ID を clone する
+- **verify:** CI 委譲のキャンセル時ガードを許可する
+- **gui:** SessionStart の確定処理を worker に分離
+- **gui:** Close 後の queued readiness を exact rollback する
+- **gui:** Move launch preparation and monitor acknowledgements off event loop
+- **gui:** Remove remaining launch cache and stale cleanup stalls
+- **verify:** Preserve deferred FIFO across reservation sweeps
+- **gui:** Preserve readiness resend response after worker completion
+- **gui:** Join active readiness to pending finalization
+- **hook:** Measure warm prompt budget with thread CPU time
+- **agents:** CLI更新をAgent Settings内で完結させる
+- **agents:** 更新結果をcache refresh前に反映する
+- **agents:** Inline更新の説明と検証待機を整える
+- **gui:** Keep launch failure cleanup off event loop
+- **gui:** Prepare monitor failure snapshots off event loop
+- **verify:** Canonical 検証の全文ログを保持する
+- **runtime:** Preserve pending fresh launches and reclaim failed candidates
+- **issue-monitor:** Retain complete queue label observations
+- **monitor:** Preserve live unbound launches and wait receipts
+- **gui:** Evict exact failed genesis sessions from launch cache
+- **git:** Bound workspace merge verdict cache lifetime
+- **index:** Bound unchanged repairs and align cache fingerprints
+- **issue-monitor:** Stamp queue.push claims with the scan claim owner
+- **issue-monitor:** Hand off queue claims across local processes
+- **pr:** Align check summaries with current check states
+- **gui:** Prepare scheduled monitor completions on workers
+- **gui:** Coalesce terminal grids and prioritize resize
+- **gui:** Coalesce terminal grids across project clients
+- **gui:** Hand off async worker during usage consumption scans
+
+### Features
+
+- **settings:** Show supported agent installation versions
+
+### Miscellaneous Tasks
+
+- **work:** Preserve issue 4969 resume event
+- **work:** Preserve issue 4969 delivery handoff
+- **work:** Link issue 4969 delivery to pr 5123
+- **work:** Record issue 5042 delivery handoff
+- **work:** Record PR delivery metadata
+- **work:** #5087 調査の work shard を記録
+- **work:** Record PR 5122 for issue 5087
+- **work:** Record issue 5081 ready pr
+- **work:** Record synchronized PR metadata
+- **work:** Record issue 4959 delivery resumption
+- **work:** Record issue 4915 PR delivery
+- **work:** Record issue 4915 independent review
+- **work:** Record final fixture delivery state
+- **work:** Issue #5028 の配送監査と最終状態を記録
+- **work:** Record Issue 5028 delivery audit
+- **work:** Retain Issue 5028 pull request metadata
+- **work:** Record Issue 5028 successor pull request
+- **work:** Retain Issue 5028 independent review lifecycle
+- **work:** Preserve issue 5080 review resume events
+- **work:** Record issue 5080 ready pr
+- **work:** Record Issue 5066 pull request
+- **work:** Record merged launch worker delivery
+- **work:** Record launch fixture pull request
+- **work:** Record issue 5133 delivery
+- **work:** Deliver issue 5133 pr and resume records
+- **work:** Bind PR 5163 and preserve launch events
+- **work:** Retain issue 5117 resume record
+
+### Performance
+
+- **git:** Cache merge verdicts for unchanged branch tips
+
+### Testing
+
+- **ci:** Resolve the guarded paired cache runner
+- **gui:** Allow complete launch load probes on busy Windows hosts
+- **gui:** Batch launch pressure events for trace recording
+- **gui:** SessionStart と launch worker の統合回帰を確認
+- **gui:** Combine launch probe browser operations
+- **gui:** Isolate launch probe project between themes
+- **gui:** Wait for fresh launch fixture migration
+- **gui:** Isolate launch probes by browser backend process
+- **agents:** Assert saved profile updates stay free of launch errors
+- **runtime:** Await asynchronous fresh execution readiness
+- **launch-wizard:** Publish executable fixtures without inherited writers
+- **fixtures:** Publish Python and Node executables in child writers
+- **issue-monitor:** Align queue coverage status fixtures
+- **gui:** Capture wizard replies before console history eviction
+- **index:** Isolate repair regression home
+
 ## [9.111.0] - 2026-10-07
 
 ### Bug Fixes
