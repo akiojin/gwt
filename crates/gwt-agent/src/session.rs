@@ -2766,9 +2766,10 @@ fn apply_agent_session_id(session: &mut Session, agent_session_id: &str) {
 }
 
 /// Persist one hook event and an optional provider Session id under one
-/// bounded lease. A contended lease returns `WouldBlock` without changing the
-/// durable Session so the caller can fail open and keep action-critical hook
-/// output within its wall-clock budget.
+/// lease. SessionStart with a supplied provider id uses the authoritative
+/// durable Session transaction: readiness cannot precede its identity commit.
+/// Other bookkeeping uses a bounded lease and returns `WouldBlock` unchanged
+/// so latency-critical hooks can fail open within their wall-clock budget.
 pub fn persist_session_hook_metadata_with_wait(
     sessions_dir: &Path,
     session_id: &str,
@@ -2780,25 +2781,29 @@ pub fn persist_session_hook_metadata_with_wait(
     let agent_session_id = agent_session_id
         .map(str::trim)
         .filter(|agent_session_id| !agent_session_id.is_empty());
-    update_session_with_wait_and_durability(
-        sessions_dir,
-        session_id,
-        wait,
-        // Issue #3777: the hook only stamps liveness here and the next hook
-        // event rewrites it, so this write must not wait for the device inside
-        // the UserPromptSubmit budget.
-        SessionDurability::RenameOnly,
-        |session| {
-            if let Some(agent_session_id) = agent_session_id {
-                apply_agent_session_id(session, agent_session_id);
-            }
-            if session.project_state_root.is_none() {
-                session.project_state_root = project_state_root.map(Path::to_path_buf);
-            }
-            session.record_hook_event(event);
-            Ok(())
-        },
-    )
+    let update = |session: &mut Session| {
+        if let Some(agent_session_id) = agent_session_id {
+            apply_agent_session_id(session, agent_session_id);
+        }
+        if session.project_state_root.is_none() {
+            session.project_state_root = project_state_root.map(Path::to_path_buf);
+        }
+        session.record_hook_event(event);
+        Ok(())
+    };
+    if event == "SessionStart" && agent_session_id.is_some() {
+        update_session(sessions_dir, session_id, update)
+    } else {
+        // Issue #3777: liveness must not wait for the device inside the
+        // UserPromptSubmit budget.
+        update_session_with_wait_and_durability(
+            sessions_dir,
+            session_id,
+            wait,
+            SessionDurability::RenameOnly,
+            update,
+        )
+    }
 }
 
 /// Persist or clear a Session's Execution generation projection under the
