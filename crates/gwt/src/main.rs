@@ -1804,6 +1804,9 @@ enum UserEvent {
     },
     Frontend {
         client_id: ClientId,
+        // Snapshot the immutable registration for queue coalescing only.
+        // Dispatch still rechecks the live connection and window ownership.
+        client_scope: Option<app_runtime::ClientScope>,
         event: FrontendEvent,
         received_at: std::time::Instant,
     },
@@ -10677,6 +10680,7 @@ fn main() -> std::io::Result<()> {
                 client_id,
                 event,
                 received_at,
+                ..
             }) => {
                 // Resolve the immutable registration again after queueing: a disconnected
                 // client cannot retain input authority through the fallback queue.
