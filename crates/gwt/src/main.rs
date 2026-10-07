@@ -2081,6 +2081,8 @@ enum UserEvent {
     /// Completion of an off-event-loop physical answer submit to an exact
     /// live pane. Durable delivery acknowledgment begins only on this event.
     IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
+    PmWakeDeliveryComplete(app_runtime::pm::PmWakeDelivery),
+    IssueMonitorScheduledScanPrepared(Box<app_runtime::PreparedScheduledIssueMonitorScan>),
     /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
     /// Issue Monitor launch the daemon already released (daemon → GUI).
     IssueMonitorIdlePaneClose {
@@ -11129,6 +11131,12 @@ fn main() -> std::io::Result<()> {
                     outcome,
                 ));
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledScanPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_scheduled_scan_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
+                app.pm_wake_delivery_complete(delivery);
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
                 project_root,
