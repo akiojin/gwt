@@ -344,6 +344,15 @@ impl CliEnv for DefaultCliEnv {
                 return Err(io::Error::other(format!("Ready PR refused: {}. Register verify.plan and execute verify.run before retrying pr.create.", evidence.describe())));
             }
         }
+        self.inspect_pr_head(base, head, verified)
+    }
+
+    fn inspect_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: &str,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
         let current;
         let head = match head {
             Some(head) => head,

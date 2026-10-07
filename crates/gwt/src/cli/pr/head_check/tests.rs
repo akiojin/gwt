@@ -151,6 +151,131 @@ impl RemoteFixture {
         )
         .expect("compare the remote snapshot")
     }
+
+    fn canonical_record(&self) -> crate::cli::verification_record::VerificationRunRecord {
+        use crate::cli::verification_record as verification;
+        let commands = vec!["git --version".to_string()];
+        verification::save_plan(
+            &self.verified_repo,
+            &verification::VerificationPlanData {
+                format_version: None,
+                session_id: "head-check-read-session".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                worktree_fingerprint: String::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            }
+            .into(),
+        )
+        .unwrap();
+        verification::run_verification(&self.verified_repo, "head-check-read-session", &commands)
+            .unwrap()
+            .0
+    }
+
+    fn read_check(&self) -> (i32, serde_json::Value) {
+        let command = crate::cli::pr::parse(&[
+            "head-check".to_string(),
+            BASE_BRANCH.to_string(),
+            HEAD_BRANCH.to_string(),
+        ])
+        .expect("parse the independent head diagnostic");
+        let mut env = crate::cli::TestEnv::new(self.verified_repo.clone());
+        let mut output = String::new();
+        let code = crate::cli::pr::run(&mut env, command, &mut output).unwrap();
+        assert!(env.pr_create_call_log.is_empty());
+        assert!(env.pr_edit_call_log.is_empty());
+        assert!(env.pr_comments.is_empty());
+        (code, serde_json::from_str(&output).unwrap())
+    }
+}
+
+#[test]
+fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
+    use crate::cli::verification_record as verification;
+    let fixture = RemoteFixture::new();
+    let record = fixture.canonical_record();
+    fixture.sync_changed_base();
+    git(&fixture.verified_repo, &["fetch", "origin", HEAD_BRANCH]);
+    git(
+        &fixture.verified_repo,
+        &["merge", "--ff-only", &format!("origin/{HEAD_BRANCH}")],
+    );
+    let local_head = git(&fixture.verified_repo, &["rev-parse", "HEAD"]);
+    let (code, report) = fixture.read_check();
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["canonical_record_state"], "passed");
+    assert_eq!(report["record_id"], record.record_id);
+    assert_eq!(report["verified_head"], fixture.verified_head);
+    assert_eq!(report["local_head"], local_head);
+    assert_eq!(report["compared_head"], "remote_head");
+    assert_eq!(report["classification"], "bookkeeping_or_base_sync");
+    assert_eq!(report["local_verification_fresh"], false);
+    assert_eq!(report["diagnostic_only"], true);
+    assert_eq!(report["product_commits"], serde_json::json!([]));
+    assert_eq!(
+        verification::load(&fixture.verified_repo).unwrap().unwrap(),
+        record
+    );
+
+    let product_commit = fixture.commit_other("src.txt", "unverified source\n", "fix: product");
+    fixture.push_head();
+    let (code, report) = fixture.read_check();
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["classification"], "unverified_product");
+    assert_eq!(
+        report["product_commits"],
+        serde_json::json!([product_commit])
+    );
+    assert_eq!(report["product_files"], serde_json::json!(["src.txt"]));
+    assert_eq!(
+        verification::load(&fixture.verified_repo).unwrap().unwrap(),
+        record
+    );
+    assert_eq!(
+        git(&fixture.verified_repo, &["rev-parse", "HEAD"]),
+        local_head
+    );
+}
+
+#[test]
+fn head_check_read_refuses_missing_failed_and_corrupt_records() {
+    use crate::cli::verification_record as verification;
+    let fixture = RemoteFixture::new();
+    let (code, report) = fixture.read_check();
+    assert_eq!(code, 2);
+    assert_eq!(report["canonical_record_state"], "missing");
+    assert_eq!(report["classification"], "unprovable");
+    assert_eq!(report["local_verification_fresh"], false);
+
+    let mut record = fixture.canonical_record();
+    record.all_passed = false;
+    record.commands[0].exit_code = 1;
+    verification::save(&fixture.verified_repo, &record).unwrap();
+    let (code, report) = fixture.read_check();
+    assert_eq!(code, 2);
+    assert_eq!(report["canonical_record_state"], "failed");
+    assert_eq!(report["classification"], "unprovable");
+
+    record = verification::load(&fixture.verified_repo).unwrap().unwrap();
+    record.record_id = "corrupt-record".to_string();
+    crate::cli::trusted_store::write(
+        &fixture.verified_repo,
+        "verification-run.json",
+        &serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    let (code, report) = fixture.read_check();
+    assert_eq!(code, 2);
+    assert_eq!(report["canonical_record_state"], "integrity_failed");
+    assert_eq!(report["classification"], "unprovable");
+    assert_eq!(report["local_verification_fresh"], false);
 }
 
 #[test]

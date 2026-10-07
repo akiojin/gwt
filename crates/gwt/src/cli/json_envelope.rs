@@ -840,6 +840,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
+        "pr.head_check" => {
+            reject_unknown_params(params, &["base", "head"], "pr.head_check")?;
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: required_string(params, "base")?,
+                head: optional_string(params, "head")?,
+            })
+        }
         "pr.list" => CliCommand::Pr(PrCommand::List {
             stale_after_hours: optional_u64(params, "stale_after_hours")?
                 .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
@@ -5687,6 +5694,43 @@ mod tests {
             err("release.status", json!({"ensure": true})),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn pr_head_check_parses_as_a_read_only_diagnostic() {
+        assert_eq!(
+            ok("pr.head_check", json!({"base": "develop"})),
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: "develop".to_string(),
+                head: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "pr.head_check",
+                json!({"base": "develop", "head": "work/issue-5059"})
+            ),
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: "develop".to_string(),
+                head: Some("work/issue-5059".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("pr.head_check", json!({})),
+            CliParseError::MissingFlag("base")
+        ));
+        assert!(matches!(
+            err(
+                "pr.head_check",
+                json!({"base": "develop", "verified_head": "caller-sha"})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pr.head_check"
+            )
+        );
     }
 
     #[test]

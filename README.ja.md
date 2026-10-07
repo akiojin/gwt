@@ -1264,6 +1264,12 @@ runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### PR HEAD の検証
 
+`pr.head_check` に `params.base`（例: `develop`）と任意の `params.head` を渡すと、
+PR の作成・編集をせずに、正本の PASS 済み検証記録と live remote HEAD を比較できます。
+JSON の診断には record ID、検証済み/remote/base の SHA、product commit/file、local
+検証の freshness が含まれます。base 同期のみと判定されても stale な証跡は更新しません。
+記録が欠落・未完了・失敗・破損している場合は unprovable を返します。
+
 Ready PR の作成前に、`pr.create` は live remote branch と `verify.run` に記録された
 HEAD を比較します。応答と PR 本文には、両方の SHA、base の SHA、比較結果が残ります。
 `.gwt/` 内の bookkeeping と base 同期のみの先行は許可します。検証済み履歴と対象

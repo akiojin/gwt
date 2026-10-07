@@ -258,7 +258,16 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
         core.get("runs-on").and_then(Value::as_str),
         Some("windows-latest")
     );
-    assert!(core.get("if").is_none() && core.get("needs").is_none());
+    // #5059: wait for the cancellation decision without gating stability on
+    // classifier success. A failed/unknown source comparison still runs it.
+    assert_eq!(
+        core.get("if").and_then(Value::as_str),
+        Some("${{ !cancelled() }}")
+    );
+    assert_eq!(
+        core.get("needs").and_then(Value::as_str),
+        Some("source-sync")
+    );
     assert!(core.get("continue-on-error").is_none());
     let steps = run_steps(&core);
     let build = index_of_step_running(&steps, "cargo test -p gwt-core --all-features --no-run")
@@ -295,8 +304,14 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
 fn the_required_windows_check_requires_successful_core_stability() {
     let windows = job(&test_workflow(), "test-windows-rust");
     assert_eq!(
-        windows.get("needs").and_then(Value::as_str),
-        Some(CORE_STABILITY_JOB)
+        windows
+            .get("needs")
+            .and_then(Value::as_sequence)
+            .unwrap()
+            .iter()
+            .map(|dependency| dependency.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [CORE_STABILITY_JOB, "source-sync"]
     );
     assert_eq!(
         windows.get("if").and_then(Value::as_str),
