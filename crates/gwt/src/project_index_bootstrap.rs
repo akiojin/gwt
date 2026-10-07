@@ -1323,6 +1323,7 @@ mod tests {
             Duration::from_secs(3600),
         );
         let temp = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let root = temp.path().to_path_buf();
         let (proxy, events) = AppEventProxy::stub();
         let calls = Arc::new(AtomicUsize::new(0));
