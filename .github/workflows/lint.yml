@@ -23,6 +23,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  coverage:
+    uses: ./.github/workflows/coverage.yml
   audit:
     name: Cargo Deny (advisories + sources)
     runs-on: ubuntu-latest
@@ -37,8 +39,16 @@ jobs:
         run: cargo deny check advisories sources
   lint:
     name: Clippy & Rustfmt
+    needs: coverage
+    # A failed dependency normally skips this required job (reported as
+    # success by branch protection). Run the guard to propagate the failure.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require coverage thresholds
+        env:
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+        run: test "$COVERAGE_RESULT" = success
       - uses: actions/checkout@v7
       # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
       # list, so a changed set is never served the previous archive.
