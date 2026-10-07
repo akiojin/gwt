@@ -147,18 +147,10 @@ async function newWindow(page: Page, before: string[]): Promise<string> {
 }
 
 async function launch(page: Page, workId: string, branch: string): Promise<string> {
-  const { before, cursor } = await page.evaluate(id => {
-    const before = [...document.querySelectorAll<HTMLElement>(".workspace-window")]
-      .map(node => node.dataset.id || "");
-    const cursor = (window as any).__gwtPlaywrightMessageSequence || 0;
-    window.dispatchEvent(new CustomEvent("__gwt_test_send", {
-      detail: { kind: "open_launch_wizard", id, branch_name: "main" },
-    }));
-    return { before, cursor };
-  }, workId);
+  const { before } = await wizardRequest(page,
+    { kind: "open_launch_wizard", id: workId, branch_name: "main" }, true);
   const wizard = page.locator("#wizard-modal");
   await expect(wizard).toBeVisible({ timeout: 60_000 });
-  await latestWizard(page, cursor, true);
   await wizardAction(page, { kind: "use_start_method", method: "configure_and_start" });
   await wizardAction(page, { kind: "set_branch_mode", create_new: true });
   await wizardAction(page, { kind: "set_branch_name", value: branch });
@@ -177,28 +169,41 @@ async function launch(page: Page, workId: string, branch: string): Promise<strin
   return id;
 }
 
-async function latestWizard(page: Page, after: number, requireOpen = false): Promise<any> {
-  return (await page.waitForFunction(({ after, requireOpen }) => {
-    const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-      entry.sequence > after && entry.payload.kind === "launch_wizard_state"
-      && (!requireOpen || entry.payload.wizard)
-      && (!entry.payload.wizard || (!entry.payload.wizard.is_hydrating
-        && !entry.payload.wizard.runtime_resolution_pending
-        && !entry.payload.wizard.launch_materialization_pending)));
-    return message ? { wizard: message.payload.wizard } : null;
-  }, { after, requireOpen }, { timeout: 30_000 })).jsonValue();
+async function wizardRequest(page: Page, detail: unknown, requireOpen = false): Promise<any> {
+  return page.evaluate(({ detail, requireOpen }) => {
+    const before = [...document.querySelectorAll<HTMLElement>(".workspace-window")]
+      .map(node => node.dataset.id || "");
+    const after = (window as any).__gwtPlaywrightMessageSequence || 0;
+    const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])]
+      .reverse().find(socket => socket.readyState === WebSocket.OPEN
+        && new URL(socket.url).pathname === "/ws" && new URL(socket.url).searchParams.has("repo_hash"));
+    if (!socket) throw new Error("no project socket");
+    // Capture the reply before sending: Console traffic can evict it from the
+    // test bridge's 256-message history while Playwright collects DOM snapshots.
+    return new Promise<{ before: string[]; wizard: unknown }>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); socket.removeEventListener("message", reply); };
+      const reply = (event: MessageEvent) => {
+        let payload;
+        try { payload = JSON.parse(String(event.data)); } catch { return; }
+        const sequence = (window as any).__gwtPlaywrightMessageSequence || 0;
+        if (sequence <= after || payload?.kind !== "launch_wizard_state"
+          || (requireOpen && !payload.wizard)
+          || (payload.wizard && (payload.wizard.is_hydrating
+            || payload.wizard.runtime_resolution_pending
+            || payload.wizard.launch_materialization_pending))) return;
+        cleanup();
+        resolve({ before, wizard: payload.wizard });
+      };
+      const timer = setTimeout(() => { cleanup(); reject(new Error("Wizard reply timed out")); }, 30_000);
+      socket.addEventListener("message", reply);
+      window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail }));
+    });
+  }, { detail, requireOpen });
 }
 
 async function wizardAction(page: Page, action: unknown): Promise<any> {
-  const after = await page.evaluate(action => {
-    const cursor = (window as any).__gwtPlaywrightMessageSequence || 0;
-    window.dispatchEvent(new CustomEvent("__gwt_test_send", {
-      detail: { kind: "launch_wizard_action", action,
-        bounds: { x: 32, y: 32, width: 880, height: 520 } },
-    }));
-    return cursor;
-  }, action);
-  return latestWizard(page, after);
+  return wizardRequest(page, { kind: "launch_wizard_action", action,
+    bounds: { x: 32, y: 32, width: 880, height: 520 } });
 }
 
 async function pmRoundtrip(page: Page, id: string): Promise<number> {
