@@ -663,6 +663,9 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_lease:: -- --test-threads=1
         timeout-minutes: 15
+      - name: Run Windows verification driver relink regression
+        run: cargo test -p gwt --test verification_driver_cli_test -- --test-threads=1
+        timeout-minutes: 15
       # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
       # can tell the Issue Monitor its silence is a wait rather than a stall.
       # Both the acceptance of a declaration and its durable prefs fallback are
