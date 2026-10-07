@@ -177,7 +177,12 @@ pub fn issue_cache_source_fingerprint(
             Ok(value) => value,
             Err(_) => continue,
         };
-        let body = fs::read_to_string(issue_dir.join("body.md")).unwrap_or_default();
+        // Match Python Path.read_text's universal-newline decoding before
+        // truncation; otherwise a successful index of a CRLF body looks stale.
+        let body = fs::read_to_string(issue_dir.join("body.md"))
+            .unwrap_or_default()
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
         let mut labels = match meta.get("labels") {
             Some(Value::String(label)) => vec![label.clone()],
             Some(Value::Array(values)) => values
