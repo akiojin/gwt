@@ -23835,7 +23835,7 @@ fn fresh_execution_queued_readiness_cannot_revive_an_exact_rollback() {
     fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
-    fixture.runtime.handle_launch_complete(
+    fixture.runtime.handle_launch_complete_and_drain(
         fixture.window_id.clone(),
         Err("spawn failed before readiness worker".to_string()),
     );
