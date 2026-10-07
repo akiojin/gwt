@@ -8328,8 +8328,10 @@ impl IssueMonitorState {
     /// autonomous launch. A launch whose window is still tracked (alive) is
     /// left in place and the PM is asked to steer it — tearing down a live
     /// agent loses its work, and a stall is not a decision the user can make.
-    /// A launch with no window is lost: it is requeued as a transient failure
-    /// (fresh launch). Neither path parks the Issue. Idempotent per stuck
+    /// An unbound launch first adopts a fresh live pane; observed runtime also
+    /// vetoes recovery while the canvas snapshot is unavailable (Issue #5066).
+    /// Without either, it is requeued as a transient failure (fresh launch).
+    /// Neither path parks the Issue. Idempotent per stuck
     /// window: a steering request re-arms the timeout and a requeued issue is
     /// no longer launched. Issue #4608: a tracked window whose pane has also
     /// been silent for the whole timeout is not alive after all; it is released
@@ -8342,8 +8344,14 @@ impl IssueMonitorState {
         }
         self.stuck_autonomous_issues(now)
             .into_iter()
-            .map(|issue_number| {
+            .filter_map(|issue_number| {
                 let window_id = self.launched_windows.get(&issue_number).cloned();
+                if window_id.is_none()
+                    && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
+                        || self.has_observed_monitor_runtime(issue_number))
+                {
+                    return None;
+                }
                 let outcome = if let Some(window_id) = window_id {
                     match self.silent_launch_release_reason(issue_number, &window_id, now) {
                         Some(reason) => {
@@ -8366,7 +8374,7 @@ impl IssueMonitorState {
                         now,
                     )
                 };
-                (issue_number, outcome)
+                Some((issue_number, outcome))
             })
             .collect()
     }
@@ -11124,7 +11132,12 @@ impl IssueMonitorState {
                 // Issue #4802 AC-1: a stale launch whose pane is running lost
                 // its ACK, not its launch. Bind the pane; never requeue an
                 // Issue that is already being worked.
-                if stale && self.bind_observed_live_pane_to_unbound_launch(issue_number, now) {
+                // Issue #5066: a cold daemon may have process evidence before
+                // its first canvas snapshot; that launch is still alive too.
+                if stale
+                    && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
+                        || self.has_observed_monitor_runtime(issue_number))
+                {
                     continue;
                 }
                 if !(materializer_dead && stale) {
@@ -11148,7 +11161,10 @@ impl IssueMonitorState {
                     let stale =
                         rfc3339_elapsed_secs(claimed_at, now).is_some_and(|elapsed| elapsed >= ttl);
                     // Issue #4802 AC-1: see the delivery branch above.
-                    if stale && self.bind_observed_live_pane_to_unbound_launch(issue_number, now) {
+                    if stale
+                        && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
+                            || self.has_observed_monitor_runtime(issue_number))
+                    {
                         continue;
                     }
                     if stale {
@@ -32760,6 +32776,97 @@ mod tests {
                 .recover_stuck_autonomous("2026-06-29T01:05:00Z")
                 .is_empty(),
             "no longer launched ⇒ idempotent"
+        );
+    }
+
+    #[test]
+    fn issue_5066_stuck_recovery_rebinds_a_restored_live_pane_without_relaunching() {
+        for status in [WindowState::Running, WindowState::Idle] {
+            let mut original = stuck_monitor(42, "2026-06-29T00:00:00Z");
+            original.launched_windows.remove(&42);
+            let mut monitor =
+                IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original.prefs());
+            monitor.record_candidate(issue(42));
+            monitor.record_window_snapshot(pane_snapshot(
+                "2026-06-29T01:00:00Z",
+                vec![live_pane_observation("tab-1::restored-agent", 42, status)],
+            ));
+
+            // The daemon runs the stuck sweep before idle/unbound reconciliation.
+            assert!(monitor
+                .recover_stuck_autonomous("2026-06-29T01:00:00Z")
+                .is_empty());
+            assert_eq!(
+                monitor.launched_window_id(42).as_deref(),
+                Some("tab-1::restored-agent")
+            );
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::Launched
+            );
+            assert_eq!(monitor.active_issue_numbers(), vec![42]);
+            assert_eq!(monitor.attempt_count(42), 0);
+            monitor.set_gui_connected(true);
+            monitor.set_max_active_agents(2);
+            monitor.terminal_queue_push(&[43], "test", "2026-06-29T01:00:00Z");
+            monitor.record_candidate(issue(43));
+            assert_eq!(
+                monitor
+                    .next_launch_request("2026-06-29T01:00:00Z")
+                    .expect("the free slot admits another Issue")
+                    .issue_number,
+                43,
+                "the restored Issue is not relaunched"
+            );
+            assert!(monitor
+                .recover_stuck_autonomous("2026-06-29T01:05:00Z")
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn issue_5066_stuck_recovery_preserves_live_runtime_without_a_canvas_snapshot() {
+        let now = "2026-06-29T04:00:00Z";
+        let mut original = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        original.launched_windows.remove(&42);
+        original
+            .launching_claimed_at
+            .insert(42, "2026-06-29T00:00:00Z".to_string());
+        original.declare_autonomous_wait(
+            42,
+            "verification",
+            "lease available",
+            "2026-06-29T00:01:00Z",
+        );
+        original.record_monitor_runtime_counts(101, 1001, BTreeMap::from([(42, 1)]), now);
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original.prefs());
+        monitor.record_candidate(issue(42));
+        let before = monitor.prefs();
+
+        // A cold daemon expires stale anchors before its stuck sweep, with no snapshot yet.
+        assert!(monitor.expire_stale_unbound_launches(now).is_empty());
+        assert!(monitor.recover_stuck_autonomous(now).is_empty());
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "live runtime keeps tracking, the expired wait and attempts"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launching
+        );
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(2);
+        monitor.terminal_queue_push(&[43], "test", now);
+        monitor.record_candidate(issue(43));
+        assert_eq!(
+            monitor
+                .next_launch_request(now)
+                .expect("the free slot admits another Issue")
+                .issue_number,
+            43,
+            "the live runtime is not relaunched"
         );
     }
 
