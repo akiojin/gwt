@@ -321,6 +321,12 @@ impl CleanupReadinessCache {
                 } else {
                     None
                 };
+                // Prune obsolete tips only on insertion, keeping warm lookups constant-time.
+                let current_shas: HashSet<&str> =
+                    tips.values().map(|tip| tip.sha.as_str()).collect();
+                self.verdicts.retain(|(branch, base), _| {
+                    current_shas.contains(branch.as_str()) && current_shas.contains(base.as_str())
+                });
                 self.verdicts.insert(key, reason);
                 reason
             };
@@ -888,6 +894,11 @@ mod tests {
         let before = gwt_core::process::thread_git_spawn_count();
         assert_eq!(cache.base_target(repo, "work/cache", &tips).unwrap(), first);
         assert!(gwt_core::process::thread_git_spawn_count() > before);
+        assert_eq!(
+            cache.verdicts.len(),
+            1,
+            "obsolete SHA pairs must be evicted"
+        );
     }
 
     #[test]
