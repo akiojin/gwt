@@ -56040,6 +56040,108 @@ fn open_agent_settings_sets(
     (runtime, recorded_events, events)
 }
 
+#[test]
+fn app_runtime_agent_settings_update_preserves_the_saved_profile_and_wizard() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let profile = codex_issue_monitor_launch_profile();
+    let (mut runtime, recorded, opened) =
+        open_agent_settings_sets(temp.path(), &repo, vec![profile]);
+    let before = agent_settings_view(&opened);
+    assert_eq!(before.selected_launch_target, "agent");
+    assert!(before.error.is_none());
+    let model = before.selected_model.clone();
+    let reasoning = before.selected_reasoning.clone();
+    // The update must never run the host's real package manager in a test.
+    let bin = write_fixture_runners(temp.path(), &["npm", "codex"]);
+    let mut settings = Settings::default();
+    pin_launch_agents(&mut settings, &bin);
+    let _path = ScopedEnvVar::set(
+        "PATH",
+        &settings.profiles.get("default").unwrap().env_vars["PATH"],
+    );
+    write_profile_config(runtime.profile_config_path.as_ref().unwrap(), &settings);
+    let context = runtime.test_context();
+    let wizard_id = runtime
+        .launch_wizard_for(&context)
+        .unwrap()
+        .wizard_id
+        .clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs_before = fs::read(&prefs_path).unwrap();
+
+    let events =
+        runtime.handle_launch_wizard_action(&context, LaunchWizardAction::RunAgentSetup, None);
+    let updated = agent_settings_view(&events);
+    assert!(updated.error.is_none(), "{:?}", updated.error);
+    assert_eq!(updated.selected_launch_target, "agent");
+    assert_eq!(updated.selected_model, model);
+    assert_eq!(updated.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert!(runtime.runtimes.is_empty());
+    assert!(updated.agent_setup.as_ref().unwrap().pending);
+    wait_for_recorded_event("CLI update result", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchWizardAgentUpdated { .. }
+            )
+        })
+    });
+    let (result_id, result) = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::LaunchWizardAgentUpdated { wizard_id, result } => {
+                Some((wizard_id.clone(), result.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(result_id, wizard_id);
+    let completed = runtime.handle_launch_wizard_agent_updated(result_id, *result);
+    let view = agent_settings_view(&completed);
+    assert!(!view.agent_setup.as_ref().unwrap().pending);
+    assert!(view
+        .agent_setup
+        .as_ref()
+        .unwrap()
+        .status
+        .as_ref()
+        .unwrap()
+        .contains("1.2.3"));
+    assert_eq!(view.selected_model, model);
+    assert_eq!(view.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert_eq!(
+        runtime
+            .launch_wizard_cache
+            .agent_options()
+            .into_iter()
+            .find(|agent| agent.id == "codex")
+            .unwrap()
+            .installed_version
+            .as_deref(),
+        Some("1.2.3")
+    );
+}
+
 fn agent_settings_view(events: &[OutboundEvent]) -> &gwt::LaunchWizardView {
     events
         .iter()
