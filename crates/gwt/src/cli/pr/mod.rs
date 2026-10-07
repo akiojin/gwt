@@ -5681,6 +5681,47 @@ mod tests {
     }
 
     #[test]
+    fn issue_5108_pr_checks_pending_details_override_green_rollup() {
+        for mode in ["checks-pending", "checks-pending-fallback"] {
+            with_fake_gh(mode, |repo_path| {
+                let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12)
+                    .expect("pending exit code is a successful checks read");
+                assert_eq!(checks.ci_status, "PENDING");
+                assert!(checks
+                    .summary
+                    .contains("CI: PENDING (5 unfinished, 3 required)"));
+                assert_eq!(checks.merge_status, "BLOCKED");
+                let data = serde_json::to_value(&checks).unwrap();
+                assert_eq!(data["check_counts"]["in_progress"], 5);
+                assert_eq!(data["check_counts"]["failure"], 1);
+                assert_eq!(data["required_pending_count"], 3);
+                assert_eq!(data["ci_status"], "PENDING");
+                assert_eq!(data["merge_status"], "BLOCKED");
+            });
+        }
+    }
+
+    #[test]
+    fn issue_5108_pr_checks_do_not_infer_unknown_required_membership() {
+        with_fake_gh("checks-pending-partial-required", |repo_path| {
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).unwrap();
+            assert!(checks.summary.contains("CI: PENDING (1 unfinished)"));
+            assert_eq!(checks.required_pending_count, None);
+        });
+    }
+
+    #[test]
+    fn issue_5108_pr_checks_preserve_github_merge_state() {
+        for state in ["BLOCKED", "BEHIND", "UNSTABLE"] {
+            with_fake_gh(&format!("checks-merge-{state}"), |repo_path| {
+                let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).unwrap();
+                assert_eq!(checks.merge_status, state);
+                assert!(checks.summary.contains(&format!("Merge: {state}")));
+            });
+        }
+    }
+
+    #[test]
     fn pr_checks_response_returns_error_when_gh_fails() {
         let err = parse_pr_checks_items_response("", "auth failed", false).unwrap_err();
         assert!(
@@ -5815,6 +5856,8 @@ mod tests {
 
         with_fake_gh("checks-fallback", |repo_path| {
             let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert_eq!(checks.ci_status, "SUCCESS");
+            assert_eq!(checks.required_pending_count, None);
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].workflow, "coverage");
             assert_eq!(checks.checks[0].url, "https://example.test/checks/12");
