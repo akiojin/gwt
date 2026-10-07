@@ -4,8 +4,11 @@
 //! charged in points that grow with the page size, so one `--limit 999` list
 //! can burn hundreds of points. The REST `core` budget is charged per request
 //! regardless of size (one page of 100 rows = one request), and it is a
-//! separate 5,000/h pool. Every Issue Monitor hot path reads through here so
-//! its cost per scan is a bounded number of REST requests and zero GraphQL.
+//! separate 5,000/h pool. Ordinary lists retain a bounded REST request cost;
+//! the queue label collection opts into complete pagination (#5080 AC-1).
+//! Both paths spend zero GraphQL points.
+
+use std::collections::HashSet;
 
 use serde_json::Value;
 
@@ -37,14 +40,39 @@ pub fn page_endpoint(endpoint: &str, page: usize) -> String {
 /// `fetch` runs one `gh api <path> --include` and answers its stdout, or the failure
 /// text; a failed page fails the whole read so a partial list never looks
 /// complete.
-pub fn read_pages_with<F>(endpoint: &str, mut fetch: F) -> Result<RestPages, String>
+pub fn read_pages_with<F>(endpoint: &str, fetch: F) -> Result<RestPages, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    read_pages_with_budget(endpoint, Some(REST_MAX_PAGES_PER_READ), fetch)
+}
+
+/// Read a label-scoped collection to its final Link page. This opt-in reader
+/// does not change the request cap of ordinary lists. A failed page or repeated
+/// continuation fails the whole read rather than returning a partial collection.
+pub fn read_complete_pages_with<F>(endpoint: &str, fetch: F) -> Result<RestPages, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    read_pages_with_budget(endpoint, None, fetch)
+}
+
+fn read_pages_with_budget<F>(
+    endpoint: &str,
+    max_pages: Option<usize>,
+    mut fetch: F,
+) -> Result<RestPages, String>
 where
     F: FnMut(&str) -> Result<String, String>,
 {
     let mut rows = Vec::new();
     let mut requests = 0;
     let mut next = Some(page_endpoint(endpoint, 1));
+    let mut seen = HashSet::new();
     while let Some(path) = next.take() {
+        if max_pages.is_none() && !seen.insert(path.clone()) {
+            return Err(format!("gh api {path}: repeated HTTP Link continuation"));
+        }
         let stdout = fetch(&path)?;
         requests += 1;
         let (headers, body) = stdout
@@ -72,7 +100,7 @@ where
         let page_rows: Vec<Value> =
             serde_json::from_str(body).map_err(|e| format!("gh api {path} JSON: {e}"))?;
         rows.extend(page_rows);
-        if requests == REST_MAX_PAGES_PER_READ {
+        if max_pages == Some(requests) {
             break;
         }
     }
@@ -246,6 +274,54 @@ mod tests {
         assert_eq!(pages.requests, REST_MAX_PAGES_PER_READ);
         assert_eq!(pages.rows.len(), REST_MAX_PAGES_PER_READ * REST_PAGE_SIZE);
         assert!(pages.capped, "next remains after the request budget");
+    }
+
+    #[test]
+    fn queue_label_complete_pages_read_past_the_regular_page_budget() {
+        let mut calls = 0;
+        let pages = read_complete_pages_with("repos/o/r/issues?labels=gwt-queued", |_| {
+            calls += 1;
+            let link = if calls <= REST_MAX_PAGES_PER_READ {
+                format!(
+                    "Link: <https://api.github.com/repos/o/r/issues?page={}>; rel=\"next\"\r\n",
+                    calls + 1
+                )
+            } else {
+                String::new()
+            };
+            Ok(format!("HTTP/2.0 200 OK\n{link}\r\n{}", rows(1, calls)))
+        })
+        .unwrap();
+        assert_eq!(calls, REST_MAX_PAGES_PER_READ + 1);
+        assert_eq!(pages.rows.len(), REST_MAX_PAGES_PER_READ + 1);
+        assert!(!pages.capped);
+    }
+
+    #[test]
+    fn queue_label_complete_pages_reject_a_repeated_continuation() {
+        let mut calls = 0;
+        let error = read_complete_pages_with("repos/o/r/issues?labels=gwt-queued", |_| {
+            calls += 1;
+            Ok("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page=2>; rel=\"next\"\r\n\r\n[]".to_string())
+        })
+        .unwrap_err();
+        assert!(error.contains("repeated"), "{error}");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn queue_label_complete_pages_fail_on_an_error_after_the_regular_budget() {
+        let mut calls = 0;
+        let error = read_complete_pages_with("repos/o/r/issues?labels=gwt-queued", |_| {
+            calls += 1;
+            if calls > REST_MAX_PAGES_PER_READ {
+                return Err("HTTP 502 on the queued continuation".to_string());
+            }
+            Ok(format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page={}>; rel=\"next\"\r\n\r\n[]", calls + 1))
+        })
+        .unwrap_err();
+        assert!(error.contains("HTTP 502"), "{error}");
+        assert_eq!(calls, REST_MAX_PAGES_PER_READ + 1);
     }
 
     #[test]

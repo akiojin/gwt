@@ -750,6 +750,12 @@ impl AppRuntime {
             Legacy(Box<gwt_agent::Session>),
             Unavailable(String),
         }
+        // Closing the pane forgets its pending maps immediately. Carry the
+        // exact Prepared request into the same finalizer that owns its PTY.
+        let pending_fresh_execution = self
+            .pending_fresh_execution_launches
+            .get(window_id)
+            .cloned();
 
         // Capture only immediately available evidence at the close ACK
         // boundary: a busy pane is Unknown, never a reason to delay close.
@@ -785,6 +791,20 @@ impl AppRuntime {
         });
         let capability_token = self.agent_capability_tokens.remove(window_id);
         let capability_issuer = self.agent_capability_issuer.clone();
+        let closing_prepared_candidate = pending_fresh_execution.as_ref().is_some_and(|pending| {
+            cached_session
+                .as_ref()
+                .and_then(|cached| gwt_agent::SessionExecutionIdentity::from_session(cached).ok())
+                .flatten()
+                .as_ref()
+                == Some(&pending.session_identity)
+                && capability_issuer
+                    .as_ref()
+                    .zip(capability_token.as_deref())
+                    .is_some_and(|(issuer, token)| {
+                        issuer.prepared_token_is_current(token, &pending.binding)
+                    })
+        });
         let capability_binding = match (
             capability_issuer.as_ref(),
             self_close_ticket.as_ref(),
@@ -865,7 +885,11 @@ impl AppRuntime {
             }
         }
         if let Some(session) = session.as_ref() {
-            self.launch_wizard_cache.mark_stopped(&session.session_id);
+            if closing_prepared_candidate {
+                self.launch_wizard_cache.forget_session(&session.session_id);
+            } else {
+                self.launch_wizard_cache.mark_stopped(&session.session_id);
+            }
             self.mark_cached_active_work_session_stopped(
                 &session.tab_id,
                 &session.session_id,
@@ -1078,6 +1102,50 @@ impl AppRuntime {
                 writer.invalidate_input_generation();
             }
 
+            let mut fresh_candidate_removed = false;
+            if let Some(pending) = pending_fresh_execution
+                .as_ref()
+                .filter(|_| local_process_exited)
+            {
+                if super::continuation::pending_fresh_execution_attempt_status(pending)
+                    == Some(gwt::cli::execution_state::ContinuationAttemptStatus::Prepared)
+                {
+                    let cleanup =
+                        gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+                            &pending.worktree_path,
+                            pending.owner,
+                            &pending.request,
+                            "fresh linked-owner pane closed before SessionStart",
+                            &sessions_dir,
+                            &pending.session_identity,
+                            || {
+                                super::continuation::reject_continue_work_workspace_commit(
+                                    &pending.project_root,
+                                    &pending.worktree_path,
+                                    &pending.operation_id,
+                                )
+                            },
+                        );
+                    match cleanup {
+                        Ok(true) => {
+                            fresh_candidate_removed = true;
+                            terminal_persisted = true;
+                            if let Err(error) = super::continuation::clear_durable_launch_recovery(
+                                &sessions_dir,
+                                &pending.binding.session_id,
+                            ) {
+                                finalizer_ok = false;
+                                tracing::warn!(%window_id, %error, "closed fresh-launch recovery receipt cleanup remains pending");
+                            }
+                        }
+                        result => {
+                            finalizer_ok = false;
+                            tracing::warn!(%window_id, ?result, "closed fresh-launch candidate retained exact recovery evidence");
+                        }
+                    }
+                }
+            }
+
             if local_process_exited && !terminal_persisted {
                 match session_authority.as_ref() {
                     Some(CloseSessionAuthority::Legacy(expected)) => {
@@ -1108,10 +1176,9 @@ impl AppRuntime {
                 &window_id,
                 closing_window_generation,
             );
-            if let Some(session) = session
-                .as_ref()
-                .filter(|_| terminal_persisted && cleanup_generation_is_current)
-            {
+            if let Some(session) = session.as_ref().filter(|_| {
+                !fresh_candidate_removed && terminal_persisted && cleanup_generation_is_current
+            }) {
                 let ephemeral = Self::session_uses_ephemeral_worktree_for_project(
                     project_root.as_deref(),
                     session,

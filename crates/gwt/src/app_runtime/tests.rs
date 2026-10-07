@@ -4318,6 +4318,7 @@ fn sample_runtime_with_events(
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
+        work_merge_status_cache: Default::default(),
         work_cleanup_ready_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
@@ -23509,6 +23510,20 @@ fn pending_fresh_execution_fixture_with_owner_kind(
     operation_id: &str,
     owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
 ) -> PendingFreshExecutionFixture {
+    pending_fresh_execution_fixture_with_predecessor_status(
+        temp_root,
+        operation_id,
+        owner_kind,
+        false,
+    )
+}
+
+fn pending_fresh_execution_fixture_with_predecessor_status(
+    temp_root: &Path,
+    operation_id: &str,
+    owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
+    completed: bool,
+) -> PendingFreshExecutionFixture {
     let repo = temp_root.join(format!("repo-{operation_id}"));
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -23531,9 +23546,13 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         gwt::cli::execution_state::settle(
             &repo,
             &predecessor_session_id,
-            gwt::cli::execution_state::ExecutionSettlement::Blocked {
-                reason: "legacy terminal blocker".to_string(),
-                missing_verification: Some("legacy evidence gap".to_string()),
+            if completed {
+                gwt::cli::execution_state::ExecutionSettlement::Completed
+            } else {
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "legacy terminal blocker".to_string(),
+                    missing_verification: Some("legacy evidence gap".to_string()),
+                }
             },
         )
         .expect("settle Blocked predecessor"),
@@ -23552,14 +23571,25 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         operation_id: operation_id.to_string(),
         principal_id: "gwt-host-launch".to_string(),
         work_id: None,
-        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        source: if completed {
+            gwt::cli::execution_state::MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+        } else {
+            gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE
+        }
+        .to_string(),
         session_binding_id: format!("binding-{operation_id}"),
         initial_session_id: candidate_session_id.clone(),
         entrypoint: "$gwt-execute #2359".to_string(),
         requested_at: Utc::now(),
     };
-    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(&repo, owner, &request)
-        .expect("prepare fresh successor");
+    if completed {
+        gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+    } else {
+        gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+            &repo, owner, &request,
+        )
+    }
+    .expect("prepare fresh successor");
     let planned =
         gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
             .expect("derive prepared binding");
@@ -23968,6 +23998,78 @@ fn fresh_execution_queued_readiness_rolls_back_after_pane_or_project_close() {
             "{operation}"
         );
     }
+}
+
+#[test]
+fn fresh_execution_completed_predecessor_survives_terminal_grace_and_activates_once() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture_with_predecessor_status(
+        temp.path(),
+        "completed-requeue",
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        true,
+    );
+    let snapshots = fixture.runtime.terminal_window_snapshots();
+    assert!(
+        snapshots.is_empty(),
+        "a Prepared candidate must not be observed as its Completed predecessor: {snapshots:?}"
+    );
+    let observations = super::terminal_convergence::observe_terminal_windows_in_background(
+        &fixture.runtime.sessions_dir,
+        snapshots,
+        Duration::from_secs(60),
+    );
+    let now = Instant::now();
+    fixture.runtime.terminal_convergence_observed_events_at(
+        Duration::from_secs(60),
+        observations,
+        now,
+    );
+    fixture
+        .runtime
+        .close_expired_terminal_window_candidates_at(now + Duration::from_secs(61));
+    assert!(
+        fixture
+            .runtime
+            .window_lookup
+            .contains_key(&fixture.window_id),
+        "the Completed predecessor must not close its Prepared successor before Ready"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.predecessor_binding.clone()),
+    );
+    let nonce = format!("readiness-{}", fixture.operation_id);
+    fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+    commit_pending_fresh_execution(&mut fixture.runtime);
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert_eq!(
+        fixture.runtime.terminal_window_snapshots().len(),
+        1,
+        "the activated pane must return to normal terminal observation"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.binding.identity.clone()),
+        "one authenticated Ready must activate the fresh generation",
+    );
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.generations.len(), 2);
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+    );
 }
 
 #[test]
@@ -25490,6 +25592,230 @@ fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predeces
 
     assert!(!events.is_empty());
     assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn fresh_execution_generic_close_aborts_candidate_in_background() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture_with_predecessor_status(
+        temp.path(),
+        "fresh-generic-close",
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        true,
+    );
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let mut pending = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id].clone();
+    let mut candidate = gwt_agent::Session::load(
+        &fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id)),
+    )
+    .expect("candidate seed");
+    let mut active = fixture.runtime.active_agent_sessions[&fixture.window_id].clone();
+    let baseline = fixture.runtime.window_scoped_state_entry_count()
+        - fixture
+            .runtime
+            .window_scoped_state_residue(&fixture.window_id)
+            .len();
+    let root_pid = sysinfo::Pid::from_u32(std::process::id());
+    let mut system = sysinfo::System::new();
+    let mut rss_bytes = Vec::new();
+
+    // AC-2/AC-3: the same host runtime must accept the next attempt without
+    // retaining the failed candidate, PTY, writer, or window buffers.
+    for round in 0..5 {
+        if round > 0 {
+            let runtime = &mut fixture.runtime;
+            pending.operation_id = format!("fresh-generic-close-{round}");
+            candidate
+                .set_execution_binding(None)
+                .expect("clear previous launch seed binding");
+            candidate.id = format!("candidate-{}", pending.operation_id);
+            pending.request.operation_id = pending.operation_id.clone();
+            pending.request.initial_session_id = candidate.id.clone();
+            pending.request.session_binding_id = format!("binding-{}", pending.operation_id);
+            pending.request.requested_at = Utc::now();
+            gwt::cli::execution_state::prepare_successor(
+                &fixture.repo,
+                fixture.owner,
+                &pending.request,
+            )
+            .expect("prepare next launch after failed close");
+            pending.binding.identity =
+                gwt::cli::execution_state::prepared_successor_execution_binding(
+                    &fixture.repo,
+                    fixture.owner,
+                    &pending.request,
+                )
+                .expect("next candidate binding");
+            pending.binding.session_id = candidate.id.clone();
+            candidate
+                .set_execution_binding(Some(pending.binding.clone()))
+                .expect("bind next candidate");
+            candidate
+                .save(&runtime.sessions_dir)
+                .expect("save next candidate");
+            pending.session_identity =
+                gwt_agent::SessionExecutionIdentity::for_binding(&candidate, &pending.binding)
+                    .expect("next candidate identity");
+            persist_durable_launch_recovery(
+                &runtime.sessions_dir,
+                DurableLaunchRecoveryKind::FreshSuccessor {
+                    operation_id: pending.operation_id.clone(),
+                },
+                &candidate.id,
+                &fixture.repo,
+                &fixture.repo,
+                fixture.owner,
+                Some(&pending.binding),
+                Some(&gwt_agent::AgentId::Codex),
+            )
+            .expect("persist next recovery receipt");
+            let capability = fixture
+                .issuer
+                .issue_prepared(&fixture.repo, &candidate.id, pending.binding.clone())
+                .expect("issue next Prepared capability");
+            let raw_id = runtime
+                .tab_mut("tab-1")
+                .unwrap()
+                .workspace
+                .add_window(WindowPreset::Agent, canvas_bounds())
+                .id;
+            runtime.register_window("tab-1", &raw_id);
+            fixture.window_id = combined_window_id("tab-1", &raw_id);
+            fixture.operation_id = pending.operation_id.clone();
+            fixture.candidate_session_id = candidate.id.clone();
+            fixture.binding = pending.binding.clone();
+            fixture.token = capability.token.clone();
+            active.window_id = fixture.window_id.clone();
+            active.session_id = candidate.id.clone();
+            runtime
+                .active_agent_sessions
+                .insert(fixture.window_id.clone(), active.clone());
+            runtime
+                .agent_capability_tokens
+                .insert(fixture.window_id.clone(), capability.token);
+            runtime
+                .pending_fresh_execution_launches
+                .insert(fixture.window_id.clone(), pending.clone());
+            runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+        }
+        insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+        let pty = fixture.runtime.runtimes[&fixture.window_id].pty.clone();
+        let closed = fixture.runtime.close_window_outcome(&fixture.window_id);
+        assert!(closed.closed);
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &fixture.repo,
+                fixture.owner,
+                &fixture.operation_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+            "close acceptance must not perform durable rollback",
+        );
+        assert!(pty.try_wait().expect("probe live child").is_none());
+        for task in std::mem::take(&mut *tasks.lock().expect("queued finalizers")) {
+            task();
+        }
+        assert!(pty.try_wait().expect("probe reaped child").is_some());
+        drop(pty);
+        assert_pending_fresh_execution_was_rolled_back(&fixture);
+        assert_eq!(fixture.runtime.window_scoped_state_entry_count(), baseline);
+        assert!(fixture.runtime.pty_writers.read().unwrap().is_empty());
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[root_pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        rss_bytes.push(
+            system
+                .process(root_pid)
+                .expect("measured host process")
+                .memory(),
+        );
+    }
+    eprintln!(
+        "Issue #4959 AC-3: {}",
+        serde_json::json!({
+            "failed_launches": 5,
+            "host_rss_bytes_after_cleanup": rss_bytes,
+            "retained_window_entries": fixture.runtime.window_scoped_state_entry_count(),
+            "retained_pty_writers": fixture.runtime.pty_writers.read().unwrap().len(),
+        })
+    );
+}
+
+#[test]
+fn fresh_execution_generic_close_preserves_activated_or_replaced_candidate() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    for activated in [false, true] {
+        let operation = if activated {
+            "close-activated"
+        } else {
+            "close-replaced"
+        };
+        let mut fixture = pending_fresh_execution_fixture(temp.path(), operation);
+        let request = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+            .request
+            .clone();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        fixture.runtime.blocking_tasks = spawner;
+        let closed = fixture.runtime.close_window_outcome(&fixture.window_id);
+        assert!(closed.closed);
+        if activated {
+            gwt::cli::execution_state::activate_successor(&fixture.repo, fixture.owner, &request)
+                .expect("activation wins before finalizer");
+        } else {
+            replace_fresh_candidate_session_incarnation(
+                &fixture.runtime.sessions_dir,
+                &fixture.candidate_session_id,
+            );
+        }
+        let candidate_path = fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id));
+        let before = fs::read(&candidate_path).expect("candidate before finalizer");
+        for task in std::mem::take(&mut *tasks.lock().expect("queued finalizers")) {
+            task();
+        }
+        assert_eq!(
+            fs::read(&candidate_path).expect("retained candidate"),
+            before
+        );
+        assert!(durable_launch_recovery_exists(
+            &fixture.runtime.sessions_dir,
+            &fixture.candidate_session_id
+        ));
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &fixture.repo,
+                fixture.owner,
+                &fixture.operation_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status,
+            if activated {
+                gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+            } else {
+                gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
+            },
+        );
+    }
 }
 
 #[test]
@@ -39418,6 +39744,75 @@ fn count_worktree_listing(_started: Instant) {
 fn worktree_listings_on_this_thread() -> u64 {
     gwt_git::worktree::set_worktree_list_observer(count_worktree_listing);
     WORKTREE_LISTINGS.with(std::cell::Cell::get)
+}
+
+/// Issue #5116 AC-2: an ordinary ingest tick shares one worktree listing
+/// between intake and reconcile, just as the startup path already does.
+#[test]
+fn work_events_ingest_tick_lists_worktrees_once() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let mut seed = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-session-ingest-tick",
+        chrono::Utc::now(),
+    );
+    seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+    seed.title = Some("existing tick work".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
+        .expect("seed existing work");
+    let project_key = gwt_core::paths::resolve_project_scope(&repo).hash;
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path(&project_key);
+    let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
+    let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
+    let before = worktree_listings_on_this_thread();
+
+    let event = AppRuntime::prepare_work_events_ingest(
+        repo,
+        &work_items_path,
+        &state_path,
+        &projection_path,
+        None,
+    );
+
+    assert!(matches!(
+        event,
+        Some(UserEvent::WorkEventsIngested {
+            local_branches: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        worktree_listings_on_this_thread() - before,
+        1,
+        "intake and reconcile must share the same tick's worktree listing"
+    );
+
+    // The grouped store writes index.json; state_path names its legacy file.
+    // A failed next listing preserves existing bytes or an absent cursor.
+    let intake_index_path = state_path.with_extension("").join("index.json");
+    let work_items = fs::read(&work_items_path).ok();
+    assert!(
+        work_items.is_some(),
+        "fixture must contain durable Work history"
+    );
+    let intake_state = fs::read(&intake_index_path).ok();
+    let unavailable_repo = temp.path().join("not-a-repo");
+    fs::create_dir_all(&unavailable_repo).expect("unavailable repository dir");
+    let before = worktree_listings_on_this_thread();
+    assert!(AppRuntime::prepare_work_events_ingest(
+        unavailable_repo,
+        &work_items_path,
+        &state_path,
+        &projection_path,
+        None,
+    )
+    .is_none());
+    assert_eq!(worktree_listings_on_this_thread() - before, 1);
+    assert_eq!(fs::read(&work_items_path).ok(), work_items);
+    assert_eq!(fs::read(&intake_index_path).ok(), intake_state);
 }
 
 /// Issue #4378 AC-1: bootstrap lists each project's worktrees once on the
@@ -66615,6 +67010,20 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         "a change-free branch whose only diff is gwt's own writes stays cleanup-ready: \
          {cleanup_ready_branches:?}"
     );
+    // The worker must warm the persistent cache, not a private per-scan copy.
+    let tips = gwt_git::refs::branch_tip_snapshot(&repo).expect("tips");
+    let caches = runtime.work_merge_status_cache.borrow();
+    let mut cache = caches
+        .get(&repo)
+        .expect("project merge cache")
+        .lock()
+        .unwrap();
+    let before = gwt_core::process::thread_git_spawn_count();
+    assert!(cache
+        .base_target(&repo, "work/gwt-writes", &tips)
+        .unwrap()
+        .is_some());
+    assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
 }
 
 #[test]
