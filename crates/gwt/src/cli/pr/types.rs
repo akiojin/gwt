@@ -29,6 +29,8 @@ pub struct PrCheckItem {
     pub started_at: String,
     pub completed_at: String,
     pub workflow: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_required: Option<bool>,
 }
 
 /// Render-friendly aggregate used by `pr.checks`.
@@ -39,6 +41,10 @@ pub struct PrChecksSummary {
     pub merge_status: String,
     pub review_status: String,
     pub checks: Vec<PrCheckItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_counts: Option<gwt_git::pr_status::PrCheckCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_pending_count: Option<u32>,
 }
 
 /// What GitHub did when `pr.update_branch` asked it to merge the base branch
