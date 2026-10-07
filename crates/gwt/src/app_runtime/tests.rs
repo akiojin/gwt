@@ -24944,7 +24944,32 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
                         ),
                         "the same request must wait for its queued finalization"
                     );
+                    let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+                        unreachable!();
+                    };
+                    let worker = tasks.lock().unwrap().remove(0);
+                    worker();
+                    let (active_reply, active_result) = std::sync::mpsc::channel();
+                    fixture.runtime.resend_fresh_execution_ready(
+                        &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
+                        &gwt::AgentExecutionContinuationRequest {
+                            schema_version: 1,
+                            operation_id: "active-inflight-retry".to_string(),
+                            readiness_nonce: None,
+                        },
+                        active_reply,
+                    );
+                    assert!(
+                        matches!(
+                            active_result.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ),
+                        "Active resend must join the pending GUI completion"
+                    );
                     commit_pending_fresh_execution(&mut fixture.runtime);
+                    let active_receipt = active_result.try_recv().unwrap().unwrap().unwrap();
+                    assert_eq!(active_receipt.operation_id, "active-inflight-retry");
+                    assert_eq!(active_receipt.execution_binding, fixture.binding.identity);
                 }
                 reply
                     .send(

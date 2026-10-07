@@ -7329,22 +7329,33 @@ impl AppRuntime {
         if !grant.matches_token(&token) {
             return refuse("Prepared Host capability changed before readiness resend");
         }
-        let events = if prepared {
-            let events = self.finalize_fresh_execution_launch_session_start(
+        let preparation_events = if prepared {
+            self.finalize_fresh_execution_launch_session_start(
                 &window_id,
                 request.readiness_nonce.as_deref(),
+            )
+        } else {
+            Vec::new()
+        };
+        // Promotion precedes GUI apply. An Active resend in that gap joins
+        // the same completion instead of synchronously repairing its Work.
+        if let Some(inflight) = self
+            .pending_fresh_execution_finalizations
+            .get_mut(&window_id)
+            .filter(|inflight| inflight.binding == pending.binding)
+        {
+            inflight
+                .readiness_replies
+                .push((request.operation_id.clone(), reply.clone()));
+            return (None, preparation_events);
+        }
+        if prepared {
+            return (
+                Some(Err(fresh_execution_readiness_conflict())),
+                preparation_events,
             );
-            if let Some(inflight) = self
-                .pending_fresh_execution_finalizations
-                .get_mut(&window_id)
-            {
-                inflight
-                    .readiness_replies
-                    .push((request.operation_id.clone(), reply.clone()));
-                return (None, events);
-            }
-            return (Some(Err(fresh_execution_readiness_conflict())), events);
-        } else if pending_fresh_execution_activation_status(&pending) == Some(true) {
+        }
+        let events = if pending_fresh_execution_activation_status(&pending) == Some(true) {
             // Readiness was authenticated before activation. Repair an interrupted
             // Work publication through the existing exact-Session coordinator.
             self.reconcile_activated_fresh_execution_launch_events(&window_id, &pending)
