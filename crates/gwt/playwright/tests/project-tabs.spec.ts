@@ -45,15 +45,26 @@ test.describe("Project tabs", () => {
         affiliation_status: "assigned", updated_at: now }];
       projection.status_category = "active";
       projection.updated_at = now;
-      const writeProjection = async () => {
+      const writeProjection = async (contents: string) => {
         const staging = `${projectionPath}.watcher-test`;
-        await writeFile(staging, JSON.stringify(projection));
-        await rename(staging, projectionPath!);
+        await writeFile(staging, contents);
+        // Windows readers can briefly deny replacement. Retry only that file
+        // operation; application assertions and the whole test run stay strict.
+        await expect.poll(async () => {
+          try {
+            await rename(staging, projectionPath!);
+            return null;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (process.platform !== "win32" || (code !== "EPERM" && code !== "EBUSY")) throw error;
+            return code;
+          }
+        }, { timeout: 5000, intervals: [100, 200, 500] }).toBeNull();
       };
       try {
         for (let index = 1; index <= 10; index++) {
           projection.agents[0].title_summary = `Watcher purpose ${index}`;
-          await writeProjection();
+          await writeProjection(JSON.stringify(projection));
         }
         await expect(page.locator(`.workspace-window[data-id="${windowId}"] .title-text`)).toContainText("Watcher purpose 10");
         await expect.poll(() => patches.some((patch) => patch.agents.some((agent) =>
@@ -61,8 +72,7 @@ test.describe("Project tabs", () => {
         await page.screenshot({ path: testInfo.outputPath("watcher.png"), fullPage: true });
         expect(errors).toEqual([]);
       } finally {
-        await writeFile(`${projectionPath}.watcher-test`, saved);
-        await rename(`${projectionPath}.watcher-test`, projectionPath!);
+        await writeProjection(saved);
         await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       }
     });
