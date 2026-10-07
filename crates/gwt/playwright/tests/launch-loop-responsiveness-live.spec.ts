@@ -69,15 +69,14 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       // No credential or production pane endpoint is copied by this test.
       for (let iteration = 0; iteration < 20; iteration += 1) {
         launched.push(await launch(page, workId, `feature/launch-loop-${info.project.name}-${iteration}`));
-        await sendLiveGwtEvent(page, {
+        await sendBurst(page, [{
           kind: "arrange_windows", mode: "tile",
           bounds: { x: 0, y: 0, width: 1440, height: 900 },
-        });
-        await sendBurst(page, canvas.map(id => ({
+        }, ...canvas.map(id => ({
           kind: "update_window_geometry", id,
           geometry: { x: iteration, y: iteration, width: 480, height: 280 },
           cols: 80, rows: 24,
-        })));
+        }))]);
         samples.push(await pmRoundtrip(page, canvas[0]));
         // Keep launching across the full pane.list observation interval.
         await page.waitForTimeout(3_500);
@@ -139,9 +138,15 @@ async function newWindow(page: Page, before: string[]): Promise<string> {
 }
 
 async function launch(page: Page, workId: string, branch: string): Promise<string> {
-  const before = await ids(page);
-  const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-  await sendLiveGwtEvent(page, { kind: "open_launch_wizard", id: workId, branch_name: "main" });
+  const { before, cursor } = await page.evaluate(id => {
+    const before = [...document.querySelectorAll<HTMLElement>(".workspace-window")]
+      .map(node => node.dataset.id || "");
+    const cursor = (window as any).__gwtPlaywrightMessageSequence || 0;
+    window.dispatchEvent(new CustomEvent("__gwt_test_send", {
+      detail: { kind: "open_launch_wizard", id, branch_name: "main" },
+    }));
+    return { before, cursor };
+  }, workId);
   const wizard = page.locator("#wizard-modal");
   await expect(wizard).toBeVisible({ timeout: 60_000 });
   await latestWizard(page, cursor, true);
@@ -176,9 +181,14 @@ async function latestWizard(page: Page, after: number, requireOpen = false): Pro
 }
 
 async function wizardAction(page: Page, action: unknown): Promise<any> {
-  const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-  await sendLiveGwtEvent(page, { kind: "launch_wizard_action", action,
-    bounds: { x: 32, y: 32, width: 880, height: 520 } });
+  const after = await page.evaluate(action => {
+    const cursor = (window as any).__gwtPlaywrightMessageSequence || 0;
+    window.dispatchEvent(new CustomEvent("__gwt_test_send", {
+      detail: { kind: "launch_wizard_action", action,
+        bounds: { x: 32, y: 32, width: 880, height: 520 } },
+    }));
+    return cursor;
+  }, action);
   return latestWizard(page, after);
 }
 
