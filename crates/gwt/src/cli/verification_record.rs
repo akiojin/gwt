@@ -3514,7 +3514,18 @@ impl InheritedVerificationChild {
         };
         let deadline = now() + timeout;
         loop {
-            if let Some(status) = self.spawned.child.try_wait()? {
+            #[cfg(unix)]
+            let completed = if self.exited_without_reaping()? {
+                // Keep the exited leader waitable until its group is reclaimed:
+                // reaping first would allow its PID/PGID to be recycled.
+                self.reclaim();
+                Some(self.spawned.child.wait()?)
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let completed = self.spawned.child.try_wait()?;
+            if let Some(status) = completed {
                 self.reaped = true;
                 return Ok((status, false));
             }
@@ -3525,6 +3536,33 @@ impl InheritedVerificationChild {
                 return Ok((status, true));
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(unix)]
+    fn exited_without_reaping(&mut self) -> io::Result<bool> {
+        // SAFETY: zero-initialized siginfo_t is valid; waitid writes into this
+        // live buffer and WNOWAIT leaves the exact owned child unreaped.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            if libc::waitid(
+                libc::P_PID,
+                self.spawned.child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            ) == -1
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    return Ok(false);
+                }
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    // Lost wait ownership cannot authorize a group signal.
+                    self.reaped = true;
+                }
+                return Err(error);
+            }
+            Ok(info.si_pid() != 0)
         }
     }
 
@@ -6888,9 +6926,16 @@ pub(crate) mod tests {
             fs::write(directory.join("ready"), "ready").unwrap();
             Some(grandchild)
         };
+        if grandchild.is_some() && std::env::var_os("GWT_VERIFY_TIMEOUT_LEADER_EXIT").is_some() {
+            // Leave the grandchild to the bounded runner's completion cleanup.
+            std::process::exit(0);
+        }
         let safety = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !directory.join("release").exists() && std::time::Instant::now() < safety {
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !directory.join("release").exists() {
+            fs::write(directory.join("fixture-deadline-elapsed"), "elapsed").unwrap();
         }
         if let Some(grandchild) = &mut grandchild {
             grandchild.wait().unwrap();
@@ -6957,6 +7002,56 @@ pub(crate) mod tests {
         assert!(result.2.contains("retry"), "{}", result.2);
         assert!(!crate::process::is_process_alive(grandchild));
         assert!(unrelated_alive, "reclamation must stay in the owned tree");
+    }
+
+    #[test]
+    fn inherited_short_command_completion_reclaims_descendants() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_timeout_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root)
+            .env("GWT_VERIFY_TIMEOUT_LEADER_EXIT", "1");
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            "git diff --check",
+            Some(Duration::from_secs(60)),
+            None,
+            Instant::now,
+        )
+        .unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let safety = Instant::now() + Duration::from_secs(45);
+        while crate::process::is_process_alive(grandchild)
+            && !root.join("fixture-deadline-elapsed").exists()
+            && Instant::now() < safety
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // A natural fixture exit is not proof that the runner reclaimed it.
+        let survived = crate::process::is_process_alive(grandchild)
+            || root.join("fixture-deadline-elapsed").exists();
+        fs::write(root.join("release"), "release").unwrap();
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(result.0, 0, "{}", result.2);
+        assert_eq!(result.1, None, "{}", result.2);
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(!survived, "bounded completion left its descendant running");
     }
 
     #[test]
@@ -9147,6 +9242,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let _node_options = ScopedEnvVar::unset("NODE_OPTIONS");
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
 

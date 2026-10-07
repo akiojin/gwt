@@ -75,16 +75,15 @@ pub(crate) enum CommandWeight {
 /// for the host-wide oversubscription the lease was built to prevent
 /// (Issue #3913).
 pub(crate) fn classify_command(command: &str) -> CommandWeight {
-    let Ok(args) = crate::cli::verification_record::split_command_line(command)
+    let Ok((assignments, args)) = crate::cli::verification_record::split_command_line(command)
         .and_then(crate::cli::verification_record::take_env_assignments)
-        .map(|(_, args)| args)
     else {
         return CommandWeight::Heavy;
     };
     let Some(program) = args.first() else {
         return CommandWeight::Heavy;
     };
-    if is_short_non_cargo_gate(&args) {
+    if is_short_non_cargo_gate(&args, &assignments) {
         return CommandWeight::Light;
     }
     let program = Path::new(program)
@@ -162,13 +161,13 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
 /// Issue #5086: the explicit short-gate allowlist also owns its execution bound.
 /// Arbitrary interpreters/wrappers and coverage producers remain Heavy.
 pub(crate) fn short_non_cargo_timeout(command: &str) -> Option<Duration> {
-    let (_, args) = crate::cli::verification_record::split_command_line(command)
+    let (assignments, args) = crate::cli::verification_record::split_command_line(command)
         .and_then(crate::cli::verification_record::take_env_assignments)
         .ok()?;
-    is_short_non_cargo_gate(&args).then_some(Duration::from_secs(60))
+    is_short_non_cargo_gate(&args, &assignments).then_some(Duration::from_secs(60))
 }
 
-fn is_short_non_cargo_gate(args: &[String]) -> bool {
+fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) -> bool {
     let program = args
         .first()
         .and_then(|program| Path::new(program).file_name())
@@ -188,8 +187,15 @@ fn is_short_non_cargo_gate(args: &[String]) -> bool {
         has_check
     };
     match program {
-        // Static file analysis; none of these programs builds or runs a suite.
-        Some("actionlint" | "shellcheck" | "yamllint" | "typos") => true,
+        // Custom actionlint checkers may be arbitrary executable wrappers.
+        Some("actionlint") => !args.iter().skip(1).any(|arg| {
+            arg.starts_with('-')
+                && matches!(
+                    arg.trim_start_matches('-').split('=').next(),
+                    Some("shellcheck" | "pyflakes")
+                )
+        }),
+        Some("shellcheck" | "yamllint" | "typos") => true,
         Some("git") => {
             subcommand == Some("diff")
                 && checks(&["--cached", "--staged", "--no-ext-diff", "--no-textconv"])
@@ -197,10 +203,26 @@ fn is_short_non_cargo_gate(args: &[String]) -> bool {
         Some("taplo") => subcommand == Some("check") || (subcommand == Some("fmt") && checks(&[])),
         // This reader consumes an existing JSON, unlike coverage-summary.mjs
         // which invokes llvm-cov. Do not classify node scripts by basename.
-        Some("node") => subcommand.is_some_and(|script| {
-            script.replace('\\', "/").trim_start_matches("./")
-                == "scripts/check-coverage-threshold.mjs"
-        }),
+        Some("node") => {
+            // NODE_OPTIONS can preload arbitrary modules before the reader.
+            // An explicit empty assignment disables inherited options.
+            let has_options = assignments
+                .iter()
+                .rev()
+                .find(|(key, _)| {
+                    key == "NODE_OPTIONS"
+                        || (cfg!(windows) && key.eq_ignore_ascii_case("NODE_OPTIONS"))
+                })
+                .map_or_else(
+                    || std::env::var_os("NODE_OPTIONS").is_some_and(|value| !value.is_empty()),
+                    |(_, value)| !value.is_empty(),
+                );
+            !has_options
+                && subcommand.is_some_and(|script| {
+                    script.replace('\\', "/").trim_start_matches("./")
+                        == "scripts/check-coverage-threshold.mjs"
+                })
+        }
         _ => false,
     }
 }
@@ -1640,6 +1662,10 @@ mod tests {
 
     #[test]
     fn known_short_non_cargo_gates_are_light_and_unknown_commands_stay_heavy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
         for command in [
             "git diff --check",
             "git diff --check --cached",
@@ -1662,6 +1688,10 @@ mod tests {
             "git diff --line-prefix --check --ext-diff -- README.md",
             "taplo fmt --config --check Cargo.toml",
             "actionlint.sh .github/workflows/test.yml",
+            "actionlint -shellcheck ./wrapper.sh .github/workflows/test.yml",
+            "actionlint --shellcheck=./wrapper.sh .github/workflows/test.yml",
+            "actionlint -pyflakes ./wrapper.sh .github/workflows/test.yml",
+            "actionlint --pyflakes=./wrapper.sh .github/workflows/test.yml",
             "shellcheck.py scripts/check.sh",
             "git.sh diff --check",
             "node.sh scripts/check-coverage-threshold.mjs summary.json 90",
@@ -1679,6 +1709,35 @@ mod tests {
             assert_eq!(short_non_cargo_timeout(command), None, "{command}");
         }
         assert_eq!(short_non_cargo_timeout("markdownlint README.md"), None);
+    }
+
+    #[test]
+    fn node_reader_options_cannot_preload_arbitrary_workloads() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options =
+            gwt_core::test_support::ScopedEnvVar::set("NODE_OPTIONS", "--require=./wrapper.cjs");
+        for command in [
+            "node scripts/check-coverage-threshold.mjs summary.json 90",
+            "NODE_OPTIONS= NODE_OPTIONS=--import=./wrapper.mjs node scripts/check-coverage-threshold.mjs summary.json 90",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), None, "{command}");
+        }
+        let command = "NODE_OPTIONS=--require=./wrapper.cjs NODE_OPTIONS= node scripts/check-coverage-threshold.mjs summary.json 90";
+        assert_eq!(classify_command(command), CommandWeight::Light);
+        assert_eq!(
+            short_non_cargo_timeout(command),
+            Some(Duration::from_secs(60))
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            classify_command(
+                "node_options= node scripts/check-coverage-threshold.mjs summary.json 90"
+            ),
+            CommandWeight::Light,
+        );
     }
 
     /// Issue #4196 AC-1 / AC-3: what a requested command weighs follows the

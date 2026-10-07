@@ -1182,7 +1182,7 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 | --- | --- |
 | `git diff --check`（`--cached` を含む） | 差分の空白を検査する |
 | `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | 既存の coverage JSON を読む。テストは実行しない |
-| `actionlint`、`shellcheck`、`yamllint` | workflow・shell・YAML ファイルの静的解析 |
+| custom checker 指定のない `actionlint`、`shellcheck`、`yamllint` | workflow・shell・YAML ファイルの静的解析 |
 | `taplo check`、`taplo fmt --check` | TOML の検証・書式確認 |
 | `typos` | 静的な綴り検査 |
 
@@ -1192,6 +1192,10 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 既存の markdownlint・スコープ付き Cargo の分類は従来どおりです。
 unknown コマンド、script wrapper、coverage を生成する `coverage-summary.mjs`、Cargo build・
 広範囲の test、headed Playwright は Heavy のままです。
+`actionlint -shellcheck` / `-pyflakes` の上書き指定も任意の wrapper を起動できるため Heavy です。
+bounded command は時間切れ時に加え、通常終了時にも子孫プロセスを回収します。
+Node reader も実効 `NODE_OPTIONS` が空でない場合は、任意 module を preload できるため Heavy です。
+明示的な `NODE_OPTIONS=` は継承オプションを無効にし、Light 分類を維持します。
 
 再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
 execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、
