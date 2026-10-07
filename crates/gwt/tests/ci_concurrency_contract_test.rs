@@ -10,7 +10,7 @@
 //! p90 33.6 min and max 40.6 min.
 //!
 //! Two GitHub Actions features contain this: a per-PR `concurrency` group with
-//! `cancel-in-progress` so a `synchronize` supersedes the previous run, and a
+//! `cancel-in-progress` so a product push supersedes the previous run, and a
 //! path filter that keeps docs-only changes off the heavy Windows jobs and the
 //! WebView E2E job. These tests pin both, plus the property that the filter
 //! never touches a required status check.
@@ -19,6 +19,8 @@
 //! through a GitHub merge queue, so a merge no longer sends every other PR
 //! back through update-branch. The queue only works if the same workflows
 //! report under `merge_group`, which the tests below pin as well.
+//! Issue #5059 moves Test cancellation to jobs after a Git comparison: base
+//! synchronization must not discard an in-flight long measurement.
 
 use serde_yaml::Value;
 use std::fs;
@@ -177,10 +179,9 @@ fn every_workflow_declares_a_concurrency_group() {
     }
 }
 
-/// AC-1: a new run for the same PR cancels the in-flight one. The group is
-/// keyed by workflow and PR number, so an update-branch `synchronize` replaces
-/// the previous run instead of queueing beside it, and one PR's Test run never
-/// cancels another PR's Test run or its own Build run.
+/// AC-1 / Issue #5059 AC-2: product pushes still supersede the same PR's work.
+/// Test classifies the source first; other workflows retain immediate per-PR
+/// cancellation. Workflow/job keys keep PRs and workloads independent.
 #[test]
 fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
     let mut checked = 0;
@@ -203,6 +204,37 @@ fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
             cancel_in_progress(&name, &block),
             "{name}: pull request runs must set cancel-in-progress: true"
         );
+        if name == TEST_WORKFLOW {
+            assert!(
+                group.contains("github.run_id"),
+                "Test must not cancel an entire run before classifying base synchronization"
+            );
+            for (id, body) in jobs(&doc) {
+                let id = id.as_str().expect("job ids are strings");
+                let policy = body
+                    .get("concurrency")
+                    .expect("Test jobs must bound their own workload");
+                let key = policy.get("group").and_then(Value::as_str).unwrap_or("");
+                assert!(
+                    key.contains("github.workflow")
+                        && key.contains("github.event.pull_request.number")
+                );
+                assert!(key.ends_with(id), "job groups must be independent: {id}");
+                if matches!(id, "source-sync" | "changes") {
+                    assert!(
+                        cancel_in_progress(id, policy),
+                        "short classifiers remain replaceable"
+                    );
+                } else {
+                    assert!(needs(body).iter().any(|need| need == "source-sync"));
+                    assert_eq!(
+                        policy.get("cancel-in-progress").and_then(Value::as_str),
+                        Some("${{ needs.source-sync.outputs.base_only == 'false' }}"),
+                        "{id}: actual pushes cancel running work; proven base sync and unknown history preserve it"
+                    );
+                }
+            }
+        }
     }
     assert!(checked >= 5, "expected the PR workflows (test, build, lint, auto-merge, pr-source-check), found {checked}");
 }

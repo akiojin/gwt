@@ -790,6 +790,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "pr.list"
             | "github.budget"
             | "pr.view"
+            | "pr.head_check"
             | "pr.checks"
             | "pr.reviews"
             | "pr.review_threads"

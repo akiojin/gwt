@@ -666,7 +666,12 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
         )?;
     }
     require(
-        coverage_job.get("if").is_none() && test["jobs"]["test"].get("if").is_none(),
+        coverage_job.get("if").is_none()
+            // A source-sync failure must not skip the workspace tests. This
+            // status-only guard overrides implicit success() without filtering sources.
+            && test["jobs"]["test"].get("if").is_none_or(|condition| {
+                condition.as_str() == Some("${{ !cancelled() }}")
+            }),
         "unconditional delegated jobs",
     )?;
     Ok(())
@@ -916,6 +921,35 @@ mod tests {
                 .unwrap_err()
                 .contains("test.yml")
         );
+    }
+
+    #[test]
+    fn pre_pr_workspace_job_accepts_only_the_cancellation_status_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let required = vec!["Test (Rust)".into(), "Clippy & Rustfmt".into()];
+        let original =
+            std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
+        let guarded = "  test:\n    name: Test (Rust workspace)\n    if: ${{ !cancelled() }}\n";
+        for (condition, accepted) in [
+            ("", true),
+            ("    if: ${{ !cancelled() }}\n", true),
+            ("    if: github.event_name == 'pull_request'\n", false),
+            (
+                "    if: ${{ !cancelled() && needs.source-sync.outputs.base_only == 'false' }}\n",
+                false,
+            ),
+        ] {
+            let replacement = format!("  test:\n    name: Test (Rust workspace)\n{condition}");
+            assert!(original.contains(guarded));
+            write(
+                dir.path(),
+                ".github/workflows/test.yml",
+                &original.replace(guarded, &replacement),
+            );
+            let result = validate_pre_pr_ci(dir.path(), &required);
+            assert_eq!(result.is_ok(), accepted, "{condition:?}: {result:?}");
+        }
     }
 
     #[test]
