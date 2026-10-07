@@ -1946,6 +1946,7 @@ struct LaunchCompletionInput {
     pending_continue_work: Option<PendingContinueWork>,
     pending_fresh_execution: Option<PendingFreshExecutionLaunch>,
     failure_session: Option<(ActiveAgentSession, gwt_agent::Session)>,
+    removed_genesis_session: Option<gwt_agent::SessionExecutionIdentity>,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
     failure_input: super::launch_errors::LaunchErrorInput,
@@ -1969,6 +1970,7 @@ struct PreparedAgentLaunchState {
 }
 
 struct PreparedLaunchFailure {
+    removed_genesis_session: Option<gwt_agent::SessionExecutionIdentity>,
     continue_work: Option<(PendingContinueWork, Result<bool, String>, Option<bool>)>,
     fresh_execution_had_pending: bool,
     fresh_execution: Option<(
@@ -2005,6 +2007,7 @@ fn rollback_worker_genesis(
     active: &ActiveAgentSession,
     genesis: &MaterializedGenesisLaunch,
     reason: &str,
+    removed_session: &mut Option<gwt_agent::SessionExecutionIdentity>,
 ) -> Result<(), String> {
     let removed = gwt::cli::execution_state::block_genesis_and_remove_exact_session(
         &genesis.worktree_path,
@@ -2030,6 +2033,8 @@ fn rollback_worker_genesis(
     if !removed {
         return Err("failed genesis Session changed before exact rollback".into());
     }
+    // Preserve exact removal even if the durable receipt still needs cleanup.
+    *removed_session = Some(genesis.session_identity.clone());
     clear_durable_launch_recovery(sessions_dir, &genesis.session_id)
 }
 
@@ -2060,6 +2065,7 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
             (pending.clone(), cleanup, status)
         });
         failure = Some(PreparedLaunchFailure {
+            removed_genesis_session: input.removed_genesis_session.take(),
             continue_work,
             fresh_execution_had_pending,
             fresh_execution,
@@ -2416,6 +2422,7 @@ fn prepare_agent_launch_inner(
                 &active,
                 genesis,
                 "launch window closed before PTY spawn",
+                &mut input.removed_genesis_session,
             )?;
         }
         return Err("launch window closed before PTY spawn".into());
@@ -2521,7 +2528,7 @@ fn prepare_agent_launch_inner(
             }
             return Err(if let Some(genesis) = genesis.as_ref() {
                 match rollback_worker_genesis(&input.sessions_dir, &input.project_root, &active, genesis,
-                    "genesis PTY spawn failed before launch readiness") {
+                    "genesis PTY spawn failed before launch readiness", &mut input.removed_genesis_session) {
                     Ok(()) => error,
                     Err(rollback) => format!("{error}; failed genesis recovery retained exact evidence for retry: {rollback}"),
                 }
@@ -2639,7 +2646,7 @@ fn prepare_agent_launch_inner(
             let _ = pane.kill();
             return Err(if let Some(genesis) = genesis.as_ref() {
                 match rollback_worker_genesis(&input.sessions_dir, &input.project_root, &active, genesis,
-                    "genesis Work publication failed before launch readiness") {
+                    "genesis Work publication failed before launch readiness", &mut input.removed_genesis_session) {
                     Ok(()) => detail,
                     Err(error) => format!("{detail}; failed genesis recovery retained exact evidence for retry: {error}"),
                 }
@@ -2658,6 +2665,7 @@ fn prepare_agent_launch_inner(
                 &active,
                 genesis,
                 "genesis recovery receipt could not be settled",
+                &mut input.removed_genesis_session,
             );
             return Err(format!(
                 "genesis launch readiness could not be committed: {error}; rollback: {rollback:?}"
@@ -2757,6 +2765,7 @@ fn cleanup_stale_prepared_agent_launch(
                 &success.active_session,
                 genesis,
                 "launch completion belongs to a closed window generation",
+                &mut None,
             ) {
                 tracing::warn!(%error, "stale launch retained exact recovery evidence");
             }
@@ -3396,6 +3405,19 @@ impl LaunchWizardMemoryCache {
             }
             None => sessions.retain(|session| session.id != session_id),
         }
+    }
+
+    fn forget_prepared_genesis_session(&mut self, identity: &gwt_agent::SessionExecutionIdentity) {
+        let sessions = Arc::make_mut(&mut self.sessions)
+            .get_mut()
+            .expect("launch worker resolved the Session ledger");
+        sessions.retain(|session| {
+            gwt_agent::SessionExecutionIdentity::from_session(session)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(identity)
+        });
     }
 
     pub(super) fn mark_stopped(&mut self, session_id: &str) {
@@ -4620,6 +4642,7 @@ impl AppRuntime {
                 .get(&window_id)
                 .cloned(),
             failure_session: None,
+            removed_genesis_session: None,
             workspace_resume_context,
             launch_feedback_context,
             failure_input,
@@ -4794,6 +4817,10 @@ impl AppRuntime {
                 let Some(failure) = failure else {
                     return Vec::new();
                 };
+                if let Some(identity) = failure.removed_genesis_session {
+                    self.launch_wizard_cache
+                        .forget_prepared_genesis_session(&identity);
+                }
                 let mut events = Vec::new();
                 if let Some((pending, cleanup, status)) = failure.continue_work {
                     events.extend(self.apply_prepared_continue_work_launch_failure(
@@ -7277,6 +7304,35 @@ mod agent_endpoint_env_tests {
         ))
         .expect("persist exact stopped rebound runtime");
         (launch, issuer, binding)
+    }
+
+    #[test]
+    fn failed_genesis_cache_tombstone_preserves_same_id_replacement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, _, _) = rebound_relaunch_fixture(home.path());
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&launch.session)
+            .expect("identity")
+            .expect("bound Session");
+        let mut cache =
+            LaunchWizardMemoryCache::load_with_agent_options(&launch.sessions_dir, Vec::new());
+        cache.sessions();
+        let mut replacement = launch.session.clone();
+        replacement.agent_id = gwt_agent::AgentId::Custom("replacement".to_string());
+        cache.record_prepared_session(&replacement.id, Some(replacement.clone()));
+
+        cache.forget_prepared_genesis_session(&identity);
+
+        assert_eq!(
+            cache
+                .session_by_id(&replacement.id)
+                .map(|session| &session.agent_id),
+            Some(&replacement.agent_id)
+        );
     }
 
     /// SPEC #3590 FR-001 / US-1 / US-4: a live Active holder must not refuse
