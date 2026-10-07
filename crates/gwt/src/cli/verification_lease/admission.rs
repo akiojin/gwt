@@ -45,6 +45,7 @@ const BOARD_NOTICE_AFTER: Duration = POLL;
 /// the target job, in the reverse of the acquisition order.
 pub(crate) struct Admission {
     guard: Option<TargetJobGuard>,
+    artifacts: Option<std::fs::File>,
     lease: Option<Arc<Mutex<HeavyLease>>>,
     renewal: Option<super::renewal::Renewal>,
     commands: Arc<super::CommandProgress>,
@@ -70,6 +71,7 @@ impl Admission {
     fn settle(&mut self, outcome: JobOutcome) {
         drop(self.renewal.take());
         drop(self.lease.take());
+        drop(self.artifacts.take());
         if let Some(guard) = self.guard.take() {
             let _ = guard.complete(outcome);
         }
@@ -305,7 +307,34 @@ fn describe_holder(
                 .as_ref()
                 .filter(|_| status.held)
                 .and_then(|owner| probe.observe(owner.pid, &workload, status.acquired_at_ms));
-            holder_notice(&status, activity.as_ref())
+            let mut notice = holder_notice(&status, activity.as_ref());
+            if let Ok(pool) = coordinator.heavy_pool_status() {
+                notice.detail.push_str(&format!(
+                    "; pool capacity={} running={} available={}",
+                    pool.capacity, pool.used, pool.available
+                ));
+                for slot in pool.slots.iter().filter(|slot| slot.status.held) {
+                    notice.detail.push_str(&format!(
+                        "; slot {}: {}",
+                        slot.slot
+                            .map_or_else(|| "exclusive".to_string(), |slot| slot.to_string()),
+                        holder_identity_notice(&slot.status).detail
+                    ));
+                }
+                notice.retry_after = pool
+                    .slots
+                    .iter()
+                    .filter(|slot| slot.status.held)
+                    .filter_map(|slot| {
+                        slot.status
+                            .estimated_remaining_ms
+                            .or(slot.status.remaining_ms)
+                    })
+                    .min()
+                    .map(Duration::from_millis)
+                    .or(notice.retry_after);
+            }
+            notice
         }
         Err(err) => HolderNotice {
             detail: format!("verification lease status unavailable: {err}"),
@@ -336,7 +365,7 @@ fn deferred(
     };
     unexpected(format!(
         "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — a deferral is \
-         not a failure and there is no attempt cap: your turn stays reserved, so keep rerunning \
+         not a failure and there is no attempt cap: keep rerunning \
          `verify.run` while the holder makes progress",
         started.elapsed().as_secs(),
         max_wait.as_secs()
@@ -394,6 +423,7 @@ impl BoardNotice {
 pub(crate) fn admit<E: CliEnv>(
     env: &mut E,
     worktree: &Path,
+    command: Option<&str>,
     max_wait: Duration,
     on_host_deferred: impl FnOnce() -> String,
 ) -> Result<Admission, SpecOpsError> {
@@ -402,6 +432,23 @@ pub(crate) fn admit<E: CliEnv>(
     let started = Instant::now();
     let deadline = started + max_wait;
     let mut notice = BoardNotice::default();
+    let target = command
+        .map(|command| verification_lease::effective_cargo_target(worktree, command, false))
+        .transpose()
+        .map_err(unexpected)?
+        .flatten();
+    let budgets = match command {
+        Some(command) => {
+            let temporary = verification_lease::command_temporary_base(worktree, command)
+                .map_err(unexpected)?;
+            let paths = vec![
+                target.clone().unwrap_or_else(|| worktree.join("target")),
+                temporary,
+            ];
+            verification_lease::command_disk_budgets(&paths).map_err(unexpected)?
+        }
+        None => Vec::new(),
+    };
 
     // Every invocation owns its locks; matching the worktree is not proof
     // that another run's lease belongs to this invocation.
@@ -434,13 +481,61 @@ pub(crate) fn admit<E: CliEnv>(
             }
         }
     };
+    let artifacts = if let Some(target) = &target {
+        loop {
+            match verification_lease::try_lock_build_artifacts(target)
+                .map_err(|error| unexpected(format!("build artifact admission failed: {error}")))?
+            {
+                Some(guard) => break Some(guard),
+                None => {
+                    if Instant::now() >= deadline {
+                        return Err(deferred(
+                            started,
+                            max_wait,
+                            &format!(
+                                "another canonical verification or GC owns Cargo target {}",
+                                target.display()
+                            ),
+                            None,
+                        ));
+                    }
+                    notice.maybe_post(
+                        env,
+                        started,
+                        max_wait,
+                        &format!(
+                            "Cargo target {} は別の検証またはGCが使用中",
+                            target.display()
+                        ),
+                    );
+                    sleep_until(deadline);
+                }
+            }
+        }
+    } else {
+        None
+    };
     let mut probe = HolderProbe::default();
     let lease = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        match guard.acquire_heavy_with_ttl(remaining.min(POLL), LEASE_TTL) {
+        let acquired = if target.is_some() {
+            guard.acquire_heavy_with_disk_budgets(remaining.min(POLL), LEASE_TTL, &budgets)
+        } else {
+            guard.acquire_exclusive_heavy_with_disk_budget(remaining.min(POLL), LEASE_TTL, &budgets)
+        };
+        match acquired {
             Ok(lease) => break lease,
             Err(CoordinatorError::Timeout { .. }) => {
-                let holder = describe_holder(&coordinator, &mut probe, worktree);
+                let mut holder = describe_holder(&coordinator, &mut probe, worktree);
+                for budget in &budgets {
+                    holder.detail.push_str(&format!(
+                        "; disk {}: reserve={} floor={} free={}",
+                        budget.volume,
+                        budget.bytes,
+                        budget.floor_bytes,
+                        fs2::available_space(&budget.path).unwrap_or(0)
+                    ));
+                }
                 if Instant::now() >= deadline {
                     // Issue #4086 AC-1: the rerun must be admitted before any
                     // background job that queues while recovery is running.
@@ -472,13 +567,15 @@ pub(crate) fn admit<E: CliEnv>(
                     // Issue #4337 AC-3: name the reservation outcome outright.
                     // `queue_position` below only ever appears on success, so
                     // on its own it leaves the rerun unable to tell a failed
-                    // reservation from a failed status read — and the two call
-                    // for opposite expectations: a reserved turn is kept for
-                    // the rerun, an unreserved one rejoins at the back.
+                    // reservation from a failed status read. Issue #4969 AC-2:
+                    // a refresh error cannot establish that an earlier valid
+                    // reservation is absent, so report that state as unknown.
                     match &reserved {
                         Ok(_) => detail.push_str("; next_turn_reserved: yes"),
                         Err(err) => {
-                            detail.push_str(&format!("; next_turn_reserved: no ({err})"));
+                            detail.push_str(&format!(
+                                "; next_turn_reserved: unknown (reservation refresh failed: {err})"
+                            ));
                         }
                     }
                     if let Ok(status) = coordinator.heavy_lease_status() {
@@ -526,6 +623,7 @@ pub(crate) fn admit<E: CliEnv>(
     })?;
     let admission = Admission {
         guard: Some(guard),
+        artifacts,
         lease_id,
         lease: Some(lease),
         renewal: Some(renewal),
@@ -844,12 +942,13 @@ mod tests {
             !without_eta.contains("verify.lease.acquire"),
             "canonical admission must not recommend detached manual acquisition: {without_eta}"
         );
-        // Issue #4280 AC-3: a deferral is a reserved turn, not a spent
-        // attempt — counting it toward a cap is what made waiters give up.
+        // Issue #4280 AC-3 / #4969 AC-2: keep retrying without an attempt
+        // cap, but a failed reservation refresh cannot promise a reserved turn.
         for message in [&with_eta, &without_eta] {
             assert!(!message.contains("lease attempt"), "{message}");
             assert!(message.contains("no attempt cap"), "{message}");
-            assert!(message.contains("turn stays reserved"), "{message}");
+            assert!(message.contains("keep rerunning"), "{message}");
+            assert!(!message.contains("your turn stays reserved"), "{message}");
         }
     }
 
@@ -950,7 +1049,7 @@ mod tests {
             worktree: &Path,
             budget: Duration,
         ) -> Result<Admission, SpecOpsError> {
-            super::admit(env, worktree, budget, String::new)
+            super::admit(env, worktree, None, budget, String::new)
                 .map_err(|err| unexpected(format!("{err}; {}", self.describe())))
         }
 
@@ -1102,6 +1201,91 @@ mod tests {
     }
 
     #[test]
+    fn independent_worktrees_use_two_slots_but_a_shared_cargo_target_waits() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let original_home = dirs::home_dir().unwrap();
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .unwrap_or_else(|| original_home.join(".cargo").into_os_string());
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .unwrap_or_else(|| original_home.join(".rustup").into_os_string());
+        let _cargo_home = gwt_core::test_support::ScopedEnvVar::set("CARGO_HOME", cargo_home);
+        let _rustup_home = gwt_core::test_support::ScopedEnvVar::set("RUSTUP_HOME", rustup_home);
+        let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _home = ScopedGwtHome::set(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=2\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for directory in [first.path(), second.path()] {
+            std::fs::create_dir_all(directory.join("src")).unwrap();
+            std::fs::write(
+                directory.join("Cargo.toml"),
+                "[package]\nname='admission-fixture'\nversion='0.0.0'\nedition='2021'\n",
+            )
+            .unwrap();
+            std::fs::write(directory.join("src/lib.rs"), "").unwrap();
+        }
+        let shared = home.path().join("shared-target");
+        let command = format!(
+            "cargo test --workspace --target-dir \"{}\"",
+            shared.display()
+        );
+        let mut first_env = crate::cli::TestEnv::new(first.path().to_path_buf());
+        let mut second_env = crate::cli::TestEnv::new(second.path().to_path_buf());
+        let first_admission = super::admit(
+            &mut first_env,
+            first.path(),
+            Some(&command),
+            Duration::ZERO,
+            String::new,
+        )
+        .unwrap();
+        let error = super::admit(
+            &mut second_env,
+            second.path(),
+            Some(&command),
+            Duration::ZERO,
+            String::new,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Cargo target"), "{error}");
+        let independent_command = format!(
+            "cargo test --workspace --target-dir \"{}\"",
+            second.path().join("target").display()
+        );
+        let second_admission = super::admit(
+            &mut second_env,
+            second.path(),
+            Some(&independent_command),
+            Duration::ZERO,
+            String::new,
+        )
+        .unwrap();
+        let pool = verification_lease::open_coordinator()
+            .unwrap()
+            .heavy_pool_status()
+            .unwrap();
+        assert_eq!(pool.capacity, 2);
+        assert_eq!(pool.used, 2);
+        assert!(verification_lease::try_lock_build_artifacts(&shared)
+            .unwrap()
+            .is_none());
+        drop(first_admission);
+        assert!(verification_lease::try_lock_build_artifacts(&shared)
+            .unwrap()
+            .is_some());
+        drop(second_admission);
+    }
+
+    #[test]
     fn admit_acquires_the_lease_in_process_and_releases_on_drop() {
         let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
@@ -1178,7 +1362,7 @@ mod tests {
         let first = lease_root
             .admit(&mut env, worktree.path(), Duration::ZERO)
             .unwrap();
-        let second = super::admit(&mut env, worktree.path(), Duration::ZERO, || {
+        let second = super::admit(&mut env, worktree.path(), None, Duration::ZERO, || {
             panic!("a contender must not restore another verifier's artifact")
         });
         assert!(
@@ -1422,7 +1606,8 @@ mod tests {
             std::fs::write(&reservation, serde_json::to_vec(&entry).unwrap()).unwrap();
             "gwtd artifact restoration: restored".to_string()
         };
-        let err = super::admit(&mut env, worktree.path(), Duration::ZERO, recover).unwrap_err();
+        let err =
+            super::admit(&mut env, worktree.path(), None, Duration::ZERO, recover).unwrap_err();
 
         let message = err.to_string();
         assert_eq!(recovery_calls.get(), 1);
@@ -1474,7 +1659,7 @@ mod tests {
                 Some("later arrival"),
             )
             .unwrap();
-        let again = super::admit(&mut env, worktree.path(), Duration::ZERO, recover)
+        let again = super::admit(&mut env, worktree.path(), None, Duration::ZERO, recover)
             .unwrap_err()
             .to_string();
         assert_eq!(recovery_calls.get(), 2);

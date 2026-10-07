@@ -332,6 +332,13 @@ develop への着地は GitHub merge queue を通す（ユーザー裁定 2026-1
 - GUI のユーザー確認が必要な実装でも、起動は下の `browser-check` 手順に従う。共有する URL は `curl -fsS -I <URL>` などで HTTP 200 を確認してから渡し、ユーザーが同じ URL で手動確認できる状態にする。
 - 「デバッグ用サーバーを起動して」等の依頼は **`browser-check` skill**（`.claude/skills/browser-check/SKILL.md`）の手順に従う。production の `GWT.app` や既存 gwt インスタンスの URL を共有せず、この checkout の `target/debug/gwt` を隔離 HOME（fresh home + `~/.gwt/runtime` symlink + credential/`.docker` symlink + `session.json` seed）で `--no-tray --no-open` 起動し、`GWT_BROWSER_URL_FILE` から得た URL を HTTP 200 確認後に共有する。検査完了の連絡を受けたらプロセスを停止する。
 
+### pre-PR ローカル検証（SPEC #5082 FR-6〜9、既存ローカル全matrixより優先）
+
+- 配送スライスは `verify.plan` の `derive:true, mode:"pre-pr"` を使用する。ローカル必須は fmt、変更クレートの clippy、当該 Issue の AC を固定する `acceptance_commands`、required CI にない検証。GUI の headed dark/light と Agent Visual Check は維持する。
+- 除外できるのは、実測 `required_status_checks.contexts` に含まれる context が覆う項目だけ。Rust 全体テストは `Test (Rust)`、workspace clippy / rustdoc / Markdown / coverage 90%・80% は `Clippy & Rustfmt` が覆う。optional job の実行だけを理由に除外しない。
+- CI 対応表の job / trigger / failure propagation が欠けたら縮小を拒否する。CI 契約を修復するか `mode:"full"` で再導出し、返された全matrixを canonical `verify.run` で実行する。
+- ローカル pre-PR PASS は PR 作成条件。配送の完了は必須 CI の成功とマージで判定し、未実施の全体テストやcoverageをローカル PASS と報告しない。既存の Ready / auto-merge / integrity / freshness / review ゲートを維持する。
+
 ## コミュニケーションガイドライン
 
 - 回答は必ず日本語

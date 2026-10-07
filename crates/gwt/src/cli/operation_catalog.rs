@@ -520,6 +520,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.head_check",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.list",
         aliases: &[],
     },

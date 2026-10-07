@@ -1486,6 +1486,11 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
     emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
 }
 
+fn is_readiness_delivery(event: &RuntimeHookEvent) -> bool {
+    event.source_event.as_deref() == Some("SessionStart")
+        && event.continuation_readiness_nonce.is_some()
+}
+
 fn emit_live_event_with_policy(
     event: &RuntimeHookEvent,
     target: &HookForwardTarget,
@@ -1493,8 +1498,7 @@ fn emit_live_event_with_policy(
 ) -> Result<(), String> {
     target.validate()?;
 
-    let readiness_delivery = event.source_event.as_deref() == Some("SessionStart")
-        && event.continuation_readiness_nonce.is_some();
+    let readiness_delivery = is_readiness_delivery(event);
     let overall_timeout = if readiness_delivery {
         policy.overall_deadline
     } else {
@@ -1515,10 +1519,45 @@ fn emit_live_event_with_policy(
     } else {
         Some(hook_live_http_client()?)
     };
-    let mut attempts = 0usize;
+    run_hook_live_retry(
+        event,
+        policy,
+        deadline,
+        |attempt_timeout| {
+            if use_bounded_plain_http {
+                return bounded_plain_http_hook_live_attempt(event, target, attempt_timeout);
+            }
+            match client
+                .expect("reqwest client is present outside bounded plain HTTP")
+                .post(&target.url)
+                .bearer_auth(&target.token)
+                .json(event)
+                .timeout(attempt_timeout)
+                .send()
+            {
+                Ok(response) if response.status().is_success() => Ok(()),
+                Ok(response) => Err(HookLiveAttemptFailure::Http(response.status())),
+                Err(error) if error.is_timeout() => Err(HookLiveAttemptFailure::Timeout),
+                Err(_) => Err(HookLiveAttemptFailure::Transport),
+            }
+        },
+        Instant::now,
+        std::thread::sleep,
+    )
+}
 
+fn run_hook_live_retry(
+    event: &RuntimeHookEvent,
+    policy: HookLiveRetryPolicy,
+    deadline: Instant,
+    mut attempt: impl FnMut(Duration) -> Result<(), HookLiveAttemptFailure>,
+    mut now: impl FnMut() -> Instant,
+    mut wait: impl FnMut(Duration),
+) -> Result<(), String> {
+    let readiness_delivery = is_readiness_delivery(event);
+    let mut attempts = 0usize;
     loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let Some(remaining) = deadline.checked_duration_since(now()) else {
             return Err(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts"
             ));
@@ -1530,40 +1569,22 @@ fn emit_live_event_with_policy(
         }
         attempts += 1;
         let attempt_timeout = policy.per_attempt_timeout.min(remaining);
-        let failure = if use_bounded_plain_http {
-            match bounded_plain_http_hook_live_attempt(event, target, attempt_timeout) {
-                Ok(()) => return Ok(()),
-                Err(failure) => failure,
-            }
-        } else {
-            match client
-                .expect("reqwest client is present outside bounded plain HTTP")
-                .post(&target.url)
-                .bearer_auth(&target.token)
-                .json(event)
-                .timeout(attempt_timeout)
-                .send()
-            {
-                Ok(response) if response.status().is_success() => return Ok(()),
-                Ok(response) => HookLiveAttemptFailure::Http(response.status()),
-                Err(error) if error.is_timeout() => HookLiveAttemptFailure::Timeout,
-                Err(_) => HookLiveAttemptFailure::Transport,
-            }
+        let failure = match attempt(attempt_timeout) {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
         };
 
         if !readiness_delivery || !failure.is_retryable() {
             return Err(failure.diagnostic());
         }
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or_default();
+        let remaining = deadline.checked_duration_since(now()).unwrap_or_default();
         if remaining <= policy.retry_delay {
             return Err(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts: {}",
                 failure.diagnostic()
             ));
         }
-        std::thread::sleep(policy.retry_delay);
+        wait(policy.retry_delay);
     }
 }
 
@@ -1940,8 +1961,10 @@ mod tests {
 
     fn short_hook_live_retry_policy() -> HookLiveRetryPolicy {
         HookLiveRetryPolicy {
+            // test-hygiene: allow-short-duration Scripted clock data only; no real sleep or IO.
             per_attempt_timeout: Duration::from_millis(40),
             overall_deadline: Duration::from_millis(250),
+            // test-hygiene: allow-short-duration Scripted clock data only; no real sleep or IO.
             retry_delay: Duration::from_millis(5),
         }
     }
@@ -1967,74 +1990,114 @@ mod tests {
 
     #[test]
     fn readiness_hook_retries_after_first_attempt_timeout_and_succeeds_within_deadline() {
-        let server = HookLiveTestServer::start(vec![
-            (Duration::from_millis(80), StatusCode::NO_CONTENT),
-            (Duration::ZERO, StatusCode::NO_CONTENT),
-        ]);
         let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
+        let policy = short_hook_live_retry_policy();
+        let started = Instant::now();
+        let clock = std::cell::Cell::new(started);
+        let mut attempts = Vec::new();
+        let mut waits = Vec::new();
+        let mut outcomes = [Err(HookLiveAttemptFailure::Timeout), Ok(())].into_iter();
 
-        emit_live_event_with_policy(
+        run_hook_live_retry(
             &event,
-            &server.target("private-forward-token"),
-            short_hook_live_retry_policy(),
+            policy,
+            started + policy.overall_deadline,
+            |timeout| {
+                attempts.push(timeout);
+                let outcome = outcomes.next().expect("only two attempts are needed");
+                if outcome.is_err() {
+                    clock.set(clock.get() + timeout);
+                }
+                outcome
+            },
+            || clock.get(),
+            |delay| {
+                waits.push(delay);
+                clock.set(clock.get() + delay);
+            },
         )
         .expect("readiness hook should recover within its bounded deadline");
 
-        assert!(server.attempts() >= 2);
+        assert_eq!(attempts, vec![policy.per_attempt_timeout; 2]);
+        assert_eq!(waits, vec![policy.retry_delay]);
+        assert_eq!(
+            clock.get().duration_since(started),
+            policy.per_attempt_timeout + policy.retry_delay
+        );
     }
 
     #[test]
     fn readiness_hook_stops_retrying_at_overall_deadline_without_exposing_secrets() {
-        let server =
-            HookLiveTestServer::start(vec![(Duration::from_millis(100), StatusCode::NO_CONTENT)]);
         let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
         let policy = HookLiveRetryPolicy {
+            // test-hygiene: allow-short-duration Scripted clock data only; no real sleep or IO.
             per_attempt_timeout: Duration::from_millis(30),
             overall_deadline: Duration::from_millis(120),
+            // test-hygiene: allow-short-duration Scripted clock data only; no real sleep or IO.
             retry_delay: Duration::from_millis(10),
         };
         let started = Instant::now();
+        let clock = std::cell::Cell::new(started);
+        let mut attempts = Vec::new();
+        let mut waits = Vec::new();
 
-        let error =
-            emit_live_event_with_policy(&event, &server.target("private-forward-token"), policy)
-                .expect_err("all delayed readiness attempts must fail");
+        let error = run_hook_live_retry(
+            &event,
+            policy,
+            started + policy.overall_deadline,
+            |timeout| {
+                attempts.push(timeout);
+                assert!(attempts.len() <= 3, "the overall deadline stops retries");
+                clock.set(clock.get() + timeout);
+                Err(HookLiveAttemptFailure::Timeout)
+            },
+            || clock.get(),
+            |delay| {
+                waits.push(delay);
+                clock.set(clock.get() + delay);
+            },
+        )
+        .expect_err("all scripted readiness attempts time out");
 
-        assert!(
-            started.elapsed() >= Duration::from_millis(80),
-            "bounded retry must continue near its deadline"
+        assert_eq!(attempts, vec![policy.per_attempt_timeout; 3]);
+        assert_eq!(waits, vec![policy.retry_delay; 2]);
+        assert_eq!(
+            clock.get().duration_since(started),
+            policy.per_attempt_timeout * 3 + policy.retry_delay * 2
         );
-        assert!(started.elapsed() < Duration::from_millis(250));
-        // Ideal arithmetic is three 30ms attempts plus two 10ms delays
-        // (110ms) inside the 120ms deadline. Scheduling and HTTP client
-        // overhead can consume later slots — a loaded host may stop after
-        // one or two attempts once remaining time is <= retry_delay.
-        // Sibling test `readiness_hook_retries_after_first_attempt_timeout_and_succeeds_within_deadline`
-        // already pins that retries happen when a later attempt can still fit.
-        assert!(
-            (1..=4).contains(&server.attempts()),
-            "deadline stop must not run away; got {} attempts",
-            server.attempts()
-        );
+        assert!(error.contains("after 3 attempts"), "{error}");
         assert!(!error.contains("private-readiness-nonce"), "{error}");
-        assert!(!error.contains("private-forward-token"), "{error}");
     }
 
     #[test]
     fn ordinary_hook_does_not_retry_after_attempt_timeout() {
-        let server = HookLiveTestServer::start(vec![
-            (Duration::from_millis(80), StatusCode::NO_CONTENT),
-            (Duration::ZERO, StatusCode::NO_CONTENT),
-        ]);
         let event = hook_live_test_event("PreToolUse", None);
+        let policy = short_hook_live_retry_policy();
+        let started = Instant::now();
+        let clock = std::cell::Cell::new(started);
+        let mut attempts = Vec::new();
 
-        emit_live_event_with_policy(
+        let error = run_hook_live_retry(
             &event,
-            &server.target("private-forward-token"),
-            short_hook_live_retry_policy(),
+            policy,
+            started + policy.per_attempt_timeout,
+            |timeout| {
+                attempts.push(timeout);
+                assert_eq!(attempts.len(), 1, "ordinary hooks cannot retry");
+                clock.set(clock.get() + timeout);
+                Err(HookLiveAttemptFailure::Timeout)
+            },
+            || clock.get(),
+            |_| panic!("ordinary hooks cannot wait for a retry"),
         )
         .expect_err("ordinary hook remains a single fail-open transport attempt");
 
-        assert_eq!(server.attempts(), 1);
+        assert_eq!(attempts, vec![policy.per_attempt_timeout]);
+        assert_eq!(
+            clock.get().duration_since(started),
+            policy.per_attempt_timeout
+        );
+        assert_eq!(error, HookLiveAttemptFailure::Timeout.diagnostic());
     }
 
     #[test]
