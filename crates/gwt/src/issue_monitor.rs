@@ -62,6 +62,8 @@ const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
 const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
 const WINDOWLESS_LAUNCH_TIMEOUT_SECS: i64 = 120;
+const WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE: &str =
+    "Launch timed out: no window was created within 120s";
 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
@@ -7950,7 +7952,13 @@ impl IssueMonitorState {
         }
         self.autonomous_record(issue_number)
             .and_then(|record| record.last_failure_message.as_deref())
-            == Some(message)
+            .is_some_and(|previous| {
+                previous == message
+                    // Delivery IDs and elapsed time describe the same timeout,
+                    // rather than new information that resets the retry ladder.
+                    || (previous.starts_with(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE)
+                        && message.starts_with(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE))
+            })
     }
 
     /// SPEC #3200 T-022: set the lifecycle phase of an issue's current attempt.
@@ -11116,12 +11124,12 @@ impl IssueMonitorState {
             .collect();
         let mut expired = Vec::new();
         for issue_number in unbound {
-            if self.windowless_launch_stall_at(issue_number, now).is_some() {
+            if let Some(diagnostic) = self.windowless_launch_stall_at(issue_number, now) {
                 self.release_confirmed_claim_for_issue(issue_number);
                 self.clear_active_tracking(issue_number);
                 self.record_launch_failed_at(
                     issue_number,
-                    "Launch timed out: no window was created within 120s",
+                    format!("{WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE}; {diagnostic}"),
                     now,
                 );
                 expired.push(issue_number);
@@ -20678,7 +20686,7 @@ mod tests {
             assert!(reason.contains("120s"), "{reason}");
             assert!(reason.contains("launch:effect-42"), "{reason}");
             assert_eq!(
-                monitor.expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true),
+                monitor.expire_stale_unbound_launches_with("2026-07-02T00:03:00Z", |_| true),
                 vec![42],
             );
             assert_eq!(monitor.active_count(), 0);
@@ -20687,6 +20695,10 @@ mod tests {
                 monitor.inbox_item(42).unwrap().state,
                 MonitorInboxState::LaunchFailed
             );
+            let failed = monitor.agent_status_at("2026-07-02T00:03:00Z");
+            let reason = failed.inbox[0].error_message.as_deref().unwrap();
+            assert!(reason.contains("180s"), "{reason}");
+            assert!(reason.contains("launch:effect-42"), "{reason}");
             assert!(monitor.pending_effects().iter().any(|effect| matches!(
                 &effect.payload,
                 IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
@@ -20751,6 +20763,27 @@ mod tests {
                 .error_message
                 .is_none());
         }
+    }
+
+    #[test]
+    fn issue_5140_timeout_details_do_not_reset_autonomous_failure_escalation() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.autonomous_mode = true;
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        let max = monitor.autonomous_tuning.max_attempts;
+        monitor.autonomous_record_mut(42).attempts = max;
+        monitor.autonomous_record_mut(42).last_failure_message = Some(
+            "Launch timed out: no window was created within 120s; Launch stalled: no window for 120s (deadline 120s; delivery first)".to_string(),
+        );
+        monitor.record_launch_failed_at(
+            42,
+            "Launch timed out: no window was created within 120s; Launch stalled: no window for 180s (deadline 120s; delivery second)",
+            "2026-07-02T00:03:00Z",
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::NeedsHuman
+        );
     }
 
     /// Issue #3712 AC-2: an already-created window keeps the ACK-driven

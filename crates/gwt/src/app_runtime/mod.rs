@@ -4433,7 +4433,11 @@ impl AppRuntime {
                         gwt::process::is_host_process_alive,
                     )
                 })
-                .map(|(_monitor, accepted)| accepted),
+                .map(|(monitor, accepted)| {
+                    accepted
+                        && monitor.pending_launch_delivery_id(issue_number).as_deref()
+                            == Some(delivery_id)
+                }),
             Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
                 Ok(false)
             }
