@@ -31329,6 +31329,177 @@ fn queued_continue_work_completion_fixture(
     (fixture, recorded, tasks, Ok(result))
 }
 
+#[test]
+fn launch_failure_status_preserves_worker_profile_and_uses_background_snapshot_order() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = &result.as_ref().expect("fixture launch").1;
+    let mut session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("fixture Session");
+    session.model = Some("worker-profile".into());
+    runtime.launch_wizard_cache.record_session(session.clone());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), issue_monitor_feedback(42));
+    assert!(runtime
+        .handle_launch_complete(window_id, Err("binary missing".into()))
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    session.model = Some("gui-profile".into());
+    session.updated_at += chrono::Duration::seconds(1);
+    runtime.launch_wizard_cache.record_session(session);
+
+    let outbound = runtime.handle_agent_launch_prepared(prepared);
+    assert!(outbound.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::IssueMonitorLaunchFailed {
+            issue_number: 42,
+            ..
+        }
+    )));
+    assert!(
+        !outbound
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })),
+        "prepared apply must leave the single status broadcast to the background route"
+    );
+    let snapshots = recorded
+        .lock()
+        .expect("event log")
+        .iter()
+        .filter_map(|event| match recorded_project_payload(event) {
+            UserEvent::IssueMonitorDaemonStatus { status, .. } => {
+                Some(("status", Some(status.launch_profile_summary.clone())))
+            }
+            UserEvent::IssueMonitorDaemonInbox { .. } => Some(("inbox", None)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].0, "status");
+    assert_eq!(snapshots[1], ("inbox", None));
+    let summary = snapshots[0].1.as_ref().expect("prepared profile summary");
+    assert!(summary.contains("worker-profile"));
+    assert!(!summary.contains("gui-profile"));
+}
+
+#[test]
+fn launch_failure_dispatch_uses_worker_receipt_when_owner_ledger_is_unreadable() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, _) = queued_continue_work_completion_fixture(temp.path());
+    let pending = fixture.runtime.pending_continue_work[&fixture.window_id].clone();
+    assert!(fixture
+        .runtime
+        .handle_launch_complete(
+            fixture.window_id.clone(),
+            Err("candidate spawn failed".into()),
+        )
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    assert_aborted_continue_work_launch(&fixture, &pending);
+    let prepared = take_prepared_agent_launch(&recorded);
+    let artifacts = exact_continue_authority_artifacts(&fixture.repo, fixture.owner);
+    fs::write(
+        artifacts.last().expect("owner ledger"),
+        b"invalid owner ledger",
+    )
+    .expect("make post-worker ledger unreadable");
+    let authority_before = snapshot_optional_files(&artifacts);
+    let work_before = tracked_work_event_store_snapshot(&fixture.repo);
+    let events = fixture.runtime.handle_agent_launch_prepared(prepared);
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                ..
+            } if code == "launch_failed"
+        )),
+        "GUI failure apply must use the committed worker receipt"
+    );
+    assert!(!fixture
+        .runtime
+        .pending_continue_work
+        .contains_key(&fixture.window_id));
+    assert_optional_files_unchanged(&authority_before);
+    assert_eq!(
+        tracked_work_event_store_snapshot(&fixture.repo),
+        work_before
+    );
+}
+
+#[test]
+fn launch_failure_dispatch_admission_rejection_retains_authority() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, _, _, _) = queued_continue_work_completion_fixture(temp.path());
+    fixture.runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    fixture.runtime.pending_launch_feedback_contexts.insert(
+        fixture.window_id.clone(),
+        issue_monitor_feedback(fixture.owner.number),
+    );
+    fixture
+        .runtime
+        .agent_capability_tokens
+        .insert(fixture.window_id.clone(), "admission-capability".into());
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let candidate_before = fs::read(&candidate_path).expect("candidate Session");
+    let work_before = tracked_work_event_store_snapshot(&fixture.repo);
+    let events = fixture.runtime.handle_launch_complete(
+        fixture.window_id.clone(),
+        Err("candidate spawn failed".into()),
+    );
+    assert!(
+        fixture
+            .runtime
+            .pending_launch_feedback_contexts
+            .contains_key(&fixture.window_id),
+        "admission rejection must retain launch feedback for recovery"
+    );
+    assert!(fixture
+        .runtime
+        .pending_continue_work
+        .contains_key(&fixture.window_id));
+    assert_eq!(
+        fixture
+            .runtime
+            .agent_capability_tokens
+            .get(&fixture.window_id)
+            .map(String::as_str),
+        Some("admission-capability")
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert_eq!(
+        fs::read(candidate_path).expect("retained candidate"),
+        candidate_before
+    );
+    assert_optional_files_unchanged(&authority_before);
+    assert_eq!(
+        tracked_work_event_store_snapshot(&fixture.repo),
+        work_before
+    );
+}
+
 fn assert_aborted_continue_work_launch(
     fixture: &ContinueWorkLaunchFailureFixture,
     pending: &PendingContinueWork,
@@ -31553,6 +31724,7 @@ fn launch_complete_dropped_prepared_handoff_defers_exact_cleanup() {
 #[test]
 fn launch_complete_defers_all_session_and_pty_work() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -53322,10 +53494,8 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     );
 }
 
-fn assert_ack_preserves_failed_window_replacement(restart_existing_id: bool) {
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
+fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_existing_id: bool) {
+    let repo = test_root.join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_repo_without_origin(&repo);
     let tab = sample_project_tab(
@@ -53338,7 +53508,7 @@ fn assert_ack_preserves_failed_window_replacement(restart_existing_id: bool) {
     let failed_raw_id = tab.workspace.persisted().windows[1].id.clone();
     let launched_id = combined_window_id("tab-1", &tab.workspace.persisted().windows[0].id);
     let failed_id = combined_window_id("tab-1", &failed_raw_id);
-    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(test_root, vec![tab], Some("tab-1"));
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
@@ -53410,12 +53580,16 @@ fn assert_ack_preserves_failed_window_replacement(restart_existing_id: bool) {
 
 #[test]
 fn issue_monitor_ack_preserves_reused_failed_window_id() {
-    assert_ack_preserves_failed_window_replacement(false);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_ack_preserves_failed_window_replacement(temp.path(), false);
 }
 
 #[test]
 fn issue_monitor_ack_preserves_failed_window_runtime_installed_after_enqueue() {
-    assert_ack_preserves_failed_window_replacement(true);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_ack_preserves_failed_window_replacement(temp.path(), true);
 }
 
 /// Issue #4802 AC-2: a launch into a worktree that already has a live agent
@@ -57511,6 +57685,108 @@ fn open_agent_settings_sets(
         FrontendEvent::IssueMonitorConfigureProfile,
     );
     (runtime, recorded_events, events)
+}
+
+#[test]
+fn app_runtime_agent_settings_update_preserves_the_saved_profile_and_wizard() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let profile = codex_issue_monitor_launch_profile();
+    let (mut runtime, recorded, opened) =
+        open_agent_settings_sets(temp.path(), &repo, vec![profile]);
+    let before = agent_settings_view(&opened);
+    assert_eq!(before.selected_launch_target, "agent");
+    assert!(before.error.is_none());
+    let model = before.selected_model.clone();
+    let reasoning = before.selected_reasoning.clone();
+    // The update must never run the host's real package manager in a test.
+    let bin = write_fixture_runners(temp.path(), &["npm", "codex"]);
+    let mut settings = Settings::default();
+    pin_launch_agents(&mut settings, &bin);
+    let _path = ScopedEnvVar::set(
+        "PATH",
+        &settings.profiles.get("default").unwrap().env_vars["PATH"],
+    );
+    write_profile_config(runtime.profile_config_path.as_ref().unwrap(), &settings);
+    let context = runtime.test_context();
+    let wizard_id = runtime
+        .launch_wizard_for(&context)
+        .unwrap()
+        .wizard_id
+        .clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs_before = fs::read(&prefs_path).unwrap();
+
+    let events =
+        runtime.handle_launch_wizard_action(&context, LaunchWizardAction::RunAgentSetup, None);
+    let updated = agent_settings_view(&events);
+    assert!(updated.error.is_none(), "{:?}", updated.error);
+    assert_eq!(updated.selected_launch_target, "agent");
+    assert_eq!(updated.selected_model, model);
+    assert_eq!(updated.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert!(runtime.runtimes.is_empty());
+    assert!(updated.agent_setup.as_ref().unwrap().pending);
+    wait_for_recorded_event("CLI update result", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchWizardAgentUpdated { .. }
+            )
+        })
+    });
+    let (result_id, result) = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::LaunchWizardAgentUpdated { wizard_id, result } => {
+                Some((wizard_id.clone(), result.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(result_id, wizard_id);
+    let completed = runtime.handle_launch_wizard_agent_updated(result_id, *result);
+    let view = agent_settings_view(&completed);
+    assert!(!view.agent_setup.as_ref().unwrap().pending);
+    assert!(view
+        .agent_setup
+        .as_ref()
+        .unwrap()
+        .status
+        .as_ref()
+        .unwrap()
+        .contains("1.2.3"));
+    assert_eq!(view.selected_model, model);
+    assert_eq!(view.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert_eq!(
+        runtime
+            .launch_wizard_cache
+            .agent_options()
+            .into_iter()
+            .find(|agent| agent.id == "codex")
+            .unwrap()
+            .installed_version
+            .as_deref(),
+        Some("1.2.3")
+    );
 }
 
 fn agent_settings_view(events: &[OutboundEvent]) -> &gwt::LaunchWizardView {

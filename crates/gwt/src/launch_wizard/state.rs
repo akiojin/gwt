@@ -78,6 +78,7 @@ impl LaunchWizardState {
             hermes_safe_mode: false,
             hermes_choices: Default::default(),
             needs_configuration: std::collections::BTreeSet::new(),
+            agent_update: None,
             branch_name: String::new(),
             initial_prompt: String::new(),
             completion: None,
@@ -421,7 +422,7 @@ impl LaunchWizardState {
         if self.launch_materialization_pending {
             return;
         }
-        if self.runtime_resolution_pending {
+        if self.runtime_resolution_pending || self.agent_update_pending() {
             match action {
                 LaunchWizardAction::Cancel => {
                     self.completion = Some(LaunchWizardCompletion::Cancelled);
@@ -1691,7 +1692,8 @@ impl LaunchWizardState {
     }
 
     /// SPEC-3864 FR-006 / FR-007: run the selected agent's setup affordance as
-    /// a Host shell launch. Install affordances run the descriptor's install
+    /// a Host command. Updates keep the settings draft open and run separately
+    /// from launch/profile saving. Install affordances run the descriptor's install
     /// command through the platform shell; configure affordances resolve the
     /// agent runner for the selected version and append the descriptor's
     /// `setup_args` (e.g. `opencode auth login`). Setup state is host-global,
@@ -1743,7 +1745,6 @@ impl LaunchWizardState {
             ),
         };
 
-        self.launch_target = LaunchTargetKind::Shell;
         let config = ShellLaunchConfig {
             working_dir: self.context.worktree_path.clone(),
             branch: (!self.branch_name.is_empty()).then(|| self.branch_name.clone()),
@@ -1758,9 +1759,55 @@ impl LaunchWizardState {
             command_override: Some(command_override),
             command_args_override: Some(args),
         };
-        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(
-            LaunchWizardLaunchRequest::Shell(Box::new(config)),
-        )));
+        if affordance.kind == AgentSetupKind::Update {
+            self.agent_update = Some(AgentUpdateState {
+                agent_id: agent.id.clone(),
+                pending: true,
+                status: format!("Updating {}…", descriptor.display_name),
+            });
+            self.completion = Some(LaunchWizardCompletion::UpdateAgent {
+                agent_id: agent.id,
+                config: Box::new(config),
+            });
+        } else {
+            self.launch_target = LaunchTargetKind::Shell;
+            self.completion = Some(LaunchWizardCompletion::Launch(Box::new(
+                LaunchWizardLaunchRequest::Shell(Box::new(config)),
+            )));
+        }
+    }
+
+    pub fn agent_update_pending(&self) -> bool {
+        self.agent_update
+            .as_ref()
+            .is_some_and(|update| update.pending)
+    }
+
+    pub fn finish_agent_update(&mut self, result: Result<AgentOption, String>) {
+        let Some(update) = self.agent_update.as_mut() else {
+            return;
+        };
+        update.pending = false;
+        match result {
+            Ok(agent) => {
+                update.status = format!(
+                    "Updated {} · {}",
+                    agent.name,
+                    agent
+                        .installed_version
+                        .as_deref()
+                        .unwrap_or("version unavailable")
+                );
+                if let Some(existing) = self
+                    .detected_agents
+                    .iter_mut()
+                    .find(|option| option.id == agent.id)
+                {
+                    *existing = agent;
+                }
+            }
+            Err(error) => update.status = format!("Update failed: {error}"),
+        }
     }
 
     /// SPEC-3152: persist a Hermes free-text launch option by field key.

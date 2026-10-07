@@ -26,6 +26,13 @@ test("setup action dispatches the generic run_agent_setup wire tag", () => {
   assert.doesNotMatch(surface, /run_opencode_setup/);
 });
 
+test("CLI update progress stays in the setup note and prevents repeated updates", () => {
+  assert.match(surface, /note\.setAttribute\("aria-busy", String\(Boolean\(setup\.pending\)\)\)/);
+  assert.match(surface, /status\.setAttribute\("role", "status"\)/);
+  assert.match(surface, /status\.setAttribute\("aria-live", "polite"\)/);
+  assert.match(surface, /button\.disabled = Boolean\(setup\.pending\)/);
+});
+
 test("no per-agent needs-setup branch survives in the wizard surface", () => {
   assert.doesNotMatch(surface, /hermes_needs_setup/);
   assert.doesNotMatch(surface, /opencode_needs_setup/);
