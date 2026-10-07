@@ -84,6 +84,9 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
     let Some(program) = args.first() else {
         return CommandWeight::Heavy;
     };
+    if is_short_non_cargo_gate(&args) {
+        return CommandWeight::Light;
+    }
     let program = Path::new(program)
         .file_stem()
         .and_then(|stem| stem.to_str());
@@ -154,6 +157,52 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
         return CommandWeight::Heavy;
     };
     classify_cargo_scope(&args.collect::<Vec<_>>(), test_filter)
+}
+
+/// Issue #5086: the explicit short-gate allowlist also owns its execution bound.
+/// Arbitrary interpreters/wrappers and coverage producers remain Heavy.
+pub(crate) fn short_non_cargo_timeout(command: &str) -> Option<Duration> {
+    let (_, args) = crate::cli::verification_record::split_command_line(command)
+        .and_then(crate::cli::verification_record::take_env_assignments)
+        .ok()?;
+    is_short_non_cargo_gate(&args).then_some(Duration::from_secs(60))
+}
+
+fn is_short_non_cargo_gate(args: &[String]) -> bool {
+    let program = args
+        .first()
+        .and_then(|program| Path::new(program).file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.strip_suffix(".exe").unwrap_or(name));
+    let subcommand = args.get(1).map(String::as_str);
+    let checks = |allowed_flags: &[&str]| {
+        let mut has_check = false;
+        for arg in args.iter().skip(2).take_while(|arg| arg.as_str() != "--") {
+            if arg == "--check" {
+                has_check = true;
+            } else if arg.starts_with('-') && !allowed_flags.contains(&arg.as_str()) {
+                // An unknown option may consume --check as its value.
+                return false;
+            }
+        }
+        has_check
+    };
+    match program {
+        // Static file analysis; none of these programs builds or runs a suite.
+        Some("actionlint" | "shellcheck" | "yamllint" | "typos") => true,
+        Some("git") => {
+            subcommand == Some("diff")
+                && checks(&["--cached", "--staged", "--no-ext-diff", "--no-textconv"])
+        }
+        Some("taplo") => subcommand == Some("check") || (subcommand == Some("fmt") && checks(&[])),
+        // This reader consumes an existing JSON, unlike coverage-summary.mjs
+        // which invokes llvm-cov. Do not classify node scripts by basename.
+        Some("node") => subcommand.is_some_and(|script| {
+            script.replace('\\', "/").trim_start_matches("./")
+                == "scripts/check-coverage-threshold.mjs"
+        }),
+        _ => false,
+    }
 }
 
 /// None means unbounded or unknown, not merely the absence of a filter.
@@ -1587,6 +1636,49 @@ mod tests {
 
     fn command_strings(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn known_short_non_cargo_gates_are_light_and_unknown_commands_stay_heavy() {
+        for command in [
+            "git diff --check",
+            "git diff --check --cached",
+            "git.exe diff --cached --check -- README.md",
+            "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90",
+            "node ./scripts/check-coverage-threshold.mjs summary.json 80 --scope-exclude 'crates/gwt/'",
+            "actionlint .github/workflows/test.yml",
+            "shellcheck scripts/check.sh",
+            "yamllint .github/workflows",
+            "taplo check Cargo.toml",
+            "taplo fmt --check Cargo.toml",
+            "typos README.md",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Light, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), Some(Duration::from_secs(60)), "{command}");
+        }
+        for command in [
+            "git diff",
+            "git status",
+            "git diff --line-prefix --check --ext-diff -- README.md",
+            "taplo fmt --config --check Cargo.toml",
+            "actionlint.sh .github/workflows/test.yml",
+            "shellcheck.py scripts/check.sh",
+            "git.sh diff --check",
+            "node.sh scripts/check-coverage-threshold.mjs summary.json 90",
+            "node scripts/coverage-summary.mjs -- --workspace --all-features",
+            "node arbitrary-script.mjs",
+            "node other/check-coverage-threshold.mjs summary.json 90",
+            "python3 runner.py",
+            "bash scripts/run-frontend-tests.sh",
+            "npx playwright test --headed",
+            "taplo lsp stdio",
+            "cargo build -p gwt",
+            "cargo test --workspace --all-features",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), None, "{command}");
+        }
+        assert_eq!(short_non_cargo_timeout("markdownlint README.md"), None);
     }
 
     /// Issue #4196 AC-1 / AC-3: what a requested command weighs follows the
