@@ -771,6 +771,26 @@ pub(super) fn resolve_split_workspace_state_external_commit(
     operation_id: &str,
     decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
+    resolve_split_workspace_state_external_commit_with_retry_hint(
+        project_root,
+        work_event_root,
+        operation_id,
+        decision,
+    )
+    .map(|(resolution, _)| resolution)
+}
+
+fn resolve_split_workspace_state_external_commit_with_retry_hint(
+    project_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+    decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
+) -> gwt_core::error::Result<(
+    gwt_core::workspace_projection::ExternalWorkspaceCommitResolution,
+    Option<String>,
+)> {
+    use gwt_core::workspace_projection::ExternalWorkspaceCommitResolution;
+
     let current_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root);
     let canonical_work_items_path =
         gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root);
@@ -782,30 +802,35 @@ pub(super) fn resolve_split_workspace_state_external_commit(
         operation_id,
         decision,
     );
-    if legacy_work_items_path == canonical_work_items_path {
-        return canonical;
-    }
-    match canonical {
-        Ok(gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing) => {
+    let resolve_legacy = legacy_work_items_path != canonical_work_items_path
+        && match &canonical {
+            Ok(ExternalWorkspaceCommitResolution::Missing) => true,
+            Err(gwt_core::error::GwtError::ExternalWorkspacePathPairMismatch {
+                operation_id: bound_operation_id,
+            }) => bound_operation_id == operation_id,
+            _ => false,
+        };
+    let (resolution, lock_work_items_path) = if resolve_legacy {
+        (
             resolve_legacy_split_workspace_state_external_commit(
                 project_root,
                 work_event_root,
                 operation_id,
                 decision,
-            )
-        }
-        Err(gwt_core::error::GwtError::ExternalWorkspacePathPairMismatch {
-            operation_id: bound_operation_id,
-        }) if bound_operation_id == operation_id => {
-            resolve_legacy_split_workspace_state_external_commit(
-                project_root,
-                work_event_root,
-                operation_id,
-                decision,
-            )
-        }
-        other => other,
-    }
+            )?,
+            &legacy_work_items_path,
+        )
+    } else {
+        (canonical?, &canonical_work_items_path)
+    };
+    let retry_hint = (resolution == ExternalWorkspaceCommitResolution::Busy).then(|| {
+        gwt_core::workspace_projection::external_workspace_operation_retry_hint_at(
+            &current_path,
+            lock_work_items_path,
+            operation_id,
+        )
+    });
+    Ok((resolution, retry_hint))
 }
 
 fn resolve_legacy_split_workspace_state_external_commit(
@@ -5741,25 +5766,27 @@ impl AppRuntime {
                 &self.sessions_dir,
                 &exact_session_identity,
                 || {
-                    match resolve_split_workspace_state_external_commit(
+                    match resolve_split_workspace_state_external_commit_with_retry_hint(
                         &target.project_root,
                         &target.worktree_path,
                         &operation_id,
                         gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
                     ) {
-                        Ok(
+                        Ok((
                             gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
-                        ) => {}
-                        Ok(
+                            _,
+                        )) => {}
+                        Ok((
                             gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Busy,
-                        ) => {
+                            Some(retry_hint),
+                        )) => {
                             return Err(ContinueWorkFailure::failed(
                                 "continuation_reconciliation_required",
-                                "The committed continuation Work transaction is still being reconciled.",
+                                retry_hint,
                                 true,
                             ));
                         }
-                        Ok(resolution) => {
+                        Ok((resolution, _)) => {
                             return Err(ContinueWorkFailure::conflict(format!(
                                 "The committed continuation has no matching Work transaction: {resolution:?}"
                             )));
