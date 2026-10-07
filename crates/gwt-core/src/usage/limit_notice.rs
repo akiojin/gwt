@@ -73,10 +73,19 @@ pub fn detect_provider_limit_screen_match<Tz: TimeZone>(
         if fenced || index < start || *line != line.trim_start() {
             continue;
         }
-        let text = normalize_tail(&lines[index..].join("\n"));
+        // Corroboration must belong to this response, never a later code quote.
+        let end = lines[index..]
+            .iter()
+            .position(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("```") || trimmed.starts_with("~~~")
+            })
+            .map_or(lines.len(), |offset| index + offset);
+        let response = &lines[index..end];
+        let text = normalize_tail(&response.join("\n"));
         let haystack = text.to_ascii_lowercase();
         let (provider, region, pattern) = if trimmed == "What do you want to do?"
-            && lines[index + 1..].iter().any(|line| {
+            && response[1..].iter().any(|line| {
                 let option = line.trim();
                 option.starts_with("❯ ") && option.contains("Wait for limit to reset")
             }) {
@@ -92,7 +101,7 @@ pub fn detect_provider_limit_screen_match<Tz: TimeZone>(
             } else if heading.starts_with("Claude usage limit reached.") {
                 Some((UsageProvider::ClaudeCode, "claude_usage_limit"))
             } else if heading.starts_with("You've hit your ")
-                && lines[index + 1..]
+                && response[1..]
                     .iter()
                     .any(|line| line.trim_start().starts_with("/usage-credits "))
             {
@@ -552,6 +561,8 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
             "• The Board quoted \"You've hit your weekly limit · resets Oct 8, 6am\".",
             "```text\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n  to purchase more credits or try again at Oct 8, 2026 6am.\n```",
             "⏺ Read(log.txt)\n  ⎿ You've hit your weekly limit · resets Oct 8, 6am\n    /usage-credits to finish what you're working on.\n❯",
+            "What do you want to do?\n```text\n❯ 1. Wait for limit to reset\n```",
+            "You've hit your weekly limit · resets Oct 8, 6am\n~~~text\n/usage-credits to finish what you're working on.\n~~~",
         ] {
             assert_eq!(
                 detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00")),
