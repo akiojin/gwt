@@ -1,6 +1,7 @@
 //! GitHub Issue tracking with file-based cache
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -118,22 +119,37 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
 
 /// Fetch open Issues while retaining the REST page-cap signal.
 pub fn fetch_issue_listing(owner: &str, repo: &str) -> Result<IssueListing> {
-    fetch_issue_listing_with(owner, repo, |path| {
-        let hub = gwt_core::process_console::global();
-        let output = gwt_core::process_console::spawn_logged_blocking(
-            &hub,
-            gwt_core::process_console::ProcessKind::Gh,
-            "gh",
-            &["api", path, "--include"],
-            gwt_core::process_console::SpawnOptions::new("gh api issues"),
-        )
-        .map_err(|e| e.to_string())?;
-        if output.success() {
-            Ok(output.stdout)
-        } else {
-            Err(output.stderr.trim().to_string())
-        }
-    })
+    fetch_issue_listing_with(owner, repo, fetch_issue_page)
+}
+
+/// Fetch every open queue-labelled Issue from the REST label list, without
+/// the ordinary list's page cap or GitHub Search's indexing delay (#5080 AC-1).
+pub fn fetch_queued_issue_listing(owner: &str, repo: &str) -> Result<IssueListing> {
+    fetch_queued_issue_listing_with(owner, repo, fetch_issue_page)
+}
+
+/// Fetch the ordinary open listing and the complete queue label collection.
+/// Queue labels and payloads come from the latter; the former retains its cap
+/// signal so queue completeness never authorizes whole-repository absence.
+pub fn fetch_issue_monitor_listing(owner: &str, repo: &str) -> Result<IssueListing> {
+    fetch_issue_monitor_listing_with(owner, repo, fetch_issue_page)
+}
+
+fn fetch_issue_page(path: &str) -> std::result::Result<String, String> {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &["api", path, "--include"],
+        gwt_core::process_console::SpawnOptions::new("gh api issues"),
+    )
+    .map_err(|e| e.to_string())?;
+    if output.success() {
+        Ok(output.stdout)
+    } else {
+        Err(output.stderr.trim().to_string())
+    }
 }
 
 /// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path> --include`.
@@ -161,6 +177,79 @@ where
             .map(Issue::from)
             .collect(),
         capped: pages.capped,
+    })
+}
+
+/// Injectable core of [`fetch_queued_issue_listing`]. Any failed continuation
+/// fails the collection. Pull requests and duplicate issue numbers cannot
+/// inflate the queue label membership.
+pub fn fetch_queued_issue_listing_with<F>(owner: &str, repo: &str, fetch: F) -> Result<IssueListing>
+where
+    F: FnMut(&str) -> std::result::Result<String, String>,
+{
+    let endpoint = format!(
+        "repos/{owner}/{repo}/issues?state=open&labels=gwt-queued&sort=created&direction=desc"
+    );
+    let pages = crate::gh_rest::read_complete_pages_with(&endpoint, fetch)
+        .map_err(|e| GwtError::Git(format!("gh api queued issues: {e}")))?;
+    let mut issues = Vec::new();
+    let mut positions = BTreeMap::new();
+    for row in crate::gh_rest::parse_issue_rows(&pages.rows)
+        .into_iter()
+        .filter(|row| {
+            row.state == "OPEN"
+                && row
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+        })
+    {
+        let issue = Issue::from(row);
+        if let Some(&index) = positions.get(&issue.number) {
+            issues[index] = issue;
+        } else {
+            positions.insert(issue.number, issues.len());
+            issues.push(issue);
+        }
+    }
+    Ok(IssueListing {
+        issues,
+        capped: false,
+    })
+}
+
+/// Injectable core of [`fetch_issue_monitor_listing`].
+pub fn fetch_issue_monitor_listing_with<F>(
+    owner: &str,
+    repo: &str,
+    mut fetch: F,
+) -> Result<IssueListing>
+where
+    F: FnMut(&str) -> std::result::Result<String, String>,
+{
+    let listing = fetch_issue_listing_with(owner, repo, &mut fetch)?;
+    let queued = fetch_queued_issue_listing_with(owner, repo, fetch)?;
+    let general = listing.issues.into_iter().map(|mut issue| {
+        // Removing only the label preserves open rows whose queue membership
+        // changed between the two reads; they are not evidence of closure.
+        issue
+            .labels
+            .retain(|label| !label.eq_ignore_ascii_case("gwt-queued"));
+        issue
+    });
+    let mut issues = Vec::new();
+    let mut positions = BTreeMap::new();
+    for issue in general.chain(queued.issues) {
+        if let Some(&index) = positions.get(&issue.number) {
+            issues[index] = issue;
+        } else {
+            positions.insert(issue.number, issues.len());
+            issues.push(issue);
+        }
+    }
+    Ok(IssueListing {
+        issues,
+        capped: listing.capped,
     })
 }
 
@@ -464,6 +553,66 @@ mod tests {
             listing.capped,
             "filtering PRs must not erase the REST page cap"
         );
+    }
+
+    #[test]
+    fn queue_label_listing_uses_the_rest_label_endpoint_and_unique_open_issues() {
+        let mut calls = Vec::new();
+        let listing = fetch_queued_issue_listing_with("acme", "widgets", |path| {
+            calls.push(path.to_string());
+            Ok("HTTP/2.0 200 OK\n\r\n[\
+                {\"number\":90,\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":42,\"title\":\"Old\",\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":42,\"title\":\"Latest\",\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":43,\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}],\"pull_request\":{}},\
+                {\"number\":44,\"state\":\"closed\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":45,\"state\":\"open\",\"labels\":[{\"name\":\"bug\"}]}]".to_string())
+        })
+        .unwrap();
+        assert_eq!(calls, ["repos/acme/widgets/issues?state=open&labels=gwt-queued&sort=created&direction=desc&per_page=100&page=1"]);
+        assert!(!listing.capped);
+        assert_eq!(listing.issues.len(), 2);
+        assert_eq!(listing.issues[0].number, 90);
+        assert_eq!(listing.issues[1].number, 42);
+        assert_eq!(listing.issues[1].title, "Latest");
+    }
+
+    #[test]
+    fn queue_label_monitor_listing_unions_rows_without_promoting_incomplete_open_lists() {
+        let listing = fetch_issue_monitor_listing_with("acme", "widgets", |path| {
+            let (link, rows) = if path.contains("labels=gwt-queued") {
+                (String::new(), r#"[{"number":42,"title":"Canonical","state":"open","labels":[{"name":"gwt-queued"}]},{"number":99,"state":"open","labels":[{"name":"gwt-queued"}]}]"#)
+            } else {
+                ("Link: <https://api.github.com/repos/acme/widgets/issues?state=open&page=2>; rel=\"next\"\r\n".to_string(), r#"[{"number":42,"title":"Stale","state":"open","labels":[{"name":"gwt-queued"}]},{"number":7,"state":"open","labels":[{"name":"gwt-queued"},{"name":"bug"}]}]"#)
+            };
+            Ok(format!("HTTP/2.0 200 OK\n{link}\r\n{rows}"))
+        })
+        .unwrap();
+        assert!(
+            listing.capped,
+            "queue completeness cannot promote the open list"
+        );
+        assert_eq!(listing.issues.len(), 3, "union is unique by issue number");
+        assert_eq!(listing.issues[0].number, 42);
+        assert_eq!(listing.issues[0].title, "Canonical");
+        assert_eq!(listing.issues[1].number, 7);
+        assert_eq!(listing.issues[1].state, "OPEN");
+        assert_eq!(listing.issues[1].labels, ["bug"]);
+        assert_eq!(listing.issues[2].number, 99);
+    }
+
+    #[test]
+    fn queue_label_monitor_listing_rejects_a_failed_label_read() {
+        let error = fetch_issue_monitor_listing_with("acme", "widgets", |path| {
+            if path.contains("labels=gwt-queued") {
+                Err("HTTP 502 label list".to_string())
+            } else {
+                Ok("HTTP/2.0 200 OK\n\r\n[]".to_string())
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("HTTP 502 label list"), "{error}");
     }
 
     #[test]
