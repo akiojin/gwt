@@ -602,7 +602,10 @@ use workspace_views::{
     workspace_execution_diagnosis_view, workspace_work_agent_view_from_ref,
     workspace_work_event_kind_wire,
 };
-pub(crate) use workspace_views::{ActiveWorkProjectionPrepared, ActiveWorkProjectionRefreshBroker};
+pub(crate) use workspace_views::{
+    ActiveWorkProjectionPrepared, ActiveWorkProjectionRefreshBroker,
+    WorkspaceProjectionPatchPrepared,
+};
 
 struct WorkspaceWorktreeReconcileOutcome {
     local_branches: std::collections::HashSet<String>,
@@ -1234,6 +1237,9 @@ pub(crate) struct ProjectRuntimeState {
     /// entering disk-backed projection loading on the GUI event loop.
     pub(crate) active_work_projection_cache:
         std::cell::RefCell<HashMap<String, gwt::ActiveWorkProjectionView>>,
+    /// Reject watcher patches prepared before another cache or window mutation.
+    pub(crate) workspace_projection_revision: std::cell::Cell<u64>,
+    pub(crate) workspace_projection_requested_revision: std::cell::Cell<u64>,
     /// Background-serialized wire snapshots paired with the view cache. Tab
     /// changes and frontend hydration reuse these Arcs instead of cloning and
     /// serializing a large Work graph on tao.
@@ -1315,6 +1321,8 @@ pub(crate) fn initial_project_states(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
                     )),
                     active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+                    workspace_projection_revision: Default::default(),
+                    workspace_projection_requested_revision: Default::default(),
                     active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
                     project_index_bootstrap: Default::default(),
                     branch_cleanup_operations: Arc::new(gwt::BranchCleanupOperationStore::new()),
@@ -3259,6 +3267,8 @@ impl AppRuntime {
                         gwt_core::workspace_projection::WorkItemsCache::new(),
                     )),
                     active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+                    workspace_projection_revision: Default::default(),
+                    workspace_projection_requested_revision: Default::default(),
                     active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
                     project_index_bootstrap: Default::default(),
                     branch_cleanup_operations: Arc::new(gwt::BranchCleanupOperationStore::new()),
@@ -11424,6 +11434,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_window(&mut self, tab_id: &str, raw_id: &str) {
+        self.invalidate_workspace_projection_patch(tab_id);
         let window_id = combined_window_id(tab_id, raw_id);
         self.invalidate_launch_delivery_ack(&window_id);
         self.pending_launch_completions.remove(&window_id);
