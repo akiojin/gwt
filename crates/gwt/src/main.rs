@@ -567,6 +567,7 @@ fn gui_event_loop_stall_warning(label: &str, elapsed_ms: u64) -> Option<String> 
 struct EventLoopDispatchTimer {
     label: DispatchLabel,
     started: std::time::Instant,
+    startup_queued: bool,
 }
 
 impl EventLoopDispatchTimer {
@@ -574,6 +575,7 @@ impl EventLoopDispatchTimer {
         Self {
             label: event_loop_dispatch_label(event),
             started: std::time::Instant::now(),
+            startup_queued: false,
         }
     }
 }
@@ -581,15 +583,30 @@ impl EventLoopDispatchTimer {
 impl Drop for EventLoopDispatchTimer {
     fn drop(&mut self) {
         let elapsed = self.started.elapsed();
+        // Parking during bootstrap has not executed this event's handler yet.
+        let label = if self.startup_queued {
+            "StartupQueued"
+        } else {
+            self.label.as_str()
+        };
         // Issue #4520 AC-2: a startup dispatch past 100 ms reaches perf.startup.
-        gwt::perf::startup::event_loop_stall(self.label.as_str(), elapsed.as_secs_f64() * 1_000.0);
+        gwt::perf::startup::event_loop_stall(label, elapsed.as_secs_f64() * 1_000.0);
         let elapsed_ms = elapsed.as_millis() as u64;
-        if let Some(message) = gui_event_loop_stall_warning(self.label.as_str(), elapsed_ms) {
+        if let Some(message) = gui_event_loop_stall_warning(label, elapsed_ms) {
             tracing::warn!(
                 target: "gwt.frontend.timing",
-                event = %self.label,
+                event = label,
                 elapsed_ms,
                 "{message}"
+            );
+        } else {
+            // #5015: retain successful samples as well as stalls, so a low
+            // percentile or an empty warning log is backed by actual dispatches.
+            tracing::debug!(
+                target: "gwt.frontend.timing",
+                event = label,
+                elapsed_ms,
+                "GUI event loop dispatch handled"
             );
         }
     }
@@ -706,7 +723,7 @@ fn request_gui_shutdown(
 
 /// Preserve evidence when the GUI loop closes before an update handoff arrives.
 fn record_update_dispatch_result(
-    result: Result<(), tao::event_loop::EventLoopClosed<UserEvent>>,
+    result: Result<(), Box<tao::event_loop::EventLoopClosed<UserEvent>>>,
     stage: &str,
 ) -> bool {
     if let Err(error) = result {
@@ -719,13 +736,26 @@ fn record_update_dispatch_result(
     true
 }
 
+/// Transfer startup parking once, including the event received when bootstrap
+/// completed. All later dispatch and early-hook replay share the proxy queue.
+fn flush_startup_events(
+    proxy: &AppEventProxy,
+    parked: &mut Vec<UserEvent>,
+    current: Option<UserEvent>,
+) {
+    if let Some(event) = current {
+        parked.push(event);
+    }
+    proxy.prepend_events(std::mem::take(parked));
+}
+
 /// Issue #4038 (AC-1 / AC-2): resolve the payload to commit for an update
 /// apply on a worker thread — the persisted manifest when there is one,
 /// otherwise a download that is then persisted — and hand the manifest back
 /// to the event loop as `ApplyUpdateGraceful`. Failures reply with
 /// `UpdateApplyError` for `stage`.
 fn spawn_update_apply_resolution(
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
     state: gwt_core::update::UpdateState,
     client_id: ClientId,
     stage: &'static str,
@@ -883,7 +913,7 @@ struct BoardProjectionWatcherRegistry {
 }
 
 impl BoardProjectionWatcherRegistry {
-    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+    fn sync(&mut self, app: &AppRuntime, proxy: AppEventProxy) {
         let mut active_roots = HashSet::new();
         for tab in &app.tabs {
             let project_root = tab.project_root.clone();
@@ -907,7 +937,7 @@ impl BoardProjectionWatcherRegistry {
 
 fn spawn_board_projection_watcher(
     project_root: PathBuf,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
 ) -> Option<BoardProjectionWatcher> {
     let name = format!(
         "gwt-board-watch-{}",
@@ -1045,7 +1075,7 @@ struct WorkspaceProjectionWatcherRegistry {
 }
 
 impl WorkspaceProjectionWatcherRegistry {
-    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+    fn sync(&mut self, app: &AppRuntime, proxy: AppEventProxy) {
         let mut active_roots = HashSet::new();
         for tab in &app.tabs {
             let Some(context) = app.project_context(&tab.id) else {
@@ -1064,7 +1094,7 @@ impl WorkspaceProjectionWatcherRegistry {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.watchers.entry(key) {
                 if let Some(watcher) = spawn_workspace_projection_watcher(
                     context.clone(),
-                    AppEventProxy::new(proxy.clone()).for_project(context),
+                    proxy.clone().for_project(context),
                 ) {
                     entry.insert(watcher);
                 }
@@ -1331,7 +1361,7 @@ impl ActiveWorkRefreshQueue {
 
 fn spawn_active_work_projection_refresh(
     handle: &tokio::runtime::Handle,
-    proxy: &EventLoopProxy<UserEvent>,
+    proxy: &AppEventProxy,
     job: app_runtime::ActiveWorkProjectionJob,
 ) {
     let proxy = proxy.clone();
@@ -1360,7 +1390,7 @@ fn spawn_active_work_projection_refresh(
 
 fn spawn_board_projection_refresh(
     handle: &tokio::runtime::Handle,
-    proxy: &EventLoopProxy<UserEvent>,
+    proxy: &AppEventProxy,
     job: app_runtime::BoardProjectionRefreshJob,
     views: app_runtime::BoardScopedViews,
 ) {
@@ -1414,7 +1444,7 @@ struct BoardDaemonSubscriberRegistry {
 }
 
 impl BoardDaemonSubscriberRegistry {
-    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+    fn sync(&mut self, app: &AppRuntime, proxy: AppEventProxy) {
         let mut active_roots = HashSet::new();
         for tab in &app.tabs {
             let Some(context) = app.project_context(&tab.id) else {
@@ -1431,10 +1461,9 @@ impl BoardDaemonSubscriberRegistry {
                 self.subscribers.remove(&key);
             }
             if let std::collections::hash_map::Entry::Vacant(entry) = self.subscribers.entry(key) {
-                if let Some(subscriber) = spawn_board_daemon_subscriber(
-                    context.clone(),
-                    AppEventProxy::new(proxy.clone()),
-                ) {
+                if let Some(subscriber) =
+                    spawn_board_daemon_subscriber(context.clone(), proxy.clone())
+                {
                     entry.insert((context, subscriber));
                 }
             }
@@ -1720,6 +1749,7 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::UpdateBoardProviderConfig { .. }
             | FrontendEvent::UpdateBoardOauthPort { .. }
             | FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListSupportedAgents
             | FrontendEvent::ListCustomAgentPresets
             | FrontendEvent::AddCustomAgentFromPreset { .. }
             | FrontendEvent::UpdateCustomAgent { .. }
@@ -1758,6 +1788,10 @@ fn browser_project_input_allowed(
 )]
 #[derive(Debug, Clone)]
 enum UserEvent {
+    IssueMonitorLaunchDeliveryAcknowledged(
+        Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
+    ),
+    DrainAppEvents,
     StartupReady,
     StartupStopped,
     ProjectIndexRefreshRequested {
@@ -1985,6 +2019,7 @@ enum UserEvent {
         operation_id: String,
         binding: gwt_agent::SessionExecutionBinding,
     },
+    FreshExecutionFinalized(Box<app_runtime::continuation::FreshExecutionFinalization>),
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeApprovalOverlay {
@@ -2085,6 +2120,10 @@ enum UserEvent {
         wizard_id: String,
         result: Box<Result<gwt::LaunchWizardHydration, String>>,
     },
+    LaunchWizardAgentUpdated {
+        wizard_id: String,
+        result: Box<Result<gwt::AgentOption, String>>,
+    },
     LaunchWizardLaunchMaterializationRequested {
         wizard_id: String,
         client_id: Option<ClientId>,
@@ -2099,6 +2138,7 @@ enum UserEvent {
         window_id: String,
         result: Box<AgentLaunchResult>,
     },
+    AgentLaunchPrepared(Box<crate::app_runtime::PreparedAgentLaunch>),
     /// Issue #4375: one PM worktree preparation finished on a blocking worker.
     /// The Git work it covers (`git worktree add`, `git fetch`) used to run
     /// inside the canvas-ready restore drain and held the GUI event loop for
@@ -2249,13 +2289,110 @@ mod tests {
     include!("project_refresh_generation_tests.rs");
 
     #[test]
+    fn startup_delivery_uses_one_pending_queue_after_bootstrap() {
+        let source = include_str!("main.rs");
+        let ready_dispatch = source
+            .rsplit_once("// Park work until bootstrap finishes")
+            .expect("startup parking boundary")
+            .1
+            .split_once("let app = app.as_mut().expect(\"startup complete\");")
+            .expect("ready dispatch boundary")
+            .0;
+        assert!(
+            !ready_dispatch.contains("startup_events.pop_front()"),
+            "ready dispatch must use the common proxy queue so replayed hooks can precede later hooks"
+        );
+        assert!(
+            ready_dispatch.contains("flush_startup_events"),
+            "the parked batch and current event must transfer through the production flush helper"
+        );
+    }
+
+    #[test]
+    fn startup_delivery_flush_keeps_current_behind_parking_and_allows_replay() {
+        fn progress(message: &str) -> super::UserEvent {
+            super::UserEvent::LaunchProgress {
+                window_id: "window".into(),
+                message: message.into(),
+            }
+        }
+        let (proxy, _) = super::AppEventProxy::stub();
+        proxy.send(progress("later"));
+        let mut parked = vec![progress("first"), progress("second")];
+        super::flush_startup_events(&proxy, &mut parked, Some(progress("current")));
+        assert!(parked.is_empty());
+        assert!(
+            matches!(proxy.take_next(), Some(super::UserEvent::LaunchProgress { message, .. }) if message == "first")
+        );
+        // Applying the first prepared completion replays its early hook through
+        // the same queue, ahead of a later hook already parked at bootstrap.
+        proxy.prepend_events(vec![progress("replayed")]);
+        super::flush_startup_events(&proxy, &mut parked, None);
+        for expected in ["replayed", "second", "current", "later"] {
+            assert!(
+                matches!(proxy.take_next(), Some(super::UserEvent::LaunchProgress { message, .. }) if message == expected)
+            );
+        }
+        assert!(proxy.take_next().is_none());
+    }
+
+    #[test]
+    fn app_delivery_closes_at_actual_exit_before_runtime_shutdown() {
+        let source = include_str!("main.rs");
+        let event_loop = source
+            .rsplit_once("event_loop.run(move |event, _, control_flow| {")
+            .expect("GUI event loop")
+            .1;
+        let startup_stopped = event_loop
+            .split_once("Event::UserEvent(UserEvent::StartupStopped) => {")
+            .expect("startup cleanup exit")
+            .1
+            .split_once("return;")
+            .unwrap()
+            .0;
+        assert!(
+            startup_stopped.contains("proxy.close()"),
+            "completed startup cleanup must close delivery before Exit"
+        );
+        let accepted_quit = event_loop
+            .split_once("let app = app.as_mut().expect(\"startup complete\");")
+            .unwrap()
+            .1
+            .split_once("Event::UserEvent(UserEvent::QuitApp { reason }) => {")
+            .expect("ready quit handler")
+            .1
+            .split_once("*control_flow = ControlFlow::Exit;")
+            .unwrap()
+            .0;
+        let close = accepted_quit
+            .find("proxy.close()")
+            .expect("accepted quit closes delivery");
+        assert!(
+            close > accepted_quit.find("return;").unwrap(),
+            "deferred quit keeps delivery open"
+        );
+        assert!(
+            close < accepted_quit.find("app.stop_all_runtimes()").unwrap(),
+            "pending handoff cleanup must enqueue before runtime shutdown"
+        );
+        let destroyed = event_loop
+            .rsplit_once("Event::LoopDestroyed => {")
+            .unwrap()
+            .1;
+        assert!(
+            destroyed.find("proxy.close()").unwrap()
+                < destroyed.find("app.stop_all_runtimes()").unwrap()
+        );
+    }
+
+    #[test]
     fn update_dispatch_closed_loop_records_stage_and_reason_without_restart() {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         assert!(!super::record_update_dispatch_result(
-            Err(tao::event_loop::EventLoopClosed(
+            Err(Box::new(tao::event_loop::EventLoopClosed(
                 super::UserEvent::Dispatch(vec![])
-            )),
+            ))),
             "dispatch_update_prepared",
         ));
         let log = std::fs::read_to_string(gwt_core::update::update_log_path()).unwrap();
@@ -2465,6 +2602,10 @@ mod tests {
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::GetSystemSettings
         ));
+        let supported_agents: FrontendEvent =
+            serde_json::from_str(r#"{"kind":"list_supported_agents"}"#)
+                .expect("Supported Agents is a global read-only Settings request");
+        assert!(hub_frontend_event_allowed(&supported_agents));
         assert!(hub_frontend_event_allowed(&FrontendEvent::ApplyUpdateStart));
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::OpenProjectDialog
@@ -4254,8 +4395,9 @@ mod tests {
             sample_wizard_agent_options(),
         );
         let blocking_tasks = BlockingTaskSpawner::thread();
-        let persist_dispatcher =
-            crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
+        let persist_dispatcher = Arc::new(
+            crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks),
+        );
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
@@ -4291,6 +4433,8 @@ mod tests {
             launch_wizard_cache,
 
             pending_launch_feedback_contexts: HashMap::new(),
+            pending_launch_delivery_acks: HashMap::new(),
+            pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
@@ -4303,6 +4447,7 @@ mod tests {
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
+            pending_fresh_execution_finalizations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
             project_open_started: None,
@@ -5941,7 +6086,7 @@ mod tests {
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
         assert!(runtime.window_lookup.contains_key(&claude_two_id));
 
-        let failed_launch = runtime.handle_launch_complete(
+        let failed_launch = runtime.handle_launch_complete_and_drain(
             "tab-1::missing".to_string(),
             Err("launch failed".to_string()),
         );
@@ -5950,7 +6095,7 @@ mod tests {
             "late completion without a live project owner must be discarded"
         );
 
-        let missing_window_launch = runtime.handle_launch_complete(
+        let missing_window_launch = runtime.handle_launch_complete_and_drain(
             "tab-1::missing".to_string(),
             Ok((
                 ProcessLaunch {
@@ -7211,7 +7356,7 @@ mod tests {
                 raw_id: "ghost".to_string(),
             },
         );
-        let project_missing = runtime.handle_launch_complete(
+        let project_missing = runtime.handle_launch_complete_and_drain(
             project_missing_id.clone(),
             Ok((
                 ProcessLaunch {
@@ -7249,7 +7394,7 @@ mod tests {
                 raw_id: "ghost".to_string(),
             },
         );
-        let raw_missing = runtime.handle_launch_complete(
+        let raw_missing = runtime.handle_launch_complete_and_drain(
             raw_missing_id.clone(),
             Ok((
                 ProcessLaunch {
@@ -9693,7 +9838,7 @@ impl Drop for PendingApp {
 
 fn bootstrap_app(
     startup_dir: &Path,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
     pty_writers: PtyWriterRegistry,
     attachment_uploads: AttachmentUploadStore,
     blocking_tasks: BlockingTaskSpawner,
@@ -9944,7 +10089,7 @@ fn main() -> std::io::Result<()> {
         use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
         event_loop.set_activation_policy(ActivationPolicy::Prohibited);
     }
-    let proxy = event_loop.create_proxy();
+    let proxy = AppEventProxy::new(event_loop.create_proxy());
     // SPEC #2920 Phase 4: the tray menu uses `tray_icon::menu::Menu`
     // (re-exported from `muda`), and `MenuEvent::set_event_handler` is
     // the single cross-platform callback. The legacy macOS native
@@ -9973,7 +10118,7 @@ fn main() -> std::io::Result<()> {
     });
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let mut app: Option<AppRuntime> = None;
-    let mut startup_events = std::collections::VecDeque::new();
+    let mut startup_events = Vec::new();
     let mut startup_quit_requested = false;
     let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
     let mut workspace_projection_watchers = WorkspaceProjectionWatcherRegistry::default();
@@ -9981,7 +10126,7 @@ fn main() -> std::io::Result<()> {
     // component in the production topology ever runs scheduled scans, so
     // autonomous launches silently never happen.
     {
-        let tick_proxy = event_loop.create_proxy();
+        let tick_proxy = proxy.clone();
         let interval = std::time::Duration::from_secs(
             gwt::IssueMonitorConfig::default()
                 .poll_interval_secs
@@ -10011,7 +10156,7 @@ fn main() -> std::io::Result<()> {
     // lane available at launch instead of minutes later, and the cadence is
     // the worst-case gap after a daemon crash.
     {
-        let tick_proxy = event_loop.create_proxy();
+        let tick_proxy = proxy.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("runtime-daemon-ensure-tick".to_string())
             .spawn(move || loop {
@@ -10031,7 +10176,7 @@ fn main() -> std::io::Result<()> {
     // The observer needs a cadence finer than the scan poll so a settled
     // window closes within one tick after its 60-second grace.
     {
-        let tick_proxy = event_loop.create_proxy();
+        let tick_proxy = proxy.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("terminal-convergence-tick".to_string())
             .spawn(move || loop {
@@ -10094,7 +10239,7 @@ fn main() -> std::io::Result<()> {
         &runtime,
         prepared_listener.into_listener(),
         oauth_redirect_port,
-        AppEventProxy::new(proxy.clone()),
+        proxy.clone(),
         clients.clone(),
         pty_writers.clone(),
         attachment_uploads,
@@ -10167,9 +10312,7 @@ fn main() -> std::io::Result<()> {
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
     if !gwt::index_worker::automatic_background_index_disabled() {
-        crate::project_index_bootstrap::ensure_refresh_broker_drain(AppEventProxy::new(
-            proxy.clone(),
-        ));
+        crate::project_index_bootstrap::ensure_refresh_broker_drain(proxy.clone());
     }
     let mut startup_index_projects = HashSet::new();
 
@@ -10307,6 +10450,13 @@ fn main() -> std::io::Result<()> {
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
+        let event = match event {
+            Event::UserEvent(UserEvent::DrainAppEvents) => {
+                let Some(event) = proxy.take_next() else { return; };
+                Event::UserEvent(event)
+            }
+            event => event,
+        };
         let mut dispatch_timer = EventLoopDispatchTimer::start(&event);
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
         let event = match event {
@@ -10330,8 +10480,15 @@ fn main() -> std::io::Result<()> {
                     // Tao exits the process without dropping the closure on Exit.
                     return;
                 }
-                Event::LoopDestroyed => { server.shutdown(); return; }
+                Event::LoopDestroyed => {
+                    proxy.close();
+                    drop(std::mem::take(&mut startup_events));
+                    server.shutdown();
+                    return;
+                }
                 Event::UserEvent(UserEvent::StartupStopped) => {
+                    proxy.close();
+                    drop(std::mem::take(&mut startup_events));
                     *control_flow = ControlFlow::Exit;
                     return;
                 }
@@ -10384,7 +10541,7 @@ fn main() -> std::io::Result<()> {
                             spawn_project_index_status_check(
                                 &runtime,
                                 state.project_index_bootstrap.clone(),
-                                AppEventProxy::new(proxy.clone()).for_project(context.clone()),
+                                proxy.clone().for_project(context.clone()),
                                 Some(context.project_root),
                                 inventory,
                             );
@@ -10395,22 +10552,26 @@ fn main() -> std::io::Result<()> {
                     app = Some(ready);
                 }
                 Ok(Err(error)) => {
+                    proxy.close();
+                    drop(std::mem::take(&mut startup_events));
                     server.shutdown();
                     fatal_startup_exit(&mut log_handles, &format!("app bootstrap failed: {error}"), 1);
                 }
                 Err(_) => {}
             }
         }
-        // Runtime completions remain in arrival order until bootstrap finishes.
+        // Park work until bootstrap finishes, then prioritize controls over completions.
         let event = if app.is_none() {
+            dispatch_timer.startup_queued = true;
+            watchdog_guard.set_event("StartupQueued");
             match event {
                 Event::UserEvent(UserEvent::StartupReady) => {}
                 Event::UserEvent(UserEvent::MenuEvent(menu)) => {
                     tray_open.set_text("Starting… — request received");
                     tracing::info!(target: "gwt_tray", "tray request accepted during startup");
-                    startup_events.push_back(UserEvent::MenuEvent(menu));
+                    startup_events.push(UserEvent::MenuEvent(menu));
                 }
-                Event::UserEvent(event) => startup_events.push_back(event),
+                Event::UserEvent(event) => startup_events.push(event),
                 _ => {}
             }
             return;
@@ -10418,15 +10579,25 @@ fn main() -> std::io::Result<()> {
             match event {
                 Event::UserEvent(event @ UserEvent::QuitApp { .. }) => Event::UserEvent(event),
                 Event::UserEvent(event) => {
-                    if !matches!(event, UserEvent::StartupReady) { startup_events.push_back(event); }
-                    let Some(next) = startup_events.pop_front() else { return; };
-                    if !startup_events.is_empty() { let _ = proxy.send_event(UserEvent::StartupReady); }
-                    Event::UserEvent(next)
+                    if startup_events.is_empty() {
+                        if matches!(event, UserEvent::StartupReady) { return; }
+                        Event::UserEvent(event)
+                    } else {
+                        let current = if matches!(event, UserEvent::StartupReady) { None } else { Some(event) };
+                        flush_startup_events(&proxy, &mut startup_events, current);
+                        let Some(next) = proxy.take_next() else { return; };
+                        Event::UserEvent(next)
+                    }
                 }
-                event => event,
+                event => {
+                    flush_startup_events(&proxy, &mut startup_events, None);
+                    event
+                }
             }
         };
         let app = app.as_mut().expect("startup complete");
+        dispatch_timer.label = event_loop_dispatch_label(&event);
+        watchdog_guard.set_event(dispatch_timer.label.as_str());
         // Issue #3611 AC-4: every dispatch on this thread is timed, not just
         // the frontend ones. The Work/branch scan results land as `UserEvent`s,
         // so a projection stall was previously invisible in the logs.
@@ -10473,6 +10644,8 @@ fn main() -> std::io::Result<()> {
                     }
                     return;
                 }
+                proxy.close();
+                drop(std::mem::take(&mut startup_events));
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     reason,
@@ -10578,7 +10751,7 @@ fn main() -> std::io::Result<()> {
                             let context = state.context.clone();
                             let log_scope = app.project_log_scope_for_tab(&context.tab_id).cloned();
                             let _log_scope = log_scope.as_ref().map(|scope| scope.enter());
-                            spawn_project_index_status_check(&runtime, state.project_index_bootstrap.clone(), AppEventProxy::new(proxy.clone()).for_project(context.clone()), Some(context.project_root), None);
+                            spawn_project_index_status_check(&runtime, state.project_index_bootstrap.clone(), proxy.clone().for_project(context.clone()), Some(context.project_root), None);
                         }
                     }
 
@@ -10863,9 +11036,7 @@ fn main() -> std::io::Result<()> {
                 ));
             }
             Event::UserEvent(UserEvent::FreshExecutionReadyResend { grant, request, reply }) => {
-                let (result, events) = app.resend_fresh_execution_ready(&grant, &request);
-                clients.dispatch(events);
-                let _ = reply.send(result);
+                clients.dispatch(app.resend_fresh_execution_ready(&grant, &request, reply));
             }
             Event::UserEvent(UserEvent::IssueMonitorFreshLaunchRepaired {
                 window_id,
@@ -11037,6 +11208,10 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::LaunchWizardAgentUpdated { wizard_id, result }) => {
+                let events = app.handle_launch_wizard_agent_updated(wizard_id, *result);
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::LaunchWizardLaunchMaterializationRequested {
                 wizard_id,
                 client_id,
@@ -11051,7 +11226,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ProjectIndexRefreshRequested { project_key, project_root }) => {
                 if let Some(state) = app.project_states.get(&project_key) {
                     state.project_index_bootstrap.invalidate_full_status(&project_root);
-                    state.project_index_bootstrap.spawn(AppEventProxy::new(proxy.clone()).for_project(state.context.clone()), project_root);
+                    state.project_index_bootstrap.spawn(proxy.clone().for_project(state.context.clone()), project_root);
                 }
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {
@@ -11079,6 +11254,15 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::FreshExecutionFinalized(completion)) => {
+                clients.dispatch(app.handle_fresh_execution_finalized(*completion));
+            }
+            Event::UserEvent(UserEvent::AgentLaunchPrepared(prepared)) => {
+                clients.dispatch(app.handle_agent_launch_prepared(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorLaunchDeliveryAcknowledged(acknowledged)) => {
+                clients.dispatch(app.handle_issue_monitor_launch_delivery_ack(*acknowledged));
             }
             Event::UserEvent(UserEvent::PmWorktreePrepared {
                 continuation,
@@ -11574,6 +11758,8 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                proxy.close();
+                drop(std::mem::take(&mut startup_events));
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     GuiShutdownReason::LoopDestroyed,

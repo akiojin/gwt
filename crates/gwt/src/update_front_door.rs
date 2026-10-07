@@ -133,7 +133,7 @@ pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> S
 pub fn spawn_startup_update_check(
     runtime: &Runtime,
     _clients: ClientHub,
-    update_proxy: EventLoopProxy<UserEvent>,
+    update_proxy: AppEventProxy,
 ) {
     if gwt_core::update::is_ci() {
         return;
@@ -198,7 +198,7 @@ pub fn spawn_startup_update_check(
 fn handle_poll_outcome(
     state: &mut PollState,
     outcome: gwt_core::update::UpdateState,
-    update_proxy: &EventLoopProxy<UserEvent>,
+    update_proxy: &AppEventProxy,
 ) -> Duration {
     match classify_startup_update_state(&outcome) {
         StartupUpdateAction::Publish => {

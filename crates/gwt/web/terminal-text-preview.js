@@ -16,8 +16,10 @@ export function createTerminalTextPreview({ document, terminal, container }) {
 
   render();
   const subscription = terminal.onWriteParsed(render);
+  const resize = terminal.onResize(render);
   return () => {
     subscription.dispose();
+    resize.dispose();
     preview.remove();
   };
 }

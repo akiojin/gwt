@@ -33,6 +33,7 @@ gwt-terminal.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tokio.workspace = true
@@ -66,7 +67,7 @@ encoding_rs.workspace = true
 pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
-sysinfo.workspace = true
+sysinfo = { workspace = true, features = ["disk"] }
 tray-icon = "0.26"
 auto-launch = "0.6"
 whoami = "2.1"
@@ -119,7 +120,6 @@ test-gh-guard = ["dep:ctor"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-serde_yaml.workspace = true
 tracing-subscriber.workspace = true
 # SPEC-3016 FR-003: shared test helpers live in gwt-core::test_support; the
 # feature is test-only and never ships.
