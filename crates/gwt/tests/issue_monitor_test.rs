@@ -215,6 +215,157 @@ fn monitor_config_defaults_to_disabled_and_requires_explicit_queue_membership() 
     assert!(!is_auto_improve_candidate(&closed, true));
 }
 
+/// Issue #5080 AC-1/4/5: observation covers the queue-label census even
+/// when this terminal admitted only a subset. These are the three incidents.
+#[test]
+fn queue_label_inbox_coverage_preserves_the_missing_membership_family() {
+    for (total, admitted) in [(50, 28), (204, 89), (287, 48)] {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let issues = (1..=total)
+            .map(|number| issue(number, &["bug", "gwt-queued"]))
+            .collect::<Vec<_>>();
+        let members = (1..=admitted).collect::<Vec<_>>();
+        monitor.terminal_queue_push(&members, "test", "2026-10-07T00:00:00Z");
+        scan_issue_monitor_candidates(&mut monitor, &issues, "2026-10-07T00:01:00Z");
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert_eq!(status["inbox"].as_array().unwrap().len(), total as usize);
+        assert_eq!(status["inbox_coverage"]["github_target_count"], total);
+        assert_eq!(status["inbox_coverage"]["inbox_row_count"], total);
+        assert_eq!(
+            status["inbox_coverage"]["missing_issue_numbers"],
+            serde_json::json!([])
+        );
+        assert_eq!(monitor.local_terminal_queue_numbers(), members);
+        assert_eq!(monitor.queued_issue_numbers(), members);
+        let unselected = monitor.inbox_item(total).expect("unselected state row");
+        assert_eq!(unselected.state, MonitorInboxState::Skipped);
+        assert_eq!(
+            unselected.exclusion_reason.as_deref(),
+            Some("not selected in this terminal queue")
+        );
+        assert!(monitor.agent_status().needs_human.is_empty());
+        // Explicit selection restores admission on the next scan.
+        monitor.terminal_queue_push(&[total], "test", "2026-10-07T00:02:00Z");
+        scan_issue_monitor_candidates(&mut monitor, &issues, "2026-10-07T00:03:00Z");
+        assert_eq!(
+            monitor.inbox_item(total).unwrap().state,
+            MonitorInboxState::Queued
+        );
+    }
+}
+
+/// AC-4: a missing observation has its own diagnostic, independent of errors.
+#[test]
+fn queue_label_inbox_coverage_reports_missing_rows_without_last_error() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        &[issue(42, &["gwt-queued"])],
+        "2026-10-07T00:00:00Z",
+    );
+    monitor.inbox.clear();
+    let status = serde_json::to_value(monitor.agent_status()).unwrap();
+    assert_eq!(status["inbox_coverage"]["github_target_count"], 1);
+    assert_eq!(status["inbox_coverage"]["inbox_row_count"], 0);
+    assert_eq!(
+        status["inbox_coverage"]["missing_issue_numbers"],
+        serde_json::json!([42])
+    );
+    assert!(status.get("last_error").is_none());
+}
+
+#[test]
+fn queue_label_removal_retires_an_observation_without_admitting_it() {
+    let repo = tempfile::tempdir().unwrap();
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[issue(42, &["gwt-queued"])],
+        IssueMonitorCandidateSource::LiveIncomplete,
+        repo.path(),
+        "2026-10-07T00:00:00Z",
+    );
+    assert_eq!(
+        monitor.inbox_item(42).unwrap().state,
+        MonitorInboxState::Skipped
+    );
+    let scan = scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[issue(42, &["bug"])],
+        IssueMonitorCandidateSource::LiveIncomplete,
+        repo.path(),
+        "2026-10-07T00:01:00Z",
+    );
+    assert!(monitor.inbox_item(42).is_none());
+    assert!(scan.errors.is_empty(), "{scan:?}");
+    assert!(monitor.agent_status().last_error.is_none());
+    assert!(monitor.queued_issue_numbers().is_empty());
+    let status = serde_json::to_value(monitor.agent_status()).unwrap();
+    assert_eq!(status["inbox_coverage"]["github_target_count"], 0);
+}
+
+#[test]
+fn queue_label_inbox_coverage_keeps_label_exclusions_observable() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    monitor.set_allowed_labels(vec!["Server".to_string()]);
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        &[issue(42, &["bug", "gwt-queued"])],
+        "2026-10-07T00:00:00Z",
+    );
+    let row = monitor.inbox_item(42).expect("excluded observation");
+    assert_eq!(row.state, MonitorInboxState::Skipped);
+    assert_eq!(
+        row.exclusion_reason.as_deref(),
+        Some("excluded by allowed labels")
+    );
+    assert!(monitor.queued_issue_numbers().is_empty());
+    let status = serde_json::to_value(monitor.agent_status()).unwrap();
+    assert_eq!(status["label_excluded_issues"], serde_json::json!([42]));
+    assert_eq!(
+        status["inbox_coverage"]["missing_issue_numbers"],
+        serde_json::json!([])
+    );
+    assert!(monitor.agent_status().needs_human.is_empty());
+}
+
+#[test]
+fn queue_label_inbox_coverage_keeps_confirmed_closure_observable() {
+    let open = issue(42, &["bug", "gwt-queued"]);
+    let prefs = IssueMonitorPrefs {
+        closure_records: vec![IssueClosureRecord {
+            issue_number: 42,
+            generation: 1,
+            state: IssueClosureState::Closed,
+            evidence: IssueClosureEvidence::ExplicitRevision,
+            issue_updated_at: open.updated_at.clone(),
+            reopened_after_close: false,
+        }],
+        ..IssueMonitorPrefs::default()
+    };
+    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    scan_issue_monitor_candidates(&mut monitor, &[open], "2026-10-07T00:00:00Z");
+    monitor.rebase_daemon_driver_prefs(&monitor.prefs());
+    let row = monitor.inbox_item(42).expect("closure-held observation");
+    assert_eq!(row.state, MonitorInboxState::Skipped);
+    assert_eq!(
+        row.exclusion_reason.as_deref(),
+        Some("held by confirmed issue closure")
+    );
+    assert_eq!(
+        monitor.prefs().closure_records[0].state,
+        IssueClosureState::Closed
+    );
+    assert!(monitor.queued_issue_numbers().is_empty());
+    assert_eq!(monitor.agent_status().closure_held, vec![42]);
+    assert!(monitor.agent_status().needs_human.is_empty());
+    let status = serde_json::to_value(monitor.agent_status()).unwrap();
+    assert_eq!(
+        status["inbox_coverage"]["missing_issue_numbers"],
+        serde_json::json!([])
+    );
+}
+
 #[test]
 fn legacy_issue_monitor_state_without_exclusion_reason_preserves_runtime_contract() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {

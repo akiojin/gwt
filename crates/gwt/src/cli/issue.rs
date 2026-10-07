@@ -6139,6 +6139,58 @@ mod tests {
         }
     }
 
+    /// Issue #5080 AC-3: the actual mutation readback and status scanner must
+    /// agree even when no terminal queue membership was written.
+    #[test]
+    fn queue_label_inbox_coverage_label_scan_status_integration() {
+        let isolation = TempDir::new().expect("isolated home");
+        let _home = ScopedGwtHome::set(isolation.path().join("home"));
+        let (_repo, mut env) = seeded_edit_env(&["bug"]);
+        env.cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&env.repo_path);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["gwt-queued".to_string()],
+                confirm_queue: true,
+                confirm_design_gate: false,
+                confirm_auto_merge: false,
+            },
+            &mut out,
+        )
+        .expect("label mutation");
+        assert_eq!(code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["changed"],
+            true
+        );
+        // Offline status takes the shared scan path over the canonical cache.
+        out.clear();
+        run_monitor_status(&env, None, &mut out).expect("status after scan");
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let row = status["inbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["issue_number"] == 7)
+            .expect("labelled state row");
+        assert_eq!(row["state"], "skipped");
+        assert_eq!(
+            row["exclusion_reason"],
+            "not selected in this terminal queue"
+        );
+        assert_eq!(status["inbox_coverage"]["github_target_count"], 1);
+        assert_eq!(
+            status["inbox_coverage"]["missing_issue_numbers"],
+            serde_json::json!([])
+        );
+        assert_eq!(status["inbox_coverage"]["source"], "cache");
+        assert!(status["queue"].as_array().unwrap().is_empty());
+    }
+
     /// Issue #3865 AC-2: title / body / labels are each optional and only the
     /// supplied fields change; the local cache reflects the write.
     #[test]
@@ -8484,6 +8536,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
@@ -8574,6 +8627,7 @@ mod tests {
                 pane_hold_reason: None,
                 runtime_consistency: None,
             }],
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
@@ -8715,6 +8769,7 @@ mod tests {
                     pane_state: None,
                     runtime_consistency: None,
                 }],
+                inbox_coverage: None,
                 closure_held: Vec::new(),
                 last_error: None,
                 last_scan_at: None,
@@ -8796,6 +8851,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
@@ -9071,6 +9127,12 @@ mod tests {
                         "tier_input": 0,
                     },
                 ],
+                "inbox_coverage": {
+                    "github_target_count": 0,
+                    "inbox_row_count": 0,
+                    "missing_issue_numbers": [],
+                    "source": "cache",
+                },
                 // Issue #3633 AC-5: this branch rebuilds the queue from the
                 // local Issue cache, which is a projection and not a scan. It
                 // used to stamp the literal string `gwtd-status` into
@@ -11349,6 +11411,7 @@ mod tests {
                 pane_hold_reason: None,
                 runtime_consistency: None,
             }],
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),

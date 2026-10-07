@@ -2236,6 +2236,17 @@ pub enum IssueMonitorCandidateSource {
     Cache,
 }
 
+/// Queue-label observation is independent of local launch admission. A cache
+/// census may be stale; live loaders supplement their general listing with
+/// the complete REST queue-label listing even when the general list is capped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorInboxCoverage {
+    pub github_target_count: usize,
+    pub inbox_row_count: usize,
+    pub missing_issue_numbers: Vec<u64>,
+    pub source: IssueMonitorCandidateSource,
+}
+
 /// Issue #4436 AC-1/AC-2: one Issue whose readiness could not be refreshed,
 /// kept with the Issue number it belongs to.
 ///
@@ -3556,9 +3567,10 @@ pub struct IssueMonitorAgentStatus {
     /// pane that is working on it.
     #[serde(default)]
     pub inbox: Vec<IssueMonitorInboxSummary>,
-    /// Issue #4231 AC-2: open Issues the last scan kept out of `inbox`
-    /// because a closure record holds them. They have no row, so without
-    /// this list the exclusion is unobservable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_coverage: Option<IssueMonitorInboxCoverage>,
+    /// Open Issues whose admission is withheld by a closure record. Queue-
+    /// labelled Issues retain observation rows; other held Issues have no row.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub closure_held: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4440,6 +4452,8 @@ pub struct AutonomousIssueSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorState {
+    #[serde(default, skip)]
+    queue_label_observation: Option<(IssueMonitorCandidateSource, BTreeSet<u64>)>,
     #[serde(default)]
     allowed_labels: Vec<String>,
     #[serde(default)]
@@ -4788,6 +4802,13 @@ pub(crate) fn normalize_issue_monitor_allowed_labels(labels: Vec<String>) -> Vec
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, queued: bool) -> bool {
     queued && issue.state == IssueMonitorIssueState::Open
+}
+
+fn has_queue_label(issue: &IssueMonitorIssue) -> bool {
+    issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(gwt_github::issue_auto_claim::QUEUED_LABEL))
 }
 
 const ISSUE_MONITOR_NOT_READY_REASON: &str = "plan/tasks の整備が必要（gwt-plan-spec）";
@@ -6776,6 +6797,7 @@ impl IssueMonitorState {
 
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
+            queue_label_observation: None,
             config,
             gui_connected: false,
             inbox: Vec::new(),
@@ -10549,7 +10571,34 @@ impl IssueMonitorState {
         // reintroduced later in the same transaction. A newer local reopen
         // similarly fences disk companions from the older closed generation,
         // then restores the live candidate captured before the merge.
+        let held_observations = self
+            .inbox
+            .iter()
+            .filter(|item| {
+                self.closure_held.contains(&item.issue.number)
+                    && item.issue.state == IssueMonitorIssueState::Open
+                    && has_queue_label(&item.issue)
+                    && matches!(
+                        item.state,
+                        MonitorInboxState::Skipped
+                            | MonitorInboxState::NotReady
+                            | MonitorInboxState::HoldExcluded
+                            | MonitorInboxState::BlockedByClaim
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         self.apply_closed_issue_facts();
+        // Closure still revokes ownership and launch state. A passive row from
+        // the last queue census is diagnostic evidence, so commit rebase keeps it.
+        for mut item in held_observations {
+            if self.issue_is_closed(item.issue.number) {
+                item.claim_id = None;
+                item.launched_window_id = None;
+                item.error_message = None;
+                self.upsert_inbox(item);
+            }
+        }
         for issue_number in reopened_closure_fences {
             if self.issue_is_closed(issue_number) {
                 continue;
@@ -12003,6 +12052,22 @@ impl IssueMonitorState {
                     }
                 })
                 .collect(),
+            inbox_coverage: self
+                .queue_label_observation
+                .as_ref()
+                .map(|(source, targets)| {
+                    let missing_issue_numbers = targets
+                        .iter()
+                        .filter(|number| self.inbox_item(**number).is_none())
+                        .copied()
+                        .collect::<Vec<_>>();
+                    IssueMonitorInboxCoverage {
+                        github_target_count: targets.len(),
+                        inbox_row_count: targets.len() - missing_issue_numbers.len(),
+                        missing_issue_numbers,
+                        source: *source,
+                    }
+                }),
             closure_held: self.closure_held.iter().copied().collect(),
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
@@ -13489,25 +13554,46 @@ impl IssueMonitorState {
 
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
         let issue_number = issue.number;
-        if !self.allows_issue_labels(&issue) {
+        let allowed = self.allows_issue_labels(&issue);
+        if !allowed {
             self.label_excluded_issues.insert(issue_number);
             if !self.active_launches.contains(&issue_number)
                 && !self.is_autonomous_in_flight(issue_number)
             {
                 self.queue.retain(|number| *number != issue_number);
-                self.inbox.retain(|item| item.issue.number != issue_number);
                 revoke_uncommitted_claims_for_issue(
                     &mut self.pending_effects,
                     self.effect_authority_epoch,
                     issue_number,
                 );
-                return;
+                if !has_queue_label(&issue) {
+                    self.inbox.retain(|item| item.issue.number != issue_number);
+                    return;
+                }
             }
         } else {
             self.label_excluded_issues.remove(&issue_number);
         }
         let existing = self.inbox_item(issue_number).cloned();
-        let exclusion = issue_monitor_candidate_exclusion(&issue);
+        let exclusion = issue_monitor_candidate_exclusion(&issue)
+            .or_else(|| {
+                (!allowed).then(|| {
+                    (
+                        MonitorInboxState::Skipped,
+                        "excluded by allowed labels".to_string(),
+                    )
+                })
+            })
+            .or_else(|| {
+                (has_queue_label(&issue) && !self.terminal_queue_contains(issue_number)).then(
+                    || {
+                        (
+                            MonitorInboxState::Skipped,
+                            "not selected in this terminal queue".to_string(),
+                        )
+                    },
+                )
+            });
         let error_message = self.failed_issues.get(&issue_number).cloned().or_else(|| {
             existing.as_ref().and_then(|item| {
                 if matches!(
@@ -13559,6 +13645,14 @@ impl IssueMonitorState {
             .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
         {
             MonitorInboxState::NeedsHuman
+        } else if existing
+            .as_ref()
+            .is_some_and(|item| item.state == MonitorInboxState::BlockedByClaim)
+            && exclusion
+                .as_ref()
+                .is_none_or(|(state, _)| *state == MonitorInboxState::Skipped)
+        {
+            MonitorInboxState::BlockedByClaim
         } else if let Some((state, _)) = exclusion.as_ref() {
             *state
         } else {
@@ -13569,6 +13663,7 @@ impl IssueMonitorState {
                 | Some(MonitorInboxState::Merged)
                 | Some(MonitorInboxState::NotReady)
                 | Some(MonitorInboxState::HoldExcluded)
+                | Some(MonitorInboxState::Skipped)
                 | None => MonitorInboxState::Queued,
                 Some(other) => other,
             }
@@ -19166,6 +19261,15 @@ pub fn scan_issue_monitor_candidates(
     now: &str,
 ) -> IssueMonitorScanSummary {
     let mut summary = IssueMonitorScanSummary::default();
+    let queue_label_issues = issues
+        .iter()
+        .filter(|issue| issue.state == IssueMonitorIssueState::Open && has_queue_label(issue))
+        .map(|issue| issue.number)
+        .collect::<BTreeSet<_>>();
+    monitor.queue_label_observation = Some((
+        IssueMonitorCandidateSource::Cache,
+        queue_label_issues.clone(),
+    ));
     monitor.label_excluded_issues = issues
         .iter()
         .filter(|issue| {
@@ -19176,6 +19280,7 @@ pub fn scan_issue_monitor_candidates(
     let excluded = monitor.label_excluded_issues.clone();
     monitor.inbox.retain(|item| {
         !excluded.contains(&item.issue.number)
+            || queue_label_issues.contains(&item.issue.number)
             || monitor.active_launches.contains(&item.issue.number)
             || monitor.launched_windows.contains_key(&item.issue.number)
     });
@@ -19228,6 +19333,18 @@ pub fn scan_issue_monitor_candidates(
             // A complete Live observation transitions the fact before reaching
             // this shared scan loop.
             monitor.closure_held.insert(issue.number);
+            if has_queue_label(issue) {
+                monitor.record_candidate(issue.clone());
+                if let Some(item) = monitor
+                    .inbox
+                    .iter_mut()
+                    .find(|item| item.issue.number == issue.number)
+                {
+                    if item.state == MonitorInboxState::Skipped {
+                        item.exclusion_reason = Some("held by confirmed issue closure".to_string());
+                    }
+                }
+            }
             summary.skipped += 1;
             continue;
         }
@@ -19239,7 +19356,13 @@ pub fn scan_issue_monitor_candidates(
             || monitor.is_autonomous_in_flight(issue.number);
         if !is_auto_improve_candidate(issue, membership.contains(&issue.number))
             && !observed_lifecycle
+            && !has_queue_label(issue)
         {
+            // A present payload can retire an observation-only row. Missing
+            // entries in a partial/cache list are never delabel evidence.
+            monitor.inbox.retain(|item| {
+                item.issue.number != issue.number || item.state != MonitorInboxState::Skipped
+            });
             summary.skipped += 1;
             continue;
         }
@@ -19247,7 +19370,9 @@ pub fn scan_issue_monitor_candidates(
         if monitor.inbox_item(issue.number).is_some_and(|item| {
             matches!(
                 item.state,
-                MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+                MonitorInboxState::NotReady
+                    | MonitorInboxState::HoldExcluded
+                    | MonitorInboxState::Skipped
             )
         }) {
             summary.skipped += 1;
@@ -19310,6 +19435,17 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
         .iter()
         .map(|item| item.issue.number)
         .collect::<BTreeSet<_>>();
+    let delabelled_observations = issues
+        .iter()
+        .filter(|issue| {
+            issue.state == IssueMonitorIssueState::Open
+                && !has_queue_label(issue)
+                && monitor
+                    .inbox_item(issue.number)
+                    .is_some_and(|item| item.state == MonitorInboxState::Skipped)
+        })
+        .map(|issue| issue.number)
+        .collect::<BTreeSet<_>>();
     if monitor.legacy_git_launch_failure_migration_version
         < LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
         && source == IssueMonitorCandidateSource::Live
@@ -19370,12 +19506,18 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     };
     let drive_diagnosis = monitor.diagnose_scan_drive(driver, std::process::id(), now);
     let mut summary = scan_issue_monitor_candidates(monitor, issues, now);
+    if let Some((observed_source, _)) = monitor.queue_label_observation.as_mut() {
+        *observed_source = source;
+    }
     if let Some(diagnosis) = drive_diagnosis {
         monitor.last_error = Some(diagnosis);
     }
-    // A known admission exclusion is an expected removal, not lost scan data.
+    // Admission exclusions and explicitly delabelled passive observations are
+    // expected removals; other shrink still reports lost scan data.
     previous_inbox.retain(|number| {
-        !monitor.label_excluded_issues.contains(number) || monitor.inbox_item(*number).is_some()
+        monitor.inbox_item(*number).is_some()
+            || (!monitor.label_excluded_issues.contains(number)
+                && !delabelled_observations.contains(number))
     });
     if monitor.inbox.len() < previous_inbox.len() {
         let previous_count = previous_inbox.len();
@@ -19854,6 +19996,12 @@ mod tests {
                     pane_state: None,
                     runtime_consistency: None,
                 }],
+                inbox_coverage: Some(IssueMonitorInboxCoverage {
+                    github_target_count: 0,
+                    inbox_row_count: 0,
+                    missing_issue_numbers: Vec::new(),
+                    source: IssueMonitorCandidateSource::Cache,
+                }),
                 closure_held: Vec::new(),
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
