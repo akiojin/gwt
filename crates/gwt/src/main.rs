@@ -11032,9 +11032,7 @@ fn main() -> std::io::Result<()> {
                 ));
             }
             Event::UserEvent(UserEvent::FreshExecutionReadyResend { grant, request, reply }) => {
-                let (result, events) = app.resend_fresh_execution_ready(&grant, &request);
-                clients.dispatch(events);
-                let _ = reply.send(result);
+                clients.dispatch(app.resend_fresh_execution_ready(&grant, &request, reply));
             }
             Event::UserEvent(UserEvent::IssueMonitorFreshLaunchRepaired {
                 window_id,

@@ -24931,10 +24931,28 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
                 reply,
             }) = event
             {
-                let (result, _) = fixture
+                let prepared = grant.principal().prepared_execution_binding().is_some();
+                let (ready_reply, ready_result) = std::sync::mpsc::channel();
+                fixture
                     .runtime
-                    .resend_fresh_execution_ready(&grant, &request);
-                reply.send(result).unwrap();
+                    .resend_fresh_execution_ready(&grant, &request, ready_reply);
+                if prepared {
+                    assert!(
+                        matches!(
+                            ready_result.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ),
+                        "the same request must wait for its queued finalization"
+                    );
+                    commit_pending_fresh_execution(&mut fixture.runtime);
+                }
+                reply
+                    .send(
+                        ready_result
+                            .try_recv()
+                            .expect("readiness completion must reply"),
+                    )
+                    .unwrap();
                 break;
             }
             assert!(
@@ -24945,12 +24963,6 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
         }
         response.join().unwrap()
     };
-    let pending = continue_via_host(&mut fixture);
-    assert!(
-        !pending.status().is_success(),
-        "readiness must wait for its queued worker"
-    );
-    commit_pending_fresh_execution(&mut fixture.runtime);
     let response = continue_via_host(&mut fixture);
     let status = response.status();
     let body = response.text().unwrap();
@@ -25036,15 +25048,19 @@ fn fresh_execution_continue_repairs_activated_response_loss_before_acknowledging
         &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
     );
     leave_fresh_execution_activated_before_projection_commit(&mut fixture);
-    let (result, _) = fixture.runtime.resend_fresh_execution_ready(
+    let (reply, response) = std::sync::mpsc::channel();
+    fixture.runtime.resend_fresh_execution_ready(
         &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
         &gwt::AgentExecutionContinuationRequest {
             schema_version: 1,
             operation_id: "retry-ready-request".to_string(),
             readiness_nonce: None,
         },
+        reply,
     );
-    assert!(result
+    assert!(response
+        .try_recv()
+        .unwrap()
         .expect("Active capability retry must repair the matching pending fresh coordinator")
         .is_some());
     assert!(!fixture
@@ -25088,15 +25104,17 @@ fn fresh_execution_continue_refuses_wrong_nonce_without_mutation() {
         diagnosis.recovery_hint.as_deref(),
         Some("prepared_launch_readiness_required")
     );
-    let (result, events) = fixture.runtime.resend_fresh_execution_ready(
+    let (reply, response) = std::sync::mpsc::channel();
+    let events = fixture.runtime.resend_fresh_execution_ready(
         &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
         &gwt::AgentExecutionContinuationRequest {
             schema_version: 1,
             operation_id: "continue-ready-request".to_string(),
             readiness_nonce: Some("wrong-nonce".to_string()),
         },
+        reply,
     );
-    assert!(result.is_err());
+    assert!(response.try_recv().unwrap().is_err());
     assert!(events.is_empty());
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner).unwrap(),

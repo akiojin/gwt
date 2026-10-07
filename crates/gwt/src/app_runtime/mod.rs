@@ -1605,7 +1605,7 @@ pub struct AppRuntime {
     pub(crate) pending_fresh_execution_launches: HashMap<String, PendingFreshExecutionLaunch>,
     /// One authenticated SessionStart worker per exact candidate binding.
     pub(crate) pending_fresh_execution_finalizations:
-        HashMap<String, (gwt_agent::SessionExecutionBinding, Option<u64>)>,
+        HashMap<String, continuation::PendingFreshExecutionFinalization>,
     /// Process-local fast replay for a lost client response. Durable
     /// reconciliation still uses the owner ledger + Work commit receipt.
     /// Additional WebSocket clients waiting on an in-flight operation after

@@ -145,6 +145,43 @@ enum FreshExecutionFinalizationOutcome {
     Retained,
 }
 
+pub(crate) type FreshExecutionReadinessResult =
+    Result<Option<gwt::AgentExecutionContinuationReceipt>, gwt::AgentWorkspaceUpdateError>;
+
+pub(crate) struct PendingFreshExecutionFinalization {
+    binding: gwt_agent::SessionExecutionBinding,
+    window_generation: Option<u64>,
+    readiness_replies: Vec<(
+        String,
+        std::sync::mpsc::Sender<FreshExecutionReadinessResult>,
+    )>,
+}
+
+fn fresh_execution_readiness_receipt(
+    pending: &PendingFreshExecutionLaunch,
+    operation_id: String,
+) -> gwt::AgentExecutionContinuationReceipt {
+    gwt::AgentExecutionContinuationReceipt {
+        schema_version: gwt::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+        operation_id,
+        outcome: gwt::AgentExecutionContinuationOutcome::SuccessorCreated,
+        predecessor_generation_id: Some(pending.predecessor_binding.generation_id.clone()),
+        generation_id: pending.binding.identity.generation_id.clone(),
+        execution_binding: pending.binding.identity.clone(),
+        capability_generation: pending.binding.capability_generation,
+        superseded_execution_binding: None,
+        takeover_audit_id: None,
+        validated: true,
+    }
+}
+
+fn fresh_execution_readiness_conflict() -> gwt::AgentWorkspaceUpdateError {
+    gwt::AgentWorkspaceUpdateError::new(
+        gwt::AgentWorkspaceUpdateErrorCode::TransactionConflict,
+        "Host readiness coordinator did not commit the candidate; run execution.status before retrying",
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_fresh_execution_launch_session_start(
     pending: &PendingFreshExecutionLaunch,
@@ -7224,21 +7261,32 @@ impl AppRuntime {
         &mut self,
         grant: &crate::embedded_server::AgentCapabilityGrant,
         request: &gwt::AgentExecutionContinuationRequest,
-    ) -> (
-        Result<Option<gwt::AgentExecutionContinuationReceipt>, gwt::AgentWorkspaceUpdateError>,
-        Vec<OutboundEvent>,
-    ) {
+        reply: std::sync::mpsc::Sender<FreshExecutionReadinessResult>,
+    ) -> Vec<OutboundEvent> {
+        let (result, events) = self.prepare_fresh_execution_ready_resend(grant, request, &reply);
+        if let Some(result) = result {
+            let _ = reply.send(result);
+        }
+        events
+    }
+
+    fn prepare_fresh_execution_ready_resend(
+        &mut self,
+        grant: &crate::embedded_server::AgentCapabilityGrant,
+        request: &gwt::AgentExecutionContinuationRequest,
+        reply: &std::sync::mpsc::Sender<FreshExecutionReadinessResult>,
+    ) -> (Option<FreshExecutionReadinessResult>, Vec<OutboundEvent>) {
         let refuse = |reason: &str| {
             (
-                Err(gwt::AgentWorkspaceUpdateError::new(
+                Some(Err(gwt::AgentWorkspaceUpdateError::new(
                     gwt::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
                     reason,
-                )),
+                ))),
                 Vec::new(),
             )
         };
         if let Err(error) = request.validate() {
-            return (Err(error), Vec::new());
+            return (Some(Err(error)), Vec::new());
         }
         let principal = grant.principal();
         let prepared = principal.prepared_execution_binding().is_some();
@@ -7263,7 +7311,7 @@ impl AppRuntime {
         else {
             // Ordinary Active continuation retains the existing generic path.
             if !prepared {
-                return (Ok(None), Vec::new());
+                return (Some(Ok(None)), Vec::new());
             }
             return refuse(
                 "the matching fresh launch coordinator is no longer pending; run execution.status",
@@ -7282,10 +7330,20 @@ impl AppRuntime {
             return refuse("Prepared Host capability changed before readiness resend");
         }
         let events = if prepared {
-            self.finalize_fresh_execution_launch_session_start(
+            let events = self.finalize_fresh_execution_launch_session_start(
                 &window_id,
                 request.readiness_nonce.as_deref(),
-            )
+            );
+            if let Some(inflight) = self
+                .pending_fresh_execution_finalizations
+                .get_mut(&window_id)
+            {
+                inflight
+                    .readiness_replies
+                    .push((request.operation_id.clone(), reply.clone()));
+                return (None, events);
+            }
+            return (Some(Err(fresh_execution_readiness_conflict())), events);
         } else if pending_fresh_execution_activation_status(&pending) == Some(true) {
             // Readiness was authenticated before activation. Repair an interrupted
             // Work publication through the existing exact-Session coordinator.
@@ -7305,24 +7363,13 @@ impl AppRuntime {
                 &pending.session_identity,
             )
         {
-            return (Err(gwt::AgentWorkspaceUpdateError::new(
-                gwt::AgentWorkspaceUpdateErrorCode::TransactionConflict,
-                "Host readiness coordinator did not commit the candidate; run execution.status before retrying",
-            )), events);
+            return (Some(Err(fresh_execution_readiness_conflict())), events);
         }
         (
-            Ok(Some(gwt::AgentExecutionContinuationReceipt {
-                schema_version: gwt::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
-                operation_id: request.operation_id.clone(),
-                outcome: gwt::AgentExecutionContinuationOutcome::SuccessorCreated,
-                predecessor_generation_id: Some(pending.predecessor_binding.generation_id),
-                generation_id: binding.identity.generation_id.clone(),
-                execution_binding: binding.identity.clone(),
-                capability_generation: binding.capability_generation,
-                superseded_execution_binding: None,
-                takeover_audit_id: None,
-                validated: true,
-            })),
+            Some(Ok(Some(fresh_execution_readiness_receipt(
+                &pending,
+                request.operation_id.clone(),
+            )))),
             events,
         )
     }
@@ -7352,8 +7399,13 @@ impl AppRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(window_id)
             .copied();
-        if self.pending_fresh_execution_finalizations.get(window_id)
-            == Some(&(pending.binding.clone(), window_generation))
+        if self
+            .pending_fresh_execution_finalizations
+            .get(window_id)
+            .is_some_and(|inflight| {
+                inflight.binding == pending.binding
+                    && inflight.window_generation == window_generation
+            })
         {
             return Vec::new();
         }
@@ -7371,8 +7423,14 @@ impl AppRuntime {
         let proxy = self.proxy.clone().for_project(context);
         let readiness_nonce = readiness_nonce.map(str::to_owned);
         let window = window_id.to_owned();
-        self.pending_fresh_execution_finalizations
-            .insert(window.clone(), (pending.binding.clone(), window_generation));
+        self.pending_fresh_execution_finalizations.insert(
+            window.clone(),
+            PendingFreshExecutionFinalization {
+                binding: pending.binding.clone(),
+                window_generation,
+                readiness_replies: Vec::new(),
+            },
+        );
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             let result = prepare_fresh_execution_launch_session_start(
                 &pending,
@@ -7453,21 +7511,47 @@ impl AppRuntime {
         completion: FreshExecutionFinalization,
     ) -> Vec<OutboundEvent> {
         let window_id = &completion.window_id;
-        if self.pending_fresh_execution_finalizations.get(window_id)
-            != Some(&(
-                completion.pending.binding.clone(),
-                completion.window_generation,
-            ))
+        if !self
+            .pending_fresh_execution_finalizations
+            .get(window_id)
+            .is_some_and(|inflight| {
+                inflight.binding == completion.pending.binding
+                    && inflight.window_generation == completion.window_generation
+            })
         {
             return Vec::new();
         }
-        self.pending_fresh_execution_finalizations.remove(window_id);
+        let inflight = self
+            .pending_fresh_execution_finalizations
+            .remove(window_id)
+            .unwrap();
+        let pending = completion.pending.clone();
+        let (committed, events) = self.apply_fresh_execution_finalized(completion);
+        for (operation_id, reply) in inflight.readiness_replies {
+            let result = if committed {
+                Ok(Some(fresh_execution_readiness_receipt(
+                    &pending,
+                    operation_id,
+                )))
+            } else {
+                Err(fresh_execution_readiness_conflict())
+            };
+            let _ = reply.send(result);
+        }
+        events
+    }
+
+    fn apply_fresh_execution_finalized(
+        &mut self,
+        completion: FreshExecutionFinalization,
+    ) -> (bool, Vec<OutboundEvent>) {
+        let window_id = &completion.window_id;
         let Some(pending) = self
             .pending_fresh_execution_launches
             .get(window_id)
             .cloned()
         else {
-            return Vec::new();
+            return (false, Vec::new());
         };
         let same_window = self
             .window_lifecycle_generations
@@ -7496,7 +7580,7 @@ impl AppRuntime {
             || pending.session_identity != completion.pending.session_identity
             || self.agent_capability_tokens.get(window_id) != completion.token.as_ref()
         {
-            return Vec::new();
+            return (false, Vec::new());
         }
         match completion.outcome {
             FreshExecutionFinalizationOutcome::Committed => {
@@ -7508,9 +7592,16 @@ impl AppRuntime {
                         issuer.active_token_is_current(token, &pending.binding)
                     });
                 if current {
-                    self.apply_completed_fresh_execution_launch_events(window_id, &pending)
+                    let events =
+                        self.apply_completed_fresh_execution_launch_events(window_id, &pending);
+                    (
+                        !self
+                            .pending_fresh_execution_launches
+                            .contains_key(window_id),
+                        events,
+                    )
                 } else {
-                    Vec::new()
+                    (false, Vec::new())
                 }
             }
             FreshExecutionFinalizationOutcome::RolledBack(detail) => {
@@ -7524,9 +7615,9 @@ impl AppRuntime {
                     self.status_events(window_id.clone(), WindowProcessStatus::Error, Some(detail));
                 events.extend(self.close_window_events(window_id));
                 self.pending_fresh_execution_launches.remove(window_id);
-                events
+                (false, events)
             }
-            FreshExecutionFinalizationOutcome::Retained => Vec::new(),
+            FreshExecutionFinalizationOutcome::Retained => (false, Vec::new()),
         }
     }
 
