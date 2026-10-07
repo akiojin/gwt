@@ -48,12 +48,14 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       await page.evaluate(theme => document.documentElement.dataset.theme = theme,
         info.project.name.includes("light") ? "light" : "dark");
       const initial = await ids(page);
+      const windows: unknown[] = [];
       for (let index = initial.length; index < 60; index += 1) {
-        await sendLiveGwtEvent(page, {
+        windows.push({
           kind: "create_window", preset: "console",
           bounds: { x: index * 8, y: index * 8, width: 480, height: 280 },
         });
       }
+      await sendBurst(page, windows);
       await expect(page.locator(".workspace-window")).toHaveCount(60, { timeout: 60_000 });
       const canvas = await ids(page);
       const workBefore = await ids(page);
@@ -71,13 +73,11 @@ test.describe("launch-loop responsiveness (live backend)", () => {
           kind: "arrange_windows", mode: "tile",
           bounds: { x: 0, y: 0, width: 1440, height: 900 },
         });
-        for (const id of canvas) {
-          await sendLiveGwtEvent(page, {
-            kind: "update_window_geometry", id,
-            geometry: { x: iteration, y: iteration, width: 480, height: 280 },
-            cols: 80, rows: 24,
-          });
-        }
+        await sendBurst(page, canvas.map(id => ({
+          kind: "update_window_geometry", id,
+          geometry: { x: iteration, y: iteration, width: 480, height: 280 },
+          cols: 80, rows: 24,
+        })));
         samples.push(await pmRoundtrip(page, canvas[0]));
         // Keep launching across the full pane.list observation interval.
         await page.waitForTimeout(3_500);
@@ -117,8 +117,16 @@ async function ids(page: Page): Promise<string[]> {
     nodes.map(node => (node as HTMLElement).dataset.id || ""));
 }
 
+// Keep every ordered WebSocket event, while tracing one browser evaluation
+// rather than before/after DOM snapshots for each message in the burst.
+async function sendBurst(page: Page, payloads: unknown[]): Promise<void> {
+  await page.evaluate(events => {
+    for (const detail of events) window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail }));
+  }, payloads);
+}
+
 async function closeWindows(page: Page): Promise<void> {
-  for (const id of await ids(page)) await sendLiveGwtEvent(page, { kind: "close_window", id });
+  await sendBurst(page, (await ids(page)).map(id => ({ kind: "close_window", id })));
   await expect(page.locator(".workspace-window")).toHaveCount(0, { timeout: 30_000 });
 }
 
