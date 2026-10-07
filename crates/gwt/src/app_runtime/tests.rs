@@ -32446,6 +32446,87 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
     .expect("managed hook health");
 
     assert_eq!(health.last_event.as_deref(), Some("UserPromptSubmit"));
+    // The selection timestamp must also reuse the unchanged runtime snapshot,
+    // even when another session has a valid but older timestamp.
+    let latest = gwt_agent::runtime_state_path(&sessions_dir, &second.session_id);
+    let metadata = fs::metadata(&latest).unwrap();
+    fs::write(&latest, vec![b'x'; metadata.len() as usize]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&latest)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+        .unwrap();
+    let reused = super::workspace_views::managed_hook_health_view_for_worktree(
+        &worktree,
+        &sessions_dir,
+        &[&first, &second],
+        &gwt::cli::hook::health::ManagedHookFailureSnapshot::read(),
+    )
+    .expect("cached hook health");
+    assert_eq!(reused.last_event.as_deref(), Some("UserPromptSubmit"));
+}
+
+#[test]
+fn managed_hook_health_for_one_hundred_forty_rows_reuses_session_json_within_one_second() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let _hook_bin = ScopedEnvVar::unset("GWT_HOOK_BIN");
+    let sessions_dir = temp.path().join("sessions");
+    let sessions = (0..140)
+        .map(|index| {
+            let mut session =
+                sample_active_agent_session("tab-1", &format!("tab-1::agent-{index}"));
+            session.session_id = format!("session-{index}");
+            session.worktree_path = temp.path().join(format!("work-{index}"));
+            // Keep health visible without unrelated Git/config audits in fixture setup.
+            gwt::cli::hook::health::record_managed_hook_self_healed(&session.worktree_path)
+                .unwrap();
+            let path = gwt_agent::runtime_state_path(&sessions_dir, &session.session_id);
+            gwt::cli::hook::runtime_state::write_for_event(&path, "PreToolUse").unwrap();
+            session
+        })
+        .collect::<Vec<_>>();
+    let project = || {
+        let snapshot = gwt::cli::hook::health::ManagedHookFailureSnapshot::default();
+        for session in &sessions {
+            let health = super::workspace_views::managed_hook_health_view_for_worktree(
+                &session.worktree_path,
+                &sessions_dir,
+                &[session],
+                &snapshot,
+            )
+            .expect("Work row hook health");
+            assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
+        }
+    };
+    project(); // Populate the existing surface cache outside the runtime budget.
+               // Replacing bytes while retaining each stamp proves every runtime is reused.
+    for session in &sessions {
+        let path = gwt_agent::runtime_state_path(&sessions_dir, &session.session_id);
+        let metadata = fs::metadata(&path).unwrap();
+        fs::write(&path, vec![b'x'; metadata.len() as usize]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+            .unwrap();
+    }
+    let started = std::time::Instant::now();
+    project();
+    let elapsed = started.elapsed();
+    eprintln!(
+        "Work hook health: 140 rows, unchanged runtime JSON, {}ms",
+        elapsed.as_millis()
+    );
+    assert!(
+        elapsed <= std::time::Duration::from_secs(1),
+        "140 rows took {elapsed:?}"
+    );
 }
 
 fn managed_hook_inspection_text(rendered: &str) -> String {
