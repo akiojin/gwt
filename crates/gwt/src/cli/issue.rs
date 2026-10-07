@@ -1301,7 +1301,7 @@ fn run_monitor_queue_push<E: CliEnv>(
             let claim = gwt_github::issue_auto_claim::ClaimComment {
                 comment_id: None,
                 claim_id: format!("gwt-queue:{}:{}", number, uuid::Uuid::new_v4()),
-                owner: crate::process::current_hostname(),
+                owner: crate::process::current_claim_owner(),
                 issue_number: *number,
                 status: gwt_github::issue_auto_claim::ClaimStatus::Queued,
                 heartbeat_at: now.clone(),
@@ -7896,6 +7896,61 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(payload["refused"], serde_json::json!([]));
         assert_eq!(queued_numbers(&repo), vec![4812]);
+    }
+
+    /// #5133 AC-1/AC-4: queue.push and the Monitor run in different processes.
+    #[test]
+    fn queue_push_claim_launches_on_the_next_scan_from_another_monitor_pid() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        queue_push_issue(&mut env, 5133, None);
+        let (code, _) = run_queue_push(&mut env, vec![5133], false);
+        assert_eq!(code, 0);
+        let claims = gwt_github::issue_auto_claim::extract_claim_comments(
+            &env.client.comments(IssueNumber(5133)),
+        );
+        let queued = claims.first().expect("queue.push wrote a claim");
+        assert_eq!(queued.owner, crate::process::current_claim_owner());
+        let (host_user, _) = queued.owner.rsplit_once(':').expect("host:user:pid");
+        let monitor_owner = format!("{host_user}:{}", u64::from(std::process::id()) + 1);
+        let mut prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .expect("persisted queue");
+        prefs.enabled = true;
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        let now = queued.heartbeat_at.as_str();
+        crate::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[crate::IssueMonitorIssue {
+                number: 5133,
+                title: "queued issue".to_string(),
+                labels: vec!["bug".to_string(), "gwt-queued".to_string()],
+                state: crate::IssueMonitorIssueState::Open,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
+                body: None,
+                url: None,
+                updated_at: None,
+            }],
+            crate::IssueMonitorCandidateSource::Live,
+            &repo,
+            now,
+        );
+        let launches = monitor.claim_next_launch_requests(&env.client, &monitor_owner, now);
+        assert_eq!(launches.len(), 1, "our live queue claim must permit launch");
+        assert_eq!(launches[0].issue_number, 5133);
+        assert_eq!(
+            monitor.inbox_item(5133).expect("inbox row").state,
+            crate::MonitorInboxState::Launching
+        );
+        assert_eq!(
+            monitor.agent_status_at(now).last_scan_at.as_deref(),
+            Some(now)
+        );
     }
 
     /// SPEC #4093 AC-8 (Issue #3737 AC-4): `launch_now` inside a GitHub
