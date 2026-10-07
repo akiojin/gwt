@@ -2048,6 +2048,7 @@ format_version: Some(1),
                     headed_e2e: None,
                     nextest: None,
                     terminated_by_signal: None,
+                    output_streams: Vec::new(),
                     command: command.clone(),
                     exit_code: 101,
                     output_tail: format!(

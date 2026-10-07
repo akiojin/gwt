@@ -68,6 +68,17 @@ pub struct CommandAdmission {
     pub queue_wait_ms: u64,
 }
 
+/// Complete sanitized command output. Offsets and hashes describe the saved
+/// UTF-8 bytes, before the bounded tail's truncation marker is added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationOutputStream {
+    pub stream: String,
+    pub path: String,
+    pub sha256: String,
+    pub bytes: usize,
+    pub tail_start_byte: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationCommandResult {
     pub command: String,
@@ -75,6 +86,10 @@ pub struct VerificationCommandResult {
     /// Bounded stdout/stderr tail retained only when the command fails.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_tail: String,
+    /// Diagnostic artifacts for both PASS and FAIL; absent on legacy records.
+    /// A nonzero tail_start_byte records exactly which prefix was truncated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_streams: Vec<VerificationOutputStream>,
     /// Measured by the command-local Playwright reporter, never by PR prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headed_e2e: Option<headed_e2e::HeadedE2eEvidence>,
@@ -3211,8 +3226,8 @@ fn restore_gwtd_after_deferral(worktree: &Path, host: &VerificationHost) -> Stri
     // or user configuration points ordinary builds at another target directory.
     let command = format!("{command} --target-dir target");
     match execute_command_with_isolation(worktree, &command, true, None, host, None) {
-        Ok((0, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
-        Ok((code, _, output)) => format!(
+        Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
+        Ok((code, _, output, _)) => format!(
             "gwtd artifact restoration: failed (`{command}`, exit {code}); \
              restore from the checkout root before GitHub operations: {output}"
         ),
@@ -3314,8 +3329,11 @@ fn execute_command_with_isolation(
     capture: Option<&headed_e2e::Capture>,
     host: &VerificationHost,
     progress: Option<&CommandProgress>,
-) -> Result<(i32, Option<i32>, String), String> {
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
+    // Auxiliary baseline proofs and artifact restoration do not produce
+    // canonical command rows, so do not leave unreferenced output artifacts.
+    let output_worktree = (!isolated_baseline).then_some(worktree);
     // Heavy admission already holds this guard. Light Cargo and operational
     // artifact restoration participate in the same GC boundary without a slot.
     let _artifacts = if progress.is_none() {
@@ -3356,7 +3374,7 @@ fn execute_command_with_isolation(
         .prefix("gwt-verify-")
         .tempdir_in(temporary_base)
         .map_err(|error| error.to_string())?;
-    match host {
+    let result = (|| match host {
         VerificationHost::Daemon(endpoint) => {
             let mut request = delegated_spawn_request(
                 worktree,
@@ -3375,7 +3393,7 @@ fn execute_command_with_isolation(
                     .env
                     .push((key.to_string(), temp.path().to_string_lossy().into_owned()));
             }
-            execute_command_on_daemon(command, &request, endpoint, progress)
+            execute_command_on_daemon(command, &request, endpoint, progress, output_worktree)
         }
         VerificationHost::Inherit => {
             let args = verification_command_arguments(&args, capture);
@@ -3408,25 +3426,29 @@ fn execute_command_with_isolation(
                 // Issue #4746 (earlier instance #4105): a grandchild can
                 // inherit stdout/stderr beyond the direct child's lifetime.
                 // Files let us wait for that child without waiting for EOF.
-                let stdout = tempfile::NamedTempFile::new_in(temp.path())?;
-                let stderr = tempfile::NamedTempFile::new_in(temp.path())?;
+                let stdout = temp.path().join("stdout");
+                let stderr = temp.path().join("stderr");
                 process
                     .stdin(std::process::Stdio::null())
-                    .stdout(stdout.reopen()?)
-                    .stderr(stderr.reopen()?);
+                    .stdout(fs::File::create(&stdout)?)
+                    .stderr(fs::File::create(&stderr)?);
+                let stdout_reader = fs::File::open(stdout)?;
+                let stderr_reader = fs::File::open(stderr)?;
                 let mut spawned = gwt_core::process_tree::spawn_at_normal_priority(&mut process)?;
                 let _command_scope = progress.map(|progress| progress.start(spawned.child.id()));
                 let status = spawned.child.wait()?;
                 let output = std::process::Output {
                     status,
-                    stdout: captured_output_snapshot(stdout.as_file()),
-                    stderr: captured_output_snapshot(stderr.as_file()),
+                    stdout: captured_output_snapshot(&stdout_reader),
+                    stderr: captured_output_snapshot(&stderr_reader),
                 };
                 Ok((output, spawned.priority))
             })();
             let output = match output {
                 Ok(output) => output,
-                Err(err) => return Ok(spawn_failure_result(command, &err.to_string())),
+                Err(err) => {
+                    return spawn_failure_result(output_worktree, command, &err.to_string())
+                }
             };
             let (output, priority) = output;
             let exit_code = output.status.code().unwrap_or(-1);
@@ -3435,11 +3457,22 @@ fn execute_command_with_isolation(
             if !priority.restored {
                 tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
             }
-            tail.push_str(&render_streams(&[
-                ("stdout", &output.stdout),
-                ("stderr", &output.stderr),
-            ]));
-            Ok((exit_code, signal, tail))
+            let (streams_tail, output_streams) = render_streams(
+                output_worktree,
+                &[("stdout", &output.stdout), ("stderr", &output.stderr)],
+            )?;
+            tail.push_str(&streams_tail);
+            Ok((exit_code, signal, tail, output_streams))
+        }
+    })();
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let retained = temp.keep();
+            Err(format!(
+                "{error}; command capture retained at {}",
+                retained.display()
+            ))
         }
     }
 }
@@ -3510,7 +3543,8 @@ fn execute_command_on_daemon(
     request: &gwt_core::daemon::VerificationSpawnRequest,
     endpoint: &gwt_core::daemon::DaemonEndpoint,
     progress: Option<&CommandProgress>,
-) -> Result<(i32, Option<i32>, String), String> {
+    output_worktree: Option<&Path>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
     let delegated = match crate::cli::daemon::verification_host::run(endpoint, request, |pid| {
         progress.map(|progress| progress.start(pid))
     }) {
@@ -3519,7 +3553,7 @@ fn execute_command_on_daemon(
         // other: the record must be written with the partial transcript, not
         // abandoned. It is emphatically *not* a reason to retry in-process —
         // that is the implicit fallback AC-5 forbids.
-        Err(error) => return Ok(spawn_failure_result(command, &error)),
+        Err(error) => return spawn_failure_result(output_worktree, command, &error),
     };
     let mut tail = String::new();
     // AC-6: what the child actually got, recorded even when it is not
@@ -3534,30 +3568,61 @@ fn execute_command_on_daemon(
              daemon killed its process group (Issue #3845)\n",
         );
     }
-    let stdout = std::fs::read(&request.stdout_path).unwrap_or_default();
-    let stderr = std::fs::read(&request.stderr_path).unwrap_or_default();
-    tail.push_str(&render_streams(&[("stdout", &stdout), ("stderr", &stderr)]));
-    Ok((delegated.exit_code, delegated.signal, tail))
+    let stdout = fs::read(&request.stdout_path).map_err(|error| error.to_string())?;
+    let stderr = fs::read(&request.stderr_path).map_err(|error| error.to_string())?;
+    let (streams_tail, output_streams) =
+        render_streams(output_worktree, &[("stdout", &stdout), ("stderr", &stderr)])?;
+    tail.push_str(&streams_tail);
+    Ok((delegated.exit_code, delegated.signal, tail, output_streams))
 }
 
-fn spawn_failure_result(command: &str, error: &str) -> (i32, Option<i32>, String) {
+fn spawn_failure_result(
+    worktree: Option<&Path>,
+    command: &str,
+    error: &str,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
     let diagnostic = format!("failed to spawn '{command}': {error}");
-    let clipped = bounded_output_tail(diagnostic.as_bytes());
-    (-1, None, format!("--- spawn error ---\n{clipped}\n"))
+    let (tail, output_streams) =
+        render_streams(worktree, &[("spawn error", diagnostic.as_bytes())])?;
+    Ok((-1, None, tail, output_streams))
 }
 
-fn render_streams(streams: &[(&str, &[u8])]) -> String {
+fn render_streams(
+    worktree: Option<&Path>,
+    streams: &[(&str, &[u8])],
+) -> Result<(String, Vec<VerificationOutputStream>), String> {
     let mut tail = String::new();
+    let mut output_streams = Vec::new();
+    let directory = worktree.map(|worktree| {
+        super::trusted_store::trusted_dir_for_worktree(worktree)
+            .unwrap_or_else(|| state_path(worktree).parent().unwrap().to_path_buf())
+    });
+    let capture_id = uuid::Uuid::new_v4().simple().to_string();
     for (label, bytes) in streams {
         if bytes.is_empty() {
             continue;
+        }
+        let complete = sanitized_output(bytes);
+        if let Some(directory) = &directory {
+            let name = format!("verification-output-{capture_id}-{label}.log");
+            super::trusted_store::write_to_resolved_dir(directory, &name, complete.as_bytes())
+                .map_err(|error| format!("failed to persist verification {label}: {error}"))?;
+            let path =
+                dunce::canonicalize(directory.join(name)).map_err(|error| error.to_string())?;
+            output_streams.push(VerificationOutputStream {
+                stream: label.to_string(),
+                path: path.to_string_lossy().into_owned(),
+                sha256: format!("{:x}", Sha256::digest(complete.as_bytes())),
+                bytes: complete.len(),
+                tail_start_byte: output_tail_start(&complete),
+            });
         }
         let clipped = bounded_output_tail(bytes);
         if !clipped.is_empty() {
             tail.push_str(&format!("--- {label} ---\n{clipped}\n"));
         }
     }
-    tail
+    Ok((tail, output_streams))
 }
 
 fn git_command(worktree: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
@@ -3618,7 +3683,7 @@ fn measure_baseline(
             std::ffi::OsStr::new(merge_base_sha),
         ],
     )?;
-    let (exit_code, _, output) = execute_command_with_isolation(
+    let (exit_code, _, output, _) = execute_command_with_isolation(
         &checkout,
         &request.baseline_command,
         true,
@@ -3638,22 +3703,31 @@ fn measure_baseline(
     Ok((exit_code, result_line))
 }
 
-fn bounded_output_tail(bytes: &[u8]) -> String {
+fn sanitized_output(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let stripped = gwt_core::process_console::strip_ansi(&text);
     let control_safe: String = stripped
         .chars()
         .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
         .collect();
-    let redacted = gwt_core::process_console::redact_line(control_safe.trim_end());
-    if redacted.len() <= OUTPUT_TAIL_LIMIT {
-        return redacted;
-    }
+    gwt_core::process_console::redact_line(control_safe.trim_end())
+}
+
+fn output_tail_start(output: &str) -> usize {
     // Snap the cut to a char boundary — runner output is frequently
     // multibyte (Japanese cargo messages) and a raw byte slice would panic.
-    let mut start = redacted.len() - OUTPUT_TAIL_LIMIT;
-    while start < redacted.len() && !redacted.is_char_boundary(start) {
+    let mut start = output.len().saturating_sub(OUTPUT_TAIL_LIMIT);
+    while !output.is_char_boundary(start) {
         start += 1;
+    }
+    start
+}
+
+fn bounded_output_tail(bytes: &[u8]) -> String {
+    let redacted = sanitized_output(bytes);
+    let start = output_tail_start(&redacted);
+    if start == 0 {
+        return redacted;
     }
     format!("...[truncated]\n{}", &redacted[start..])
 }
@@ -4173,6 +4247,23 @@ where
                         interruption::checkpoint(worktree, &running).map_err(|err| {
                             format!("failed to save deferred verification: {err}")
                         })?;
+                        let canonical_path =
+                            super::trusted_store::trusted_dir_for_worktree(worktree)
+                                .map(|directory| directory.join("verification-run.json"))
+                                .unwrap_or_else(|| state_path(worktree));
+                        let mut references = format!(
+                            "\nRetained canonical run {}: {} (mirror: {})\n",
+                            running.record_id,
+                            canonical_path.display(),
+                            state_path(worktree).display()
+                        );
+                        for result in &running.commands {
+                            for stream in &result.output_streams {
+                                references
+                                    .push_str(&format!("{}: {}\n", stream.stream, stream.path));
+                            }
+                        }
+                        return Err(format!("{error}{references}"));
                     }
                     return Err(error);
                 }
@@ -4236,7 +4327,7 @@ where
         }
         // Release before processing evidence or admitting the next command.
         drop(admission);
-        let (mut exit_code, terminated_by_signal, mut tail) = executed?;
+        let (mut exit_code, terminated_by_signal, mut tail, output_streams) = executed?;
         let nextest = nextest_capture
             .as_ref()
             .and_then(|capture| match capture.evidence() {
@@ -4291,6 +4382,7 @@ where
             command: command.to_string(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
+            output_streams,
             headed_e2e,
             nextest,
             terminated_by_signal,
@@ -6063,6 +6155,7 @@ pub(crate) mod tests {
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
+                output_streams: Vec::new(),
             }],
             all_passed: true,
             quarantined_failures: Vec::new(),
@@ -6459,7 +6552,7 @@ pub(crate) mod tests {
                 "{shell} -NoProfile -File \"{}\" -Label \"日本語 label=1\" \"-Data:C:\\日本語 path\" -Enabled:$true \"{reporter}\"",
                 script.display()
             );
-            let (code, _, output) = execute_command_with_isolation(
+            let (code, _, output, _) = execute_command_with_isolation(
                 dir.path(),
                 &command,
                 false,
@@ -6756,6 +6849,105 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn canonical_output_retains_inventory_before_long_stdout_and_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        for stream in ["stdout", "stderr"] {
+            fs::write(
+                dir.path().join(format!(".gwt/{stream}-fixture")),
+                format!(
+                    "failures:\n    {stream}_inventory_before_noise\n{}\nAuthorization: Bearer ghp_abcdef0123456789abcdef\n",
+                    "診断".repeat(10_000)
+                ),
+            )
+            .unwrap();
+        }
+        #[cfg(unix)]
+        let command = "sh -c 'cat .gwt/stdout-fixture; cat .gwt/stderr-fixture >&2; printf %s \"$TMPDIR\" > .gwt/child-temp; exit 1'";
+        #[cfg(windows)]
+        let command = r#"powershell -NoProfile -Command "[Console]::Out.Write([IO.File]::ReadAllText('.gwt/stdout-fixture')); [Console]::Error.Write([IO.File]::ReadAllText('.gwt/stderr-fixture')); [IO.File]::WriteAllText('.gwt/child-temp',$env:TEMP); exit 1""#;
+        let (record, _) =
+            run_verification(dir.path(), "sess-inventory", &[command.into()]).unwrap();
+        assert!(!record.all_passed);
+        let persisted = load(dir.path()).unwrap().unwrap();
+        let result = serde_json::to_value(&persisted.commands[0]).unwrap();
+        let streams = result["output_streams"]
+            .as_array()
+            .expect("canonical records must reference complete stdout/stderr");
+        assert_eq!(streams.len(), 2);
+        for stream in streams {
+            let text = fs::read_to_string(stream["path"].as_str().unwrap()).unwrap();
+            let name = stream["stream"].as_str().unwrap();
+            assert!(text.contains(&format!("{name}_inventory_before_noise")));
+            assert!(!text.contains("ghp_abcdef0123456789abcdef"));
+            assert_eq!(stream["bytes"].as_u64().unwrap(), text.len() as u64);
+            let start = stream["tail_start_byte"].as_u64().unwrap() as usize;
+            assert!(start > 0 && text.is_char_boundary(start));
+            assert!(text.len() - start <= OUTPUT_TAIL_LIMIT);
+            assert_eq!(
+                stream["sha256"],
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            );
+        }
+        let child_temp = fs::read_to_string(dir.path().join(".gwt/child-temp")).unwrap();
+        assert!(!Path::new(&child_temp).exists());
+        assert!(!persisted.commands[0]
+            .output_tail
+            .contains("inventory_before_noise"));
+    }
+
+    #[test]
+    fn canonical_output_save_failure_retains_command_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        fs::write(dir.path().join(".gwt/skill-state"), "not a directory").unwrap();
+        #[cfg(unix)]
+        let command =
+            "sh -c 'printf inventory_before_save_failure; printf %s \"$TMPDIR\" > .gwt/child-temp'";
+        #[cfg(windows)]
+        let command = r#"powershell -NoProfile -Command "[Console]::Out.Write('inventory_before_save_failure'); [IO.File]::WriteAllText('.gwt/child-temp',$env:TEMP)""#;
+        let error = execute_command_with_isolation(
+            dir.path(),
+            command,
+            false,
+            None,
+            &VerificationHost::Inherit,
+            None,
+        )
+        .unwrap_err();
+        let captured = fs::read_to_string(dir.path().join(".gwt/child-temp")).unwrap();
+        assert!(
+            error.contains("failed to persist verification stdout"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&captured),
+            "capture recovery path must be reported: {error}"
+        );
+        assert!(fs::read_to_string(Path::new(&captured).join("stdout"))
+            .unwrap()
+            .contains("inventory_before_save_failure"));
+        fs::remove_dir_all(captured).unwrap();
+    }
+
+    #[test]
+    fn auxiliary_baseline_output_does_not_create_unreferenced_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (code, _, output, streams) = execute_command_with_isolation(
+            dir.path(),
+            "git --version",
+            true,
+            None,
+            &VerificationHost::Inherit,
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(streams.is_empty());
+        assert!(!dir.path().join(".gwt/skill-state").exists());
+    }
+
+    #[test]
     fn command_children_have_distinct_temporary_directories() {
         let worktree = tempfile::tempdir().unwrap();
         #[cfg(windows)]
@@ -6764,7 +6956,7 @@ pub(crate) mod tests {
         let command = r#"sh -c 'printf "%s|%s|%s" "$TEMP" "$TMP" "$TMPDIR"'"#;
         let mut paths = Vec::new();
         for _ in 0..2 {
-            let (code, _, output) = execute_command_with_isolation(
+            let (code, _, output, _) = execute_command_with_isolation(
                 worktree.path(),
                 command,
                 false,
@@ -6892,7 +7084,7 @@ pub(crate) mod tests {
             .is_none();
         // Release the real build child before asserting, including on RED.
         fs::write(worktree.path().join("release"), "").unwrap();
-        let (code, _, output) = child.join().unwrap().unwrap();
+        let (code, _, output, _) = child.join().unwrap().unwrap();
         assert_eq!(code, 0, "{output}");
         assert!(
             entered,
@@ -7338,6 +7530,7 @@ mod tests {
             command: "cmd".to_string(),
             exit_code,
             output_tail: String::new(),
+            output_streams: Vec::new(),
             headed_e2e: None,
             nextest: None,
             terminated_by_signal,
@@ -7437,6 +7630,7 @@ mod tests {
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
+                output_streams: Vec::new(),
             }],
             all_passed: true,
             quarantined_failures: Vec::new(),
@@ -9255,11 +9449,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        fs::write(
+            dir.path().join(".gwt/passed-inventory"),
+            format!(
+                "test passed_inventory_before_noise ... ok\n{}",
+                "x".repeat(20_000)
+            ),
+        )
+        .unwrap();
         let commands = vec![
             if cfg!(windows) {
-                r#"powershell -NoProfile -Command "[IO.File]::AppendAllText('.gwt/command-count','x')""#
+                r#"powershell -NoProfile -Command "[IO.File]::AppendAllText('.gwt/command-count','x'); [Console]::Out.Write([IO.File]::ReadAllText('.gwt/passed-inventory'))""#
             } else {
-                "sh -c 'printf x >> .gwt/command-count'"
+                "sh -c 'printf x >> .gwt/command-count; cat .gwt/passed-inventory'"
             }
             .to_string(),
             "git --version".to_string(),
@@ -9296,7 +9498,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("deferred"));
+        assert!(
+            error.contains(&state_path(dir.path()).display().to_string()),
+            "{error}"
+        );
         let mut predecessor = load(dir.path()).unwrap().unwrap();
+        let result = serde_json::to_value(&predecessor.commands[0]).unwrap();
+        let saved_path = result["output_streams"][0]["path"].as_str().unwrap();
+        assert!(fs::read_to_string(saved_path)
+            .unwrap()
+            .contains("passed_inventory_before_noise"));
+        assert!(
+            error.contains(saved_path),
+            "deferred response must expose retained transcript: {error}"
+        );
         let mut document = serde_json::to_value(&predecessor).unwrap();
         document["commands"][0]["future_measurement"] = serde_json::json!({"count": 7});
         predecessor = serde_json::from_value(document).unwrap();
