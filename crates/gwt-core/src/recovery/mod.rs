@@ -694,6 +694,17 @@ impl RecoveryStore {
             .map(|revision| revision.record.clone()))
     }
 
+    /// Check emptiness without locking, repairing, or writing recovery records.
+    /// Any entry, including incomplete or unrecognized evidence, is retained.
+    pub fn has_no_records(&self) -> RecoveryResult<bool> {
+        fs::read_dir(&self.root)
+            .map_err(|_| RecoveryError::Storage)?
+            .next()
+            .transpose()
+            .map(|entry| entry.is_none())
+            .map_err(|_| RecoveryError::Storage)
+    }
+
     pub fn list(&self) -> RecoveryResult<Vec<RecoveryRecord>> {
         let mut records = Vec::new();
         let entries = fs::read_dir(&self.root).map_err(|_| RecoveryError::Storage)?;

@@ -385,9 +385,7 @@ fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
     let dir = gwt_core::paths::gwt_sessions_dir();
     let codex_home = codex::codex_home();
     let claude_home = claude::claude_home();
-    let Ok(sessions) = gwt_agent::session_ledger::load_sessions(&dir) else {
-        return out;
-    };
+    let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load(&dir);
     for session in sessions {
         if !is_active_status(session.status) {
             continue;

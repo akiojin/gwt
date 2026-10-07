@@ -167,9 +167,8 @@ fn safe_to_prune(
     match gwt_core::recovery::RecoveryStore::open_for_repo_if_exists(project_root, &session.id) {
         Ok(Some(store))
             if store
-                .list()
-                .map_err(|_| io::Error::other("Recovery storage unreadable"))?
-                .is_empty() => {}
+                .has_no_records()
+                .map_err(|_| io::Error::other("Recovery storage unreadable"))? => {}
         Ok(None) => {}
         Ok(Some(_)) | Err(_) => return Ok(false),
     }
@@ -424,6 +423,23 @@ mod tests {
         assert!(sessions.join("recovery.toml").exists());
 
         fs::remove_file(&recovery).unwrap();
+        gwt_core::recovery::RecoveryStore::for_repo(&worktree, "recovery").unwrap();
+        let authority_root = fs::read_dir(&recovery)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let incomplete_record = authority_root.join("a".repeat(64));
+        fs::create_dir(&incomplete_record).unwrap();
+        old_session(&sessions, &worktree, "empty-recovery", now);
+        gwt_core::recovery::RecoveryStore::for_repo(&worktree, "empty-recovery").unwrap();
+
+        prune_session_ledger(&sessions, now).unwrap();
+        assert!(sessions.join("recovery.toml").exists());
+        assert_eq!(fs::read_dir(&incomplete_record).unwrap().count(), 0);
+        assert!(!sessions.join("empty-recovery.toml").exists());
+
         let original_hash =
             gwt_core::repo_hash::compute_repo_hash("https://github.com/example/moved-repo.git");
         let mut moved = old_session(&sessions, &worktree, "moved-recovery", now);
