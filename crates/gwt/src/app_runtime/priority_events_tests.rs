@@ -18,6 +18,272 @@ fn geometry() -> WindowGeometry {
     }
 }
 
+fn grid(client_id: &str, id: &str, cols: u16, received_at: std::time::Instant) -> UserEvent {
+    UserEvent::Frontend {
+        client_id: client_id.into(),
+        event: FrontendEvent::UpdateTerminalGrid {
+            id: id.into(),
+            cols,
+            rows: 24,
+        },
+        received_at,
+    }
+}
+
+fn scoped(event: UserEvent, generation: u64) -> UserEvent {
+    UserEvent::ProjectCompletion {
+        context: ProjectContext {
+            tab_id: "project-tab".into(),
+            project_key: gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap(),
+            generation,
+            project_root: "/project".into(),
+        },
+        event: Box::new(event),
+    }
+}
+
+#[test]
+fn terminal_grid_queue_coalesces_at_latest_arrival_position() {
+    let received_at = std::time::Instant::now();
+    let mut queue = AppEventQueue::default();
+    queue
+        .push_back(grid("client", "window", 80, received_at))
+        .unwrap();
+    queue
+        .push_back(frontend(FrontendEvent::UpdateWindowGeometry {
+            id: "window".into(),
+            geometry: geometry(),
+            cols: 100,
+            rows: 24,
+            base_geometry_revision: None,
+        }))
+        .unwrap();
+    queue
+        .push_back(frontend(FrontendEvent::TerminalInput {
+            id: "window".into(),
+            data: "input".into(),
+        }))
+        .unwrap();
+    // Equal timestamps still keep the later arrival, after the geometry commit.
+    queue
+        .push_back(grid("client", "window", 120, received_at))
+        .unwrap();
+    assert!(matches!(queue.pop_front(), Some(UserEvent::Frontend {
+        event: FrontendEvent::TerminalInput { data, .. }, ..
+    }) if data == "input"));
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::Frontend {
+            event: FrontendEvent::UpdateWindowGeometry { cols: 100, .. },
+            ..
+        })
+    ));
+    assert!(matches!(queue.pop_front(), Some(UserEvent::Frontend {
+        event: FrontendEvent::UpdateTerminalGrid { cols: 120, .. },
+        received_at: delivered_at, ..
+    }) if delivered_at == received_at));
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn terminal_grid_queue_keeps_client_window_and_full_project_scope_separate() {
+    let received_at = std::time::Instant::now();
+    let mut queue = AppEventQueue::default();
+    queue
+        .push_back(scoped(
+            scoped(grid("client", "window", 80, received_at), 9),
+            7,
+        ))
+        .unwrap();
+    let distinct = [
+        grid("client", "window", 81, received_at),
+        scoped(
+            scoped(grid("other-client", "window", 82, received_at), 9),
+            7,
+        ),
+        scoped(
+            scoped(grid("client", "other-window", 83, received_at), 9),
+            7,
+        ),
+        scoped(scoped(grid("client", "window", 84, received_at), 9), 8),
+        scoped(scoped(grid("client", "window", 85, received_at), 10), 7),
+    ];
+    for event in &distinct {
+        queue.push_back(event.clone()).unwrap();
+    }
+    let latest = scoped(scoped(grid("client", "window", 120, received_at), 9), 7);
+    queue.push_back(latest.clone()).unwrap();
+    for expected in distinct.into_iter().chain([latest]) {
+        let delivered = queue.pop_front().expect("independent grid update");
+        assert_eq!(format!("{delivered:?}"), format!("{expected:?}"));
+    }
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn terminal_grid_queue_replay_cannot_replace_newer_pending_update() {
+    let received_at = std::time::Instant::now();
+    let old = received_at - std::time::Duration::from_secs(1);
+    let arrange = frontend(FrontendEvent::ArrangeWindows {
+        mode: gwt::protocol::ArrangeMode::Tile,
+        bounds: geometry(),
+    });
+    let mut queue = AppEventQueue::default();
+    queue
+        .push_back(grid("client", "window", 120, received_at))
+        .unwrap();
+    queue.prepend(vec![
+        grid("client", "window", 80, old),
+        arrange.clone(),
+        grid("client", "window", 100, received_at),
+    ]);
+    // A late delivery also cannot replace a newer receive timestamp.
+    queue.push_back(grid("client", "window", 90, old)).unwrap();
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::Frontend {
+            event: FrontendEvent::ArrangeWindows { .. },
+            ..
+        })
+    ));
+    assert!(matches!(queue.pop_front(), Some(UserEvent::Frontend {
+        event: FrontendEvent::UpdateTerminalGrid { cols: 120, .. },
+        received_at: delivered_at, ..
+    }) if delivered_at == received_at));
+    assert!(queue.is_empty());
+
+    queue.prepend(vec![
+        grid("client", "window", 80, old),
+        arrange,
+        grid("client", "window", 100, received_at),
+    ]);
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::Frontend {
+            event: FrontendEvent::ArrangeWindows { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::Frontend {
+            event: FrontendEvent::UpdateTerminalGrid { cols: 100, .. },
+            ..
+        })
+    ));
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn terminal_grid_queue_input_and_layout_overtake_background_without_starvation() {
+    let mut queue = AppEventQueue::default();
+    queue
+        .push_back(UserEvent::LaunchProgress {
+            window_id: "launch".into(),
+            message: "background".into(),
+        })
+        .unwrap();
+    queue
+        .push_back(grid("client", "window", 80, std::time::Instant::now()))
+        .unwrap();
+    for index in 0..10 {
+        queue
+            .push_back(frontend(FrontendEvent::TerminalInput {
+                id: "window".into(),
+                data: index.to_string(),
+            }))
+            .unwrap();
+    }
+    for index in 0..8 {
+        assert!(matches!(queue.pop_front(), Some(UserEvent::Frontend {
+            event: FrontendEvent::TerminalInput { data, .. }, ..
+        }) if data == index.to_string()));
+    }
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::LaunchProgress { .. })
+    ));
+    assert!(
+        matches!(
+            queue.pop_front(),
+            Some(UserEvent::Frontend {
+                event: FrontendEvent::UpdateTerminalGrid { .. },
+                ..
+            })
+        ),
+        "background service must not reset the control burst and starve layout"
+    );
+    for index in 8..10 {
+        assert!(matches!(queue.pop_front(), Some(UserEvent::Frontend {
+            event: FrontendEvent::TerminalInput { data, .. }, ..
+        }) if data == index.to_string()));
+    }
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn terminal_grid_queue_layout_precedes_background_with_bounded_burst() {
+    let mut queue = AppEventQueue::default();
+    queue
+        .push_back(UserEvent::LaunchProgress {
+            window_id: "launch".into(),
+            message: "background".into(),
+        })
+        .unwrap();
+    queue
+        .push_back(frontend(FrontendEvent::ArrangeWindows {
+            mode: gwt::protocol::ArrangeMode::Tile,
+            bounds: geometry(),
+        }))
+        .unwrap();
+    queue
+        .push_back(frontend(FrontendEvent::UpdateWindowGeometry {
+            id: "window".into(),
+            geometry: geometry(),
+            cols: 80,
+            rows: 24,
+            base_geometry_revision: None,
+        }))
+        .unwrap();
+    for index in 0..7 {
+        queue
+            .push_back(grid(
+                "client",
+                &index.to_string(),
+                80,
+                std::time::Instant::now(),
+            ))
+            .unwrap();
+    }
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::Frontend {
+            event: FrontendEvent::ArrangeWindows { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::Frontend {
+            event: FrontendEvent::UpdateWindowGeometry { .. },
+            ..
+        })
+    ));
+    for index in 0..6 {
+        assert!(matches!(queue.pop_front(), Some(UserEvent::Frontend {
+            event: FrontendEvent::UpdateTerminalGrid { id, .. }, ..
+        }) if id == index.to_string()));
+    }
+    assert!(matches!(
+        queue.pop_front(),
+        Some(UserEvent::LaunchProgress { .. })
+    ));
+    assert!(matches!(queue.pop_front(), Some(UserEvent::Frontend {
+        event: FrontendEvent::UpdateTerminalGrid { id, .. }, ..
+    }) if id == "6"));
+    assert!(queue.is_empty());
+}
+
 #[test]
 fn launch_priority_queue_controls_overtake_background_and_keep_fifo() {
     let mut queue = AppEventQueue::default();
