@@ -5,8 +5,10 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 #[derive(Default)]
 pub(crate) struct AppEventQueue {
     foreground: std::collections::VecDeque<UserEvent>,
+    layout: std::collections::VecDeque<UserEvent>,
     background: std::collections::VecDeque<UserEvent>,
     foreground_run: usize,
+    control_run: usize,
     wake_pending: bool,
     closed: bool,
 }
@@ -20,60 +22,95 @@ impl AppEventQueue {
 
     fn prepend(&mut self, events: Vec<UserEvent>) {
         for event in events.into_iter().rev() {
-            if user_event_is_foreground(&event) {
-                self.foreground.push_front(event);
-            } else {
-                self.background.push_front(event);
+            self.enqueue(event, true);
+        }
+    }
+
+    fn enqueue(&mut self, event: UserEvent, prepend: bool) -> bool {
+        let priority = user_event_priority(&event);
+        if priority == AppEventPriority::Layout {
+            if let Some((index, order)) =
+                self.layout.iter().enumerate().find_map(|(index, pending)| {
+                    terminal_grid_coalescing_order(&event, pending).map(|order| (index, order))
+                })
+            {
+                if order.is_lt() || (prepend && order.is_eq()) {
+                    return false;
+                }
+                // Keep the newest update at its own arrival position relative to layout commits.
+                self.layout.remove(index);
             }
         }
+        let lane = match priority {
+            AppEventPriority::Foreground => &mut self.foreground,
+            AppEventPriority::Layout => &mut self.layout,
+            AppEventPriority::Background => &mut self.background,
+        };
+        if prepend {
+            lane.push_front(event);
+        } else {
+            lane.push_back(event);
+        }
+        true
     }
 
     pub(crate) fn push_back(
         &mut self,
         event: UserEvent,
-    ) -> Result<(), Box<tao::event_loop::EventLoopClosed<UserEvent>>> {
+    ) -> Result<bool, Box<tao::event_loop::EventLoopClosed<UserEvent>>> {
         if self.closed {
             return Err(Box::new(tao::event_loop::EventLoopClosed(event)));
         }
-        if user_event_is_foreground(&event) {
-            self.foreground.push_back(event);
-        } else {
-            self.background.push_back(event);
-        }
-        Ok(())
+        Ok(self.enqueue(event, false))
     }
 
     pub(crate) fn pop_front(&mut self) -> Option<UserEvent> {
         // Bound the foreground burst so continuous input cannot starve runtime output.
-        let event = if !self.foreground.is_empty()
+        let event = if (!self.foreground.is_empty() || !self.layout.is_empty())
             && (self.background.is_empty() || self.foreground_run < 8)
         {
             self.foreground_run = (self.foreground_run + 1).min(8);
-            self.foreground.pop_front()
+            if !self.foreground.is_empty() && (self.layout.is_empty() || self.control_run < 8) {
+                self.control_run = (self.control_run + 1).min(8);
+                self.foreground.pop_front()
+            } else {
+                self.control_run = 0;
+                self.layout.pop_front()
+            }
         } else {
             self.foreground_run = 0;
+            // Background service must not restart the control burst and starve layout.
             self.background.pop_front()
         };
         if self.is_empty() {
             self.foreground_run = 0;
+            self.control_run = 0;
         }
         event
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.foreground.is_empty() && self.background.is_empty()
+        self.foreground.is_empty() && self.layout.is_empty() && self.background.is_empty()
     }
 }
 
-fn user_event_is_foreground(event: &UserEvent) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppEventPriority {
+    Foreground,
+    Layout,
+    Background,
+}
+
+fn user_event_priority(event: &UserEvent) -> AppEventPriority {
     match event {
-        UserEvent::ProjectCompletion { event, .. } => user_event_is_foreground(event),
-        UserEvent::Frontend { event, .. } => !matches!(
-            event,
+        UserEvent::ProjectCompletion { event, .. } => user_event_priority(event),
+        UserEvent::Frontend { event, .. } => match event {
             FrontendEvent::ArrangeWindows { .. }
-                | FrontendEvent::UpdateWindowGeometry { .. }
-                | FrontendEvent::LoadKnowledgeBridge { .. }
-        ),
+            | FrontendEvent::UpdateWindowGeometry { .. }
+            | FrontendEvent::UpdateTerminalGrid { .. } => AppEventPriority::Layout,
+            FrontendEvent::LoadKnowledgeBridge { .. } => AppEventPriority::Background,
+            _ => AppEventPriority::Foreground,
+        },
         UserEvent::AgentFrontend { .. }
         | UserEvent::FreshExecutionReadyResend { .. }
         | UserEvent::CommitAgentSelfClose { .. }
@@ -81,8 +118,48 @@ fn user_event_is_foreground(event: &UserEvent) -> bool {
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }
         | UserEvent::StartupReady
-        | UserEvent::StartupStopped => true,
-        _ => false,
+        | UserEvent::StartupStopped => AppEventPriority::Foreground,
+        _ => AppEventPriority::Background,
+    }
+}
+
+fn terminal_grid_coalescing_order(
+    incoming: &UserEvent,
+    pending: &UserEvent,
+) -> Option<std::cmp::Ordering> {
+    match (incoming, pending) {
+        (
+            UserEvent::ProjectCompletion { context, event },
+            UserEvent::ProjectCompletion {
+                context: pending_context,
+                event: pending_event,
+            },
+        ) if context == pending_context => terminal_grid_coalescing_order(event, pending_event),
+        (
+            UserEvent::Frontend {
+                client_id,
+                client_scope,
+                event: FrontendEvent::UpdateTerminalGrid { id, .. },
+                received_at,
+            },
+            UserEvent::Frontend {
+                client_id: pending_client,
+                client_scope: pending_scope,
+                event: FrontendEvent::UpdateTerminalGrid { id: pending_id, .. },
+                received_at: pending_received_at,
+            },
+        ) if id == pending_id => match (client_scope, pending_scope) {
+            (Some(ClientScope::Project(project)), Some(ClientScope::Project(pending_project)))
+                if project == pending_project =>
+            {
+                Some(received_at.cmp(pending_received_at))
+            }
+            (None, None) if client_id == pending_client => {
+                Some(received_at.cmp(pending_received_at))
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -135,8 +212,10 @@ impl AppEventProxy {
             }),
             Self::Real(delivery) => {
                 let mut pending = delivery.pending.lock().expect("app event queue");
-                let foreground = user_event_is_foreground(&event);
-                pending.push_back(event)?;
+                let priority = user_event_priority(&event);
+                if !pending.push_back(event)? {
+                    return Ok(());
+                }
                 if !pending.wake_pending {
                     pending.wake_pending = true;
                     if delivery
@@ -145,10 +224,10 @@ impl AppEventProxy {
                         .is_err()
                     {
                         // Return this sender's event, regardless of any earlier backlog.
-                        let rejected = if foreground {
-                            pending.foreground.pop_back()
-                        } else {
-                            pending.background.pop_back()
+                        let rejected = match priority {
+                            AppEventPriority::Foreground => pending.foreground.pop_back(),
+                            AppEventPriority::Layout => pending.layout.pop_back(),
+                            AppEventPriority::Background => pending.background.pop_back(),
                         }
                         .expect("newly queued event");
                         let discarded = pending.close();
