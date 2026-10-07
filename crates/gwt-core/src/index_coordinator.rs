@@ -1186,6 +1186,7 @@ impl IndexCoordinator {
     ) -> Result<HeavyReservation, CoordinatorError> {
         let expires_at_ms = now_ms().saturating_add(ttl.as_millis() as u64);
         let path = self.heavy_reservation_path(key);
+        let _queue_state = lock_heavy_queue_entries(&self.heavy_pending_dir())?;
         // Issue #4169: reserving is the same claimant coming back, so it keeps
         // the place its earlier attempt earned rather than rejoining at the
         // back. Reserving never opens a remembered place of its own — that is
@@ -1205,6 +1206,7 @@ impl IndexCoordinator {
 
     /// Drop the reservation for `key`. Returns whether one existed.
     pub fn clear_heavy_reservation(&self, key: &TargetKey) -> Result<bool, CoordinatorError> {
+        let _queue_state = lock_heavy_queue_entries(&self.heavy_pending_dir())?;
         match fs::remove_file(self.heavy_reservation_path(key)) {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1512,7 +1514,10 @@ fn acquire_heavy_at(
                 cleanup_pending(pending_file, &pending_path);
                 // Consume both the reservation (#4086) and remembered
                 // queue position (#4169) once the claimant gets its turn.
-                let _ = fs::remove_file(heavy_queue_entry_path(&pending_dir, &target));
+                {
+                    let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
+                    let _ = fs::remove_file(heavy_queue_entry_path(&pending_dir, &target));
+                }
                 record_interactive_burst_grant(root, priority);
                 let lease = HeavyLease {
                     queue_wait_ms: acquired_at_ms.saturating_sub(queued_at_ms),
@@ -1545,6 +1550,7 @@ fn acquire_heavy_at(
                 // Preserve #4169's reservation before ending this poll so a
                 // later claimant cannot overtake the deferred verification.
                 let path = heavy_queue_entry_path(&pending_dir, &target);
+                let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
                 if let Ok(mut entry) = heavy_queue_entry(&pending_dir, &target, priority) {
                     entry.reserved_until_ms = Some(
                         now_ms().saturating_add(VERIFICATION_RESERVATION_TTL.as_millis() as u64),
@@ -2410,6 +2416,7 @@ fn enroll_in_heavy_queue(
     target: &str,
     priority: JobPriority,
 ) -> Result<(u64, Option<u64>), CoordinatorError> {
+    let _queue_state = lock_heavy_queue_entries(dir)?;
     let mut entry = heavy_queue_entry(dir, target, priority)?;
     entry.position_until_ms =
         Some(now_ms().saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
@@ -2536,8 +2543,28 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(RESERVATION_PREFIX));
+        if is_reservation {
+            let snapshot = read_registration(&path)?;
+            #[cfg(test)]
+            tests::after_registration_snapshot(&path);
+            // Durable reservations have an expiry, not a process liveness
+            // lock. Keep an already-live snapshot visible through a concurrent
+            // probe, and recheck expired entries under the same metadata lock
+            // their writers hold before deleting them.
+            let registration = match snapshot {
+                Some(entry) if entry.outlives(now) => Some(entry),
+                _ => sweep_heavy_queue_entry(&path, now)?,
+            };
+            if let Some(registration) = registration {
+                live.push(LiveRegistration {
+                    registration: Some(registration),
+                    locked: false,
+                });
+            }
+            continue;
+        }
         // A claimant may remove this entry after read_dir. Never recreate it
-        // as an empty reservation that cannot establish its expiry.
+        // as an empty registration that cannot establish its expiry.
         let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
@@ -2615,7 +2642,13 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
                         .or(entry.position_until_ms)
                         .is_some()
                     {
-                        let _ = fs::remove_file(&path);
+                        drop(file);
+                        if let Some(registration) = sweep_heavy_queue_entry(&path, now)? {
+                            live.push(LiveRegistration {
+                                registration: Some(registration),
+                                locked: false,
+                            });
+                        }
                         continue;
                     }
                 }
@@ -2646,6 +2679,38 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
         }
     }
     Ok(live)
+}
+
+/// Serialize durable-entry updates with the expiry check and physical delete.
+/// The lock file is separate from the atomically replaced JSON payload.
+fn lock_heavy_queue_entries(dir: &Path) -> Result<File, CoordinatorError> {
+    let file = open_lock_file(&dir.join("queue-state.lock"))?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+fn sweep_heavy_queue_entry(
+    path: &Path,
+    now: u64,
+) -> Result<Option<Registration>, CoordinatorError> {
+    let _queue_state = lock_heavy_queue_entries(path.parent().expect("registration directory"))?;
+    // The snapshot that chose this entry may predate a successful renewal.
+    // Re-read under the same lock every durable-entry writer takes; another
+    // renewal cannot interleave between this check and the delete.
+    if let Some(entry) = read_registration(path)? {
+        if entry.outlives(now)
+            || entry
+                .reserved_until_ms
+                .or(entry.position_until_ms)
+                .is_none()
+        {
+            // The current scan must also publish the renewed claimant, so an
+            // admission using this snapshot cannot treat its turn as absent.
+            return Ok(Some(entry));
+        }
+        let _ = fs::remove_file(path);
+    }
+    Ok(None)
 }
 
 fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorError> {
@@ -3351,6 +3416,41 @@ mod tests {
         assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 0);
         drop(heavy);
         guard.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn expired_sweep_preserves_a_reservation_renewed_after_its_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, Duration::ZERO, None)
+            .unwrap();
+        let path = coordinator.heavy_reservation_path(&key);
+        let snapshot = read_registration(&path).unwrap().unwrap();
+        let swept_at = now_ms();
+        assert!(!snapshot.outlives(swept_at));
+
+        // The sweeper already chose the expired entry, but another process
+        // publishes its next reservation before the physical delete.
+        coordinator
+            .reserve_heavy(
+                &key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                Some("renewed after the sweep snapshot"),
+            )
+            .unwrap();
+        let renewed = fs::read(&path).unwrap();
+        let kept = sweep_heavy_queue_entry(&path, swept_at)
+            .unwrap()
+            .expect("the current scan must retain the renewed claimant");
+        assert!(kept.outlives(swept_at));
+        assert_eq!(
+            fs::read(&path).expect("the renewed reservation must survive stale cleanup"),
+            renewed
+        );
+        assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 1);
     }
 
     // ------------------------------------------------------------------
