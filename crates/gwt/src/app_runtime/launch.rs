@@ -1948,6 +1948,7 @@ struct LaunchCompletionInput {
     failure_session: Option<(ActiveAgentSession, gwt_agent::Session)>,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
+    failure_input: super::launch_errors::LaunchErrorInput,
     auto_resume_source_session_id: Option<String>,
     origin: gwt_agent::SessionLaunchOrigin,
     pending_pm_project_root: Option<PathBuf>,
@@ -1963,7 +1964,19 @@ struct PreparedAgentLaunchState {
     failure_session: Option<(ActiveAgentSession, Option<gwt_agent::Session>)>,
     pending_fresh_execution: Option<PendingFreshExecutionLaunch>,
     failure_capability_token: Option<String>,
+    failure: Option<PreparedLaunchFailure>,
     result: Result<PreparedAgentLaunchSuccess, String>,
+}
+
+struct PreparedLaunchFailure {
+    continue_work: Option<(PendingContinueWork, Result<bool, String>, Option<bool>)>,
+    fresh_execution_had_pending: bool,
+    fresh_execution: Option<(
+        PendingFreshExecutionLaunch,
+        Result<bool, String>,
+        Option<bool>,
+    )>,
+    generic: Option<super::launch_errors::PreparedLaunchError>,
 }
 
 struct PreparedAgentLaunchSuccess {
@@ -2021,6 +2034,7 @@ fn rollback_worker_genesis(
 }
 
 fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch {
+    let fresh_execution_had_pending = input.pending_fresh_execution.is_some();
     let token = input.result.as_ref().ok().and_then(|launch| {
         launch
             .0
@@ -2031,19 +2045,26 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
     let result = std::mem::replace(&mut input.result, Err(String::new()))
         .and_then(|launch| prepare_agent_launch_inner(&mut input, launch));
     let mut failure_capability_token = None;
+    let mut failure = None;
     if result.is_err() {
         // A dropped failure completion cannot rely on the GUI still owning
         // the candidate. Preserve the exact operation through worker cleanup.
-        if let Some(pending) = input.pending_continue_work.as_ref() {
-            if let Err(error) = rollback_worker_continue_work(&input.sessions_dir, pending) {
-                tracing::warn!(%error, "failed continuation retained exact recovery evidence");
-            }
-        }
-        if let Some(pending) = input.pending_fresh_execution.as_ref() {
-            if let Err(error) = rollback_worker_fresh_execution(&input.sessions_dir, pending) {
-                tracing::warn!(%error, "failed fresh launch retained exact recovery evidence");
-            }
-        }
+        let continue_work = input.pending_continue_work.as_ref().map(|pending| {
+            let cleanup = rollback_worker_continue_work(&input.sessions_dir, pending);
+            let status = pending_execution_activation_status(pending);
+            (pending.clone(), cleanup, status)
+        });
+        let fresh_execution = input.pending_fresh_execution.as_ref().map(|pending| {
+            let cleanup = rollback_worker_fresh_execution(&input.sessions_dir, pending);
+            let status = pending_fresh_execution_activation_status(pending);
+            (pending.clone(), cleanup, status)
+        });
+        failure = Some(PreparedLaunchFailure {
+            continue_work,
+            fresh_execution_had_pending,
+            fresh_execution,
+            generic: None,
+        });
         let retain_capability = input
             .pending_continue_work
             .as_ref()
@@ -2086,6 +2107,34 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
     // Clones share the startup OnceLock. Resolve it here so GUI cache ingest
     // never joins the ledger loader or falls back to a directory scan.
     input.session_cache.sessions();
+    if let Some(failure) = failure.as_mut() {
+        let answered_handoff = input
+            .launch_feedback_context
+            .as_ref()
+            .is_some_and(|context| context.issue_monitor_autonomous_handoff.is_some());
+        let preserved_authority = failure
+            .continue_work
+            .as_ref()
+            .is_some_and(|(_, _, status)| *status != Some(false))
+            || failure
+                .fresh_execution
+                .as_ref()
+                .is_some_and(|(_, _, status)| *status != Some(false));
+        if !preserved_authority
+            && (answered_handoff
+                || failure.continue_work.is_none() && failure.fresh_execution.is_none())
+        {
+            if let Some((active, _)) = failure_session.as_ref() {
+                input.failure_input.active = Some(active.clone());
+            }
+            input.failure_input.feedback = input.launch_feedback_context.clone();
+            failure.generic = super::launch_errors::prepare_launch_error(
+                input.failure_input,
+                result.as_ref().err().expect("failed preparation"),
+                &input.current,
+            );
+        }
+    }
     PreparedAgentLaunch(Arc::new(PreparedAgentLaunchHandoff {
         state: Mutex::new(Some(PreparedAgentLaunchState {
             window_id: input.window_id,
@@ -2094,6 +2143,7 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
             failure_session,
             pending_fresh_execution: input.pending_fresh_execution.filter(|_| result.is_err()),
             failure_capability_token,
+            failure,
             result,
         })),
         sessions_dir: input.sessions_dir,
@@ -4511,9 +4561,18 @@ impl AppRuntime {
         );
         let pending_continue_work = self.pending_continue_work.get(&window_id).cloned();
         let is_continue_work = pending_continue_work.is_some();
-        let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
-        let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
-        let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        let workspace_resume_context = self
+            .pending_workspace_resume_contexts
+            .get(&window_id)
+            .cloned();
+        let launch_feedback_context = self
+            .pending_launch_feedback_contexts
+            .get(&window_id)
+            .cloned();
+        let auto_resume_source_session_id =
+            self.pending_auto_resume_sources.get(&window_id).cloned();
+        let failure_input =
+            self.capture_launch_error_input(&window_id, launch_feedback_context.clone());
         let origin = if auto_resume_source_session_id.is_some() {
             if self.restore_launch_windows.contains_key(&window_id) {
                 gwt_agent::SessionLaunchOrigin::AutomaticRestore
@@ -4563,10 +4622,14 @@ impl AppRuntime {
             current,
             is_continue_work,
             pending_continue_work,
-            pending_fresh_execution: None,
+            pending_fresh_execution: self
+                .pending_fresh_execution_launches
+                .get(&window_id)
+                .cloned(),
             failure_session: None,
             workspace_resume_context,
             launch_feedback_context,
+            failure_input,
             auto_resume_source_session_id,
             origin,
             pending_pm_project_root,
@@ -4583,11 +4646,18 @@ impl AppRuntime {
             self.pending_launch_completions.remove(&window_id);
             self.inflight_launches
                 .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
-            for state in self.project_states.values_mut() {
-                state.pending_pm_launches.remove(&window_id);
-            }
-            return self.launch_error_events_with_continue_work(window_id, error, None);
+            // No worker acquired authority. Keep its exact pending inputs for
+            // recovery and surface only the in-memory refusal.
+            let detail = Self::user_facing_launch_error_detail(&error);
+            self.launch_error_terminal_details
+                .insert(window_id.clone(), detail.clone());
+            let mut events = self.apply_launch_error_status(&window_id, &detail);
+            events.extend(self.launch_error_terminal_output_event(window_id, &detail));
+            return events;
         }
+        self.pending_workspace_resume_contexts.remove(&window_id);
+        self.pending_launch_feedback_contexts.remove(&window_id);
+        self.pending_auto_resume_sources.remove(&window_id);
         Vec::new()
     }
 
@@ -4644,6 +4714,38 @@ impl AppRuntime {
             .pending_launch_completions
             .get(&window_id)
             .is_some_and(|pending| !pending.had_window);
+        let failure_authority_matches = prepared.failure.as_ref().is_none_or(|failure| {
+            failure
+                .continue_work
+                .as_ref()
+                .is_none_or(|(expected, _, _)| {
+                    self.pending_continue_work
+                        .get(&window_id)
+                        .is_some_and(|current| {
+                            current.operation_id == expected.operation_id
+                                && current.binding == expected.binding
+                                && current.owner == expected.owner
+                                && current.worktree_path == expected.worktree_path
+                        })
+                })
+                && failure
+                    .fresh_execution
+                    .as_ref()
+                    .is_none_or(|(expected, _, _)| {
+                        self.pending_fresh_execution_launches
+                            .get(&window_id)
+                            .map_or(!failure.fresh_execution_had_pending, |current| {
+                                current.operation_id == expected.operation_id
+                                    && current.binding == expected.binding
+                                    && current.owner == expected.owner
+                                    && current.worktree_path == expected.worktree_path
+                            })
+                    })
+        });
+        if matches_generation && !failure_authority_matches {
+            self.pending_launch_completions.remove(&window_id);
+            return Vec::new();
+        }
         if !matches_generation || !(current || missing_at_enqueue && prepared.result.is_err()) {
             if matches_generation {
                 self.pending_launch_completions.remove(&window_id);
@@ -4666,6 +4768,7 @@ impl AppRuntime {
             gwt::perf::record_route(gwt::perf::PerfRoute::PaneCreate, started_at.elapsed());
         }
         let mut feedback = prepared.launch_feedback_context;
+        let failure = prepared.failure;
         let success = match prepared.result {
             Ok(success) => success,
             Err(error) => {
@@ -4695,7 +4798,29 @@ impl AppRuntime {
                         .record_prepared_session(&active.session_id, session);
                     self.active_agent_sessions.insert(window_id.clone(), active);
                 }
-                return self.launch_error_events_with_continue_work(window_id, error, feedback);
+                let Some(failure) = failure else {
+                    return Vec::new();
+                };
+                let mut events = Vec::new();
+                if let Some((pending, cleanup, status)) = failure.continue_work {
+                    events.extend(self.apply_prepared_continue_work_launch_failure(
+                        &window_id, &error, &pending, cleanup, status,
+                    ));
+                }
+                if let Some((pending, cleanup, status)) = failure.fresh_execution {
+                    events.extend(self.apply_prepared_fresh_execution_launch_failure(
+                        &window_id, &error, &pending, cleanup, status,
+                    ));
+                }
+                if let Some(generic) = failure.generic {
+                    events.extend(self.launch_error_events_prepared(
+                        window_id,
+                        error,
+                        feedback,
+                        Some(generic),
+                    ));
+                }
+                return events;
             }
         };
         let active = success.active_session;

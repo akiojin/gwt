@@ -148,6 +148,7 @@ fn launch_priority_queue_preserves_project_context_when_prioritizing() {
 #[test]
 fn launch_priority_queue_pane_observation_overtakes_layout_backlog() {
     let project = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
     let grant = gwt::agent_capability::AgentCapabilityGrant::new(
         "test-capability".to_string(),
         gwt::agent_capability::AgentSessionPrincipal::for_test(project.path(), "session").unwrap(),

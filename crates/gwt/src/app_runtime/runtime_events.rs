@@ -2295,7 +2295,7 @@ fn publish_runtime_output_change(
         preview_text,
     });
 }
-fn publish_runtime_status_change(
+pub(super) fn publish_runtime_status_change(
     project_root: &Path,
     id: &str,
     status: WindowProcessStatus,
