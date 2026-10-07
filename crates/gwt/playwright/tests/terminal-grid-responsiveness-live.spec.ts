@@ -56,6 +56,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
       await expect(page.locator("#close-project-button")).toBeVisible();
       const theme = info.project.name.includes("light") ? "light" : "dark";
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      let verified = false;
       try {
         const foreground = await createShell(page, created, 80);
         const background = await createShell(page, created, 820);
@@ -143,16 +144,27 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         await expect.poll(async () => (await samples()).length).toBeGreaterThan(processed);
         await expectPtyGrid(page, outputs, foreground, "LATEST", 103, 31);
         expect(errors, "console and page errors").toEqual([]);
+        const checkedAt = Date.now();
+        for (const traffic of socketTraffic) {
+          expect(checkedAt - (traffic.lastReceivedAt ?? 0), `receive liveness: ${traffic.url}`)
+            .toBeLessThanOrEqual(15_000);
+        }
         const screenshot = info.outputPath(`${theme}-terminal-grid.png`);
         await page.screenshot({ path: screenshot });
         await info.attach(`${theme}-terminal-grid`, { path: screenshot, contentType: "image/png" });
+        verified = true;
       } finally {
         await info.attach("terminal-grid-transport", { contentType: "application/json",
           body: JSON.stringify({ sent: Object.fromEntries(sent), received: Object.fromEntries(received), socketEvents,
             socketTraffic, burstTrace,
             sockets: await page.evaluate(() => ((window as any).__gwtPlaywrightSockets ?? []).map((socket: WebSocket) =>
               ({ url: socket.url, readyState: socket.readyState, bufferedAmount: socket.bufferedAmount }))), errors }) });
-        for (const id of created.reverse()) await sendLiveGwtEvent(page, { kind: "close_window", id });
+        for (const id of created.reverse()) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          // Finish a successful repetition before the next page can discover
+          // its old shells. Preserve the original error when the body failed.
+          if (verified) await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
         await sendLiveGwtEvent(page, { kind: "update_viewport", viewport: { x: 0, y: 0, zoom: 1 } });
       }
     });

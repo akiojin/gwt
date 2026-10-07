@@ -4,6 +4,7 @@ use gwt::{FrontendEvent, KnowledgeKind, WindowGeometry};
 fn frontend(event: FrontendEvent) -> UserEvent {
     UserEvent::Frontend {
         client_id: "client".to_string(),
+        client_scope: None,
         event,
         received_at: std::time::Instant::now(),
     }
@@ -21,6 +22,9 @@ fn geometry() -> WindowGeometry {
 fn grid(client_id: &str, id: &str, cols: u16, received_at: std::time::Instant) -> UserEvent {
     UserEvent::Frontend {
         client_id: client_id.into(),
+        client_scope: Some(super::ClientScope::Project(
+            gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap(),
+        )),
         event: FrontendEvent::UpdateTerminalGrid {
             id: id.into(),
             cols,
@@ -86,9 +90,15 @@ fn terminal_grid_queue_coalesces_at_latest_arrival_position() {
 }
 
 #[test]
-fn terminal_grid_queue_keeps_client_window_and_full_project_scope_separate() {
+fn terminal_grid_queue_coalesces_clients_and_keeps_window_and_project_scope_separate() {
     let received_at = std::time::Instant::now();
     let mut queue = AppEventQueue::default();
+    let mut other_project = grid("other-client", "window", 82, received_at);
+    if let UserEvent::Frontend { client_scope, .. } = &mut other_project {
+        *client_scope = Some(super::ClientScope::Project(
+            gwt_core::repo_hash::ProjectKey::parse("fedcba9876543210").unwrap(),
+        ));
+    }
     queue
         .push_back(scoped(
             scoped(grid("client", "window", 80, received_at), 9),
@@ -97,10 +107,7 @@ fn terminal_grid_queue_keeps_client_window_and_full_project_scope_separate() {
         .unwrap();
     let distinct = [
         grid("client", "window", 81, received_at),
-        scoped(
-            scoped(grid("other-client", "window", 82, received_at), 9),
-            7,
-        ),
+        scoped(scoped(other_project, 9), 7),
         scoped(
             scoped(grid("client", "other-window", 83, received_at), 9),
             7,
@@ -111,7 +118,10 @@ fn terminal_grid_queue_keeps_client_window_and_full_project_scope_separate() {
     for event in &distinct {
         queue.push_back(event.clone()).unwrap();
     }
-    let latest = scoped(scoped(grid("client", "window", 120, received_at), 9), 7);
+    let latest = scoped(
+        scoped(grid("other-client", "window", 120, received_at), 9),
+        7,
+    );
     queue.push_back(latest.clone()).unwrap();
     for expected in distinct.into_iter().chain([latest]) {
         let delivered = queue.pop_front().expect("independent grid update");

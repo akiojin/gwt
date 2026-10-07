@@ -138,17 +138,27 @@ fn terminal_grid_coalescing_order(
         (
             UserEvent::Frontend {
                 client_id,
+                client_scope,
                 event: FrontendEvent::UpdateTerminalGrid { id, .. },
                 received_at,
             },
             UserEvent::Frontend {
                 client_id: pending_client,
+                client_scope: pending_scope,
                 event: FrontendEvent::UpdateTerminalGrid { id: pending_id, .. },
                 received_at: pending_received_at,
             },
-        ) if client_id == pending_client && id == pending_id => {
-            Some(received_at.cmp(pending_received_at))
-        }
+        ) if id == pending_id => match (client_scope, pending_scope) {
+            (Some(ClientScope::Project(project)), Some(ClientScope::Project(pending_project)))
+                if project == pending_project =>
+            {
+                Some(received_at.cmp(pending_received_at))
+            }
+            (None, None) if client_id == pending_client => {
+                Some(received_at.cmp(pending_received_at))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
