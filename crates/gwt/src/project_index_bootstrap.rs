@@ -33,6 +33,8 @@ const FULL_STATUS_COOLDOWN: Duration = Duration::from_secs(10);
 /// repeat `frontend_ready` requests (reconnect storms replay it on every
 /// re-established socket) before a real re-run is allowed again.
 const BOOTSTRAP_STATUS_COOLDOWN: Duration = Duration::from_secs(120);
+const AUTO_REPAIR_BACKOFF: Duration = Duration::from_secs(30);
+const AUTO_REPAIR_MAX_UNCHANGED: u32 = 3;
 
 type BootstrapFn = dyn Fn(&Path) -> Result<(), String> + Send + Sync + 'static;
 type StatusProbeFn = dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static;
@@ -74,6 +76,34 @@ pub struct ProjectIndexBootstrapService {
     full_status_cooldown: Duration,
     last_bootstrap_status: Arc<Mutex<HashMap<PathBuf, FullStatusCacheEntry>>>,
     bootstrap_status_cooldown: Duration,
+    auto_repair: Arc<Mutex<HashMap<PathBuf, AutoRepairState>>>,
+}
+
+#[derive(Default)]
+struct AutoRepairState {
+    running: bool,
+    unchanged: u32,
+    retry_at: Option<Instant>,
+}
+
+impl AutoRepairState {
+    fn reason(&self, now: Instant) -> Option<String> {
+        if self.unchanged >= AUTO_REPAIR_MAX_UNCHANGED {
+            return Some(format!(
+                "Auto-repair stopped after {} unchanged rebuilds; use manual rebuild to retry",
+                self.unchanged
+            ));
+        }
+        self.retry_at
+            .filter(|retry_at| *retry_at > now)
+            .map(|retry_at| {
+                format!(
+                    "Auto-repair backoff: retry in {}s after {} unchanged rebuild(s)",
+                    retry_at.duration_since(now).as_secs(),
+                    self.unchanged
+                )
+            })
+    }
 }
 
 #[derive(Clone)]
@@ -90,6 +120,7 @@ impl Default for ProjectIndexBootstrapService {
             full_status_cooldown: FULL_STATUS_COOLDOWN,
             last_bootstrap_status: Arc::default(),
             bootstrap_status_cooldown: BOOTSTRAP_STATUS_COOLDOWN,
+            auto_repair: Arc::default(),
         }
     }
 }
@@ -290,22 +321,18 @@ impl ProjectIndexBootstrapService {
                             state = %status.state,
                             "project index full status refreshed"
                         );
-                        let kick_orchestrator =
-                            status.state == gwt::ProjectIndexStatusState::RepairRequired;
                         service_for_thread.emit_full_status_if_changed(
                             &proxy,
                             &project_key,
                             &project_root_label,
                             status.clone(),
                         );
-                        if kick_orchestrator {
-                            trigger_auto_repair_for_project(
-                                service_for_thread,
-                                proxy.clone(),
-                                project_key.clone(),
-                                &status,
-                            );
-                        }
+                        trigger_auto_repair_for_project(
+                            service_for_thread,
+                            proxy.clone(),
+                            project_key.clone(),
+                            &status,
+                        );
                     }
                     Err(error) => {
                         let elapsed_ms = bootstrap_started.elapsed().as_millis() as u64;
@@ -481,7 +508,10 @@ impl ProjectIndexBootstrapService {
             cooldown_ms = self.full_status_cooldown.as_millis() as u64,
             "replaying fresh project index full status"
         );
-        Some(entry.status.clone())
+        let mut status = entry.status.clone();
+        drop(last);
+        self.decorate_auto_repair_status(&key, &mut status);
+        Some(status)
     }
 
     pub(crate) fn invalidate_full_status(&self, project_root: &Path) {
@@ -520,7 +550,10 @@ impl ProjectIndexBootstrapService {
             cooldown_ms = self.bootstrap_status_cooldown.as_millis() as u64,
             "skipping fresh project index bootstrap; replaying cached status"
         );
-        Some(entry.status.clone())
+        let mut status = entry.status.clone();
+        drop(last);
+        self.decorate_auto_repair_status(&key, &mut status);
+        Some(status)
     }
 
     fn record_bootstrap_status(&self, project_root: &Path, status: &gwt::ProjectIndexStatusView) {
@@ -622,21 +655,17 @@ impl ProjectIndexBootstrapService {
                             state = %status.state,
                             "project index status refreshed after background bootstrap"
                         );
-                        let kick_orchestrator =
-                            status.state == gwt::ProjectIndexStatusState::RepairRequired;
                         service_for_thread.record_bootstrap_status(&project_key, &status);
                         proxy.send(UserEvent::ProjectIndexStatus {
                             project_root: project_root_label.clone(),
                             status: Box::new(status.clone()),
                         });
-                        if kick_orchestrator {
-                            trigger_auto_repair_for_project(
-                                service_for_thread,
-                                proxy.clone(),
-                                project_key.clone(),
-                                &status,
-                            );
-                        }
+                        trigger_auto_repair_for_project(
+                            service_for_thread,
+                            proxy.clone(),
+                            project_key.clone(),
+                            &status,
+                        );
                     }
                     Err(error) => {
                         let elapsed_ms = bootstrap_started.elapsed().as_millis() as u64;
@@ -733,6 +762,8 @@ impl ProjectIndexBootstrapService {
             return ProjectIndexBootstrapRequest::AlreadyRunning;
         }
         self.invalidate_full_status(&project_key);
+        // This is the explicit user rebuild path, not the auto-repair spawner.
+        self.reset_auto_repair(&project_key);
 
         let in_flight = self.in_flight.clone();
         let key_for_thread = key.clone();
@@ -796,6 +827,77 @@ impl ProjectIndexBootstrapService {
         self.invalidate_full_status(project_root);
         self.release(&key);
         result
+    }
+
+    fn decorate_auto_repair_status(
+        &self,
+        project_root: &Path,
+        status: &mut gwt::ProjectIndexStatusView,
+    ) {
+        if status.state != gwt::ProjectIndexStatusState::RepairRequired {
+            return;
+        }
+        if let Some(reason) = self
+            .auto_repair
+            .lock()
+            .expect("auto-repair state")
+            .get(project_root)
+            .and_then(|state| state.reason(Instant::now()))
+        {
+            status.detail = format!("{reason}: {}", status.detail);
+        }
+    }
+
+    fn reset_auto_repair(&self, project_root: &Path) {
+        let mut states = self.auto_repair.lock().expect("auto-repair state");
+        if let Some(state) = states.get_mut(project_root) {
+            state.unchanged = 0;
+            state.retry_at = None;
+        }
+    }
+
+    fn begin_auto_repair(&self, project_root: &Path, now: Instant) -> Result<bool, String> {
+        let mut states = self.auto_repair.lock().expect("auto-repair state");
+        let state = states.entry(project_root.to_path_buf()).or_default();
+        if state.running {
+            return Ok(false);
+        }
+        if let Some(reason) = state.reason(now) {
+            return Err(reason);
+        }
+        state.running = true;
+        Ok(true)
+    }
+
+    fn finish_auto_repair(
+        &self,
+        project_root: &Path,
+        initial_target_count: usize,
+        view: &mut gwt::ProjectIndexStatusView,
+        now: Instant,
+    ) {
+        let remaining =
+            gwt::collect_unhealthy_rebuild_targets_for_project_root(&view.scopes, project_root)
+                .len();
+        let improved = view.state == gwt::ProjectIndexStatusState::Ready
+            || (view.state == gwt::ProjectIndexStatusState::RepairRequired
+                && remaining < initial_target_count);
+        let mut states = self.auto_repair.lock().expect("auto-repair state");
+        let state = states.get_mut(project_root).expect("admitted auto-repair");
+        state.running = false;
+        if improved {
+            state.unchanged = 0;
+            state.retry_at = None;
+        } else {
+            state.unchanged += 1;
+            state.retry_at = Some(now + AUTO_REPAIR_BACKOFF * (1 << (state.unchanged - 1)));
+            if let Some(reason) = state.reason(now) {
+                view.detail = format!("{reason}: {}", view.detail);
+                tracing::warn!(target: "gwt::index", worktree = %project_root.display(),
+                    unchanged_attempts = state.unchanged, reason = %view.detail,
+                    "project index auto-repair did not improve status");
+            }
+        }
     }
 
     fn try_reserve(&self, key: IndexInFlightKey) -> bool {
@@ -973,26 +1075,51 @@ pub(crate) fn trigger_auto_repair_for_project(
     project_root: PathBuf,
     initial_status: &gwt::ProjectIndexStatusView,
 ) -> Option<thread::JoinHandle<()>> {
+    let spawner = ServiceBackedRebuildSpawner::with_default_runner(service.clone());
+    trigger_auto_repair_for_project_with(
+        service,
+        proxy,
+        project_root,
+        initial_status,
+        spawner,
+        |path| {
+            gwt::global_aggregated_status_cache().invalidate(path);
+            gwt::aggregate_current_worktree_index_status_for_path(path)
+        },
+        Instant::now,
+    )
+}
+
+fn trigger_auto_repair_for_project_with<S, P, C>(
+    service: ProjectIndexBootstrapService,
+    proxy: AppEventProxy,
+    project_root: PathBuf,
+    initial_status: &gwt::ProjectIndexStatusView,
+    spawner: S,
+    final_status_provider: P,
+    clock: C,
+) -> Option<thread::JoinHandle<()>>
+where
+    S: gwt::IndexRebuildSpawner,
+    P: FnOnce(&Path) -> gwt::ProjectIndexStatusView + Send + 'static,
+    C: Fn() -> Instant + Send + 'static,
+{
+    let project_root = normalize_project_root(&project_root);
     if initial_status.state != gwt::ProjectIndexStatusState::RepairRequired {
+        if initial_status.state == gwt::ProjectIndexStatusState::Ready {
+            service.reset_auto_repair(&project_root);
+        }
         return None;
     }
     let project_root_label = project_root.display().to_string();
     let project_root_for_sink = project_root.clone();
-    let event_sink = move |view: gwt::ProjectIndexStatusView| {
-        proxy.send(UserEvent::ProjectIndexStatus {
-            project_root: project_root_for_sink.display().to_string(),
-            status: Box::new(view),
-        });
-    };
-    let final_status_provider = |path: &Path| -> gwt::ProjectIndexStatusView {
-        gwt::global_aggregated_status_cache().invalidate(path);
-        gwt::aggregate_current_worktree_index_status_for_path(path)
-    };
     let targets = gwt::collect_unhealthy_rebuild_targets_for_project_root(
         &initial_status.scopes,
         &project_root,
     );
     if targets.is_empty() {
+        // An all-worktree view may still be degraded after this worktree recovers.
+        service.reset_auto_repair(&project_root);
         tracing::info!(
             target: "gwt::index",
             worktree = %project_root_label,
@@ -1000,20 +1127,60 @@ pub(crate) fn trigger_auto_repair_for_project(
         );
         return None;
     }
+    match service.begin_auto_repair(&project_root, clock()) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(reason) => {
+            let mut view = initial_status.clone();
+            view.detail = format!("{reason}: {}", view.detail);
+            proxy.send(UserEvent::ProjectIndexStatus {
+                project_root: project_root_label,
+                status: Box::new(view),
+            });
+            return None;
+        }
+    }
+    let target_count = targets.len();
+    let service_for_sink = service.clone();
+    let event_sink = move |mut view: gwt::ProjectIndexStatusView| {
+        if view.state != gwt::ProjectIndexStatusState::Repairing {
+            service_for_sink.finish_auto_repair(
+                &project_root_for_sink,
+                target_count,
+                &mut view,
+                clock(),
+            );
+        }
+        proxy.send(UserEvent::ProjectIndexStatus {
+            project_root: project_root_for_sink.display().to_string(),
+            status: Box::new(view),
+        });
+    };
     tracing::info!(
         target: "gwt::index",
         worktree = %project_root_label,
         target_count = targets.len(),
         "kicking auto-rebuild orchestrator after repair_required status"
     );
-    gwt::auto_repair_unhealthy_targets(
-        project_root,
+    let handle = gwt::auto_repair_unhealthy_targets(
+        project_root.clone(),
         initial_status,
         targets,
-        ServiceBackedRebuildSpawner::with_default_runner(service),
+        spawner,
         final_status_provider,
         event_sink,
-    )
+    );
+    if handle.is_none() {
+        if let Some(state) = service
+            .auto_repair
+            .lock()
+            .expect("auto-repair state")
+            .get_mut(&project_root)
+        {
+            state.running = false;
+        }
+    }
+    handle
 }
 
 struct InFlightGuard {
@@ -1149,6 +1316,126 @@ mod tests {
     use crate::{app_runtime::AppEventProxy, UserEvent};
 
     use super::IndexRebuildScope;
+
+    #[test]
+    fn auto_repair_backs_off_and_stops_three_unchanged_results() {
+        let service = super::ProjectIndexBootstrapService::new_for_test_with_bootstrap_cooldown(
+            Duration::from_secs(3600),
+        );
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let (proxy, events) = AppEventProxy::stub();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner_calls = calls.clone();
+        let runner: Arc<gwt::IndexRebuildRunnerFn> = Arc::new(move |_, _, _| {
+            runner_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let mut status = gwt::ProjectIndexStatusView::new(
+            gwt::ProjectIndexStatusState::RepairRequired,
+            "one unhealthy scope",
+        );
+        status.scopes.memory = Some(gwt::ScopeHealthView::unhealthy("manifest_missing"));
+        let clock = Arc::new(Mutex::new(std::time::Instant::now()));
+        let attempt = |root: &std::path::Path, status: &gwt::ProjectIndexStatusView| {
+            let final_status = status.clone();
+            let clock = clock.clone();
+            super::trigger_auto_repair_for_project_with(
+                service.clone(),
+                proxy.clone(),
+                root.to_path_buf(),
+                status,
+                super::ServiceBackedRebuildSpawner::new(service.clone(), runner.clone()),
+                move |_| final_status,
+                move || *clock.lock().unwrap(),
+            )
+        };
+
+        for delay in [30, 60] {
+            attempt(&root, &status).unwrap().join().unwrap();
+            assert!(
+                attempt(&root, &status).is_none(),
+                "retry before backoff must not rebuild"
+            );
+            let latest = events
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    UserEvent::ProjectIndexStatus { status, .. } => Some(status.detail.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(latest.contains(&format!("{delay}s")), "{latest}");
+            *clock.lock().unwrap() += Duration::from_secs(delay);
+        }
+        attempt(&root, &status).unwrap().join().unwrap();
+        *clock.lock().unwrap() += Duration::from_secs(3600);
+        for _ in 0..100 {
+            assert!(attempt(&root, &status).is_none());
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "unchanged successful rebuilds must stop"
+        );
+        let latest = events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                UserEvent::ProjectIndexStatus { status, .. } => Some(status.detail.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(latest.contains("stopped after 3"), "{latest}");
+        assert!(latest.contains("manual rebuild"), "{latest}");
+
+        // A reconnect or cached full refresh must retain the diagnostic.
+        let canonical_root = super::normalize_project_root(&root);
+        let label = canonical_root.display().to_string();
+        service.record_bootstrap_status(&root, &status);
+        service.emit_full_status_if_changed(&proxy, &root, &label, status.clone());
+        for cached in [
+            service.bootstrap_completed_recently(&root, &label).unwrap(),
+            service.fresh_full_status(&root, &label).unwrap(),
+        ] {
+            assert!(
+                cached.detail.contains("stopped after 3"),
+                "{}",
+                cached.detail
+            );
+        }
+
+        // Another worktree has its own budget; manual rebuild is an explicit retry.
+        attempt(&temp.path().join("other"), &status)
+            .unwrap()
+            .join()
+            .unwrap();
+        let mut inactive_only = status.clone();
+        inactive_only.scopes.memory = Some(gwt::ScopeHealthView::ready(1));
+        inactive_only.scopes.files.insert(
+            "inactive-worktree".into(),
+            gwt::ScopeHealthView::unhealthy("manifest_missing"),
+        );
+        assert!(attempt(&root, &inactive_only).is_none());
+        attempt(&root, &status).unwrap().join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert_eq!(
+            service.spawn_rebuild_with(root.clone(), IndexRebuildScope::Files, None, || {}),
+            super::ProjectIndexBootstrapRequest::Spawned,
+        );
+        attempt(&root, &status).unwrap().join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+
+        // A genuinely healthy status also clears old failure history.
+        let ready = gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "ready");
+        assert!(attempt(&root, &ready).is_none());
+        attempt(&root, &status).unwrap().join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
+    }
 
     #[test]
     fn disabled_automatic_bootstrap_starts_no_background_work() {
