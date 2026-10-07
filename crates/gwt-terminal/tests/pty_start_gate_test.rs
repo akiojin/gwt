@@ -421,3 +421,196 @@ fn pending_pty_waits_for_a_delayed_helper_hello() {
     assert!(pending.process_id().is_some());
     pending.abort().expect("abort pending PTY");
 }
+
+#[cfg(windows)]
+mod lifecycle {
+    use super::*;
+    use std::{io, sync::mpsc};
+    use windows::Win32::{
+        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+
+    const TREE_DIR: &str = "GWT_TERMINAL_TEST_GATE_TREE_DIR";
+
+    // Retain exact process handles so PID reuse cannot affect the assertions.
+    struct Process(HANDLE);
+
+    impl Process {
+        fn open(pid: u32) -> Self {
+            // SAFETY: OpenProcess returns an owned handle for this fixture PID.
+            Self(unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.unwrap())
+        }
+
+        fn running(&self) -> bool {
+            // SAFETY: the process handle remains owned until Drop.
+            unsafe { WaitForSingleObject(self.0, 0) == WAIT_TIMEOUT }
+        }
+
+        fn assert_exited_by(&self, deadline: Instant) {
+            let timeout_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u32;
+            // SAFETY: wait on the captured process, rather than a new PID.
+            assert_eq!(
+                unsafe { WaitForSingleObject(self.0, timeout_ms) },
+                WAIT_OBJECT_0
+            );
+        }
+    }
+
+    impl Drop for Process {
+        fn drop(&mut self) {
+            // SAFETY: this is the unique owner of the OpenProcess handle.
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    #[test]
+    fn tree_descendant() {
+        let Some(dir) = std::env::var_os(TREE_DIR).map(PathBuf::from) else {
+            return;
+        };
+        fs::write(dir.join("descendant"), std::process::id().to_string()).unwrap();
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn tree_target() {
+        let Some(dir) = std::env::var_os(TREE_DIR).map(PathBuf::from) else {
+            return;
+        };
+        // This child outlives its parent; the pane's Job must reclaim it.
+        let _child = gwt_core::process::hidden_command(current_test_exe())
+            .args(exact_test_args("lifecycle::tree_descendant"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        fs::write(dir.join("target"), std::process::id().to_string()).unwrap();
+        while !dir.join("finish").exists() {
+            thread::sleep(Duration::from_millis(100));
+        }
+        std::process::exit(7);
+    }
+
+    struct GatedPane {
+        pane: Pane,
+        processes: Vec<Process>,
+        drained: mpsc::Receiver<io::Result<u64>>,
+    }
+
+    impl GatedPane {
+        fn spawn(dir: &Path, id: &str) -> Self {
+            fs::create_dir_all(dir).unwrap();
+            let mut config = target_config(&dir.join("unused"));
+            config.args = exact_test_args("lifecycle::tree_target");
+            config
+                .env
+                .insert(TREE_DIR.to_string(), dir.display().to_string());
+            let pending = Pane::new_pending_with_spawn_config(
+                id.to_string(),
+                config,
+                current_test_exe(),
+                gate_args_prefix(),
+                id,
+            )
+            .unwrap();
+            let gate = Process::open(pending.process_id().unwrap());
+            let pane = pending.release().unwrap();
+            let mut reader = pane.pty().reader().unwrap();
+            let (done, drained) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = done.send(io::copy(&mut reader, &mut io::sink()));
+            });
+            let mut processes = vec![gate];
+            for role in ["target", "descendant"] {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let pid = loop {
+                    if let Ok(Some(pid)) =
+                        fs::read_to_string(dir.join(role)).map(|value| value.parse::<u32>().ok())
+                    {
+                        break pid;
+                    }
+                    assert!(Instant::now() < deadline, "{role} did not start");
+                    thread::sleep(Duration::from_millis(100));
+                };
+                processes.push(Process::open(pid));
+            }
+            assert!(processes.iter().all(Process::running));
+            Self {
+                pane,
+                processes,
+                drained,
+            }
+        }
+
+        fn close(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            self.pane.kill().unwrap();
+            for process in &self.processes {
+                process.assert_exited_by(deadline);
+            }
+            self.pane.pty().release_descriptors();
+            self.drained
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("PTY reader must finish within the tree cleanup deadline")
+                .expect("PTY reader must reach EOF without an I/O error");
+        }
+    }
+
+    /// #5113 AC-1/2: re-create the same pane identity while another pane
+    /// stays live, checking gate counts and the complete captured tree.
+    /// Startup restore uses this same PendingPane lifecycle (AC-3); this
+    /// fixture covers that shared boundary, not startup admission itself.
+    #[test]
+    fn closing_recreated_gated_panes_keeps_live_pane_and_gate_counts_equal() {
+        let _guard = pty_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let survivor = GatedPane::spawn(&temp.path().join("survivor"), "survivor");
+        let first = GatedPane::spawn(&temp.path().join("first"), "restored-pane");
+        assert_eq!(
+            [&survivor, &first]
+                .iter()
+                .filter(|p| p.processes[0].running())
+                .count(),
+            2
+        );
+        first.close();
+        assert_eq!(
+            [&survivor, &first]
+                .iter()
+                .filter(|p| p.processes[0].running())
+                .count(),
+            1
+        );
+        let restored = GatedPane::spawn(&temp.path().join("restored"), "restored-pane");
+        restored.close();
+        assert_eq!(
+            [&survivor, &first, &restored]
+                .iter()
+                .filter(|p| p.processes[0].running())
+                .count(),
+            1
+        );
+        assert!(survivor.processes.iter().all(Process::running));
+        survivor.close();
+    }
+
+    /// #5113 AC-1: natural exit keeps the gate's receipt, and cleanup still
+    /// reaches a descendant whose parent has already exited.
+    #[test]
+    fn natural_gate_exit_preserves_status_and_reclaims_remaining_descendant() {
+        let _guard = pty_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let mut live = GatedPane::spawn(temp.path(), "natural-exit");
+        fs::write(temp.path().join("finish"), b"finish").unwrap();
+        live.processes[0].assert_exited_by(Instant::now() + Duration::from_secs(5));
+        live.pane.check_status().unwrap();
+        assert_eq!(live.pane.last_exit().unwrap().exit_code, 7);
+        live.close();
+    }
+}
