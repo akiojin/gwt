@@ -365,7 +365,7 @@ fn deferred(
     };
     unexpected(format!(
         "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — a deferral is \
-         not a failure and there is no attempt cap: your turn stays reserved, so keep rerunning \
+         not a failure and there is no attempt cap: keep rerunning \
          `verify.run` while the holder makes progress",
         started.elapsed().as_secs(),
         max_wait.as_secs()
@@ -567,13 +567,15 @@ pub(crate) fn admit<E: CliEnv>(
                     // Issue #4337 AC-3: name the reservation outcome outright.
                     // `queue_position` below only ever appears on success, so
                     // on its own it leaves the rerun unable to tell a failed
-                    // reservation from a failed status read — and the two call
-                    // for opposite expectations: a reserved turn is kept for
-                    // the rerun, an unreserved one rejoins at the back.
+                    // reservation from a failed status read. Issue #4969 AC-2:
+                    // a refresh error cannot establish that an earlier valid
+                    // reservation is absent, so report that state as unknown.
                     match &reserved {
                         Ok(_) => detail.push_str("; next_turn_reserved: yes"),
                         Err(err) => {
-                            detail.push_str(&format!("; next_turn_reserved: no ({err})"));
+                            detail.push_str(&format!(
+                                "; next_turn_reserved: unknown (reservation refresh failed: {err})"
+                            ));
                         }
                     }
                     if let Ok(status) = coordinator.heavy_lease_status() {
@@ -940,12 +942,13 @@ mod tests {
             !without_eta.contains("verify.lease.acquire"),
             "canonical admission must not recommend detached manual acquisition: {without_eta}"
         );
-        // Issue #4280 AC-3: a deferral is a reserved turn, not a spent
-        // attempt — counting it toward a cap is what made waiters give up.
+        // Issue #4280 AC-3 / #4969 AC-2: keep retrying without an attempt
+        // cap, but a failed reservation refresh cannot promise a reserved turn.
         for message in [&with_eta, &without_eta] {
             assert!(!message.contains("lease attempt"), "{message}");
             assert!(message.contains("no attempt cap"), "{message}");
-            assert!(message.contains("turn stays reserved"), "{message}");
+            assert!(message.contains("keep rerunning"), "{message}");
+            assert!(!message.contains("your turn stays reserved"), "{message}");
         }
     }
 
@@ -1199,7 +1202,7 @@ mod tests {
 
     #[test]
     fn independent_worktrees_use_two_slots_but_a_shared_cargo_target_waits() {
-        let _lock = crate::env_test_lock()
+        let _lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();

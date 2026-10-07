@@ -119,9 +119,10 @@ serve the current recovery and session-specific Stop contracts. The obsolete age
 identity reset is retired; startup preserves saved purpose and focus values and
 leaves `agent_identity.migration.json` unchanged (or absent).
 
-The embedded frontend uses the current Fast mode fields and requires an operation
-ID for cleanup requests. Reload older open tabs after upgrading; saved Fast mode
-preferences are retained.
+The embedded frontend requires an operation ID for cleanup requests. Reload older
+open tabs after upgrading. Launch Wizard always skips permission prompts and
+launches with Fast mode off; it reads older saved choices without rewriting them.
+Issue Monitor profiles and direct Session resume keep their existing preferences.
 
 ## Requirements
 
@@ -1347,6 +1348,13 @@ each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
 
 ### PR head verification
+
+Use `pr.head_check` with `params.base` (for example, `develop`) and optional
+`params.head` to compare a canonical passing verification record with the live
+remote head without creating or editing a PR. The JSON diagnostic reports the
+record ID, verified/remote/base SHAs, product commits/files, and whether local
+verification is still fresh. A base-only comparison does not refresh stale
+evidence; missing, incomplete, failed, or corrupt records are unprovable.
 
 Before creating a Ready PR, `pr.create` compares the live remote branch with
 the HEAD recorded by `verify.run`. Its response and the PR body preserve both

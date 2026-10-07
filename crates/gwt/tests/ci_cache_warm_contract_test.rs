@@ -143,11 +143,23 @@ fn cache_sites(relative: &str) -> Vec<CacheSite> {
             if !uses.starts_with(RUST_CACHE_ACTION) {
                 continue;
             }
+            // The no-measurement admission runner never reaches this cache
+            // step. Resolve only its exact Windows guard; unknown expressions
+            // remain literal and fail the warmed-scope comparison below.
+            let cache_runner = if runs_on
+                == "${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}"
+                && step["if"].as_str()
+                    == Some("${{ needs.changes.outputs.verify_timings != 'false' }}")
+            {
+                "windows-latest".to_string()
+            } else {
+                runs_on.clone()
+            };
             let with = step.get("with");
             sites.push(CacheSite {
                 workflow: relative.to_string(),
                 job: job_id.clone(),
-                runs_on: runs_on.clone(),
+                runs_on: cache_runner,
                 shared_key: with
                     .and_then(|with| with.get("shared-key"))
                     .and_then(Value::as_str)

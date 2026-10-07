@@ -114,9 +114,10 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 目的・進捗を保持します。`agent_identity.migration.json` は既存の内容を変更せず、
 未作成なら新たに作成しません。
 
-組み込みフロントエンドは現行の Fast mode フィールドを使用し、cleanup リクエストには
-operation ID を必須とします。更新前から開いているタブは再読み込みしてください。
-保存済みの Fast mode 設定は保持します。
+組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
+更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
+Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
+Issue Monitor のプロファイルと直接の Session Resume は従来の設定を維持します。
 
 ## 前提
 
@@ -1262,6 +1263,12 @@ lease の遷移は
 runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### PR HEAD の検証
+
+`pr.head_check` に `params.base`（例: `develop`）と任意の `params.head` を渡すと、
+PR の作成・編集をせずに、正本の PASS 済み検証記録と live remote HEAD を比較できます。
+JSON の診断には record ID、検証済み/remote/base の SHA、product commit/file、local
+検証の freshness が含まれます。base 同期のみと判定されても stale な証跡は更新しません。
+記録が欠落・未完了・失敗・破損している場合は unprovable を返します。
 
 Ready PR の作成前に、`pr.create` は live remote branch と `verify.run` に記録された
 HEAD を比較します。応答と PR 本文には、両方の SHA、base の SHA、比較結果が残ります。

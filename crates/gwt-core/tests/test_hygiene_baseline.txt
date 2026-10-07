@@ -109,9 +109,7 @@ short-wall-clock|crates/gwt/src/app_runtime/tests.rs|stop_window_runtime_records
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_prepare_completions
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_knowledge_view_dispatch
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_path
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_recorded_event_with_timeout
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_scheduled_scan_completion
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|write_fake_gh_issue_list
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_cold_remote_client_construction
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_remote_board_requests
@@ -158,10 +156,6 @@ short-wall-clock|crates/gwt/src/cli/workspace.rs|start
 short-wall-clock|crates/gwt/src/daemon_publisher.rs|bootstrap_elapsed_time_consumes_the_control_budget
 short-wall-clock|crates/gwt/src/daemon_runtime.rs|drop
 short-wall-clock|crates/gwt/src/daemon_runtime.rs|hook_live_status_retry_policy
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|ordinary_hook_does_not_retry_after_attempt_timeout
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|readiness_hook_retries_after_first_attempt_timeout_and_succeeds_within_deadline
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|readiness_hook_stops_retrying_at_overall_deadline_without_exposing_secrets
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|short_hook_live_retry_policy
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_forwards_events_through_callback
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_resolver_picks_up_new_token_between_sessions
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_with_resolver_picks_up_endpoint_after_initial_failure

@@ -82,6 +82,14 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
         self.inner.compare_pr_head(base, head, verified)
     }
+    fn inspect_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: &str,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        self.inner.inspect_pr_head(base, head, verified)
+    }
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
         self.inner.fetch_pr_head_sha(number)
     }

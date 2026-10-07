@@ -603,7 +603,6 @@ impl AppRuntime {
         };
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         let prefs = pm_registry::load_pm_prefs(&prefs_path).unwrap_or_default();
-        let configured = prefs.settings.launch_profile_or_default();
         // Liveness is the pane registry's answer, not the file's: a
         // registration whose pane is gone is a stale record, and reporting it
         // as running would make the panel offer a restart for nothing.
@@ -611,8 +610,18 @@ impl AppRuntime {
             .registration
             .as_ref()
             .filter(|registration| self.pm_registration_is_live(registration));
+        Self::pm_status_from_launch_prefs(&self.sessions_dir, &prefs, running)
+    }
+
+    pub(super) fn pm_status_from_launch_prefs(
+        sessions_dir: &Path,
+        prefs: &pm_registry::PmPrefs,
+        running: Option<&PmRegistration>,
+    ) -> BackendEvent {
+        let configured = prefs.settings.launch_profile_or_default();
         let loop_interval_secs = prefs.settings.loop_interval_secs_clamped();
-        let running_profile = running.map(|registration| self.pm_running_profile(registration));
+        let running_profile =
+            running.map(|registration| Self::pm_running_profile_at(sessions_dir, registration));
         let agent_options = Self::pm_agent_options(&configured.agent_id);
         BackendEvent::PmStatus {
             available: true,
@@ -646,10 +655,11 @@ impl AppRuntime {
     /// The registration deliberately stays small; the durable Session already
     /// owns agent/model/reasoning. Legacy or temporarily unreadable Session
     /// records retain the registered agent and expose unknown tuning.
-    fn pm_running_profile(&self, registration: &PmRegistration) -> PmLaunchProfile {
-        let session_path = self
-            .sessions_dir
-            .join(format!("{}.toml", registration.session_id));
+    fn pm_running_profile_at(
+        sessions_dir: &Path,
+        registration: &PmRegistration,
+    ) -> PmLaunchProfile {
+        let session_path = sessions_dir.join(format!("{}.toml", registration.session_id));
         gwt_agent::Session::load_and_migrate(&session_path)
             .map(|session| {
                 PmLaunchProfile {
@@ -1951,10 +1961,10 @@ impl AppRuntime {
             })
     }
 
-    /// SPEC-3431 FR-001: called by `handle_launch_complete` once the PM
-    /// launch produced a real session. Writes the durable registration,
-    /// replacing a stale one; a concurrently live PM (which the ensure gate
-    /// should have prevented) is left untouched and logged.
+    /// Test fixture adapter for a PM whose launch has already completed.
+    /// Production registration runs in the launch preparation worker. Fixtures
+    /// keep the same stale-replacement and live-singleton registration rules.
+    #[cfg(test)]
     pub(crate) fn register_pm_after_launch(
         &mut self,
         project_root: &Path,

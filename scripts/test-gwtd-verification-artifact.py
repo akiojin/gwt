@@ -34,7 +34,7 @@ GWTD = CHECKOUT / "target/debug/gwtd"
 GUARD_ERROR_CODE = "real_gh_spawn_blocked_in_tests"
 RESTORE_COMMAND = ["cargo", "build", "-p", "gwt", "--bin", "gwtd"]
 DEFERRED_RESTORE_COMMAND = RESTORE_COMMAND + ["--target-dir", "target"]
-TARGET_METADATA_ARGS = ["metadata", "--offline", "--no-deps", "--format-version", "1"]
+METADATA_ARGS = ["metadata", "--offline", "--no-deps", "--format-version", "1"]
 # An integration test needs the gwtd bin built, and --all-features builds it
 # with the guard armed. Only used when the artifact is not already armed.
 ARM_COMMAND = [
@@ -140,7 +140,7 @@ def deferred_restore():
             "import json, os, subprocess, sys\n"
             f"with open({str(calls)!r}, 'a') as log:\n"
             "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-            f"assert sys.argv[1:] in ({TARGET_METADATA_ARGS!r}, {DEFERRED_RESTORE_COMMAND[1:]!r}), sys.argv\n"
+            f"assert sys.argv[1:] in [{METADATA_ARGS!r}, {DEFERRED_RESTORE_COMMAND[1:]!r}], sys.argv\n"
             f"if sys.argv[1:] == {DEFERRED_RESTORE_COMMAND[1:]!r}:\n"
             "    assert 'CARGO_TARGET_DIR' not in os.environ, 'recovery must target the checkout artifact'\n"
             f"raise SystemExit(subprocess.call([{shutil.which('cargo')!r}, "
@@ -185,10 +185,12 @@ def deferred_restore():
         ok, after, github_calls = probe("after deferred verify.run")
         assert ok and GUARD_ERROR_CODE not in after, after
         assert github_calls == [["pr", "view"], ["pr", "checks"]], github_calls
-        # Admission and restoration each resolve the effective target without
-        # executing the deferred test matrix.
-        assert reached == [TARGET_METADATA_ARGS, TARGET_METADATA_ARGS, DEFERRED_RESTORE_COMMAND[1:]], (
-            f"deferred verification must query targets then restore, never run its test matrix: {reached}\n{output}"
+        # Admission and GC coordination resolve Cargo's effective target with
+        # read-only metadata. Only the final restoration may build anything.
+        assert reached and reached[-1] == DEFERRED_RESTORE_COMMAND[1:] and all(
+            arguments == METADATA_ARGS for arguments in reached[:-1]
+        ), (
+            f"deferred verification may resolve targets and restore once, never run its test matrix: {reached}\n{output}"
         )
         assert "gwtd artifact restoration: restored" in output, output
         assert not (repo / ".gwt/skill-state/verification-run.json").exists(), (
