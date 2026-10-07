@@ -559,6 +559,10 @@ mod lifecycle {
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .expect("PTY reader must finish within the tree cleanup deadline")
                 .expect("PTY reader must reach EOF without an I/O error");
+            assert!(
+                Instant::now() <= deadline,
+                "tree cleanup exceeded five seconds"
+            );
         }
     }
 
@@ -607,10 +611,15 @@ mod lifecycle {
         let _guard = pty_test_lock();
         let temp = tempfile::tempdir().unwrap();
         let mut live = GatedPane::spawn(temp.path(), "natural-exit");
+        let deadline = Instant::now() + Duration::from_secs(5);
         fs::write(temp.path().join("finish"), b"finish").unwrap();
-        live.processes[0].assert_exited_by(Instant::now() + Duration::from_secs(5));
+        live.processes[0].assert_exited_by(deadline);
         live.pane.check_status().unwrap();
         assert_eq!(live.pane.last_exit().unwrap().exit_code, 7);
         live.close();
+        assert!(
+            Instant::now() <= deadline,
+            "natural exit cleanup exceeded five seconds"
+        );
     }
 }
