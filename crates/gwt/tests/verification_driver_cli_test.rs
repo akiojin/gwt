@@ -8,22 +8,46 @@ use sha2::{Digest, Sha256};
 
 #[test]
 fn canonical_driver_frees_its_artifact_and_records_build_provenance() {
+    assert_driver_relink("target");
+}
+
+#[test]
+fn configured_output_driver_frees_its_artifact_and_records_build_provenance() {
+    // The configured target must not also contain the fixed driver's cache.
+    assert_driver_relink(".gwt");
+}
+
+fn assert_driver_relink(target_dir: &str) {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='driver-fixture'\nversion='0.1.0'\n[lib]\npath='lib.rs'\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib.rs"), "").unwrap();
+    fs::create_dir(root.join(".cargo")).unwrap();
+    fs::write(
+        root.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir='{target_dir}'\n"),
+    )
+    .unwrap();
     assert!(hidden_command("git")
         .args(["init", "-q"])
         .current_dir(root)
         .status()
         .unwrap()
         .success());
-    let artifact = root.join("target/debug/gwtd.exe");
+    let artifact = root.join(target_dir).join("debug/gwtd.exe");
     fs::create_dir_all(artifact.parent().unwrap()).unwrap();
     fs::copy(env!("CARGO_BIN_EXE_gwtd"), &artifact).unwrap();
     let expected_hash = format!("{:x}", Sha256::digest(fs::read(&artifact).unwrap()));
     // The failure code also proves that relocation preserves the caller's OS
     // exit code, in addition to freeing the runner and watchdog's original path.
-    let command = r#"powershell.exe -NoProfile -NonInteractive -Command "Remove-Item -LiteralPath 'target/debug/gwtd.exe' -ErrorAction Stop; [System.IO.File]::WriteAllBytes('target/debug/gwtd.exe', [byte[]](1,2,3)); exit 7""#;
+    let command = format!(
+        r#"powershell.exe -NoProfile -NonInteractive -Command "Remove-Item -LiteralPath '{target_dir}/debug/gwtd.exe' -ErrorAction Stop; [System.IO.File]::WriteAllBytes('{target_dir}/debug/gwtd.exe', [byte[]](1,2,3)); exit 7""#
+    );
     let mut driver = hidden_command(&artifact);
     for key in [
         "GWT_BIN_PATH",
@@ -34,6 +58,7 @@ fn canonical_driver_frees_its_artifact_and_records_build_provenance() {
         "GWT_REPO_HASH",
         "GWT_SESSION_RUNTIME_PATH",
         "GWT_WORKTREE_HASH",
+        "CARGO_TARGET_DIR",
     ] {
         driver.env_remove(key);
     }
@@ -78,7 +103,7 @@ fn canonical_driver_frees_its_artifact_and_records_build_provenance() {
     assert_eq!(provenance["sha256"], expected_hash);
     assert_eq!(provenance["source_head"], env!("GWT_BUILD_COMMIT"));
     let fixed = std::path::PathBuf::from(provenance["fixed_path"].as_str().unwrap());
-    assert!(!fixed.starts_with(root.join("target")));
+    assert!(!fixed.starts_with(root.join(target_dir)));
     assert_eq!(
         format!("{:x}", Sha256::digest(fs::read(&fixed).unwrap())),
         expected_hash

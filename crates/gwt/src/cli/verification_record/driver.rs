@@ -17,11 +17,14 @@ pub struct DriverProvenance {
     pub source_head: String,
 }
 
-pub(super) fn prepare(worktree: &Path) -> io::Result<Option<DriverProvenance>> {
+pub(super) fn prepare(
+    worktree: &Path,
+    commands: &[String],
+) -> io::Result<Option<DriverProvenance>> {
     // In-process unit fixtures have no production gwtd image to relocate.
     #[cfg(any(not(windows), test))]
     {
-        let _ = worktree;
+        let _ = (worktree, commands);
         Ok(None)
     }
     #[cfg(all(windows, not(test)))]
@@ -37,7 +40,7 @@ pub(super) fn prepare(worktree: &Path) -> io::Result<Option<DriverProvenance>> {
             source_head,
         )?;
         let root = dunce::canonicalize(worktree)?;
-        if !original.starts_with(root.join("target")) {
+        let Some(target) = cargo_artifact_target(&root, &original, commands) else {
             // Installed drivers and already fixed copies do not lock this
             // checkout's Cargo artifact. Keep them in place.
             return Ok(Some(DriverProvenance {
@@ -46,13 +49,47 @@ pub(super) fn prepare(worktree: &Path) -> io::Result<Option<DriverProvenance>> {
                 original_path: original,
                 source_head: source_head.to_string(),
             }));
-        }
+        };
         pin_artifact(
             &original,
-            &root.join(".gwt/skill-state/verification-drivers"),
+            &fixed_driver_root(&root, &target, commands)?,
             source_head,
         )
         .map(Some)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn cargo_artifact_target(worktree: &Path, original: &Path, commands: &[String]) -> Option<PathBuf> {
+    if original.starts_with(worktree.join("target")) {
+        return Some(worktree.join("target"));
+    }
+    // Resolve the ambient target for config/env, then each command's overrides.
+    // Use the same Cargo metadata contract as build admission and GC locks.
+    std::iter::once("cargo build")
+        .chain(commands.iter().map(String::as_str))
+        .filter_map(|command| {
+            crate::cli::verification_lease::effective_cargo_target(worktree, command, false)
+                .ok()
+                .flatten()
+        })
+        .map(|target| dunce::canonicalize(&target).unwrap_or(target))
+        .find(|target| original.starts_with(target))
+}
+
+#[cfg(any(windows, test))]
+fn fixed_driver_root(worktree: &Path, target: &Path, commands: &[String]) -> io::Result<PathBuf> {
+    // Rename and hard-link restoration must stay on the artifact's volume.
+    // Ascend if this cache would itself be inside any command's Cargo target.
+    let mut parent = target;
+    loop {
+        parent = parent.parent().ok_or_else(|| {
+            io::Error::other("Cargo target has no parent outside its verification artifacts")
+        })?;
+        let fixed = parent.join(".gwt/skill-state/verification-drivers");
+        if cargo_artifact_target(worktree, &fixed, commands).is_none() {
+            return Ok(fixed);
+        }
     }
 }
 
@@ -143,6 +180,50 @@ fn pin_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_and_command_output_drivers_require_pinning() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _target = gwt_core::test_support::ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='driver-fixture'\nversion='0.1.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("lib.rs"), "").unwrap();
+        std::fs::create_dir(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir='build-output'\n",
+        )
+        .unwrap();
+        let configured = root.join("build-output/debug/gwtd.exe");
+        assert_eq!(
+            cargo_artifact_target(&root, &configured, &[]),
+            Some(root.join("build-output"))
+        );
+        let command_output = root.join("command-output/debug/gwtd.exe");
+        let commands = vec!["cargo test --target-dir command-output".to_string()];
+        assert_eq!(
+            cargo_artifact_target(&root, &command_output, &commands),
+            Some(root.join("command-output"))
+        );
+        let env_output = root.join("env-output/debug/gwtd.exe");
+        let commands = vec!["CARGO_TARGET_DIR=env-output cargo test".to_string()];
+        assert_eq!(
+            cargo_artifact_target(&root, &env_output, &commands),
+            Some(root.join("env-output"))
+        );
+        assert!(cargo_artifact_target(&root, &root.join("tools/gwtd.exe"), &commands).is_none());
+        let target = root.join(".gwt");
+        let commands = vec!["cargo test --target-dir .gwt".to_string()];
+        let fixed = fixed_driver_root(&root, &target, &commands).unwrap();
+        assert!(!fixed.starts_with(&target));
+    }
 
     #[test]
     fn pin_preserves_bytes_and_uses_an_independent_artifact() {

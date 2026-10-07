@@ -5871,7 +5871,7 @@ pub(super) fn run<E: CliEnv>(
             // subsequent timeouts preserve the preceding command evidence.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
-            let driver = driver::prepare(&worktree).map_err(|error| {
+            let driver = driver::prepare(&worktree, &commands).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to fix verification driver: {error}"
                 )))
