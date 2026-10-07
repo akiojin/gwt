@@ -3348,7 +3348,7 @@ fn execute_command_with_isolation(
         .prefix("gwt-verify-")
         .tempdir_in(temporary_base)
         .map_err(|error| error.to_string())?;
-    let result = (|| match host {
+    let result = match host {
         VerificationHost::Daemon(endpoint) => {
             let mut request = delegated_spawn_request(
                 worktree,
@@ -3400,7 +3400,7 @@ fn execute_command_with_isolation(
                 std::time::Instant::now,
             )
         }
-    })();
+    };
     match result {
         Ok(result) => Ok(result),
         Err(error) => {

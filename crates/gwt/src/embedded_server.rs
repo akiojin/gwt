@@ -849,6 +849,7 @@ fn handle_frontend_message(
             // from the paint observation when restore is still draining.
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
+                client_scope: state.clients.scope(client_id),
                 event: FrontendEvent::StartupFirstFrame { navigation_ms },
                 received_at,
             });
@@ -863,6 +864,7 @@ fn handle_frontend_message(
         other => {
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
+                client_scope: state.clients.scope(client_id),
                 event: other,
                 received_at,
             });
@@ -991,6 +993,7 @@ fn forward_terminal_input_to_event_loop(
 ) {
     state.proxy.send(UserEvent::Frontend {
         client_id: client_id.to_string(),
+        client_scope: state.clients.scope(client_id),
         event: FrontendEvent::TerminalInput { id, data },
         received_at,
     });
@@ -4010,13 +4013,21 @@ mod tests {
     #[test]
     fn handle_frontend_message_forwards_non_terminal_events_to_proxy() {
         let (state, events) = sample_server_state();
-        let received_at = Instant::now() - Duration::from_millis(50);
+        let project = ProjectKey::parse("0123456789abcdef").unwrap();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project.clone()));
+        let received_at = Instant::now() - Duration::from_millis(100);
 
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
-            FrontendEvent::FrontendReady,
+            FrontendEvent::UpdateTerminalGrid {
+                id: "window-1".into(),
+                cols: 120,
+                rows: 24,
+            },
             received_at,
         );
 
@@ -4025,8 +4036,10 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady, received_at: forwarded_at }]
-                if client_id == "client-1" && *forwarded_at == received_at
+            [UserEvent::Frontend { client_id, client_scope: Some(ClientScope::Project(forwarded_project)),
+                event: FrontendEvent::UpdateTerminalGrid { id, cols: 120, rows: 24 }, received_at: forwarded_at }]
+                if client_id == "client-1" && forwarded_project == &project
+                    && id == "window-1" && *forwarded_at == received_at
         ));
     }
 
@@ -4344,7 +4357,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data }, received_at: forwarded_at }]
+            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data }, received_at: forwarded_at, .. }]
                 if client_id == "client-1"
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
