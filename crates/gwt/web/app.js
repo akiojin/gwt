@@ -5651,6 +5651,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         applyAutostartError,
         applyCustomAgentDeleted,
         applyCustomAgentError,
+        applySupportedAgentList,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -6765,6 +6766,9 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             customAgentsState.agents = event.agents || [];
             customAgentsState.loading = false;
             frontendUnits.knowledgeSettingsSurface.renderSettingsAgentList();
+            break;
+          case "supported_agent_list":
+            applySupportedAgentList(event);
             break;
           // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends WebSocket
           // events. `agent_backend_list` is a snapshot reply per

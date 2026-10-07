@@ -1720,6 +1720,7 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::UpdateBoardProviderConfig { .. }
             | FrontendEvent::UpdateBoardOauthPort { .. }
             | FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListSupportedAgents
             | FrontendEvent::ListCustomAgentPresets
             | FrontendEvent::AddCustomAgentFromPreset { .. }
             | FrontendEvent::UpdateCustomAgent { .. }
@@ -2466,6 +2467,10 @@ mod tests {
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::GetSystemSettings
         ));
+        let supported_agents: FrontendEvent =
+            serde_json::from_str(r#"{"kind":"list_supported_agents"}"#)
+                .expect("Supported Agents is a global read-only Settings request");
+        assert!(hub_frontend_event_allowed(&supported_agents));
         assert!(hub_frontend_event_allowed(&FrontendEvent::ApplyUpdateStart));
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::OpenProjectDialog

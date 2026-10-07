@@ -8488,6 +8488,10 @@ impl AppRuntime {
                 self.open_update_log_events(&client_id, log_path)
             }
             FrontendEvent::OpenServerUrl { url } => self.open_server_url_events(&client_id, url),
+            FrontendEvent::ListSupportedAgents => {
+                self.spawn_supported_agent_list(client_id);
+                Vec::new()
+            }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -9611,6 +9615,10 @@ impl AppRuntime {
                 self.open_update_log_events(&client_id, log_path)
             }
             FrontendEvent::OpenServerUrl { url } => self.open_server_url_events(&client_id, url),
+            FrontendEvent::ListSupportedAgents => {
+                self.spawn_supported_agent_list(client_id);
+                Vec::new()
+            }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),

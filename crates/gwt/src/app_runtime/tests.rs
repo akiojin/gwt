@@ -14703,6 +14703,67 @@ fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
 }
 
 #[test]
+fn app_runtime_supported_agents_lists_catalog_and_distinguishes_missing_versions() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let options = vec![
+        gwt::AgentOption {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            available: true,
+            installed_version: Some(" 2.1.0 ".into()),
+            custom_agent: None,
+        },
+        gwt::AgentOption {
+            id: "codex".into(),
+            name: "Codex".into(),
+            available: true,
+            installed_version: None,
+            custom_agent: None,
+        },
+    ];
+    runtime.launch_wizard_cache =
+        LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, options);
+    let request: FrontendEvent = serde_json::from_str(r#"{"kind":"list_supported_agents"}"#)
+        .expect("L3 Settings must support the read-only list request");
+    let immediate = runtime.handle_frontend_event("settings-client".into(), request);
+    assert!(
+        immediate.is_empty(),
+        "detection cache reads run off the GUI loop"
+    );
+    wait_for_recorded_event("supported agent list", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(event, UserEvent::Dispatch(outbound) if outbound.iter().any(|reply|
+                serde_json::to_value(&reply.event).unwrap()["kind"] == "supported_agent_list"))
+        })
+    });
+    let events = recorded_events.lock().expect("events lock");
+    let payload = events
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(outbound) => Some(outbound),
+            _ => None,
+        })
+        .flatten()
+        .map(|reply| serde_json::to_value(&reply.event).unwrap())
+        .find(|value| value["kind"] == "supported_agent_list")
+        .expect("supported agent reply");
+    let rows = payload["agents"].as_array().expect("agent rows");
+    assert_eq!(rows.len(), gwt_agent::builtin_agent_descriptors().len());
+    for (row, descriptor) in rows.iter().zip(gwt_agent::builtin_agent_descriptors()) {
+        assert_eq!(row["id"], descriptor.command);
+        assert_eq!(row["name"], descriptor.display_name);
+    }
+    assert_eq!(rows[0]["installed"], true);
+    assert_eq!(rows[0]["installed_version"], "2.1.0");
+    assert_eq!(rows[1]["installed"], true);
+    assert!(rows[1]["installed_version"].is_null());
+    assert_eq!(rows[2]["installed"], false);
+    assert!(rows[2]["installed_version"].is_null());
+}
+
+#[test]
 fn issue_monitor_error_notification_keeps_project_in_ledger() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());

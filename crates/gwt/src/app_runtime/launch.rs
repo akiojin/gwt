@@ -2263,6 +2263,32 @@ impl LaunchWizardMemoryCache {
         }
     }
 
+    /// Settings shows the entire built-in catalog while the wizard still
+    /// offers only installed agents. Reuse its existing detection snapshot.
+    pub(super) fn supported_agents(&self) -> Vec<gwt::protocol::SupportedAgentView> {
+        let options = self.agent_options();
+        gwt_agent::builtin_agent_descriptors()
+            .iter()
+            .map(|descriptor| {
+                let detected = options.iter().find(|option| {
+                    option.id == descriptor.command
+                        && option.available
+                        && option.custom_agent.is_none()
+                });
+                gwt::protocol::SupportedAgentView {
+                    id: descriptor.command.to_string(),
+                    name: descriptor.display_name.to_string(),
+                    installed: detected.is_some(),
+                    installed_version: detected
+                        .and_then(|agent| agent.installed_version.as_deref())
+                        .map(str::trim)
+                        .filter(|version| !version.is_empty())
+                        .map(str::to_string),
+                }
+            })
+            .collect()
+    }
+
     /// SPEC-3170 FR-001: cached `claude --version`-derived ultracode capability,
     /// resolved once at load time so wizard open never re-spawns the probe.
     pub(super) fn claude_ultracode_supported(&self) -> bool {
