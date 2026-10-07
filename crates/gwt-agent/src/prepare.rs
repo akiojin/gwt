@@ -4483,6 +4483,13 @@ mod tests {
             // SAFETY: this is a NUL-terminated path in our unique tempdir.
             assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         }
+        // Keep release available before the descendant runs so a survivor can
+        // consume the queued message even if it opens its end after cleanup.
+        let mut release_writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&release)
+            .expect("hold release FIFO");
         // Nonblocking open also lets a failed fixture report missing readiness
         // rather than hang if the deadline kills it before it opens the FIFO.
         let mut ready_reader = OpenOptions::new()
@@ -4512,19 +4519,8 @@ mod tests {
             &hub,
         );
         // A survivor writes the failure marker before closing the readiness
-        // pipe. Release it so a cleanup regression still reaches EOF.
-        match OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(release)
-        {
-            Ok(mut file) => {
-                if let Err(error) = file.write_all(b"go\n") {
-                    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-                }
-            }
-            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
-        }
+        // pipe. Queue its release even if it has not opened the FIFO yet.
+        release_writer.write_all(b"go\n").expect("release survivor");
         // EOF observes descriptor closure on exit, independent of how soon
         // init reaps the descendant: kill -0 also succeeds for a zombie.
         let fd = ready_reader.as_raw_fd();
