@@ -15551,6 +15551,8 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
     session
         .save(&runtime.sessions_dir)
         .expect("save genesis Session");
+    // Resolve a previously visible Session before its launch gains a recovery receipt.
+    runtime.launch_wizard_cache.record_session(session.clone());
     persist_durable_launch_recovery(
         &runtime.sessions_dir,
         DurableLaunchRecoveryKind::Genesis,
@@ -15562,13 +15564,20 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         Some(&gwt_agent::AgentId::Codex),
     )
     .expect("persist exact genesis recovery receipt");
-    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     let receipt_path = runtime
         .sessions_dir
         .join("execution-launch-recovery")
         .join(format!("{session_id}.json"));
     fs::remove_file(&receipt_path).expect("remove receipt file");
     fs::create_dir(&receipt_path).expect("create receipt cleanup blocker");
+    assert!(
+        runtime
+            .launch_wizard_cache
+            .quick_start_entries(&repo, "work/issue-2359")
+            .iter()
+            .any(|entry| entry.session_id == session_id),
+        "the failed genesis starts visible in the warm cache",
+    );
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.pending_workspace_resume_contexts.insert(
         window_id.clone(),
@@ -15652,6 +15661,13 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
     assert!(
         receipt_path.is_dir(),
         "the injected cleanup blocker must remain"
+    );
+    assert!(
+        !runtime
+            .sessions_dir
+            .join(format!("{session_id}.toml"))
+            .exists(),
+        "exact Session removal must precede the pending receipt cleanup",
     );
     assert!(
         runtime
