@@ -1708,6 +1708,10 @@ pub struct AppRuntime {
     /// process cwd according to the latest background merge scan. Projection
     /// consumes only this cache and never enumerates OS processes.
     pub(crate) work_live_process_branches: HashMap<PathBuf, HashSet<String>>,
+    /// Immutable merge verdicts shared by successive workers for each repo.
+    pub(crate) work_merge_status_cache: std::cell::RefCell<
+        HashMap<PathBuf, Arc<std::sync::Mutex<gwt_git::branch::CleanupReadinessCache>>>,
+    >,
     /// Issue #3611: short branch names (`work/x`, `origin/work/x`) present in
     /// the latest background ref snapshot, per project. The projection resolves
     /// Session resumability from this set instead of spawning
@@ -3600,6 +3604,7 @@ impl AppRuntime {
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
+            work_merge_status_cache: std::cell::RefCell::new(HashMap::new()),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
@@ -3770,46 +3775,81 @@ impl AppRuntime {
         let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
         let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
         thread::spawn(move || {
-            let summary =
-                crate::work_events_ingest::ingest_project_work_events_paths_with_inventory(
-                    &project_root,
-                    &work_items_path,
-                    &state_path,
-                    worktree_inventory.as_deref().map(Vec::as_slice),
-                );
-            if let Some(error) = summary.load_error.as_ref() {
-                proxy.send(UserEvent::WorkspaceStateLoadFailed {
-                    project_root,
-                    error: error.clone(),
-                });
-                return;
-            }
-            // #3065: detection-based repair for the resume owner bleed. Runs
-            // after every ingest so re-ingested contaminated logs (from other
-            // machines / refs) self-heal; converges to a no-op on clean data.
-            let repaired = gwt_core::workspace_projection::repair_resume_owner_bleed_paths(
-                &work_items_path,
-                &projection_path,
-                chrono::Utc::now(),
-            )
-            .map(|report| report.changed())
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "resume owner bleed repair failed");
-                false
-            });
-            let reconcile = Self::reconcile_workspace_worktrees_off_event_loop(
-                &project_root,
-                worktree_inventory.as_deref().map(Vec::as_slice),
-            );
-            let reconciled = reconcile
-                .as_ref()
-                .is_some_and(|outcome| outcome.backfilled > 0);
-            proxy.send(UserEvent::WorkEventsIngested {
+            if let Some(event) = Self::prepare_work_events_ingest(
                 project_root,
-                changed: summary.changed() || repaired || reconciled,
-                local_branches: reconcile.map(|outcome| outcome.local_branches),
-            });
+                &work_items_path,
+                &state_path,
+                &projection_path,
+                worktree_inventory.as_deref().map(Vec::as_slice),
+            ) {
+                proxy.send(event);
+            }
         });
+    }
+
+    /// Prepare the ingest worker's event synchronously so the tick's Git
+    /// process budget can be verified on the executing thread.
+    fn prepare_work_events_ingest(
+        project_root: PathBuf,
+        work_items_path: &Path,
+        state_path: &Path,
+        projection_path: &Path,
+        worktree_inventory: Option<&[gwt::worktree_inventory::WorktreeEntry]>,
+    ) -> Option<UserEvent> {
+        // Issue #5116 AC-2: intake and reconcile consume one listing per tick.
+        // A failed listing must not look like an authoritative empty inventory
+        // or allow either writer to mutate the existing Work projection.
+        let listed;
+        let worktree_inventory = match worktree_inventory {
+            Some(entries) => entries,
+            None => {
+                listed = match gwt::worktree_inventory::enumerate_worktrees(&project_root, None) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        tracing::warn!(%error, "work events ingest: worktree enumeration failed");
+                        return None;
+                    }
+                };
+                listed.as_slice()
+            }
+        };
+        let summary = crate::work_events_ingest::ingest_project_work_events_paths_with_inventory(
+            &project_root,
+            work_items_path,
+            state_path,
+            Some(worktree_inventory),
+        );
+        if let Some(error) = summary.load_error.as_ref() {
+            return Some(UserEvent::WorkspaceStateLoadFailed {
+                project_root,
+                error: error.clone(),
+            });
+        }
+        // #3065: detection-based repair for the resume owner bleed. Runs
+        // after every ingest so re-ingested contaminated logs (from other
+        // machines / refs) self-heal; converges to a no-op on clean data.
+        let repaired = gwt_core::workspace_projection::repair_resume_owner_bleed_paths(
+            work_items_path,
+            projection_path,
+            chrono::Utc::now(),
+        )
+        .map(|report| report.changed())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "resume owner bleed repair failed");
+            false
+        });
+        let reconcile = Self::reconcile_workspace_worktrees_off_event_loop(
+            &project_root,
+            Some(worktree_inventory),
+        );
+        let reconciled = reconcile
+            .as_ref()
+            .is_some_and(|outcome| outcome.backfilled > 0);
+        Some(UserEvent::WorkEventsIngested {
+            project_root,
+            changed: summary.changed() || repaired || reconciled,
+            local_branches: reconcile.map(|outcome| outcome.local_branches),
+        })
     }
 
     /// Event-loop continuation of [`Self::spawn_work_events_ingest`]: commit
@@ -3863,6 +3903,12 @@ impl AppRuntime {
             return;
         };
         let proxy = self.proxy.for_project(context);
+        let merge_cache = self
+            .work_merge_status_cache
+            .borrow_mut()
+            .entry(project_root.clone())
+            .or_default()
+            .clone();
         thread::spawn(move || {
             let Ok(projection) =
                 gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
@@ -3880,7 +3926,7 @@ impl AppRuntime {
             // Issue #3611: it is resolved before the empty-target exit because
             // the projection also consumes it, as the process-free answer to
             // "can this Session's worktree be re-materialized?".
-            let tip_times = gwt_git::refs::branch_tip_committer_times(&project_root);
+            let tip_times = gwt_git::refs::branch_tip_snapshot(&project_root);
             // A failed snapshot publishes `None`, not an empty set: an empty
             // set would claim every branch is gone and silently strip working
             // Resume controls.
@@ -3928,19 +3974,18 @@ impl AppRuntime {
                     return;
                 }
             };
-            let known_refs: HashSet<String> = tip_times.keys().cloned().collect();
+            let mut merge_cache = merge_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut merged: Vec<String> = Vec::new();
             let mut cleanup_ready_branches: HashMap<String, String> = HashMap::new();
             let mut dirty_branches = HashSet::new();
             for target in &targets {
                 let branch = target.branch.clone();
-                let readiness = gwt_git::branch::cleanup_readiness_base_target_with_known_refs(
-                    &git_root,
-                    &branch,
-                    &known_refs,
-                )
-                .ok()
-                .flatten();
+                let readiness = merge_cache
+                    .base_target(&git_root, &branch, &tip_times)
+                    .ok()
+                    .flatten();
                 if !work_merge_scan_needs_dirty_check(readiness.as_ref(), target.has_merged_pr) {
                     continue;
                 }
@@ -3967,7 +4012,7 @@ impl AppRuntime {
                     let unix = tip_times
                         .get(&branch)
                         .or_else(|| tip_times.get(&format!("origin/{branch}")))
-                        .copied();
+                        .map(|tip| tip.committer_time);
                     let reference = unix
                         .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
                         .unwrap_or_else(chrono::Utc::now);
