@@ -24046,6 +24046,7 @@ fn fresh_execution_completed_predecessor_survives_terminal_grace_and_activates_o
     fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+    commit_pending_fresh_execution(&mut fixture.runtime);
     assert!(!fixture
         .runtime
         .pending_fresh_execution_launches
