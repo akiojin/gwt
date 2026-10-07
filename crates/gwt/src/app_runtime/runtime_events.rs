@@ -1817,6 +1817,20 @@ impl AppRuntime {
         event: gwt::RuntimeHookEvent,
         publish_to_daemon: bool,
     ) -> Vec<OutboundEvent> {
+        if let Some(pending) = self
+            .pending_launch_completions
+            .values_mut()
+            .find(|pending| {
+                pending.session_id.as_deref().is_some_and(|session_id| {
+                    event.gwt_session_id.as_deref() == Some(session_id)
+                        || (event.source_event.as_deref() != Some("SessionStart")
+                            && event.agent_session_id.as_deref() == Some(session_id))
+                })
+            })
+        {
+            pending.early_hooks.push((event, publish_to_daemon));
+            return Vec::new();
+        }
         let project_scope = self
             .active_window_for_runtime_event(&event)
             .as_deref()
@@ -2297,7 +2311,7 @@ fn publish_runtime_output_change(
         preview_text,
     });
 }
-fn publish_runtime_status_change(
+pub(super) fn publish_runtime_status_change(
     project_root: &Path,
     id: &str,
     status: WindowProcessStatus,

@@ -204,12 +204,19 @@ export function createLaunchWizardSurface({
         note.dataset.agentId = setup.agent_id || "";
         note.dataset.setupKind = setup.kind || "";
         note.setAttribute("role", "note");
+        note.setAttribute("aria-busy", String(Boolean(setup.pending)));
         note.appendChild(
           createNode("div", "launch-agent-setup__title", setup.title || ""),
         );
         note.appendChild(
           createNode("div", "launch-agent-setup__detail", setup.detail || ""),
         );
+        if (setup.status) {
+          const status = createNode("div", "launch-agent-setup__detail", setup.status);
+          status.setAttribute("role", "status");
+          status.setAttribute("aria-live", "polite");
+          note.appendChild(status);
+        }
         if (setup.action_label) {
           const button = createNode(
             "button",
@@ -217,6 +224,7 @@ export function createLaunchWizardSurface({
             setup.action_label,
           );
           button.type = "button";
+          button.disabled = Boolean(setup.pending);
           button.addEventListener("click", () =>
             sendWizardAction({ kind: "run_agent_setup" }),
           );
@@ -1882,51 +1890,6 @@ export function createLaunchWizardSurface({
           setupParent.appendChild(section);
         }
 
-        if (
-          showSetupForms &&
-          (
-            launchWizard.show_skip_permissions ||
-            launchWizard.show_fast_mode
-          )
-        ) {
-          const showFastMode = Boolean(
-            launchWizard.show_fast_mode,
-          );
-          const section = createLaunchSection(
-            "Launch settings",
-            "Permissions and tool-specific launch behavior.",
-          );
-          const grid = createNode("div", "launch-form-grid");
-          if (launchWizard.show_skip_permissions) {
-            appendToggleField(
-              grid,
-              "Permissions",
-              "Skip permission prompts",
-              launchWizard.skip_permissions,
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_skip_permissions",
-                  enabled,
-                }),
-            );
-          }
-          if (showFastMode) {
-            appendToggleField(
-              grid,
-              "Fast mode",
-              "Use the agent's Fast mode",
-              Boolean(launchWizard.fast_mode),
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_fast_mode",
-                  enabled,
-                }),
-            );
-          }
-          section.appendChild(grid);
-          setupParent.appendChild(section);
-        }
-
         // SPEC-3152: Hermes-specific launch options, rendered only for the
         // Hermes agent. Provider is a curated dropdown sourced from the user's
         // config; the remaining fields are optional overrides (blank uses the
@@ -2170,7 +2133,7 @@ export function createLaunchWizardSurface({
 
         setLaunchWizardPendingDisabled(
           panel,
-          isRuntimeResolutionPending || isLaunchActionPending,
+          isRuntimeResolutionPending || isLaunchActionPending || launchWizard.agent_setup?.pending,
         );
         wizardContentPane.appendChild(panel);
         wizardMain.appendChild(wizardContentPane);
