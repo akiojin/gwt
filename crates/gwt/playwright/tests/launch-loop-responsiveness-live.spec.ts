@@ -42,6 +42,7 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await openLiveGwtProject(page, project);
       const migration = page.locator("#migration-modal.open");
+      if (project !== PROJECT) await expect(migration).toBeVisible({ timeout: 60_000 });
       if (await migration.count()) {
         // Exercise the regular migration route only on this disposable repository.
         await migration.getByRole("button", { name: "Migrate", exact: true }).click();
