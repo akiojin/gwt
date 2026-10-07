@@ -25,6 +25,10 @@ test.describe("launch-loop responsiveness (live backend)", () => {
   test("pane observations and PM requests survive repeated launches with 60 windows", async ({ page }, info) => {
     expect(PROJECT, "isolated fixture repository").not.toBe("");
     expect(PROBES, "fixture agent evidence directory").not.toBe("");
+    // Distinct fixture origins keep the first theme's Work history out of the
+    // second theme's trace without changing the measured launch workload.
+    const project = info.project.name.includes("light")
+      ? process.env.GWT_PLAYWRIGHT_LAUNCH_LIGHT_PROJECT || PROJECT : PROJECT;
     const release = await acquireLiveGwtBackendLock(BASE, info);
     const errors: string[] = [];
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -36,7 +40,7 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       await rm(join(PROBES, "leader.json"), { force: true });
       await rm(join(PROBES, "pane-samples.json"), { force: true });
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
-      await openLiveGwtProject(page, PROJECT);
+      await openLiveGwtProject(page, project);
       const migration = page.locator("#migration-modal.open");
       if (await migration.count()) {
         // Exercise the regular migration route only on this disposable repository.
