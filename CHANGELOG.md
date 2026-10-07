@@ -1,6 +1,104 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.111.0] - 2026-10-07
+
+### Bug Fixes
+
+- **verify:** 同一 deferred 検証の成功済み項目を再利用する
+- **test:** Runner probe の fixture を終了事象で同期する
+- **test:** Make deferred continuation fixture portable
+- **ci:** Paired Windows 検証のフェーズ診断と回帰実行を追加
+- **hook:** 名乗れない lock 保持者の理由を区別し、劣化した PM refresh を errors.list に残す
+- **issue-monitor:** 解決できない intra-doc link を通常の code span にする
+- **verify:** 検証延期後に通常の gwtd 成果物を復元
+- **monitor:** Preserve rapid label edits and keyboard focus
+- **index:** Snapshot後のlive waiter登録をsweepから保護する
+- **index:** Grace期間の既存liveness判定を維持する
+- **index:** Preserve refreshed reservations during waiter sweeps
+- **launch:** Align setup guidance with installed-only execution
+- **issue-monitor:** Make priority.set/move reorder the local terminal queue (#5079)
+- **verify:** Preserve versioned verification evidence
+- **process:** Linux のプロセス識別値を btime に依存しない start_ticks にする
+- **execution:** Clarify authority-scoped recovery diagnostics
+- **test:** Isolate format-skew fixture storage
+- **monitor:** Recover label edits after rejected saves
+- **verify:** Require unconditional delegated check steps
+- **verify:** Express measured capacity bounds with clamp
+- **verify:** Guard slotless Cargo and repair CI regressions
+- **test:** Return metadata from Cargo admission fixture
+
+### Features
+
+- **monitor:** Requeue retry-held rows and name the cause behind a retry_backoff stall
+- **monitor:** Record the candidate pool's degradation to one provider when it happens
+- **issue-monitor:** Max_active 飽和時に枠の占有者と解除操作を報告する
+- **monitor:** Add project label admission allow-list
+- **gui:** Allow safe agent tab close and reopen
+- **launch-wizard:** バージョン選択を撤去し検出済みエージェントのみを一覧に出す
+- **launch:** Retire version selection and preserve saved agent settings
+- **launch:** Use installed agents without package fallback
+- **gui:** Allow the same surface in both split panes
+- **wizard:** Fix launch permission and fast mode choices
+- **verify:** Admit independent builds through bounded slots
+
+### Miscellaneous Tasks
+
+- **work:** Record tray dependency contract delivery
+- **work:** トレイ依存契約の再監査と配送を記録
+- **work:** Record fresh tray contract delivery audit
+- **work:** 検証継続PRの関連イベントを配送する
+- **work:** Record runner fixture PR delivery
+- **work:** Deliver issue 5061 work updates
+- **work:** Issue #4982 の再開記録を保存
+- **work:** Issue #4982 の PR 読み取り記録を保存
+- **work:** Issue #4982 の Ready PR 記録を保存
+- **work:** Record issue 4158 PR delivery
+- **work:** Record agent tab delivery preparation
+- **work:** Record merged pull request readback
+- **work:** Record agent tab pull request delivery
+- **work:** Record issue 5061 ready pull request
+- **work:** Record issue-1921 dependency audit
+- **work:** #1921の依存配送待ち監査を記録
+- **work:** Record issue-1921 dependency delivery audit
+- **work:** #1921の依存未配送監査を記録
+- **work:** Record issue-1921 dependency preflight
+- **work:** Record Phase L1 verification handoff
+- **work:** Record installed agent launch pull request
+- **work:** Record concurrent reopen delivery audit
+- **work:** Record resumed hook retry delivery checkpoint
+- **work:** Preserve #4740 launch checkpoints
+- **work:** Preserve #4740 dependency checkpoint
+- **work:** Preserve issue 4740 runtime resume event
+- **work:** Record issue-5089 execution events
+- **work:** #5031 の検証と配送記録を確定
+- **work:** Finalize #5031 relaunch verification handoff
+- **work:** Record #5031 ready PR handoff
+- **work:** Record split surface delivery context
+- **work:** Record PR 5099 delivery context
+- **work:** Preserve issue 1921 recovery handoff events
+- **work:** Record initial label admission merge
+- **work:** Record label-save recovery delivery
+
+### Performance
+
+- **verify:** Delegate protected pre-pr checks to ci
+
+### Testing
+
+- **startup:** トレイ契約から推移的依存のバージョン固定を除く
+- **verify:** 成果物復元の回帰プロセスに待機上限を追加
+- **launch-wizard:** 旧バージョン選択契約のテストを installed のみの契約へ更新
+- **launch:** Align resume regressions with installed agent contract
+- **ci:** Align Windows launch budget contract with installed providers
+- **launch:** Pin direct preset fixtures in the active profile
+- **issue-monitor:** Verify priority writes select the next launch (#5079)
+- **execution:** Make concurrent reopen retry writer contention
+- Hook retryの期限検証を仮想時刻で決定化する
+- Synchronize monitor fixture completion
+- **verify:** Isolate canonical benchmark temporary fixtures
+- **verify:** Compare fallback plans on the same host
+
 ## [9.110.0] - 2026-10-05
 
 ### Bug Fixes
