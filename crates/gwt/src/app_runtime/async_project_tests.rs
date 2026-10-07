@@ -168,8 +168,44 @@ fn stale_project_launch_completion_cleans_exact_genesis_without_touching_reopene
     runtime
         .window_details
         .insert(window_id.clone(), "new pane state".to_string());
+    let (spawner, cleanup_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let completion = queued.lock().unwrap().pop().unwrap();
+    let retry = completion.clone();
     assert!(runtime.accept_project_completion(completion).is_none());
+    assert_eq!(
+        cleanup_tasks.lock().unwrap().len(),
+        1,
+        "stale LaunchComplete must enqueue cleanup instead of doing ledger I/O on the GUI"
+    );
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    assert!(
+        session_path.exists(),
+        "cleanup must not run before the worker"
+    );
+    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .unwrap()
+        .unwrap();
+    let replacement = gwt::cli::execution_state::begin_active_session_launch_handshake(
+        &runtime.sessions_dir,
+        &session_identity,
+    )
+    .expect("reserve a same-identity relaunch while cleanup is queued")
+    .expect("replacement launch handshake");
+    drain_queued_blocking_tasks(&cleanup_tasks);
+    assert!(
+        session_path.exists(),
+        "queued cleanup must preserve a newer launch of the same Session"
+    );
+    assert!(
+        gwt::cli::execution_state::finish_active_session_launch_handshake(
+            &runtime.sessions_dir,
+            &replacement,
+        )
+        .expect("release replacement launch")
+    );
+    assert!(runtime.accept_project_completion(retry).is_none());
+    drain_queued_blocking_tasks(&cleanup_tasks);
     assert_eq!(
         runtime.window_details.get(&window_id).map(String::as_str),
         Some("new pane state")

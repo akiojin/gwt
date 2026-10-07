@@ -12584,7 +12584,7 @@ fn take_project_navigation_completion(
     }
 }
 
-fn drain_queued_blocking_tasks(tasks: &BlockingTestTaskQueue) {
+pub(super) fn drain_queued_blocking_tasks(tasks: &BlockingTestTaskQueue) {
     loop {
         let task = tasks.lock().expect("blocking task queue").pop();
         let Some(task) = task else {
@@ -30572,7 +30572,7 @@ impl AppRuntime {
     }
 }
 
-fn queued_agent_completion_fixture(
+pub(super) fn queued_agent_completion_fixture(
     temp_root: &Path,
 ) -> (
     AppRuntime,

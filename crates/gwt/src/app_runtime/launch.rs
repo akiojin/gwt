@@ -1936,6 +1936,7 @@ struct LaunchCompletionInput {
     project_root: PathBuf,
     geometry: Option<WindowGeometry>,
     sessions_dir: PathBuf,
+    session_cache: LaunchWizardMemoryCache,
     issue_link_cache_dir: PathBuf,
     materializer_id: String,
     live_pm_session_ids: std::collections::HashSet<String>,
@@ -1959,7 +1960,7 @@ struct PreparedAgentLaunchState {
     window_id: String,
     generation: u64,
     launch_feedback_context: Option<LaunchFeedbackContext>,
-    failure_session: Option<(ActiveAgentSession, gwt_agent::Session)>,
+    failure_session: Option<(ActiveAgentSession, Option<gwt_agent::Session>)>,
     pending_fresh_execution: Option<PendingFreshExecutionLaunch>,
     failure_capability_token: Option<String>,
     result: Result<PreparedAgentLaunchSuccess, String>,
@@ -2075,8 +2076,16 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
                 && session.repo_hash == expected.repo_hash
                 && session.runtime_target == expected.runtime_target
                 && session.execution_binding == expected.execution_binding)
-                .then_some((active, session))
+                .then(|| {
+                    let cached =
+                        (!durable_launch_recovery_exists(&input.sessions_dir, &session.id))
+                            .then_some(session);
+                    (active, cached)
+                })
         });
+    // Clones share the startup OnceLock. Resolve it here so GUI cache ingest
+    // never joins the ledger loader or falls back to a directory scan.
+    input.session_cache.sessions();
     PreparedAgentLaunch(Arc::new(PreparedAgentLaunchHandoff {
         state: Mutex::new(Some(PreparedAgentLaunchState {
             window_id: input.window_id,
@@ -3299,6 +3308,27 @@ impl LaunchWizardMemoryCache {
         }
     }
 
+    /// The launch worker has resolved the shared ledger and recovery-filtered
+    /// this snapshot. Later cache replacements are already resolved as well.
+    fn record_prepared_session(&mut self, session_id: &str, session: Option<gwt_agent::Session>) {
+        let sessions = Arc::make_mut(&mut self.sessions)
+            .get_mut()
+            .expect("launch worker resolved the Session ledger");
+        match session {
+            Some(session) => {
+                if let Some(existing) = sessions
+                    .iter_mut()
+                    .find(|existing| existing.id == session.id)
+                {
+                    *existing = session;
+                } else {
+                    sessions.push(session);
+                }
+            }
+            None => sessions.retain(|session| session.id != session_id),
+        }
+    }
+
     pub(super) fn mark_stopped(&mut self, session_id: &str) {
         if let Some(session) = self
             .sessions_mut()
@@ -4265,97 +4295,133 @@ impl AppRuntime {
             }
             _ => return,
         };
-        let (launch, session_id, branch, _, worktree, agent, issue, _, _, mode, prepared, runtime) =
-            completion;
+        let (launch, session_id, _, _, _, _, _, _, _, _, _, runtime) = completion;
         self.revoke_unbound_agent_capability(
             launch
                 .env
                 .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
                 .map(String::as_str),
         );
-        let cleanup = (|| -> Result<(), String> {
-            if let Some(handshake) = &runtime.active_launch_handshake {
-                if !gwt::cli::execution_state::finish_active_session_launch_handshake(
-                    &self.sessions_dir,
-                    handshake,
-                )
-                .map_err(|error| error.to_string())?
-                {
-                    return Ok(()); // A newer launch owns this Session's handshake.
-                }
-            }
-            if self
-                .active_agent_sessions
-                .values()
-                .any(|active| &active.session_id == session_id)
-            {
-                return Ok(());
-            }
-            let Some(expected) = runtime.expected_execution_identity.as_ref() else {
-                return Ok(());
-            };
-            let current =
-                gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
-                    .ok()
-                    .and_then(|session| {
-                        gwt_agent::SessionExecutionIdentity::from_session(&session).ok()
-                    })
-                    .flatten();
-            if current.as_ref() != Some(expected) {
-                return Ok(());
-            }
-            let reason = "project generation closed before launch PTY handoff";
-            if let Some(pending) = self.pending_continue_work.values().find(|pending| {
+        let active_session = self
+            .active_agent_sessions
+            .values()
+            .any(|active| &active.session_id == session_id);
+        let pending_continue_work = self
+            .pending_continue_work
+            .values()
+            .find(|pending| {
                 pending.binding.session_id == *session_id
-                    && super::continuation::pending_continue_work_session_identity(pending)
+                    && runtime
+                        .expected_execution_identity
                         .as_ref()
-                        .ok()
-                        == Some(expected)
-            }) {
-                super::continuation::abort_prepared_execution_and_remove_exact_session(
-                    &pending.worktree_path,
-                    pending.owner,
-                    &pending.execution,
-                    reason,
-                    &self.sessions_dir,
-                    expected,
-                    || Ok(()),
-                )
-                .map_err(|error| error.to_string())?;
-                return Ok(());
-            }
-            if launch
-                .env
-                .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
-            {
-                return rollback_materialized_fresh_execution_launch(
-                    &self.sessions_dir,
-                    session_id,
-                    worktree,
-                    reason,
-                    agent,
+                        .is_some_and(|expected| {
+                            pending_continue_work_session_identity(pending)
+                                .as_ref()
+                                .ok()
+                                == Some(expected)
+                        })
+            })
+            .cloned();
+        let sessions_dir = self.sessions_dir.clone();
+        let completion = completion.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let (launch, session_id, branch, _, worktree, agent, issue, _, _, mode, prepared, runtime) =
+                &completion;
+            let cleanup = (|| -> Result<(), String> {
+                if active_session {
+                    return Ok(());
+                }
+                let Some(expected) = runtime.expected_execution_identity.as_ref() else {
+                    return Ok(());
+                };
+                // Keep the launch fence through rollback, so a same-identity
+                // in-place relaunch cannot start while cleanup is queued or running.
+                let handshake = if let Some(handshake) = &runtime.active_launch_handshake {
+                    let current = gwt_agent::with_session_path_lease(
+                        &sessions_dir, session_id, |_| {
+                            gwt_agent::read_session_active_launch_handshake_under_lease(
+                                &sessions_dir, expected,
+                            )
+                        },
+                    ).map_err(|error| error.to_string())?;
+                    if current.as_ref() != Some(handshake) {
+                        return Ok(());
+                    }
+                    handshake.clone()
+                } else {
+                    let Some(handshake) =
+                        gwt::cli::execution_state::begin_active_session_launch_handshake(
+                            &sessions_dir, expected,
+                        ).map_err(|error| error.to_string())?
+                    else {
+                        // Newer launch/runtime or unknown authority: preserve
+                        // the Session and its recovery receipt for reconciliation.
+                        return Ok(());
+                    };
+                    handshake
+                };
+                let _fence = ActiveLaunchHandshakeCleanup::new(
+                    sessions_dir.clone(), Some(handshake),
                 );
+                let current =
+                    gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+                        .ok()
+                        .and_then(|session| {
+                            gwt_agent::SessionExecutionIdentity::from_session(&session).ok()
+                        })
+                        .flatten();
+                if current.as_ref() != Some(expected) {
+                    return Ok(());
+                }
+                let reason = "project generation closed before launch PTY handoff";
+                if let Some(pending) = pending_continue_work {
+                    super::continuation::abort_prepared_execution_and_remove_exact_session(
+                        &pending.worktree_path,
+                        pending.owner,
+                        &pending.execution,
+                        reason,
+                        &sessions_dir,
+                        expected,
+                        || Ok(()),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+                if launch
+                    .env
+                    .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+                {
+                    return rollback_materialized_fresh_execution_launch(
+                        &sessions_dir,
+                        session_id,
+                        worktree,
+                        reason,
+                        agent,
+                    );
+                }
+                if *prepared || *mode == gwt_agent::SessionMode::Normal {
+                    let genesis = materialized_genesis_launch_from_session(
+                        &sessions_dir,
+                        session_id,
+                        worktree,
+                        expected.project_state_root.as_deref().unwrap_or(worktree),
+                        branch,
+                        *issue,
+                        agent,
+                    )?;
+                    terminalize_materialized_genesis_launch(
+                        &sessions_dir,
+                        genesis.as_ref(),
+                        reason,
+                    )?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = cleanup {
+                tracing::warn!(%session_id, %error, "stale project launch retained exact recovery evidence");
             }
-            if *prepared || *mode == gwt_agent::SessionMode::Normal {
-                let genesis = materialized_genesis_launch_from_session(
-                    &self.sessions_dir,
-                    session_id,
-                    worktree,
-                    expected.project_state_root.as_deref().unwrap_or(worktree),
-                    branch,
-                    *issue,
-                    agent,
-                )?;
-                terminalize_materialized_genesis_launch(
-                    &self.sessions_dir,
-                    genesis.as_ref(),
-                    reason,
-                )?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = cleanup {
-            tracing::warn!(%session_id, %error, "stale project launch retained exact recovery evidence");
+        }) {
+            tracing::warn!(%error, "stale project launch cleanup unavailable; recovery evidence retained");
         }
     }
 
@@ -4452,6 +4518,7 @@ impl AppRuntime {
             project_root,
             geometry,
             sessions_dir: self.sessions_dir.clone(),
+            session_cache: self.launch_wizard_cache.clone(),
             issue_link_cache_dir: self.issue_link_cache_dir.clone(),
             materializer_id: self.issue_monitor_materializer_id.clone(),
             live_pm_session_ids: self
@@ -4598,7 +4665,8 @@ impl AppRuntime {
                                 .set_session_id(&address.raw_id, Some(active.session_id.clone()));
                         }
                     }
-                    self.launch_wizard_cache.record_session(session);
+                    self.launch_wizard_cache
+                        .record_prepared_session(&active.session_id, session);
                     self.active_agent_sessions.insert(window_id.clone(), active);
                 }
                 return self.launch_error_events_with_continue_work(window_id, error, feedback);
@@ -4623,11 +4691,8 @@ impl AppRuntime {
                 }
             }
         }
-        if let Some(session) = success.cached_session {
-            self.launch_wizard_cache.record_session(session);
-        } else {
-            self.launch_wizard_cache.forget_session(&active.session_id);
-        }
+        self.launch_wizard_cache
+            .record_prepared_session(&active.session_id, success.cached_session);
         if let Some(address) = self.window_lookup.get(&window_id).cloned() {
             if let Some(tab) = self.tab_mut(&address.tab_id) {
                 let _ = tab
@@ -9635,6 +9700,24 @@ mod fr001_capability_cache_tests {
 #[cfg(test)]
 mod lazy_session_ledger_tests {
     use super::LaunchWizardMemoryCache;
+
+    #[test]
+    fn launch_complete_worker_resolves_session_ledger_before_gui_apply() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
+        let (mut runtime, _recorded, tasks, window_id, result) =
+            crate::app_runtime::tests::queued_agent_completion_fixture(dir.path());
+        runtime.launch_wizard_cache =
+            LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, Vec::new());
+        assert!(runtime.launch_wizard_cache.sessions.get().is_none());
+        runtime.handle_launch_complete(window_id, result);
+        assert!(runtime.launch_wizard_cache.sessions.get().is_none());
+        crate::app_runtime::tests::drain_queued_blocking_tasks(&tasks);
+        assert!(
+            runtime.launch_wizard_cache.sessions.get().is_some(),
+            "prepared completion must not leave the GUI to join or scan the Session ledger"
+        );
+    }
 
     /// Issue #4377 (AC-1 / AC-3): the Session ledger is parsed off the
     /// constructor (and so off `AppRuntime::new`); the first wizard read
