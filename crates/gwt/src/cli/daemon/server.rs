@@ -13479,6 +13479,188 @@ exit 0
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // global fake-gh env must stay isolated for the full worker run
+    async fn issue_5140_scans_and_admits_another_issue_while_windowless_delivery_is_pending() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_budget = pin_prefs_hang_guard();
+        let _worker_prefs_budget =
+            ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "60000");
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create isolated gwt home");
+        // The scan's spawn_blocking thread must read the same seeded prefs.
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let issue_list = temp.path().join("issues.json");
+        fs::write(
+            &issue_list,
+            serde_json::to_vec(&[43, 44].map(|number| {
+                serde_json::json!({
+                    "number": number,
+                    "title": format!("Issue {number}"),
+                    "body": "Open issue",
+                    "labels": [{"name": "bug"}, {"name": "gwt-queued"}],
+                    "state": "OPEN",
+                    "url": format!("https://example.test/issues/{number}"),
+                    "updatedAt": "2026-10-07T00:00:00Z",
+                })
+            }))
+            .expect("serialize live candidates"),
+        )
+        .expect("write live candidates");
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_inventory");
+        let _issues = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_LIST_FILE", &issue_list);
+        let effect_started = temp.path().join("claim-before-permit-started");
+        let effect_release = temp.path().join("claim-before-permit-release");
+        let client_marker = temp.path().join("claim-http-client-started");
+        let _effect_started =
+            ScopedEnvVar::set("GWT_TEST_EFFECT_BEFORE_PERMIT_STARTED", &effect_started);
+        let _effect_release =
+            ScopedEnvVar::set("GWT_TEST_EFFECT_BEFORE_PERMIT_RELEASE", &effect_release);
+        let _client_marker =
+            ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_HTTP_CLIENT_MARKER", &client_marker);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let mut seeded = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            scheduled_issue_monitor_prefs(
+                crate::IssueMonitorPrefs {
+                    enabled: true,
+                    max_active_agents: 2,
+                    launch_profile: Some(sample_issue_monitor_profile()),
+                    ..crate::IssueMonitorPrefs::default()
+                },
+                &[43, 44],
+            ),
+        );
+        seeded.record_candidate(sample_issue_monitor_issue(43));
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(seeded.apply_confirmed_claim(43, "claim-43", "host/session", "effect-43", &now));
+        let delivery_id = seeded.pending_launch_delivery_id(43).expect("delivery 43");
+        assert!(seeded.claim_launch_delivery(
+            43,
+            &delivery_id,
+            "gui-test",
+            std::process::id(),
+            "tab-1::agent-never-created",
+            |_| true,
+        ));
+        let original_delivery = seeded.prefs().pending_launch_deliveries[0].clone();
+        crate::save_issue_monitor_prefs(&prefs_path, &seeded.prefs())
+            .expect("seed pending delivery");
+
+        let hub = BroadcastHub::new();
+        let _materializer = hub.acquire_issue_monitor_materializer();
+        let mut statuses = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let worker = spawn_issue_monitor_worker_with_config_and_timeout(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 1,
+                ..crate::IssueMonitorConfig::default()
+            },
+            HANG_GUARD,
+        );
+        let first_scan = recv_issue_monitor_status_matching(&mut statuses, HANG_GUARD, |status| {
+            status.last_scan_at.is_some() && status.last_error.is_none()
+        })
+        .await;
+        let first_scan_at = first_scan
+            .as_ref()
+            .and_then(|status| status.last_scan_at.as_ref());
+        let second_scan = recv_issue_monitor_status_matching(&mut statuses, HANG_GUARD, |status| {
+            first_scan_at.is_some()
+                && status
+                    .last_scan_at
+                    .as_ref()
+                    .is_some_and(|at| Some(at) != first_scan_at)
+                && status.last_error.is_none()
+        })
+        .await;
+        let admission_started = wait_for_path(&effect_started).await;
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path);
+
+        // Revoke the permit before releasing the executor: the test observes
+        // admission, and must never submit its proposed claim to GitHub.
+        let stopped = hub
+            .publish_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"enabled": false}),
+                    std::process::id().wrapping_add(1),
+                ),
+            })
+            .await;
+        shutdown.request();
+        fs::write(&effect_release, b"release").expect("release denied claim executor");
+        tokio::time::timeout(HANG_GUARD, worker)
+            .await
+            .expect("worker shutdown is bounded")
+            .expect("worker exits cleanly");
+        drop(_materializer);
+        drop(_client_marker);
+        drop(_effect_release);
+        drop(_effect_started);
+        drop(_issues);
+        drop(_mode);
+        drop(_gh);
+        drop(_path);
+        drop(_home);
+        drop(_worker_prefs_budget);
+        drop(_prefs_budget);
+        drop(_env_lock);
+
+        assert!(first_scan.is_some(), "the first scan must commit");
+        assert!(
+            second_scan.is_some(),
+            "a second scan must commit while delivery 43 stays pending"
+        );
+        assert!(admission_started, "issue 44 must reach the claim executor");
+        assert!(stopped.is_ok(), "OFF must revoke the claim permit");
+        assert!(
+            !client_marker.exists(),
+            "the fixture must not reach the HTTP claim adapter"
+        );
+        let persisted = persisted.expect("read committed scan prefs");
+        assert_eq!(persisted.pending_launch_deliveries, vec![original_delivery]);
+        assert!(
+            persisted.launched_issues.is_empty(),
+            "no window was created or acknowledged"
+        );
+        assert!(
+            persisted.pending_effects.iter().any(|effect| {
+                effect.state == crate::IssueMonitorEffectState::Attempting
+                    && matches!(
+                        effect.payload,
+                        crate::IssueMonitorEffectPayload::AcquireClaim {
+                            issue_number: 44,
+                            ..
+                        }
+                    )
+            }),
+            "the independent issue must have a durable admission proposal"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global fake-gh env must stay isolated for the full worker run
     async fn issue_monitor_worker_applies_control_during_scan_without_rewinding_mutation() {
         let _prefs_budget = pin_prefs_hang_guard();
         // SPEC #3200 T-127/T-128 (FR-040/FR-041): a blocking external scan must
