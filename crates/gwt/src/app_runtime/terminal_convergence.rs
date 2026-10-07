@@ -730,6 +730,15 @@ impl AppRuntime {
         self.active_agent_sessions
             .values()
             .filter_map(|active| {
+                // Until authenticated Ready commits this launch, the current
+                // generation still describes its predecessor, not this pane.
+                if self
+                    .pending_fresh_execution_launches
+                    .get(&active.window_id)
+                    .is_some_and(|pending| pending.binding.session_id == active.session_id)
+                {
+                    return None;
+                }
                 let address = self.window_lookup.get(&active.window_id)?;
                 let tab = self.tab(&address.tab_id)?;
                 let window = tab.workspace.window(&address.raw_id)?;
