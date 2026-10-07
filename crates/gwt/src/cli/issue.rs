@@ -1301,7 +1301,7 @@ fn run_monitor_queue_push<E: CliEnv>(
             let claim = gwt_github::issue_auto_claim::ClaimComment {
                 comment_id: None,
                 claim_id: format!("gwt-queue:{}:{}", number, uuid::Uuid::new_v4()),
-                owner: crate::process::current_hostname(),
+                owner: crate::process::current_claim_owner(),
                 issue_number: *number,
                 status: gwt_github::issue_auto_claim::ClaimStatus::Queued,
                 heartbeat_at: now.clone(),
