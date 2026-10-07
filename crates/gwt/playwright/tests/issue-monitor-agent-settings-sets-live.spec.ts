@@ -168,7 +168,9 @@ test.describe("Issue Monitor Agent Settings sets", () => {
         const update = setup.getByRole("button", { name: `Update ${displayName}`, exact: true });
         await expect(update).toBeEnabled();
         const before = await liveWizardSnapshot(page);
+        await expect(modal.locator("#wizard-error")).not.toBeVisible();
         expect(before).toMatchObject({
+          error: null,
           selected_launch_target: "agent",
           selected_agent_id: agentId,
           selected_model: model,
@@ -192,6 +194,7 @@ test.describe("Issue Monitor Agent Settings sets", () => {
           await expect(update).toBeEnabled();
           await expect(status).toContainText(nextVersion);
           await expect(modal).toHaveClass(/open/);
+          await expect(modal.locator("#wizard-error")).not.toBeVisible();
           await expect.poll(() => liveWizardSnapshot(page)).toMatchObject({ agent_setup: { pending: false } });
           const snapshots = await page.evaluate(after => ((window as any).__gwtPlaywrightMessages ?? [])
             .filter((entry: any) => entry.sequence > after && entry.payload.kind === "launch_wizard_state")
@@ -200,6 +203,7 @@ test.describe("Issue Monitor Agent Settings sets", () => {
           for (const snapshot of snapshots) {
             expect(snapshot, "Update keeps the same open settings form").not.toBeNull();
             expect(snapshot).toMatchObject({
+              error: null,
               selected_launch_target: before.selected_launch_target,
               selected_agent_id: before.selected_agent_id,
               selected_model: before.selected_model,
