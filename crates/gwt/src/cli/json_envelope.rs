@@ -840,6 +840,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
+        "pr.head_check" => {
+            reject_unknown_params(params, &["base", "head"], "pr.head_check")?;
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: required_string(params, "base")?,
+                head: optional_string(params, "head")?,
+            })
+        }
         "pr.list" => CliCommand::Pr(PrCommand::List {
             stale_after_hours: optional_u64(params, "stale_after_hours")?
                 .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
@@ -1053,23 +1060,42 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             let quarantines = verification_quarantine_requests(params)?;
-            if commands.is_empty() && !derive {
-                return Err(CliParseError::MissingFlag("commands"));
-            }
-            if generated_outputs.is_empty() && quarantines.is_empty() {
-                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+            let mode = optional_string(params, "mode")?.unwrap_or_else(|| "full".into());
+            let acceptance_commands = optional_string_vec(params, "acceptance_commands")?;
+            if mode == "pre-pr" {
+                if !derive {
+                    return Err(CliParseError::InvalidJson(
+                        "verify.plan mode pre-pr requires derive:true".into(),
+                    ));
+                }
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::PrePrPlan {
                     commands,
-                    derive,
+                    acceptance_commands,
+                    generated_outputs,
+                    quarantines,
                 })
             } else {
-                CliCommand::Verify(
-                    crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                if mode != "full" || !acceptance_commands.is_empty() {
+                    return Err(CliParseError::InvalidJson("verify.plan mode must be full or pre-pr; acceptance_commands requires mode pre-pr".into()));
+                }
+                if commands.is_empty() && !derive {
+                    return Err(CliParseError::MissingFlag("commands"));
+                }
+                if generated_outputs.is_empty() && quarantines.is_empty() {
+                    CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
                         commands,
                         derive,
-                        generated_outputs,
-                        quarantines,
-                    },
-                )
+                    })
+                } else {
+                    CliCommand::Verify(
+                        crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                            commands,
+                            derive,
+                            generated_outputs,
+                            quarantines,
+                        },
+                    )
+                }
             }
         }
         // SPEC #3576: host-wide verification lease.
@@ -2992,6 +3018,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        // Result persistence is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let _session =
             ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4217-verification");
         let repo = temp.path().join("repo");
@@ -3028,6 +3062,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        // Confirmation authority is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
         let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
@@ -5467,6 +5509,40 @@ mod tests {
     }
 
     #[test]
+    fn verification_pre_pr_plan_preserves_acceptance_and_non_ci_commands() {
+        let command = ok(
+            "verify.plan",
+            json!({
+                "mode": "pre-pr", "derive": true,
+                "acceptance_commands": ["cargo test -p gwt --test ci_pre_pr_contract_test"],
+                "commands": ["bash scripts/verify-local-only.sh"]
+            }),
+        );
+        let typed = format!("{command:?}");
+        assert!(
+            typed.contains("PrePrPlan"),
+            "pre-pr must not silently use full: {typed}"
+        );
+        assert!(
+            typed.contains("ci_pre_pr_contract_test"),
+            "AC tests were discarded: {typed}"
+        );
+        assert!(
+            typed.contains("verify-local-only.sh"),
+            "non-CI check was discarded: {typed}"
+        );
+    }
+
+    #[test]
+    fn verification_plan_rejects_unknown_mode() {
+        let error = err(
+            "verify.plan",
+            json!({"mode": "pretend-fast", "derive": true}),
+        );
+        assert!(error.to_string().contains("mode"));
+    }
+
+    #[test]
     fn verification_plan_generated_output_allowlist_is_typed() {
         assert!(matches!(
             ok(
@@ -5618,6 +5694,43 @@ mod tests {
             err("release.status", json!({"ensure": true})),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn pr_head_check_parses_as_a_read_only_diagnostic() {
+        assert_eq!(
+            ok("pr.head_check", json!({"base": "develop"})),
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: "develop".to_string(),
+                head: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "pr.head_check",
+                json!({"base": "develop", "head": "work/issue-5059"})
+            ),
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: "develop".to_string(),
+                head: Some("work/issue-5059".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("pr.head_check", json!({})),
+            CliParseError::MissingFlag("base")
+        ));
+        assert!(matches!(
+            err(
+                "pr.head_check",
+                json!({"base": "develop", "verified_head": "caller-sha"})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pr.head_check"
+            )
+        );
     }
 
     #[test]

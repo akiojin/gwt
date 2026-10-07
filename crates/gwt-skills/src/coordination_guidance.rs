@@ -352,6 +352,16 @@ reserving a lease. Use `verify.lease.status` to inspect contention;
 when admission times out. Inspect the reported holder before retrying;
 there is no manual acquire loop or fixed retry schedule.
 
+Heavy Cargo commands use a bounded verification slot pool. Independent
+worktrees and effective target directories may run concurrently; the same
+worktree or target remains serialized. Capacity follows host CPU/memory or
+`[verification] slots` in the global config. Disk reservations and isolated
+child temporary directories protect concurrent runs. Unknown command wrappers
+and older exclusive holders serialize against the entire pool.
+`verify.lease.status` reports capacity, running/available slots, all holders
+and their ETAs, and the shared FIFO queue. Inspect every holder before retrying;
+one representative holder is not the complete contention snapshot.
+
 Retry with the identical full requested matrix, never a caller-built subset.
 Automatic resume requires valid admission-deferred evidence and exact matches
 for owner, session, execution authority digest, verification plan content hash,
@@ -701,6 +711,14 @@ canonical な検証記録は `verify.plan` → `verify.run` で生成します�
 `deferred` を返します。報告された holder を確認してから再試行してください。
 手動 acquire のループや固定の再試行間隔はありません。
 
+Heavy Cargo は容量制限付き verification slot pool を使います。
+独立 worktree と実効 target directory は並行実行でき、同一 worktree/target は
+直列化します。容量はCPU/メモリから導出し、global config の
+`[verification] slots` で上書きできます。disk予約とchild一時directory分離を行い、
+未知wrapperと旧exclusive holderはpool全体と直列化します。
+`verify.lease.status` のcapacity、running/available、全holderのETA、共通FIFO queueを
+確認してください。代表holder一件だけでは競合全体を判断できません。
+
 ### gwtd bootstrap order
 
 gwtd をソースから build する checkout（gwt リポジトリ自身）では、初回の
@@ -936,6 +954,14 @@ mod tests {
             assert!(body.contains("Only canonical `verify.run` acquires the host-wide lease"));
             assert!(body.contains("cargo build -p gwt --bin gwtd"));
             assert!(body.contains("do not require a verification lease"));
+            for phrase in [
+                "bounded verification slot pool",
+                "running/available slots",
+                "effective target directories",
+                "shared FIFO queue",
+            ] {
+                assert!(body.contains(phrase), "{relative}: missing `{phrase}`");
+            }
             for phrase in resume_contract {
                 assert!(body.contains(phrase), "{relative}: missing `{phrase}`");
             }

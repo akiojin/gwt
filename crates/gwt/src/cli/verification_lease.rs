@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
     coordinator_root, verification_coordinator_root, HeavyHolderKind, HeavyLeaseStatus,
-    HeavyQueueEntry, IndexCoordinator, TargetKey,
+    HeavyQueueEntry, HeavySlotStatus, IndexCoordinator, TargetKey,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -56,7 +56,7 @@ const CARGO_NAMED_TARGET_SELECTORS: &[&str] = &["--test", "--bin", "--example"];
 pub(crate) enum CommandWeight {
     /// Narrow enough that several worktrees can run it side by side.
     Light,
-    /// Builds or runs enough of the tree to need the host to itself.
+    /// Requires a host verification slot; unbounded resources stay exclusive.
     Heavy,
 }
 
@@ -378,22 +378,7 @@ fn release(
     reclaimer: &mut dyn OrphanReclaimer,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let mut snapshot = status()?;
-    if !snapshot.held || snapshot.lease_id.as_deref() != Some(lease_id) {
-        // A current verification holder can hide a pre-upgrade holder on
-        // the model lane. Check that holder's ownership before writing its
-        // release channel too; a saved control outcome is not authority.
-        snapshot = IndexCoordinator::open_default()
-            .and_then(|coordinator| coordinator.heavy_lease_status())
-            .ok()
-            .filter(|status| {
-                status.held
-                    && status.lease_id.as_deref() == Some(lease_id)
-                    && status.holder_kind == Some(HeavyHolderKind::Verification)
-            })
-            .ok_or_else(|| missing_lease(lease_id))?
-            .into();
-    }
+    let snapshot = status_for_lease(lease_id)?.ok_or_else(|| missing_lease(lease_id))?;
     let relation = holder_project_relation(snapshot.target.as_deref(), current_project);
     if relation != HolderProjectRelation::SameProject {
         return Err(unexpected(format!(
@@ -554,12 +539,8 @@ fn reclaim_holder(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let coordinator = open_coordinator()?;
-    let held = |coordinator: &IndexCoordinator| {
-        coordinator
-            .heavy_lease_status()
-            .ok()
-            .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id))
-    };
+    let held =
+        |coordinator: &IndexCoordinator| holder_for_lease(coordinator, lease_id).ok().flatten();
     let Some(status) = held(&coordinator) else {
         return Err(missing_lease(lease_id));
     };
@@ -657,8 +638,13 @@ pub(crate) fn closing_pane_lease_note(worktree: &Path) -> Option<String> {
     let project = project_scope_hash(worktree);
     let worktree_hash = compute_worktree_hash(worktree).ok()?;
     let target = TargetKey::verification(project.as_str(), worktree_hash.as_str()).file_stem();
-    let status = open_coordinator().ok()?.heavy_lease_status().ok()?;
-    lease_note_for_target(&target, &status)
+    open_coordinator()
+        .ok()?
+        .heavy_pool_status()
+        .ok()?
+        .slots
+        .iter()
+        .find_map(|slot| lease_note_for_target(&target, &slot.status))
 }
 
 fn lease_note_for_target(target: &str, status: &HeavyLeaseStatus) -> Option<String> {
@@ -683,8 +669,7 @@ fn lease_note_for_target(target: &str, status: &HeavyLeaseStatus) -> Option<Stri
 fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
     let deadline = Instant::now() + CONTROL_ACK_TIMEOUT;
     loop {
-        let status = status()?;
-        if !status.held || status.lease_id.as_deref() != Some(lease_id) {
+        if status_for_lease(lease_id)?.is_none() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -697,8 +682,7 @@ fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
     }
 }
 
-/// Locate the control directory of a live lease. At most one lease is held
-/// host-wide, so this scan sees one candidate in practice. Only a *granted*
+/// Locate the control directory of a live legacy lease. Only a *granted*
 /// outcome may answer: a refusal snapshot names the lease it lost to, so
 /// matching on the lease id alone would route release requests to
 /// a directory with nobody listening. Pre-upgrade detached holders wrote
@@ -776,6 +760,15 @@ fn holder_project_relation(target: Option<&str>, current_project: &str) -> Holde
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LeaseStatusSnapshot {
     held: bool,
+    /// Pool diagnostics are additive output, not part of legacy control outcomes.
+    #[serde(skip)]
+    capacity: Option<usize>,
+    #[serde(skip)]
+    running: usize,
+    #[serde(skip)]
+    available: usize,
+    #[serde(skip)]
+    slots: Vec<HeavySlotStatus>,
     /// Derived from the live lease's control channel, never trusted from a
     /// saved pre-upgrade outcome.
     #[serde(skip)]
@@ -882,6 +875,7 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             holder_alive: status.holder_alive,
             holder_job_status: status.holder_job_status.map(|job| job.as_str().to_string()),
             holder_stale: status.holder_stale,
+            ..Self::default()
         }
     }
 }
@@ -900,21 +894,36 @@ struct LeaseOutcome {
 /// reported in its place (Issue #4285 transition); index jobs and searches
 /// on the model lane are never verification holders.
 fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
-    let status = open_coordinator()?
-        .heavy_lease_status()
+    let pool = open_coordinator()?
+        .heavy_pool_status()
         .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
-    let status = if status.held || status.pending > 0 {
-        status
-    } else {
+    let status = pool
+        .slots
+        .iter()
+        .find(|slot| slot.status.held)
+        .or_else(|| pool.slots.iter().find(|slot| slot.status.holder_stale))
+        .map(|slot| slot.status.clone())
+        .unwrap_or_default();
+    let legacy = if pool.used == 0 && pool.queue.is_empty() {
         IndexCoordinator::open_default()
             .and_then(|coordinator| coordinator.heavy_lease_status())
             .ok()
             .filter(|legacy| {
                 legacy.held && legacy.holder_kind == Some(HeavyHolderKind::Verification)
             })
-            .unwrap_or(status)
+    } else {
+        None
     };
-    let mut snapshot = LeaseStatusSnapshot::from(status);
+    let mut snapshot = LeaseStatusSnapshot::from(legacy.clone().unwrap_or(status));
+    snapshot.capacity = Some(pool.capacity);
+    snapshot.running = pool.used.max(usize::from(legacy.is_some()));
+    snapshot.available = if legacy.is_some() { 0 } else { pool.available };
+    snapshot.slots = pool.slots;
+    if let Some(status) = legacy {
+        snapshot.slots.push(HeavySlotStatus { slot: None, status });
+    }
+    snapshot.pending = pool.queue.len();
+    snapshot.queue = pool.queue;
     snapshot.legacy_release_available = snapshot.held
         && snapshot
             .lease_id
@@ -924,9 +933,335 @@ fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
     Ok(snapshot)
 }
 
+/// A representative holder is unsuitable for control and renewal: another
+/// slot can remain active after that representative changes or finishes.
+pub(super) fn holder_for_lease(
+    coordinator: &IndexCoordinator,
+    lease_id: &str,
+) -> Result<Option<HeavyLeaseStatus>, gwt_core::index_coordinator::CoordinatorError> {
+    let pool = coordinator.heavy_pool_status()?;
+    let mut status = pool
+        .slots
+        .into_iter()
+        .map(|slot| slot.status)
+        .find(|status| status.held && status.lease_id.as_deref() == Some(lease_id));
+    if let Some(status) = &mut status {
+        status.pending = pool.queue.len();
+        status.queue = pool.queue;
+    }
+    Ok(status)
+}
+
+fn status_for_lease(lease_id: &str) -> Result<Option<LeaseStatusSnapshot>, SpecOpsError> {
+    let status = holder_for_lease(&open_coordinator()?, lease_id)
+        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
+    let status = status.or_else(|| {
+        IndexCoordinator::open_default()
+            .and_then(|coordinator| holder_for_lease(&coordinator, lease_id))
+            .ok()
+            .flatten()
+            .filter(|status| status.holder_kind == Some(HeavyHolderKind::Verification))
+    });
+    Ok(status.map(LeaseStatusSnapshot::from))
+}
+
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
-    IndexCoordinator::open_default_verification()
+    let settings = gwt_config::Settings::load()
+        .map_err(|err| unexpected(format!("verification configuration invalid: {err}")))?;
+    let capacity = settings.verification.slots.map_or_else(
+        || {
+            let mut host = sysinfo::System::new();
+            host.refresh_memory();
+            automatic_slot_capacity(
+                std::thread::available_parallelism().map_or(1, usize::from),
+                host.total_memory(),
+            )
+        },
+        |slots| usize::from(slots.get()),
+    );
+    IndexCoordinator::open_verification(verification_coordinator_root(), capacity)
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
+}
+
+fn automatic_slot_capacity(logical_cores: usize, memory_bytes: u64) -> usize {
+    (logical_cores / 8)
+        .min((memory_bytes / (16 * 1024 * 1024 * 1024)) as usize)
+        .clamp(1, 4) // Largest all-PASS canonical capacity measured for #5082.
+}
+
+pub(super) fn cargo_subcommand(args: &[String]) -> Option<&str> {
+    let mut globals = args.iter().skip(1).take_while(|arg| arg.as_str() != "--");
+    loop {
+        let argument = globals.next()?;
+        if argument.starts_with('+')
+            || matches!(
+                argument.as_str(),
+                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
+            )
+        {
+            continue;
+        }
+        if matches!(argument.as_str(), "--config" | "-Z") {
+            globals.next();
+            continue;
+        }
+        if argument.starts_with("--config=") {
+            continue;
+        }
+        return Some(argument.as_str());
+    }
+}
+
+pub(super) fn effective_cargo_target(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+) -> Result<Option<PathBuf>, String> {
+    let (assignments, args) = crate::cli::verification_record::take_env_assignments(
+        crate::cli::verification_record::split_command_line(command)?,
+    )?;
+    if Path::new(&args[0]).file_stem().and_then(|s| s.to_str()) != Some("cargo") {
+        return Ok(None);
+    }
+    let cargo_args: Vec<_> = args[1..]
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .collect();
+    // Cargo plugins can choose their own build roots. Keep those commands
+    // exclusive unless their artifact directory can be established.
+    let Some(subcommand) = cargo_subcommand(&args) else {
+        return Ok(None);
+    };
+    if !matches!(
+        subcommand,
+        "build"
+            | "check"
+            | "clippy"
+            | "test"
+            | "t"
+            | "nextest"
+            | "rustc"
+            | "doc"
+            | "bench"
+            | "clean"
+    ) {
+        return Ok(None);
+    }
+    let mut metadata = gwt_core::process::hidden_command(&args[0]);
+    if let Some(toolchain) = args.get(1).filter(|arg| arg.starts_with('+')) {
+        metadata.arg(toolchain);
+    }
+    metadata
+        .args([
+            "metadata",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
+        .current_dir(worktree);
+    gwt_core::process::scrub_git_env(&mut metadata);
+    for (key, value) in assignments {
+        metadata.env(key, value);
+    }
+    if isolated_baseline {
+        metadata.env_remove("CARGO_TARGET_DIR");
+    }
+    let mut index = 0;
+    while index < cargo_args.len() {
+        let argument = cargo_args[index];
+        let (flag, inline) = argument
+            .split_once('=')
+            .map_or((argument.as_str(), None), |(flag, value)| {
+                (flag, Some(value))
+            });
+        if matches!(flag, "--target-dir" | "--manifest-path" | "--config") {
+            let value = match inline {
+                Some(value) => value,
+                None => {
+                    index += 1;
+                    cargo_args
+                        .get(index)
+                        .ok_or_else(|| format!("{flag} requires a value"))?
+                        .as_str()
+                }
+            };
+            if flag == "--target-dir" {
+                metadata.env("CARGO_TARGET_DIR", value);
+            } else {
+                metadata.args([flag, value]);
+            }
+        }
+        index += 1;
+    }
+    let output = metadata
+        .output()
+        .map_err(|error| format!("Cargo target resolution failed: {error}"))?;
+    if !output.status.success() {
+        // A wrapper or unresolved metadata is safe on the legacy exclusive
+        // route; it must never silently receive a parallel slot.
+        return Ok(None);
+    }
+    Ok(serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|metadata| metadata["target_directory"].as_str().map(PathBuf::from)))
+}
+
+pub(super) fn command_temporary_base(worktree: &Path, command: &str) -> Result<PathBuf, String> {
+    let (assignments, _) = crate::cli::verification_record::take_env_assignments(
+        crate::cli::verification_record::split_command_line(command)?,
+    )?;
+    let keys = if cfg!(windows) {
+        ["TEMP", "TMP", "TMPDIR"]
+    } else {
+        ["TMPDIR", "TMP", "TEMP"]
+    };
+    let base = keys
+        .iter()
+        .find_map(|key| {
+            assignments
+                .iter()
+                .rev()
+                .find(|(name, value)| name == key && !value.is_empty())
+                .map(|(_, value)| PathBuf::from(value))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    Ok(if base.is_absolute() {
+        base
+    } else {
+        worktree.join(base)
+    })
+}
+
+// #5082: sampled target growth 4,650,508,061 + temporary growth 269,853,053
+// bytes across the changed-surface matrix, with 20% headroom (rounded up).
+const DEFAULT_VERIFICATION_DISK_BUDGET_BYTES: u64 = 5_904_433_337;
+
+pub(super) fn command_disk_budgets(
+    paths: &[PathBuf],
+) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
+    let settings = gwt_config::Settings::load().map_err(|error| error.to_string())?;
+    let bytes = settings
+        .verification
+        .disk_budget_bytes
+        .unwrap_or(DEFAULT_VERIFICATION_DISK_BUDGET_BYTES);
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let mut budgets: Vec<gwt_core::index_coordinator::VerificationDiskBudget> = Vec::new();
+    for path in paths {
+        let mut probe = path.clone();
+        while !probe.exists() {
+            if !probe.pop() {
+                return Err(format!("cannot locate disk for {}", path.display()));
+            }
+        }
+        let probe = dunce::canonicalize(probe).map_err(|error| error.to_string())?;
+        let mount = disks
+            .iter()
+            .filter(|disk| probe.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().components().count())
+            .ok_or_else(|| {
+                format!(
+                    "cannot identify verification volume for {}",
+                    probe.display()
+                )
+            })?;
+        #[cfg(windows)]
+        let volume = mount.mount_point().to_string_lossy().to_lowercase();
+        #[cfg(unix)]
+        let volume = {
+            use std::os::unix::fs::MetadataExt;
+            format!(
+                "device:{}",
+                fs::metadata(&probe)
+                    .map_err(|error| error.to_string())?
+                    .dev()
+            )
+        };
+        #[cfg(not(any(windows, unix)))]
+        let volume = mount.mount_point().to_string_lossy().into_owned();
+        // Unix bind mounts may have different mount paths on the same device.
+        let _ = mount;
+        if budgets.iter().any(|budget| budget.volume == volume) {
+            continue;
+        }
+        let total = fs2::total_space(&probe).map_err(|error| error.to_string())?;
+        let floor = settings
+            .build_artifact_gc
+            .below_bytes
+            .max(total.saturating_mul(settings.build_artifact_gc.below_percent) / 100);
+        budgets.push(gwt_core::index_coordinator::VerificationDiskBudget {
+            volume,
+            path: probe,
+            bytes,
+            floor_bytes: floor,
+        });
+    }
+    Ok(budgets)
+}
+
+/// The shared target-directory boundary for canonical verification and GC.
+/// The lock lives outside the target, so deletion never removes its identity.
+pub(crate) fn try_lock_build_artifacts(target: &Path) -> std::io::Result<Option<fs::File>> {
+    let file = build_artifact_lock(target)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(Some(file)),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<fs::File> {
+    let file = build_artifact_lock(target)?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+fn build_artifact_lock(target: &Path) -> std::io::Result<fs::File> {
+    use sha2::{Digest, Sha256};
+    let mut existing = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(target)
+    };
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        missing.push(
+            existing
+                .file_name()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid Cargo target path",
+                    )
+                })?
+                .to_os_string(),
+        );
+        existing.pop();
+    }
+    let mut normalized = dunce::canonicalize(existing)?;
+    for component in missing.into_iter().rev() {
+        normalized.push(component);
+    }
+    let identity = normalized.to_string_lossy();
+    let identity = if cfg!(windows) {
+        identity.to_lowercase()
+    } else {
+        identity.into_owned()
+    };
+    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let locks = verification_coordinator_root().join("build-artifacts");
+    fs::create_dir_all(&locks)?;
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(locks.join(format!("{digest}.lock")))
 }
 
 pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
@@ -952,6 +1287,30 @@ fn render(
 }
 
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_project: &str) {
+    if let Some(capacity) = status.capacity {
+        out.push_str(&format!(
+            "capacity: {capacity}\nrunning: {}\navailable: {}\n",
+            status.running, status.available
+        ));
+        for slot in &status.slots {
+            let label = slot
+                .slot
+                .map_or_else(|| "legacy".to_string(), |slot| slot.to_string());
+            let holder = &slot.status;
+            out.push_str(&format!(
+                "slots[{label}]: held={} lease_id={} target={} owner_pid={} remaining_ms={} estimated_remaining_ms={} estimated_remaining_ms_uncertain=true holder_alive={} holder_stale={} holder_project_relation={}\n",
+                holder.held,
+                holder.lease_id.as_deref().unwrap_or("none"),
+                holder.target.as_deref().unwrap_or("none"),
+                holder.owner.as_ref().map_or_else(|| "unknown".to_string(), |owner| owner.pid.to_string()),
+                holder.remaining_ms.map_or_else(|| "unknown".to_string(), |remaining| remaining.to_string()),
+                holder.estimated_remaining_ms.map_or_else(|| "unknown".to_string(), |remaining| remaining.to_string()),
+                holder.holder_alive.map_or_else(|| "unknown".to_string(), |alive| alive.to_string()),
+                holder.holder_stale,
+                holder_project_relation(holder.target.as_deref(), current_project).as_str(),
+            ));
+        }
+    }
     if let Some(lease_id) = &status.lease_id {
         out.push_str(&format!("lease_id: {lease_id}\n"));
     }
@@ -1082,9 +1441,7 @@ fn canonical_refusal(lease_id: &str, holder: Option<&str>) -> SpecOpsError {
 }
 
 fn missing_lease(lease_id: &str) -> SpecOpsError {
-    let held = status()
-        .ok()
-        .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id));
+    let held = status_for_lease(lease_id).ok().flatten();
     match held {
         Some(_) => canonical_refusal(lease_id, None),
         None => unexpected(format!(
@@ -1100,6 +1457,134 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_lists_both_slot_holders_and_remaining_capacity() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let coordinator = gwt_core::index_coordinator::IndexCoordinator::open_verification(
+            gwt_core::index_coordinator::verification_coordinator_root(),
+            2,
+        )
+        .unwrap();
+        let mut holders = Vec::new();
+        for worktree in ["first", "second"] {
+            let key = gwt_core::index_coordinator::TargetKey::verification("fixture", worktree);
+            let gwt_core::index_coordinator::JobAdmission::Owner(guard) = coordinator
+                .request_job(
+                    &key,
+                    gwt_core::index_coordinator::JobPriority::ManualRebuild,
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap()
+            else {
+                panic!("unique worktree")
+            };
+            let lease = guard
+                .acquire_heavy_with_ttl(
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(60),
+                )
+                .unwrap();
+            holders.push((guard, lease));
+        }
+        let mut out = String::new();
+        let snapshot = super::status().unwrap();
+        super::push_status_fields(&mut out, &snapshot, "fixture");
+        assert!(out.contains("running: 2\n"), "{out}");
+        assert!(
+            out.contains(&format!("capacity: {}\n", snapshot.capacity.unwrap())),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "available: {}\n",
+                snapshot.capacity.unwrap().saturating_sub(2)
+            )),
+            "{out}"
+        );
+        assert!(out.contains("slots[0]:"), "{out}");
+        assert!(out.contains("slots[1]:"), "{out}");
+        struct NoWork;
+        impl super::OrphanReclaimer for NoWork {
+            fn observe(
+                &mut self,
+                _: u32,
+                _: &gwt_core::index_coordinator::HeavyLeaseStatus,
+                _: std::time::Duration,
+            ) -> Option<super::holder_activity::HolderActivity> {
+                None
+            }
+            fn terminate(&mut self, _: u32, _: bool) -> Result<(), String> {
+                panic!("a live slot holder must not be terminated")
+            }
+        }
+        for (_, lease) in &holders {
+            assert!(out.contains(lease.id()), "{out}");
+            assert_eq!(
+                super::holder_for_lease(&coordinator, lease.id())
+                    .unwrap()
+                    .unwrap()
+                    .lease_id
+                    .as_deref(),
+                Some(lease.id())
+            );
+            let error = super::release(
+                "fixture",
+                lease.id(),
+                Some("inspect live slot"),
+                &mut NoWork,
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("Canonical leases are owned by `verify.run`"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_capacity_is_bounded_by_cpu_and_memory() {
+        let gib = 1024 * 1024 * 1024;
+        assert_eq!(super::automatic_slot_capacity(64, 256 * gib), 4);
+        assert_eq!(super::automatic_slot_capacity(32, 128 * gib), 4);
+        assert_eq!(super::automatic_slot_capacity(32, 32 * gib), 2);
+        assert_eq!(super::automatic_slot_capacity(2, 8 * gib), 1);
+    }
+
+    #[test]
+    fn cargo_target_resolution_respects_configuration_and_command_overrides() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".cargo")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='target-fixture'\nversion='0.0.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            dir.path().join(".cargo/config.toml"),
+            "[build]\ntarget-dir='configured-target'\n",
+        )
+        .unwrap();
+        let _target = gwt_core::test_support::ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        assert_eq!(
+            super::effective_cargo_target(&root, "cargo test --workspace", false).unwrap(),
+            Some(root.join("configured-target"))
+        );
+        assert_eq!(super::effective_cargo_target(&root, "CARGO_TARGET_DIR=assigned-target cargo test --workspace --target-dir selected-target", false).unwrap(), Some(root.join("selected-target")));
+        assert_eq!(
+            super::effective_cargo_target(dir.path(), "python runner.py", false).unwrap(),
+            None
+        );
+    }
+
     fn command_strings(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
     }
@@ -1355,6 +1840,7 @@ mod tests {
                 holder_alive: Some(true),
                 holder_job_status: Some("running".to_string()),
                 holder_stale: false,
+                ..LeaseStatusSnapshot::default()
             },
             "repo",
         );
