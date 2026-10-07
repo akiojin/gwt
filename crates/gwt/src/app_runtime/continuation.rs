@@ -743,7 +743,7 @@ fn continue_work_outcome(
     )
 }
 
-fn reject_continue_work_workspace_commit(
+pub(super) fn reject_continue_work_workspace_commit(
     project_root: &Path,
     work_event_root: &Path,
     operation_id: &str,
@@ -1603,7 +1603,7 @@ pub(super) fn pending_fresh_execution_activation_status(
         .map(|status| status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated)
 }
 
-fn pending_fresh_execution_attempt_status(
+pub(super) fn pending_fresh_execution_attempt_status(
     pending: &PendingFreshExecutionLaunch,
 ) -> Option<gwt::cli::execution_state::ContinuationAttemptStatus> {
     gwt::cli::execution_state::continuation_attempt_for_operation(
