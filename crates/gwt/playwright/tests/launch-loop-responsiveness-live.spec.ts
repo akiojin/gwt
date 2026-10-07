@@ -25,11 +25,15 @@ test.describe("launch-loop responsiveness (live backend)", () => {
   test("pane observations and PM requests survive repeated launches with 60 windows", async ({ page }, info) => {
     expect(PROJECT, "isolated fixture repository").not.toBe("");
     expect(PROBES, "fixture agent evidence directory").not.toBe("");
-    // Distinct fixture origins keep the first theme's Work history out of the
-    // second theme's trace without changing the measured launch workload.
+    // Separate fixture processes keep Work and Console history out of the
+    // next theme's trace without changing the measured launch workload.
     const project = info.project.name.includes("light")
       ? process.env.GWT_PLAYWRIGHT_LAUNCH_LIGHT_PROJECT || PROJECT : PROJECT;
-    const release = await acquireLiveGwtBackendLock(BASE, info);
+    const base = info.project.name.includes("light")
+      ? process.env.GWT_PLAYWRIGHT_LAUNCH_LIGHT_BASE_URL || BASE : BASE;
+    const probes = info.project.name.includes("light")
+      ? process.env.GWT_PLAYWRIGHT_LAUNCH_LIGHT_PROBES || PROBES : PROBES;
+    const release = await acquireLiveGwtBackendLock(base, info);
     const errors: string[] = [];
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     page.on("pageerror", error => errors.push(String(error)));
@@ -37,9 +41,9 @@ test.describe("launch-loop responsiveness (live backend)", () => {
     const launched: string[] = [];
     const startedAt = new Date().toISOString();
     try {
-      await rm(join(PROBES, "leader.json"), { force: true });
-      await rm(join(PROBES, "pane-samples.json"), { force: true });
-      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await rm(join(probes, "leader.json"), { force: true });
+      await rm(join(probes, "pane-samples.json"), { force: true });
+      await gotoLiveGwt(page, base, { enableTestBridge: true });
       await openLiveGwtProject(page, project);
       const migration = page.locator("#migration-modal.open");
       if (project !== PROJECT) await expect(migration).toBeVisible({ timeout: 60_000 });
@@ -87,7 +91,7 @@ test.describe("launch-loop responsiveness (live backend)", () => {
         await page.waitForTimeout(3_500);
       }
       await expect(async () => {
-        const record = JSON.parse(await readFile(join(PROBES, "pane-samples.json"), "utf8"));
+        const record = JSON.parse(await readFile(join(probes, "pane-samples.json"), "utf8"));
         expect(record.samples).toHaveLength(20);
         expect(record.failures).toEqual([]);
       }).toPass({ timeout: 90_000 });
@@ -98,17 +102,17 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       expect(errors, "console and page errors").toEqual([]);
       await info.attach("launch-loop-measurements", {
         body: Buffer.from(JSON.stringify({ windows: (await ids(page)).length, pmRoundtripMs: samples,
-          pane: JSON.parse(await readFile(join(PROBES, "pane-samples.json"), "utf8")) })),
+          pane: JSON.parse(await readFile(join(probes, "pane-samples.json"), "utf8")) })),
         contentType: "application/json",
       });
       await info.attach("canvas", { body: await page.screenshot(), contentType: "image/png" });
     } finally {
-      await page.screenshot({ path: join(PROBES, `canvas-${info.project.name}.png`) }).catch(() => undefined);
-      await writeFile(join(PROBES, `measurements-${info.project.name}.json`), JSON.stringify({
+      await page.screenshot({ path: join(probes, `canvas-${info.project.name}.png`) }).catch(() => undefined);
+      await writeFile(join(probes, `measurements-${info.project.name}.json`), JSON.stringify({
         theme: info.project.name, startedAt, endedAt: new Date().toISOString(),
         windows: (await ids(page).catch(() => [])).length, launchedCount: launched.length,
         pmRoundtripMs: samples, errors,
-        pane: await readFile(join(PROBES, "pane-samples.json"), "utf8").then(JSON.parse).catch(() => null),
+        pane: await readFile(join(probes, "pane-samples.json"), "utf8").then(JSON.parse).catch(() => null),
       }));
       await closeWindows(page).catch(() => undefined);
       await release();
