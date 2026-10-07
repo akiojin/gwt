@@ -108,6 +108,8 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, board_all_view_windows);
         $visit!($runtime, $id, pending_workspace_resume_contexts);
         $visit!($runtime, $id, pending_launch_feedback_contexts);
+        $visit!($runtime, $id, pending_launch_completions);
+        $visit!($runtime, $id, pending_launch_delivery_acks);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
         $visit!($runtime, $id, pending_auto_resume_sources);
@@ -733,6 +735,8 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
     ) {
+        self.invalidate_launch_delivery_ack(id);
+        self.pending_launch_completions.remove(id);
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
         // intentional stop and clears the durable PM registration below.

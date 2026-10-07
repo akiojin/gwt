@@ -6515,9 +6515,66 @@ impl AppRuntime {
                 );
             }
         }
+        self.finish_continue_work_launch_failure(window_id, detail, &context, &pending, pane, false)
+    }
+
+    pub(super) fn apply_prepared_continue_work_launch_failure(
+        &mut self,
+        window_id: &str,
+        detail: &str,
+        pending: &PendingContinueWork,
+        cleanup: Result<bool, String>,
+        activation_status: Option<bool>,
+    ) -> Vec<OutboundEvent> {
+        if !self
+            .pending_continue_work
+            .get(window_id)
+            .is_some_and(|current| {
+                current.operation_id == pending.operation_id
+                    && current.binding == pending.binding
+                    && current.owner == pending.owner
+                    && current.worktree_path == pending.worktree_path
+            })
+            || activation_status != Some(false)
+        {
+            return Vec::new();
+        }
+        match cleanup {
+            Ok(true) => {
+                let Some(context) = self.project_context_for_root(&pending.project_root) else {
+                    return Vec::new();
+                };
+                self.finish_continue_work_launch_failure(
+                    window_id, detail, &context, pending, LaunchPaneDisposition::Teardown, true,
+                )
+            }
+            Ok(false) => Vec::new(),
+            Err(error) => self.continue_work_pending_uncached_failure_events(pending,
+                if error == "continuation candidate Session changed before exact rollback" {
+                    ContinueWorkFailure::conflict(
+                        "The failed continuation candidate no longer matches its exact Agent identity.",
+                    )
+                } else {
+                    ContinueWorkFailure::failed("continuation_reconciliation_required",
+                        "The failed continuation could not commit its exact cleanup; retry reconciliation.", true)
+                }),
+        }
+    }
+
+    fn finish_continue_work_launch_failure(
+        &mut self,
+        window_id: &str,
+        detail: &str,
+        context: &super::ProjectContext,
+        pending: &PendingContinueWork,
+        pane: LaunchPaneDisposition,
+        prepared: bool,
+    ) -> Vec<OutboundEvent> {
         let mut events = match pane {
             LaunchPaneDisposition::Teardown => {
-                self.stop_window_runtime_without_session_projection(window_id);
+                if !prepared {
+                    self.stop_window_runtime_without_session_projection(window_id);
+                }
                 self.close_window_events(window_id)
             }
             LaunchPaneDisposition::Retain => Vec::new(),
@@ -6525,7 +6582,7 @@ impl AppRuntime {
         self.pending_continue_work.remove(window_id);
         let message = format!("Continue work launch failed before activation: {detail}");
         self.cache_continue_work_outcome(
-            &context,
+            context,
             pending.operation_id.clone(),
             CachedContinueWorkOutcome {
                 work_id: pending.work_id.clone(),
@@ -6536,7 +6593,7 @@ impl AppRuntime {
             },
         );
         events.extend(self.continue_work_pending_outcome_events(
-            &pending,
+            pending,
             gwt::ContinueWorkOutcomeKind::Failed,
             Some(message),
             Some("launch_failed".to_string()),
@@ -6748,6 +6805,40 @@ impl AppRuntime {
             return self.completed_fresh_execution_launch_events(window_id, pending);
         }
         Vec::new()
+    }
+
+    pub(super) fn apply_prepared_fresh_execution_launch_failure(
+        &mut self,
+        window_id: &str,
+        detail: &str,
+        pending: &PendingFreshExecutionLaunch,
+        cleanup: Result<bool, String>,
+        activation_status: Option<bool>,
+    ) -> Vec<OutboundEvent> {
+        if !self
+            .pending_fresh_execution_launches
+            .get(window_id)
+            .is_some_and(|current| {
+                current.operation_id == pending.operation_id
+                    && current.binding == pending.binding
+                    && current.owner == pending.owner
+                    && current.worktree_path == pending.worktree_path
+            })
+            || activation_status != Some(false)
+            || !matches!(cleanup, Ok(true))
+        {
+            return Vec::new();
+        }
+        self.launch_wizard_cache
+            .forget_session(&pending.binding.session_id);
+        self.pending_fresh_execution_launches.remove(window_id);
+        let mut events = self.status_events(
+            window_id.to_string(),
+            WindowProcessStatus::Error,
+            Some(detail.to_string()),
+        );
+        events.extend(self.close_window_events(window_id));
+        events
     }
 
     pub(crate) fn fresh_execution_launch_failed_events(
