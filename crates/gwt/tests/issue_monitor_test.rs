@@ -3534,7 +3534,7 @@ fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
         // Far in the future: the expiry sweep must not release this hold on
         // its own; only the explicit operator release may.
         "2027-01-01T00:00:00Z",
-        None,
+        Some("gwt-queue:42:stale"),
     ));
 
     // The CLI process only sees the persisted prefs, never the daemon inbox.
@@ -3559,6 +3559,12 @@ fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
         MonitorInboxState::Queued
     );
     assert!(daemon.queued_issue_numbers().contains(&42));
+    let row = daemon.agent_status_at("2026-08-19T00:10:00Z");
+    let row = row.inbox.iter().find(|row| row.issue_number == 42).unwrap();
+    assert_eq!(row.blocked_by_owner, None);
+    assert_eq!(row.blocked_by_claim_id, None);
+    assert_eq!(row.claim_expires_at, None);
+    assert_eq!(row.exclusion_reason, None);
 }
 
 /// Issue #3683 AC-3: the release fails closed on anything a launch still owns,
