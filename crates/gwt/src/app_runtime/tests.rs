@@ -66988,7 +66988,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     );
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.spawn_work_merge_status_scan(repo.clone());
 
     wait_for_recorded_event("gwt-write work merge status", &events, |events| {
@@ -67040,6 +67040,10 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         .unwrap()
         .is_some());
     assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
+    drop(cache);
+    drop(caches);
+    runtime.invalidate_project_caches(&repo);
+    assert!(!runtime.work_merge_status_cache.borrow().contains_key(&repo));
 }
 
 #[test]
