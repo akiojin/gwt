@@ -19991,7 +19991,12 @@ mod tests {
                     pane_state: None,
                     runtime_consistency: None,
                 }],
-                inbox_coverage: None,
+                inbox_coverage: Some(IssueMonitorInboxCoverage {
+                    github_target_count: 0,
+                    inbox_row_count: 0,
+                    missing_issue_numbers: Vec::new(),
+                    source: IssueMonitorCandidateSource::Cache,
+                }),
                 closure_held: Vec::new(),
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),

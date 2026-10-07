@@ -9072,6 +9072,12 @@ mod tests {
                         "tier_input": 0,
                     },
                 ],
+                "inbox_coverage": {
+                    "github_target_count": 0,
+                    "inbox_row_count": 0,
+                    "missing_issue_numbers": [],
+                    "source": "cache",
+                },
                 // Issue #3633 AC-5: this branch rebuilds the queue from the
                 // local Issue cache, which is a projection and not a scan. It
                 // used to stamp the literal string `gwtd-status` into
