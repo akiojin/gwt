@@ -2630,7 +2630,7 @@ test("Launch wizard choice buttons expose toggle state via aria-pressed", () => 
   );
 });
 
-test("Launch wizard separates launch settings from runtime controls", () => {
+test("Launch wizard omits permission and Fast mode choices while preserving other settings", () => {
   assert.equal(
     launchWizardSource.includes("wizardAdvancedOpen"),
     false,
@@ -2644,9 +2644,24 @@ test("Launch wizard separates launch settings from runtime controls", () => {
     );
   }
 
-  const launchSettingsStart = launchWizardSource.indexOf(
-    'createLaunchSection(\n            "Launch settings"',
-  );
+  // SPEC-1921 AC-1921-L2/L3: permissions and Fast mode are fixed launch
+  // behavior, including when an older backend View still advertises controls.
+  for (const retired of [
+    '"Launch settings"',
+    '"Skip permission prompts"',
+    '"Fast mode"',
+    "show_skip_permissions",
+    "show_fast_mode",
+    "set_skip_permissions",
+    "set_fast_mode",
+    "set_codex_fast_mode",
+  ]) {
+    assert.equal(
+      launchWizardSource.includes(retired),
+      false,
+      `Launch wizard should not render or dispatch ${retired}`,
+    );
+  }
   const linkedIssueStart = launchWizardSource.indexOf(
     'createLaunchSection(\n            "Linked issue"',
   );
@@ -2654,31 +2669,19 @@ test("Launch wizard separates launch settings from runtime controls", () => {
     'createLaunchSection(\n            "Runtime"',
   );
 
-  assert.notEqual(launchSettingsStart, -1, "expected Launch settings section");
   assert.notEqual(linkedIssueStart, -1, "expected Linked issue section");
   assert.notEqual(runtimeStart, -1, "expected Runtime section");
   assert.ok(
-    launchSettingsStart < linkedIssueStart && linkedIssueStart < runtimeStart,
-    "expected Launch settings before Linked issue and Runtime after Linked issue",
+    linkedIssueStart < runtimeStart,
+    "expected Runtime after Linked issue",
   );
-
-  const launchSettingsBlock = launchWizardSource.slice(
-    launchSettingsStart,
-    linkedIssueStart,
+  assert.match(
+    launchWizardSource,
+    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_hermes_options\s*\)[\s\S]*?createLaunchSection\(\s*"Hermes options"[\s\S]*?appendToggleField\(\s*grid,\s*"Safe mode"[\s\S]*?kind:\s*"set_hermes_safe_mode"/,
+    "expected Hermes options and its Safe mode toggle to remain available",
   );
-  for (const copy of ["Skip permission prompts", "Fast mode"]) {
-    assert.ok(
-      launchSettingsBlock.includes(`"${copy}"`),
-      `expected Launch settings to include ${copy}`,
-    );
-  }
   // SPEC-1921 AC-1921-L1: the wizard launches the resolved executable, so
   // there is no version to choose and no action that could send one.
-  assert.equal(
-    launchSettingsBlock.includes('"Version"'),
-    false,
-    "Launch settings should not offer a version selection",
-  );
   for (const retired of ["set_version", "version_options", "selected_version", "show_version"]) {
     assert.equal(
       launchWizardSource.includes(retired),
@@ -2686,11 +2689,6 @@ test("Launch wizard separates launch settings from runtime controls", () => {
       `Launch wizard should not reference ${retired}`,
     );
   }
-  assert.equal(
-    launchSettingsBlock.includes('"Runtime target"'),
-    false,
-    "Launch settings should not contain runtime target controls",
-  );
 
   const runtimeBlock = launchWizardSource.slice(
     runtimeStart,
@@ -2746,24 +2744,6 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
     launchWizardSource,
     /if\s*\(\s*showSetupForms\s*\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch"/,
     "expected Launch controls to be part of setup forms only",
-  );
-  assert.match(
-    launchWizardSource,
-    /if\s*\(\s*showSetupForms\s*&&[\s\S]*?launchWizard\.show_fast_mode[\s\S]*?\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch settings"/,
-    "expected Launch settings controls to be part of setup forms only",
-  );
-  // SPEC-2014 2026-05-29 amendment (FR-109): Fast mode is now a toggle switch
-  // (appendToggleField) instead of a checkbox, but stays provider-neutral —
-  // wired to launchWizard.fast_mode + set_fast_mode, not Codex-only state.
-  assert.match(
-    launchWizardSource,
-    /appendToggleField\(\s*grid,\s*"Fast mode"[\s\S]*?launchWizard\.fast_mode[\s\S]*?kind:\s*"set_fast_mode"/,
-    "expected Launch settings to wire provider-neutral Fast mode controls",
-  );
-  assert.doesNotMatch(
-    launchWizardSource,
-    /Codex fast mode/,
-    "expected Launch settings copy to avoid Codex-only Fast mode wording",
   );
   // SPEC-2014 Amendment 2026-05-20 (FR-057): Linked issue is gated by its
   // dedicated `show_linked_issue` flag so it only appears when the wizard
