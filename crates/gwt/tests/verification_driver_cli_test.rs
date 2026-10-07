@@ -19,6 +19,12 @@ fn configured_output_driver_frees_its_artifact_and_records_build_provenance() {
 
 fn assert_driver_relink(target_dir: &str) {
     let home = tempfile::tempdir().unwrap();
+    // Isolate gwt state while keeping Cargo metadata's real toolchain usable.
+    let original_home = dirs::home_dir().unwrap();
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .unwrap_or_else(|| original_home.join(".cargo").into_os_string());
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .unwrap_or_else(|| original_home.join(".rustup").into_os_string());
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
     fs::write(
@@ -63,6 +69,8 @@ fn assert_driver_relink(target_dir: &str) {
         driver.env_remove(key);
     }
     let mut child = driver
+        .env("CARGO_HOME", cargo_home)
+        .env("RUSTUP_HOME", rustup_home)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env("GWT_SESSION_ID", "driver-regression")
