@@ -101,7 +101,10 @@ fn main() -> ExitCode {
         [pr, view, number, repo_flag, _, json_flag, ..]
             if pr == "pr" && view == "view" && repo_flag == "--repo" && json_flag == "--json" =>
         {
-            if mode == "behind" {
+            if mode.starts_with("checks-pending") || mode.starts_with("checks-merge-") {
+                let merge_state = mode.strip_prefix("checks-merge-").unwrap_or("BLOCKED");
+                println!("{}", pr_json(number, "Fetched PR").replace("\"CLEAN\"", &format!("\"{merge_state}\"")));
+            } else if mode == "behind" {
                 println!("{}", behind_pr_json(number, "Fetched PR"));
             } else {
                 println!("{}", pr_json(number, "Fetched PR"));
@@ -119,9 +122,26 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, checks, _, json_flag, fields] if pr == "pr" && checks == "checks" && json_flag == "--json" => {
-            if mode == "checks-fallback" && !fields.contains("bucket") {
+            if (mode == "checks-fallback" || mode == "checks-pending-fallback") && !fields.contains("bucket") {
                 eprintln!("unknown JSON field\nAvailable fields:\n  name\n  state\n  bucket\n  link\n  startedAt\n  completedAt\n  workflow");
                 return ExitCode::from(1);
+            }
+            if mode == "checks-pending-partial-required" {
+                println!("{}", r#"[{"name":"passed","state":"SUCCESS","bucket":"pass","isRequired":false},{"name":"Build","state":"QUEUED","bucket":"pending"}]"#);
+                return ExitCode::SUCCESS;
+            }
+            if mode.starts_with("checks-pending") {
+                println!("{}", r#"[
+                    {"name":"passed","state":"SUCCESS","bucket":"pass"},
+                    {"name":"skipped","state":"SKIPPED","bucket":"skipping"},
+                    {"name":"failed","state":"FAILURE","bucket":"fail"},
+                    {"name":"Build","state":"QUEUED","conclusion":"SUCCESS","bucket":"pending","isRequired":true},
+                    {"name":"Test","state":"IN_PROGRESS","bucket":"pending","isRequired":false},
+                    {"name":"Check Windows","state":"PENDING","bucket":"pending","isRequired":true},
+                    {"name":"Review","state":"WAITING","bucket":"pending","isRequired":false},
+                    {"name":"Check macOS","state":"REQUESTED","bucket":"pending","isRequired":true}
+                ]"#);
+                return if mode == "checks-pending-fallback" { ExitCode::from(8) } else { ExitCode::SUCCESS };
             }
             if fields.contains("bucket") {
                 println!("[{{\"name\":\"CI\",\"state\":\"COMPLETED\",\"bucket\":\"pass\",\"link\":\"https://example.test/checks/12\",\"startedAt\":\"2026-04-20T00:00:00Z\",\"completedAt\":\"2026-04-20T00:01:00Z\",\"workflow\":\"coverage\"}}]");
