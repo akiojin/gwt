@@ -6170,6 +6170,59 @@ impl AppRuntime {
         }
     }
 
+    fn issue_monitor_allowed_labels_result_events(
+        &mut self,
+        context: &ProjectContext,
+        client_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+        allowed_labels: Vec<String>,
+        request_id: Option<u64>,
+    ) -> Vec<OutboundEvent> {
+        let outcome = match publication {
+            Ok(()) => Ok(None),
+            Err(error) if error.allows_local_fallback() => self
+                .commit_local_issue_monitor_control(context, |monitor| {
+                    monitor.set_allowed_labels(allowed_labels);
+                })
+                .map(|(monitor, ())| Some(monitor)),
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(None) => Vec::new(),
+            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
+                Some(client_id),
+                Some(&context.project_root),
+                monitor,
+            ),
+            Err(error) => {
+                let outcome_unknown = matches!(
+                    &error,
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_)
+                );
+                let mut events = self.issue_monitor_control_error_events(
+                    Some(&context.project_root),
+                    Some(client_id),
+                    error,
+                    "allowed-labels",
+                    None,
+                );
+                if let Some(request_id) = request_id {
+                    events.push(
+                        OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::IssueMonitorAllowedLabelsWriteFailed {
+                                request_id,
+                                outcome_unknown,
+                            },
+                        )
+                        .with_error_project_root(&context.project_root),
+                    );
+                }
+                events
+            }
+        }
+    }
+
     fn issue_monitor_profiles_set_events(
         &mut self,
         context: &ProjectContext,
@@ -9545,19 +9598,20 @@ impl AppRuntime {
                     },
                 )
             }
-            FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels } => {
+            FrontendEvent::SetIssueMonitorAllowedLabels {
+                allowed_labels,
+                request_id,
+            } => {
                 let publication = self.publish_project_issue_monitor_control(
                     context,
                     serde_json::json!({ "config_set": { "allowed_labels": allowed_labels } }),
                 );
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_allowed_labels_result_events(
                     context,
                     &client_id,
                     publication,
-                    "allowed-labels",
-                    |monitor| {
-                        monitor.set_allowed_labels(allowed_labels);
-                    },
+                    allowed_labels,
+                    request_id,
                 )
             }
             FrontendEvent::IssueMonitorProfilesSet {

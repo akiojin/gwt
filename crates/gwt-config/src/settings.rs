@@ -43,6 +43,16 @@ pub struct ServerConfig {
     pub embedded_port: Option<NonZeroU16>,
 }
 
+/// Host-wide canonical verification capacity (`[verification]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VerificationConfig {
+    /// None derives capacity from host CPU and memory. Zero is invalid.
+    pub slots: Option<NonZeroU16>,
+    /// Per-run disk growth budget in bytes, measured from a full matrix.
+    pub disk_budget_bytes: Option<u64>,
+}
+
 /// Optional overrides for the built-in performance budgets.
 ///
 /// `None` keeps the normative default owned by the performance domain. This
@@ -174,6 +184,8 @@ pub struct Settings {
     pub pr_inventory: PrInventoryConfig,
     /// Automatic build-artifact reclaim on low disk (Issue #4391).
     pub build_artifact_gc: crate::BuildArtifactGcConfig,
+    /// Canonical verification capacity and disk reservation override.
+    pub verification: VerificationConfig,
 }
 
 impl Default for Settings {
@@ -199,6 +211,7 @@ impl Default for Settings {
             github_budget: crate::GitHubBudgetConfig::default(),
             pr_inventory: PrInventoryConfig::default(),
             build_artifact_gc: crate::BuildArtifactGcConfig::default(),
+            verification: VerificationConfig::default(),
         }
     }
 }
@@ -347,6 +360,26 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_slots_roundtrip_and_reject_zero() {
+        let settings: Settings = toml::from_str("[verification]\nslots = 2\n").unwrap();
+        let encoded: toml::Value = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            encoded
+                .get("verification")
+                .and_then(|table| table.get("slots"))
+                .and_then(toml::Value::as_integer),
+            Some(2)
+        );
+        assert!(toml::from_str::<Settings>("[verification]\nslots = 0\n").is_err());
+        let defaults: toml::Value =
+            toml::from_str(&toml::to_string(&Settings::default()).unwrap()).unwrap();
+        assert!(defaults
+            .get("verification")
+            .and_then(|table| table.get("slots"))
+            .is_none());
+    }
 
     #[test]
     fn default_settings_are_sane() {

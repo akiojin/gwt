@@ -2504,6 +2504,7 @@ impl AppRuntime {
         }
         let pool = self.issue_monitor_saved_pool(project_root);
         if let Some(session) = self.launch_wizard_for_mut(&context) {
+            session.wizard.use_profile_launch_preferences();
             session.issue_monitor_profile_save = Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
                 issue_number: Some(issue_number),
@@ -2668,6 +2669,7 @@ impl AppRuntime {
             Vec::new(),
             previous_profiles,
         );
+        wizard.use_profile_launch_preferences();
         Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
@@ -3711,6 +3713,7 @@ impl AppRuntime {
             linked_issue_kind,
             previous_profiles,
         );
+        session.wizard.use_profile_launch_preferences();
         let initial_prompt = review_prompt.clone().unwrap_or_else(|| {
             // Issue #4630: a launch that consumed an operator requeue carries
             // the operator's reason, read from the exact durable delivery.
