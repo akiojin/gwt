@@ -114,9 +114,10 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 目的・進捗を保持します。`agent_identity.migration.json` は既存の内容を変更せず、
 未作成なら新たに作成しません。
 
-組み込みフロントエンドは現行の Fast mode フィールドを使用し、cleanup リクエストには
-operation ID を必須とします。更新前から開いているタブは再読み込みしてください。
-保存済みの Fast mode 設定は保持します。
+組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
+更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
+Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
+Issue Monitor のプロファイルと直接の Session Resume は従来の設定を維持します。
 
 ## 前提
 
@@ -146,6 +147,23 @@ operation ID を必須とします。更新前から開いているタブは再�
 
 Linux デスクトップ版のビルドには WebKitGTK 系の依存が必要です。CI と同じ依存は
 [docs/docker-usage.md](docs/docker-usage.md) を参照してください。
+
+### 対応する組み込みエージェント
+
+gwt は次の組み込みエージェントに対応しています。Launch Agent には、gwt が検出した
+インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
+カスタムエージェントとして引き続き利用できます。
+
+| エージェント | CLI コマンド |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
 
 ## 使い方
 
@@ -377,6 +395,15 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+
+**Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
+ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
+大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
+維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
+設定欄には保存済みラベルと除外件数・Issue 番号を表示します。自動化からは
+`issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。
+`issue.monitor.status` は `allowed_labels`、`label_excluded_count`、
+`label_excluded_issues` を返します。
 
 open な GitHub Issue は、明示的な追加、有効な Auto-refill、または `urgent` ラベルによる投入
 まで Backlog に留まります。キューへの所属は Monitor の実行候補になる条件であり、
@@ -1140,14 +1167,41 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
-### 重量級検証の直列化
+### 重量級検証の容量制御
 
 ホスト全体の verification lease を取得するのは canonical `verify.run`
 だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
 各 Heavy コマンドの実行時に取得・解放し、Light コマンドは他の run と並行できます。
-最初のコマンドの取得待機が時間切れになると、新しい記録を作らず `deferred` を返します。
+未実行の Light を先に進め、Heavy の相対順序を保ち、gwt の成果物復旧は最後に実行します。
+残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
-再試行では行列全体を再実行します。再試行前に保持者を確認してください。
+
+再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
+execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、
+先行コマンドがすべて signal なしで成功した、有効な admission-deferred 記録だけを自動再開します。
+失敗・強制終了・クラッシュ・不一致などの記録では新しく実行し、登録 plan の不一致は
+引き続き `verify.plan` の再登録が必要です。再開した証跡は不変の先行記録を id/hash で参照し、
+元の開始時刻とコマンドごとの headed E2E・nextest・admission 証跡を保持します。
+行列全体と必要な headed Chromium の dark/light 証跡が成功するまでは Overall PASS や Ready にはなりません。
+独立した worktree とビルド directory の Heavy Cargo コマンドは、上限付きの
+ホスト共通 pool を利用します。既定容量は論理 CPU 8 個あたり 1 slot と
+メモリ 16 GiB あたり 1 slot の小さい方で、最低 1、最大 4 です。
+`~/.gwt/config.toml` で上書きできます。
+
+```toml
+[verification]
+slots = 4
+```
+
+同じ worktree または実効 Cargo target directory の実行は直列化します。
+共有資源を特定できない wrapper と旧 binary は全体排他を使います。
+各子プロセスの一時 directory を分離し、target と一時 directory の volume ごとに
+GC の空き容量閾値を残してディスク容量を予約します。
+`verification.disk_budget_bytes` で実測に基づく run 単位の予算を上書きできます。
+既定の予約量は各 volume で 5,904,433,337 bytes（約 5.5 GiB）です。
+target と一時領域の実測増分に 20% の余裕を加えて算出しています。
+`verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
+共通 FIFO queue を表示します。再試行前に確認してください。
 
 ```bash
 gwtd <<'JSON'

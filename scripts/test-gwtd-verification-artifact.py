@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issue #4317: pin the state of the operational gwtd build artifact.
+"""Issues #4317 / #4982: pin operational gwtd restoration after deferral.
 
 `cargo test --all-features` enables the self dev-dependency's `test-gh-guard`
 feature, so the `target/debug/gwtd` it leaves behind refuses every real `gh`
@@ -8,8 +8,9 @@ spawn. This regression drives the whole sequence against the real artifact:
   1. after a Cargo test run, `target/debug/gwtd` refuses a GitHub read with
      `real_gh_spawn_blocked_in_tests` (the guard is intact -- AC-2), and the
      refusal names the recovery build command (AC-3);
-  2. `cargo build -p gwt --bin gwtd` -- the command `verify.run` now appends
-     to its own matrix -- restores the operational artifact;
+  2. a host-busy `verify.run` restores the checkout artifact without running
+     its requested matrix or writing passing evidence, even with an inherited
+     CARGO_TARGET_DIR pointing elsewhere;
   3. the same path then completes a GitHub read (AC-1).
 
 The GitHub reads use a PATH `gh` fixture under a temporary HOME, and set no
@@ -22,6 +23,7 @@ itself with one focused integration test.
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,8 @@ CHECKOUT = Path(__file__).resolve().parents[1]
 GWTD = CHECKOUT / "target/debug/gwtd"
 GUARD_ERROR_CODE = "real_gh_spawn_blocked_in_tests"
 RESTORE_COMMAND = ["cargo", "build", "-p", "gwt", "--bin", "gwtd"]
+DEFERRED_RESTORE_COMMAND = RESTORE_COMMAND + ["--target-dir", "target"]
+METADATA_ARGS = ["metadata", "--offline", "--no-deps", "--format-version", "1"]
 # An integration test needs the gwtd bin built, and --all-features builds it
 # with the guard armed. Only used when the artifact is not already armed.
 ARM_COMMAND = [
@@ -116,6 +120,84 @@ def probe(label):
     return ok, output, reached
 
 
+def deferred_restore():
+    """Drive host-busy deferral through the actual guarded checkout binary."""
+    import fcntl
+
+    with tempfile.TemporaryDirectory(prefix="gwtd-deferred-artifact-") as temporary:
+        root = Path(temporary)
+        home, repo, bin_dir = (root / name for name in ("home", "repo", "bin"))
+        for directory in (home, repo, bin_dir):
+            directory.mkdir()
+        # The fixture has no live execution record. Its manifests identify the
+        # gwt workspace; its cargo delegate builds the actual checkout artifact.
+        for name in ("Cargo.toml", "crates"):
+            (repo / name).symlink_to(CHECKOUT / name)
+        calls = root / "cargo-calls.jsonl"
+        cargo = bin_dir / "cargo"
+        cargo.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, subprocess, sys\n"
+            f"with open({str(calls)!r}, 'a') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            f"assert sys.argv[1:] in [{METADATA_ARGS!r}, {DEFERRED_RESTORE_COMMAND[1:]!r}], sys.argv\n"
+            f"if sys.argv[1:] == {DEFERRED_RESTORE_COMMAND[1:]!r}:\n"
+            "    assert 'CARGO_TARGET_DIR' not in os.environ, 'recovery must target the checkout artifact'\n"
+            f"raise SystemExit(subprocess.call([{shutil.which('cargo')!r}, "
+            f"*sys.argv[1:]], cwd={str(CHECKOUT)!r}))\n",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("GWT_", "GIT_", "GH_", "GITHUB_"))
+        }
+        env.update(
+            HOME=str(home), USERPROFILE=str(home),
+            CARGO_HOME=os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")),
+            RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup")),
+            PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+            GWT_SESSION_ID="deferred-artifact-fixture", GWT_VERIFY_SPAWN_HOST="inherit",
+            CARGO_TARGET_DIR=str(root / "wrong-target"),
+        )
+        subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
+        lease = home / ".gwt/runtime/verification-coordinator/heavy.lock"
+        lease.parent.mkdir(parents=True)
+        with lease.open("a") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                result = subprocess.run(
+                    [str(GWTD)], cwd=repo, env=env, text=True, capture_output=True,
+                    input=json.dumps({"schema_version": 1, "operation": "verify.run",
+                                      "params": {"commands": ["cargo test --all-features"],
+                                                 "max_wait_secs": 0}}),
+                    timeout=1800,
+                )
+            except subprocess.TimeoutExpired as error:
+                output = "".join(
+                    chunk.decode(errors="replace") if isinstance(chunk, bytes) else chunk or ""
+                    for chunk in (error.stdout, error.stderr)
+                )
+                raise AssertionError(f"deferred verify.run timed out after 1800s:\n{output}") from error
+        output = result.stdout + result.stderr
+        assert result.returncode != 0 and "deferred" in output, output
+        reached = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        ok, after, github_calls = probe("after deferred verify.run")
+        assert ok and GUARD_ERROR_CODE not in after, after
+        assert github_calls == [["pr", "view"], ["pr", "checks"]], github_calls
+        # Admission and GC coordination resolve Cargo's effective target with
+        # read-only metadata. Only the final restoration may build anything.
+        assert reached and reached[-1] == DEFERRED_RESTORE_COMMAND[1:] and all(
+            arguments == METADATA_ARGS for arguments in reached[:-1]
+        ), (
+            f"deferred verification may resolve targets and restore once, never run its test matrix: {reached}\n{output}"
+        )
+        assert "gwtd artifact restoration: restored" in output, output
+        assert not (repo / ".gwt/skill-state/verification-run.json").exists(), (
+            "deferral recovery must not create passing verification evidence"
+        )
+
+
 def main():
     if os.name != "posix":
         raise SystemExit("This artifact regression uses POSIX executable fixtures.")
@@ -137,13 +219,17 @@ def main():
         f"the refusal must name the recovery build command: {output}"
     )
 
-    run(RESTORE_COMMAND)
+    try:
+        deferred_restore()
+    finally:
+        # Leave a usable operational artifact even when the RED assertion fails.
+        run(RESTORE_COMMAND)
 
     ok, output, reached = probe("after restore")
     assert ok, f"the restored artifact must complete a GitHub read: {output}"
     assert "artifact-check" in output, output
     assert reached == [["pr", "view"], ["pr", "checks"]], reached
-    print("PASS: cargo test arms target/debug/gwtd; the restore build clears it")
+    print("PASS: cargo test arms target/debug/gwtd; deferred verification restores it")
 
 
 if __name__ == "__main__":

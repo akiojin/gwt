@@ -899,6 +899,11 @@ pub enum FrontendEvent {
     SetIssueMonitorMaxActiveAgents {
         max_active_agents: usize,
     },
+    SetIssueMonitorAllowedLabels {
+        allowed_labels: Vec<String>,
+        #[serde(default)]
+        request_id: Option<u64>,
+    },
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },
@@ -2072,6 +2077,11 @@ pub enum BackendEvent {
         /// (clippy `large_enum_variant`), and every broadcast clones it.
         status: Box<IssueMonitorStatusView>,
     },
+    /// Client-scoped failure for one label save; uncertain writes can still commit.
+    IssueMonitorAllowedLabelsWriteFailed {
+        request_id: u64,
+        outcome_unknown: bool,
+    },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
     },
@@ -2935,6 +2945,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_allowed_labels_write_failed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_inbox",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3383,6 +3398,9 @@ impl BackendEvent {
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
+            BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
+                "issue_monitor_allowed_labels_write_failed"
+            }
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",

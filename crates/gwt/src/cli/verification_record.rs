@@ -50,9 +50,15 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+pub mod continuation;
 pub mod headed_e2e;
 pub mod interruption;
 pub mod nextest;
+pub mod wire;
+
+/// Additive fields are preserved and hash-covered independently of the
+/// reader's typed schema. Incompatible meanings require a version bump.
+pub const VERIFICATION_FORMAT_VERSION: u32 = 1;
 
 /// Per-command lease provenance; absent for Light commands and old records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,8 +365,14 @@ pub struct VerificationAdjudicationRef {
 
 /// One tool-generated verification run (T-110).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationRunRecord {
+pub struct VerificationRunData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
     pub record_id: String,
+    /// Exact continuation inputs and occurrence provenance (#5035). Omission
+    /// preserves legacy hashes; legacy records are never resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<continuation::Continuation>,
     /// Present only while a run is unfinished; omitted for legacy compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<interruption::RunLifecycle>,
@@ -393,7 +405,11 @@ pub struct VerificationRunRecord {
     pub all_passed: bool,
     /// Conditional dispositions for exact failures. Raw command exits and
     /// `all_passed` remain authoritative and are never rewritten.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_stored_failures"
+    )]
     pub quarantined_failures: Vec<TypedQuarantinedFailure>,
     /// Integrity-covered Board references attached through
     /// `verify.adjudicate` and consumed only by `pr.ready`.
@@ -431,6 +447,8 @@ pub struct VerificationRunRecord {
     pub content_hash: String,
 }
 
+pub type VerificationRunRecord = wire::WireRecord<VerificationRunData>;
+
 impl VerificationRunRecord {
     pub fn headed_e2e_passed(&self) -> bool {
         headed_e2e_passed(&self.commands)
@@ -457,7 +475,16 @@ fn headed_e2e_passed(commands: &[VerificationCommandResult]) -> bool {
 pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
     let mut canonical = record.clone();
     canonical.content_hash = String::new();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    if record.format_version.is_some() {
+        return wire::canonical_hash(
+            &serde_json::to_value(&canonical).expect("serializable record"),
+        );
+    }
+    let bytes = {
+        // Pre-versioned records used struct field order and omission rules.
+        serde_json::to_vec(&canonical.data)
+    }
+    .expect("serializable record");
     format!("{:x}", Sha256::digest(&bytes))
 }
 
@@ -465,7 +492,15 @@ pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
 /// a legacy pre-P9a record without one).
 #[must_use]
 pub fn integrity_ok(record: &VerificationRunRecord) -> bool {
-    record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+    match record.format_version {
+        None => {
+            record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+        }
+        Some(VERIFICATION_FORMAT_VERSION) => {
+            !record.content_hash.is_empty() && record.content_hash == compute_content_hash(record)
+        }
+        Some(_) => false,
+    }
 }
 
 /// Worktree-relative path of the registered verification plan (SPEC-3248
@@ -478,7 +513,9 @@ pub const VERIFICATION_PLAN_STATE_RELATIVE: &str = ".gwt/skill-state/verificatio
 /// scenarios is the full T-130; here the plan is a first-class recorded
 /// contract that `verify.run` must cover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationPlanRecord {
+pub struct VerificationPlanData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_number: Option<u64>,
@@ -504,7 +541,11 @@ pub struct VerificationPlanRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_outputs: Vec<String>,
     /// Exact typed quarantine requests registered before `verify.run`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_stored_quarantines"
+    )]
     pub quarantines: Vec<VerificationQuarantineRequest>,
     /// Content-level worktree fingerprint at plan registration. Derived
     /// matrices are valid only for this exact change set; a later surface
@@ -517,12 +558,77 @@ pub struct VerificationPlanRecord {
     pub content_hash: String,
 }
 
+pub type VerificationPlanRecord = wire::WireRecord<VerificationPlanData>;
+
+fn retain_stored_fields(value: &mut serde_json::Value, fields: &[&str]) {
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| fields.contains(&key.as_str()));
+    }
+}
+
+// Quarantine inputs remain strict. Only the integrity-covered stored record
+// projection ignores additive fields; WireRecord retains their original JSON.
+fn deserialize_stored_quarantines<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<VerificationQuarantineRequest>, D::Error> {
+    let mut values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    for value in &mut values {
+        retain_stored_fields(
+            value,
+            &[
+                "failed_command",
+                "test_identity",
+                "baseline_command",
+                "owner_issue",
+                "pr_number",
+            ],
+        );
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+fn deserialize_stored_failures<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<TypedQuarantinedFailure>, D::Error> {
+    let mut values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    for value in &mut values {
+        retain_stored_fields(
+            value,
+            &[
+                "failed_command",
+                "test_identity",
+                "owner_issue",
+                "head_sha",
+                "merge_base_sha",
+                "baseline_command",
+                "baseline_exit_code",
+                "baseline_result_line",
+                "pr_number",
+                "pr_reference",
+            ],
+        );
+        if let Some(reference) = value.get_mut("pr_reference") {
+            retain_stored_fields(reference, &["kind", "comment_id", "marker"]);
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
 /// Compute the integrity hash for a plan (content with the hash emptied).
 #[must_use]
 pub fn compute_plan_hash(plan: &VerificationPlanRecord) -> String {
     let mut canonical = plan.clone();
     canonical.content_hash = String::new();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    if plan.format_version.is_some() {
+        return wire::canonical_hash(&serde_json::to_value(&canonical).expect("serializable plan"));
+    }
+    let bytes = serde_json::to_vec(&canonical.data).expect("serializable plan");
     format!("{:x}", Sha256::digest(&bytes))
 }
 
@@ -548,6 +654,14 @@ fn changed_plan_fields(
             before.generated_outputs != after.generated_outputs,
         ),
         ("quarantines", before.quarantines != after.quarantines),
+        (
+            "format_version",
+            before.format_version != after.format_version,
+        ),
+        (
+            "unknown_fields",
+            before.unknown_fields() != after.unknown_fields(),
+        ),
     ]
     .into_iter()
     .filter_map(|(field, changed)| changed.then_some(field))
@@ -565,7 +679,13 @@ fn same_plan_meaning(before: &VerificationPlanRecord, after: &VerificationPlanRe
 /// True when the plan's stored integrity hash matches (or is legacy-empty).
 #[must_use]
 pub fn plan_integrity_ok(plan: &VerificationPlanRecord) -> bool {
-    plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan)
+    match plan.format_version {
+        None => plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan),
+        Some(VERIFICATION_FORMAT_VERSION) => {
+            !plan.content_hash.is_empty() && plan.content_hash == compute_plan_hash(plan)
+        }
+        Some(_) => false,
+    }
 }
 
 /// Resolve the plan path for a worktree.
@@ -587,8 +707,7 @@ pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> 
             Err(err) => return Err(err),
         },
     };
-    let plan = serde_json::from_str::<VerificationPlanRecord>(&contents)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let plan = decode_record(&contents, "plan")?;
     Ok(Some(plan))
 }
 
@@ -696,7 +815,8 @@ fn register_plan_with_context_unleased(
     context: PlanRegistrationContext,
     authority: &VerificationCallerAuthority,
 ) -> io::Result<VerificationPlanRecord> {
-    let plan = VerificationPlanRecord {
+    let plan = VerificationPlanRecord::from(VerificationPlanData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
         session_id: session_id.to_string(),
         owner_number: authority.owner_number,
         execution_binding: authority.execution_binding.clone(),
@@ -708,7 +828,7 @@ fn register_plan_with_context_unleased(
         worktree_fingerprint: context.worktree_fingerprint,
         created_at: Utc::now(),
         content_hash: String::new(),
-    };
+    });
     save_plan_unleased(worktree, &plan)
 }
 
@@ -718,6 +838,7 @@ fn derive_and_register_plan_for_caller(
     generated_outputs: Vec<String>,
     quarantines: Vec<VerificationQuarantineRequest>,
     authority: &VerificationCallerAuthority,
+    pre_pr: Option<(&[String], &[String])>,
 ) -> Result<
     (
         crate::cli::verify_derivation::DerivedPlan,
@@ -729,7 +850,10 @@ fn derive_and_register_plan_for_caller(
         let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
-        let derived = crate::cli::verify_derivation::derive(worktree)
+        let derived = match pre_pr {
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, acceptance, local),
+            None => crate::cli::verify_derivation::derive(worktree),
+        }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
         validate_quarantine_requests(&quarantines, &derived.commands)?;
         let fingerprint_after =
@@ -781,9 +905,72 @@ pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
             Err(err) => return Err(err),
         },
     };
-    let record = serde_json::from_str::<VerificationRunRecord>(&contents)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let record = decode_record(&contents, "run")?;
     Ok(Some(record))
+}
+
+#[derive(Debug)]
+struct UnsupportedFormat {
+    kind: &'static str,
+    version: u64,
+}
+
+impl std::fmt::Display for UnsupportedFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "verification {} format version {} is unsupported by this gwtd (supported version: {}); upgrade gwtd to a compatible version", self.kind, self.version, VERIFICATION_FORMAT_VERSION)
+    }
+}
+
+impl std::error::Error for UnsupportedFormat {}
+
+/// Version admission precedes typed decoding: newer schemas can change even
+/// recognized fields, which must not be mistaken for corrupt evidence.
+fn decode_record<T: serde::de::DeserializeOwned>(
+    contents: &str,
+    kind: &'static str,
+) -> io::Result<T> {
+    let value: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    if let Some(version) = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        if version != u64::from(VERIFICATION_FORMAT_VERSION) {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                UnsupportedFormat { kind, version },
+            ));
+        }
+    }
+    if let Some(version) = value
+        .get("verification_plan_snapshot")
+        .and_then(|plan| plan.get("format_version"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        if version != u64::from(VERIFICATION_FORMAT_VERSION) {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                UnsupportedFormat {
+                    kind: "plan",
+                    version,
+                },
+            ));
+        }
+    }
+    serde_json::from_value(value).map_err(|err| io::Error::new(ErrorKind::InvalidData, err))
+}
+
+pub(crate) fn evidence_read_error(error: &io::Error) -> EvidenceStatus {
+    match error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<UnsupportedFormat>())
+    {
+        Some(unsupported) => EvidenceStatus::UnsupportedFormat {
+            kind: unsupported.kind,
+            version: unsupported.version,
+        },
+        None => EvidenceStatus::Unreadable,
+    }
 }
 
 /// Persist the record atomically. The integrity hash is recomputed on every
@@ -2956,6 +3143,13 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
     {
         return None;
     }
+    gwtd_artifact_restore_command(worktree)
+}
+
+fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
+    if cfg!(windows) {
+        return None;
+    }
     let manifest =
         |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
     let workspace = manifest(&worktree.join("Cargo.toml"))?;
@@ -2979,6 +3173,25 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
         return None;
     }
     Some("cargo build -p gwt --bin gwtd")
+}
+
+/// Keep recovery (including failures) in the deferred admission diagnostic,
+/// without presenting unexecuted commands as passing verification evidence.
+fn restore_gwtd_after_deferral(worktree: &Path, host: &VerificationHost) -> String {
+    let Some(command) = gwtd_artifact_restore_command(worktree) else {
+        return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
+    };
+    // Restore this checkout's operational path, even when Cargo's environment
+    // or user configuration points ordinary builds at another target directory.
+    let command = format!("{command} --target-dir target");
+    match execute_command_with_isolation(worktree, &command, true, None, host, None) {
+        Ok((0, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
+        Ok((code, _, output)) => format!(
+            "gwtd artifact restoration: failed (`{command}`, exit {code}); \
+             restore from the checkout root before GitHub operations: {output}"
+        ),
+        Err(error) => format!("gwtd artifact restoration: failed (`{command}`): {error}"),
+    }
 }
 
 /// Assemble once for both local and daemon launches (Issue #4830).
@@ -3077,10 +3290,49 @@ fn execute_command_with_isolation(
     progress: Option<&CommandProgress>,
 ) -> Result<(i32, Option<i32>, String), String> {
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
+    // Heavy admission already holds this guard. Light Cargo and operational
+    // artifact restoration participate in the same GC boundary without a slot.
+    let _artifacts = if progress.is_none() {
+        match crate::cli::verification_lease::effective_cargo_target(
+            worktree,
+            command,
+            isolated_baseline,
+        )? {
+            Some(target) => Some(
+                crate::cli::verification_lease::lock_build_artifacts(&target)
+                    .map_err(|error| format!("build artifact coordination failed: {error}"))?,
+            ),
+            None if Path::new(&args[0])
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                == Some("cargo")
+                && !matches!(
+                    crate::cli::verification_lease::cargo_subcommand(&args),
+                    Some("fmt" | "metadata")
+                ) =>
+            {
+                return Err(
+                    "Cargo artifact target is unresolved; refusing slotless execution without \
+                     the build artifact/GC lock. Run `cargo metadata --offline --no-deps \
+                     --format-version 1` with this command's configuration, fix its failure, \
+                     and retry verify.run."
+                        .to_string(),
+                );
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let temporary_base = crate::cli::verification_lease::command_temporary_base(worktree, command)?;
+    fs::create_dir_all(&temporary_base).map_err(|error| error.to_string())?;
+    let temp = tempfile::Builder::new()
+        .prefix("gwt-verify-")
+        .tempdir_in(temporary_base)
+        .map_err(|error| error.to_string())?;
     match host {
         VerificationHost::Daemon(endpoint) => {
-            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-            let request = delegated_spawn_request(
+            let mut request = delegated_spawn_request(
                 worktree,
                 &args,
                 &assignments,
@@ -3089,6 +3341,14 @@ fn execute_command_with_isolation(
                 temp.path().join("stdout"),
                 temp.path().join("stderr"),
             );
+            for key in ["TMPDIR", "TEMP", "TMP"] {
+                request
+                    .env
+                    .retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
+                request
+                    .env
+                    .push((key.to_string(), temp.path().to_string_lossy().into_owned()));
+            }
             execute_command_on_daemon(command, &request, endpoint, progress)
         }
         VerificationHost::Inherit => {
@@ -3105,6 +3365,9 @@ fn execute_command_with_isolation(
             for (key, value) in &assignments {
                 process.env(key, value);
             }
+            for key in ["TMPDIR", "TEMP", "TMP"] {
+                process.env(key, temp.path());
+            }
             if isolated_baseline {
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
@@ -3119,8 +3382,8 @@ fn execute_command_with_isolation(
                 // Issue #4746 (earlier instance #4105): a grandchild can
                 // inherit stdout/stderr beyond the direct child's lifetime.
                 // Files let us wait for that child without waiting for EOF.
-                let stdout = tempfile::NamedTempFile::new()?;
-                let stderr = tempfile::NamedTempFile::new()?;
+                let stdout = tempfile::NamedTempFile::new_in(temp.path())?;
+                let stderr = tempfile::NamedTempFile::new_in(temp.path())?;
                 process
                     .stdin(std::process::Stdio::null())
                     .stdout(stdout.reopen()?)
@@ -3479,7 +3742,10 @@ struct RunOptions<'a> {
     admit_command: Option<&'a mut AdmitCommand<'a>>,
 }
 
-type AdmitCommand<'a> = dyn FnMut(&str) -> Result<Option<crate::cli::verification_lease::admission::Admission>, String>
+type AdmitCommand<'a> = dyn FnMut(
+        &str,
+        &VerificationHost,
+    ) -> Result<Option<crate::cli::verification_lease::admission::Admission>, String>
     + 'a;
 
 fn run_verification_for_caller(
@@ -3564,12 +3830,53 @@ where
     {
         return Err("headed_e2e_commands must name exact entries in commands".to_string());
     }
-    let started_at = Utc::now();
+    // Keep the operational artifact restore as the final matrix occurrence.
+    let mut effective_commands = commands.to_vec();
+    if let Some(restoration) = gwtd_artifact_restoration(worktree, commands) {
+        effective_commands.push(restoration.to_string());
+    }
+    let commands = effective_commands.as_slice();
+    let request = authority.map(|authority| {
+        continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
+    });
+    // Preview only chooses which command needs admission. The trusted snapshot
+    // below rechecks all inputs after waiting; no reused result is trusted yet.
+    let preview = (|| -> io::Result<Option<VerificationRunRecord>> {
+        let Some(request) = &request else {
+            return Ok(None);
+        };
+        let plan = load_plan(worktree)?;
+        let fingerprint = worktree_fingerprint_excluding(
+            worktree,
+            plan.as_ref()
+                .map(|plan| plan.generated_outputs.as_slice())
+                .unwrap_or_default(),
+        )?;
+        Ok(load(worktree)?.filter(|record| {
+            continuation::eligible(
+                worktree,
+                record,
+                session_id,
+                authority.and_then(|a| a.owner_number),
+                authority.and_then(|a| a.execution_binding.as_ref()),
+                plan.as_ref(),
+                &fingerprint,
+                request,
+            )
+        }))
+    })()
+    .unwrap_or(None);
+    let preview_first = preview
+        .as_ref()
+        .and_then(|record| record.continuation.as_ref())
+        .and_then(|context| context.remaining(true).first().copied())
+        .unwrap_or(0);
+    let mut started_at = Utc::now();
     // Admit before the strict snapshot check so a live same-worktree runner
     // follows the normal wait/deferred path. Never wait under the write lease.
     // A first-command timeout still writes no record.
-    let mut first_admission = match (commands.first(), options.admit_command.as_mut()) {
-        (Some(command), Some(admit)) => admit(command)?,
+    let mut first_admission = match (commands.get(preview_first), options.admit_command.as_mut()) {
+        (Some(command), Some(admit)) => admit(command, &options.host)?,
         _ => None,
     };
     if let Some(admission) = &first_admission {
@@ -3578,47 +3885,71 @@ where
     // Snapshot owner, plan, and worktree together. Commands deliberately run
     // outside the lease; the final commit reacquires it and rejects any
     // interleaving writer by invalidating the evidence snapshot.
-    let (owner_number, execution_binding, plan_snapshot, fingerprint_before, verified_head) =
-        crate::cli::trusted_store::with_write_lease(worktree, || {
-            let (owner_number, execution_binding) = if let Some(authority) = authority {
-                (authority.owner_number, authority.execution_binding.clone())
-            } else {
-                current_execution_context(worktree)?
-            };
-            let plan = load_plan(worktree)?;
-            let generated_outputs = plan
-                .as_ref()
-                .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
-                .transpose()?
-                .unwrap_or_default();
-            let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
-            if let Some(authority) = authority {
-                revalidate_verification_caller_authority(worktree, session_id, authority)?;
-                validate_plan_run_context(
-                    plan.as_ref(),
-                    session_id,
-                    owner_number,
-                    execution_binding.as_ref(),
-                    &fingerprint,
-                )?;
-            }
-            let verified_head = current_head_sha(worktree).ok();
-            interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
-            Ok((
+    let (
+        owner_number,
+        execution_binding,
+        plan_snapshot,
+        fingerprint_before,
+        verified_head,
+        predecessor,
+    ) = crate::cli::trusted_store::with_write_lease(worktree, || {
+        let (owner_number, execution_binding) = if let Some(authority) = authority {
+            (authority.owner_number, authority.execution_binding.clone())
+        } else {
+            current_execution_context(worktree)?
+        };
+        let plan = load_plan(worktree)?;
+        let generated_outputs = plan
+            .as_ref()
+            .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
+            .transpose()?
+            .unwrap_or_default();
+        let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
+        if let Some(authority) = authority {
+            revalidate_verification_caller_authority(worktree, session_id, authority)?;
+            validate_plan_run_context(
+                plan.as_ref(),
+                session_id,
                 owner_number,
-                execution_binding,
-                plan,
-                fingerprint,
-                verified_head,
-            ))
-        })
-        .map_err(|err| {
-            if err.kind() == ErrorKind::PermissionDenied {
-                err.to_string()
-            } else {
-                format!("failed to snapshot verification state: {err}")
-            }
-        })?;
+                execution_binding.as_ref(),
+                &fingerprint,
+            )?;
+        }
+        let verified_head = current_head_sha(worktree).ok();
+        interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
+        let predecessor = match (&preview, &request) {
+            (Some(preview), Some(request)) => load(worktree)?.filter(|record| {
+                record.record_id == preview.record_id
+                    && record.content_hash == preview.content_hash
+                    && continuation::eligible(
+                        worktree,
+                        record,
+                        session_id,
+                        owner_number,
+                        execution_binding.as_ref(),
+                        plan.as_ref(),
+                        &fingerprint,
+                        request,
+                    )
+            }),
+            _ => None,
+        };
+        Ok((
+            owner_number,
+            execution_binding,
+            plan,
+            fingerprint,
+            verified_head,
+            predecessor,
+        ))
+    })
+    .map_err(|err| {
+        if err.kind() == ErrorKind::PermissionDenied {
+            err.to_string()
+        } else {
+            format!("failed to snapshot verification state: {err}")
+        }
+    })?;
     if commands.is_empty()
         && !plan_snapshot
             .as_ref()
@@ -3627,6 +3958,45 @@ where
         return Err(
             "verify.run with no commands requires a canonical trivial derived plan".to_string(),
         );
+    }
+    let mut continuation = request;
+    let mut results = Vec::new();
+    let mut transcript = String::new();
+    if let Some(previous) = &predecessor {
+        let context = continuation.as_mut().expect("resumption has exact inputs");
+        context.command_indices = previous
+            .continuation
+            .as_ref()
+            .expect("resumable context")
+            .command_indices
+            .clone();
+        context.previous = Some(continuation::PreviousRun {
+            record_id: previous.record_id.clone(),
+            content_hash: previous.content_hash.clone(),
+            reused_commands: previous.commands.len(),
+        });
+        results = previous.commands.clone();
+        started_at = previous.started_at.expect("resumable measurement start");
+        transcript.push_str(&format!(
+            "verify: continuation — {} passed command(s) retained from {} ({})\n",
+            results.len(),
+            previous.record_id,
+            previous.content_hash
+        ));
+        options.lease_id = previous.lease_id.clone();
+    }
+    let execution_indices = continuation
+        .as_ref()
+        .map(|context| context.remaining(predecessor.is_some()))
+        .unwrap_or_else(|| (0..commands.len()).collect());
+    if execution_indices.first().copied().unwrap_or(0) != preview_first {
+        // Inputs changed while admission waited: discard all carried evidence
+        // and obtain the first fresh command's own admission.
+        drop(first_admission.take());
+        first_admission = match (execution_indices.first(), options.admit_command.as_mut()) {
+            (Some(index), Some(admit)) => admit(&commands[*index], &options.host)?,
+            _ => None,
+        };
     }
     let record_id = format!("vrr-{}", uuid::Uuid::new_v4().simple());
     let watchdog_token = uuid::Uuid::new_v4().simple().to_string();
@@ -3637,7 +4007,9 @@ where
         .then(|| interruption::Watchdog::start(worktree, &record_id, &watchdog_token))
         .transpose()
         .map_err(|error| format!("failed to start verification watchdog: {error}"))?;
-    let mut running = VerificationRunRecord {
+    let mut running = VerificationRunRecord::from(VerificationRunData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
+        continuation,
         record_id: record_id.clone(),
         lifecycle: Some(interruption::RunLifecycle::running(&watchdog_token)),
         session_id: session_id.to_string(),
@@ -3647,7 +4019,7 @@ where
         lease_id: options.lease_id.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
         verified_head: verified_head.clone(),
-        commands: Vec::new(),
+        commands: results.clone(),
         all_passed: false,
         quarantined_failures: Vec::new(),
         adjudications: Vec::new(),
@@ -3662,10 +4034,56 @@ where
             .unwrap_or_default(),
         plan_derived: plan_snapshot.as_ref().is_some_and(|plan| plan.derived),
         content_hash: String::new(),
-    };
+    });
+    if let Some(previous) = &predecessor {
+        let mut document = serde_json::to_value(&running).map_err(|error| error.to_string())?;
+        document["commands"] =
+            serde_json::to_value(previous).map_err(|error| error.to_string())?["commands"].clone();
+        running = serde_json::from_value(document).map_err(|error| error.to_string())?;
+    }
+    if let Some(context) = &running.continuation {
+        running.planned_missing = context.missing();
+    }
     crate::cli::trusted_store::with_write_lease(worktree, || {
         if let Some(authority) = authority {
             revalidate_verification_caller_authority(worktree, session_id, authority)?;
+            let current_plan = load_plan(worktree)?;
+            let fingerprint = worktree_fingerprint_excluding(
+                worktree,
+                plan_snapshot
+                    .as_ref()
+                    .map(|plan| plan.generated_outputs.as_slice())
+                    .unwrap_or_default(),
+            )?;
+            validate_plan_run_context(
+                current_plan.as_ref(),
+                session_id,
+                owner_number,
+                execution_binding.as_ref(),
+                &fingerprint,
+            )?;
+            if predecessor.is_some() && current_plan != plan_snapshot {
+                return Err(io::Error::new(ErrorKind::InvalidInput,
+                    "continuation plan changed during admission; retry verify.run for a fresh matrix"));
+            }
+            if fingerprint != fingerprint_before {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "verification inputs changed during admission; rerun verify.run",
+                ));
+            }
+        }
+        if let Some(previous) = &predecessor {
+            let current = load(worktree)?
+                .ok_or_else(|| io::Error::other("continuation predecessor disappeared"))?;
+            if current.record_id != previous.record_id
+                || current.content_hash != previous.content_hash
+            {
+                return Err(io::Error::other(
+                    "continuation predecessor changed during admission; rerun verify.run",
+                ));
+            }
+            continuation::archive(worktree, previous)?;
         }
         // Recheck while replacing the prior record: a concurrent watchdog may
         // have settled it since the initial snapshot.
@@ -3678,8 +4096,6 @@ where
         save(worktree, &running)
     })
     .map_err(|error| format!("failed to save verification start: {error}"))?;
-    let mut results: Vec<VerificationCommandResult> = Vec::new();
-    let mut transcript = String::new();
     if std::env::var_os(LIVE_GITHUB_OPT_IN_ENV).is_some() {
         transcript.push_str(
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
@@ -3689,29 +4105,24 @@ where
     // the same result path so an unusable artifact can never report PASS
     // (Issue #4317). Appending it to the run's own command list keeps it on
     // the progress count and in the persisted results.
-    let restored;
-    let commands = match gwtd_artifact_restoration(worktree, commands) {
-        Some(restoration) => {
-            let mut extended = commands.to_vec();
-            extended.push(restoration.to_string());
-            restored = extended;
-            restored.as_slice()
-        }
-        None => commands,
-    };
     let commands_started = std::time::Instant::now();
     if let Some(on_progress) = options.on_progress.as_mut() {
-        on_progress(0, commands.len(), std::time::Duration::ZERO);
+        on_progress(results.len(), commands.len(), std::time::Duration::ZERO);
     }
-    for (index, command) in commands.iter().enumerate() {
-        let admission = if index == 0 {
+    for (position, index) in execution_indices.iter().copied().enumerate() {
+        let command = &commands[index];
+        let admission = if position == 0 {
             first_admission.take()
         } else if let Some(admit) = options.admit_command.as_mut() {
-            match admit(command) {
+            match admit(command, &options.host) {
                 Ok(admission) => admission,
                 Err(error) => {
                     if error.contains("verify: deferred") {
-                        running.planned_missing = commands[index..].to_vec();
+                        running.planned_missing = running
+                            .continuation
+                            .as_ref()
+                            .map(continuation::Continuation::missing)
+                            .unwrap_or_else(|| commands[index..].to_vec());
                         let lifecycle = running.lifecycle.as_mut().expect("unfinished run");
                         lifecycle.status = interruption::RunStatus::Deferred;
                         lifecycle.reason = Some(error.clone());
@@ -3841,6 +4252,10 @@ where
             nextest,
             terminated_by_signal,
         });
+        if let Some(context) = running.continuation.as_mut() {
+            context.command_indices.push(index);
+            running.planned_missing = context.missing();
+        }
         running.commands = results.clone();
         running
             .lifecycle
@@ -3866,8 +4281,9 @@ where
             }
         ));
     }
-    let all_passed =
-        results.iter().all(|result| result.exit_code == 0) && (!has_headed_e2e || visual_passed);
+    let all_passed = results.len() == commands.len()
+        && results.iter().all(|result| result.exit_code == 0)
+        && (!has_headed_e2e || visual_passed);
     let mut quarantined_failures = Vec::new();
     if !all_passed {
         let head_sha = current_head_sha(worktree);
@@ -3960,7 +4376,11 @@ where
             }
             _ => (false, Vec::new(), String::new(), false),
         };
-    let mut record = VerificationRunRecord {
+    let continuation = running.continuation.take();
+    let mut record = running;
+    record.data = VerificationRunData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
+        continuation,
         record_id,
         lifecycle: None,
         session_id: session_id.to_string(),
@@ -4025,7 +4445,7 @@ where
             (None, None) => true,
             _ => false,
         };
-        if !same_plan {
+        if !same_plan || (predecessor.is_some() && current_plan != plan_snapshot) {
             transcript.push_str(
                 "warning: the verification plan changed while verification ran — the record is invalidated; rerun `verify.run` against the current plan\n",
             );
@@ -4132,6 +4552,11 @@ pub enum EvidenceStatus {
     StaleFingerprintFiles(Vec<String>),
     Failing,
     Unreadable,
+    /// Authenticity cannot be interpreted by this reader's wire version.
+    UnsupportedFormat {
+        kind: &'static str,
+        version: u64,
+    },
     /// P9a (T-122): the stored integrity hash does not match the content —
     /// the record was edited outside `verify.run`.
     Tampered,
@@ -4158,7 +4583,7 @@ impl EvidenceStatus {
                 "no verification run record exists — run the verification matrix through JSON operation `verify.run` with `params.commands:[...]`"
             }
             Self::Running => "verification is still running — wait for its terminal result",
-            Self::Deferred => "verification admission timed out after partial execution; retained results are incomplete, not PASS — rerun verify.run with the entire matrix",
+            Self::Deferred => "verification admission timed out after partial execution; retained results are incomplete, not PASS — retry verify.run with the identical full matrix to continue strictly matching evidence; changed inputs run fresh",
             Self::Interrupted => "the last verification run was interrupted before completion; this is not a test failure. Inspect lifecycle.reason: two consecutive external terminations on the same HEAD require infrastructure diagnosis and a corrected HEAD before retrying; otherwise rerun verify.run",
             Self::WrongSession => {
                 "the verification record belongs to another session — rerun `verify.run` from this session"
@@ -4184,6 +4609,10 @@ impl EvidenceStatus {
             Self::Unreadable => {
                 "the verification record is unreadable — rerun `verify.run` to rewrite it"
             }
+            Self::UnsupportedFormat { kind, version } => return UnsupportedFormat {
+                kind,
+                version: *version,
+            }.to_string(),
             Self::Tampered => {
                 "the verification record failed integrity validation (edited outside `verify.run`) — rerun `verify.run` to produce a genuine record"
             }
@@ -4541,10 +4970,36 @@ fn evaluate_evidence_snapshot_inner(
     require_current_execution_binding: bool,
     allow_failing_commands: bool,
 ) -> EvidenceStatus {
+    if let Some(version) = record
+        .format_version
+        .filter(|version| *version != VERIFICATION_FORMAT_VERSION)
+    {
+        return EvidenceStatus::UnsupportedFormat {
+            kind: "run",
+            version: u64::from(version),
+        };
+    }
+    for plan in plan
+        .into_iter()
+        .chain(record.verification_plan_snapshot.as_ref())
+    {
+        if let Some(version) = plan
+            .format_version
+            .filter(|version| *version != VERIFICATION_FORMAT_VERSION)
+        {
+            return EvidenceStatus::UnsupportedFormat {
+                kind: "plan",
+                version: u64::from(version),
+            };
+        }
+    }
     if !record.quarantined_failures.is_empty() && record.content_hash.is_empty() {
         return EvidenceStatus::Tampered;
     }
     if !integrity_ok(record) {
+        return EvidenceStatus::Tampered;
+    }
+    if !continuation::chain_valid(worktree, record) {
         return EvidenceStatus::Tampered;
     }
     if record.session_id != session_id {
@@ -4671,7 +5126,7 @@ fn evaluate_evidence_snapshot_inner(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct VerificationCallerAuthority {
     owner_number: Option<u64>,
     execution_binding: Option<ExecutionBindingIdentity>,
@@ -5003,11 +5458,11 @@ pub fn evaluate_evidence(
     let record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => return EvidenceStatus::MissingRecord,
-        Err(_) => return EvidenceStatus::Unreadable,
+        Err(error) => return evidence_read_error(&error),
     };
     let plan = match load_plan(worktree) {
         Ok(plan) => plan,
-        Err(_) => return EvidenceStatus::Unreadable,
+        Err(error) => return evidence_read_error(&error),
     };
     evaluate_evidence_snapshot(
         worktree,
@@ -5030,9 +5485,9 @@ pub(crate) fn evaluate_pr_ready_evidence(
     let record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => return Err(EvidenceStatus::MissingRecord),
-        Err(_) => return Err(EvidenceStatus::Unreadable),
+        Err(error) => return Err(evidence_read_error(&error)),
     };
-    let plan = load_plan(worktree).map_err(|_| EvidenceStatus::Unreadable)?;
+    let plan = load_plan(worktree).map_err(|error| evidence_read_error(&error))?;
     let status = evaluate_evidence_snapshot_inner(
         worktree,
         session_id,
@@ -5109,6 +5564,14 @@ pub enum VerifyCommand {
     /// Full T-130 core: `derive` classifies changed surfaces and derives the
     /// matrix when no explicit commands are given.
     Plan { commands: Vec<String>, derive: bool },
+    /// Explicit CI-backed pre-PR policy; existing full/explicit plans keep
+    /// their semantics and the trusted persisted record shape is unchanged.
+    PrePrPlan {
+        commands: Vec<String>,
+        acceptance_commands: Vec<String>,
+        generated_outputs: Vec<String>,
+        quarantines: Vec<VerificationQuarantineRequest>,
+    },
     /// Explicit plan with an exact generated-file allowlist.
     PlanWithOutputs {
         commands: Vec<String>,
@@ -5181,6 +5644,36 @@ pub(super) fn run<E: CliEnv>(
         other => other,
     };
     match command {
+        VerifyCommand::PrePrPlan {
+            commands,
+            acceptance_commands,
+            generated_outputs,
+            quarantines,
+        } => {
+            let (derived, plan) = derive_and_register_plan_for_caller(
+                &worktree,
+                &session_id,
+                generated_outputs,
+                quarantines,
+                &authority,
+                Some((&acceptance_commands, &commands)),
+            )
+            .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            out.push_str(&format!(
+                "verify: pre-pr derived matrix [{}]\n",
+                derived.surfaces.join(", ")
+            ));
+            for command in &derived.commands {
+                out.push_str(&format!("  - {command}\n"));
+            }
+            out.push_str(&format!(
+                "verify: plan registered — {} command(s) for session {} (owner {:?}, derived)\n",
+                plan.commands.len(),
+                session_id,
+                plan.owner_number
+            ));
+            Ok(0)
+        }
         VerifyCommand::PlanWithOutputs {
             commands,
             derive,
@@ -5200,6 +5693,7 @@ pub(super) fn run<E: CliEnv>(
                     generated_outputs,
                     quarantines,
                     &authority,
+                    None,
                 )
                 .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
                 out.push_str(&format!(
@@ -5355,15 +5849,21 @@ pub(super) fn run<E: CliEnv>(
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
             out.push_str(&host_note);
-            let mut admit_command = |command: &str| {
+            let mut admit_command = |command: &str, host: &VerificationHost| {
                 if crate::cli::verification_lease::classify_command(command)
                     == crate::cli::verification_lease::CommandWeight::Light
                 {
                     Ok(None)
                 } else {
-                    crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)
-                        .map(Some)
-                        .map_err(|error| error.to_string())
+                    crate::cli::verification_lease::admission::admit(
+                        env,
+                        &worktree,
+                        Some(command),
+                        max_wait,
+                        || restore_gwtd_after_deferral(&worktree, host),
+                    )
+                    .map(Some)
+                    .map_err(|error| error.to_string())
                 }
             };
             let run = run_verification_for_caller(
@@ -5464,7 +5964,8 @@ pub(crate) mod tests {
             .map(|record| record.owner_number);
         save_plan(
             worktree,
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: session.to_string(),
                 owner_number,
                 execution_binding: None,
@@ -5476,14 +5977,16 @@ pub(crate) mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         run_verification(worktree, session, commands).unwrap()
     }
 
     pub(super) fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
-        VerificationRunRecord {
+        VerificationRunRecord::from(VerificationRunData {
+            format_version: None,
+            continuation: None,
             lifecycle: None,
             record_id: "vr-test".to_string(),
             user_verification_result: None,
@@ -5513,7 +6016,7 @@ pub(crate) mod tests {
             verification_plan_snapshot: None,
             plan_derived: false,
             content_hash: String::new(),
-        }
+        })
     }
 
     /// An authority refusal must explain how ordinary development can proceed
@@ -5552,7 +6055,8 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-cov".to_string(),
                 owner_number: Some(3248),
                 execution_binding: None,
@@ -5564,7 +6068,7 @@ pub(crate) mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let loaded = load_plan(dir.path()).unwrap().unwrap();
@@ -5584,7 +6088,8 @@ pub(crate) mod tests {
 
     #[test]
     fn typed_quarantine_request_roundtrips_in_verification_plan() {
-        let mut value = serde_json::to_value(VerificationPlanRecord {
+        let mut value = serde_json::to_value(VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-plan-quarantine".to_string(),
             owner_number: Some(3841),
             execution_binding: None,
@@ -5596,7 +6101,7 @@ pub(crate) mod tests {
             worktree_fingerprint: "fingerprint".to_string(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        })
+        }))
         .unwrap();
         value["quarantines"] = serde_json::json!([{
             "failed_command": "cargo test -p gwt --all-features --lib",
@@ -5652,6 +6157,7 @@ pub(crate) mod tests {
             vec!["artifacts/report.json".to_string()],
             Vec::new(),
             &authority,
+            None,
         )
         .unwrap();
         assert!(!derived.surfaces.is_empty());
@@ -5689,7 +6195,8 @@ pub(crate) mod tests {
         gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
         assert!(!load(dir.path()).unwrap().unwrap().all_passed);
 
-        let plan = VerificationPlanRecord {
+        let plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -5701,7 +6208,7 @@ pub(crate) mod tests {
             quarantines: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        };
+        });
         save_plan(dir.path(), &plan).unwrap();
         // Forge a trivial (empty-matrix) plan in the mirror.
         let mut forged_plan = plan.clone();
@@ -5767,7 +6274,8 @@ pub(crate) mod tests {
         assert_eq!(load(dir.path()).unwrap(), None);
 
         // Same for a forged trivial plan.
-        let mut forged_plan = VerificationPlanRecord {
+        let mut forged_plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -5779,7 +6287,7 @@ pub(crate) mod tests {
             quarantines: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        };
+        });
         forged_plan.content_hash = compute_plan_hash(&forged_plan);
         let serialized = serde_json::to_vec_pretty(&forged_plan).unwrap();
         gwt_github::cache::write_atomic(&plan_state_path(dir.path()), &serialized).unwrap();
@@ -6006,9 +6514,11 @@ pub(crate) mod tests {
             all_passed: bool,
             created_at: DateTime<Utc>,
             plan_covered: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            verification_plan_snapshot: Option<VerificationPlanData>,
         }
 
-        let legacy = LegacyVerificationRunRecord {
+        let mut legacy = LegacyVerificationRunRecord {
             record_id: "vrr-legacy",
             session_id: "sess-legacy",
             owner_number: 3248,
@@ -6022,6 +6532,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             plan_covered: true,
+            verification_plan_snapshot: None,
         };
         let serialized = serde_json::to_vec(&legacy).unwrap();
         let hash = format!("{:x}", Sha256::digest(&serialized));
@@ -6032,6 +6543,145 @@ pub(crate) mod tests {
         assert!(integrity_ok(&loaded));
         assert_eq!(compute_content_hash(&loaded), hash);
         assert!(loaded.commands[0].output_tail.is_empty());
+
+        // A legacy embedded plan must keep struct order too, rather than
+        // acquiring the sorted object order of the versioned wire adapter.
+        legacy.verification_plan_snapshot = Some(VerificationPlanData {
+            format_version: None,
+            session_id: "sess-legacy".to_string(),
+            owner_number: Some(3248),
+            execution_binding: None,
+            commands: vec!["git --version".to_string()],
+            derived: false,
+            surfaces: Vec::new(),
+            generated_outputs: Vec::new(),
+            quarantines: Vec::new(),
+            worktree_fingerprint: String::new(),
+            created_at: legacy.created_at,
+            content_hash: String::new(),
+        });
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
+        let mut value = serde_json::to_value(legacy).unwrap();
+        value["content_hash"] = serde_json::json!(hash);
+        let loaded: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(integrity_ok(&loaded));
+        assert_eq!(compute_content_hash(&loaded), hash);
+    }
+
+    #[test]
+    fn verification_wire_roundtrip_preserves_unknown_fields_and_hash() {
+        let mut value = serde_json::to_value(passing_record("skew", "abc")).unwrap();
+        value["format_version"] = serde_json::json!(1);
+        value["future_record_field"] = serde_json::json!({"nested": [1, 2]});
+        value["commands"][0]["future_command_field"] = serde_json::json!("measured");
+        value["quarantined_failures"] = serde_json::json!([{
+            "failed_command": "cargo test", "test_identity": "test", "owner_issue": 5064,
+            "head_sha": "head", "merge_base_sha": "base", "baseline_command": "cargo test",
+            "baseline_exit_code": 1, "baseline_result_line": "FAILED", "pr_number": 1,
+            "future_failure": "opaque",
+            "pr_reference": {"kind": "body", "marker": "marker", "future_reference": true}
+        }]);
+        value.as_object_mut().unwrap().remove("content_hash");
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()));
+        value["content_hash"] = serde_json::json!(hash);
+
+        let record: VerificationRunRecord = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), value);
+        assert!(integrity_ok(&record));
+        assert_eq!(compute_content_hash(&record), hash);
+
+        let mut edited = record;
+        edited.commands[0].exit_code = 1;
+        assert!(!integrity_ok(&edited), "known fields remain hash-covered");
+        value["future_record_field"]["nested"][0] = serde_json::json!(3);
+        let edited: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(!integrity_ok(&edited), "unknown fields remain hash-covered");
+    }
+
+    #[test]
+    fn verification_wire_n_minus_one_reader_accepts_writer_continuation() {
+        // Freeze a v1 reader projection from before continuation was known.
+        #[derive(Serialize, Deserialize)]
+        struct PreviousReader {
+            format_version: u32,
+            record_id: String,
+            commands: Vec<VerificationCommandResult>,
+        }
+        let mut writer = passing_record("skew", "abc");
+        writer.format_version = Some(VERIFICATION_FORMAT_VERSION);
+        writer.continuation = Some(continuation::Continuation {
+            commands: vec!["git --version".to_string()],
+            headed_e2e_commands: Vec::new(),
+            authority_hash: "test-authority".to_string(),
+            command_indices: vec![0],
+            previous: None,
+        });
+        writer.content_hash = compute_content_hash(&writer);
+        let produced = serde_json::to_value(&writer).unwrap();
+        let reader: wire::WireRecord<PreviousReader> =
+            serde_json::from_value(produced.clone()).unwrap();
+        let mut roundtrip = serde_json::to_value(reader).unwrap();
+        assert_eq!(roundtrip, produced);
+        roundtrip.as_object_mut().unwrap().remove("content_hash");
+        assert_eq!(wire::canonical_hash(&roundtrip), writer.content_hash);
+    }
+
+    #[test]
+    fn verification_wire_plan_extensions_are_integrity_and_meaning_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        plan_and_run(dir.path(), "skew", &["git --version".to_string()]);
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        let mut value = serde_json::to_value(plan).unwrap();
+        value["future_input"] = serde_json::json!({"checks": ["new"]});
+        value["quarantines"] = serde_json::json!([{
+            "failed_command": "cargo test", "test_identity": "test",
+            "baseline_command": "cargo test", "owner_issue": 5064, "pr_number": 1,
+            "future_request": "opaque"
+        }]);
+        assert!(
+            serde_json::from_value::<VerificationQuarantineRequest>(
+                value["quarantines"][0].clone()
+            )
+            .is_err(),
+            "user input remains strict"
+        );
+        value.as_object_mut().unwrap().remove("content_hash");
+        value["content_hash"] = serde_json::json!(wire::canonical_hash(&value));
+        let extended: VerificationPlanRecord = serde_json::from_value(value.clone()).unwrap();
+        assert!(plan_integrity_ok(&extended));
+        assert_eq!(serde_json::to_value(&extended).unwrap(), value);
+
+        value["future_input"]["checks"][0] = serde_json::json!("changed");
+        let edited: VerificationPlanRecord = serde_json::from_value(value).unwrap();
+        assert!(!plan_integrity_ok(&edited));
+        assert_eq!(
+            changed_plan_fields(&extended, &edited),
+            vec!["unknown_fields"]
+        );
+    }
+
+    #[test]
+    fn verification_wire_newer_format_reports_version_instead_of_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(passing_record("skew", "no-git")).unwrap();
+        value["format_version"] = serde_json::json!(999);
+        // A newer format may change even recognized nested fields. Diagnose
+        // the version before attempting to decode that payload.
+        value["commands"] = serde_json::json!("newer command representation");
+        fs::create_dir_all(state_path(dir.path()).parent().unwrap()).unwrap();
+        fs::write(state_path(dir.path()), serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let status = evaluate_evidence(dir.path(), "skew", Some(3248));
+        let message = status.describe();
+        assert!(
+            message.contains("format version 999"),
+            "{status:?}: {message}"
+        );
+        assert!(message.contains("upgrade"), "{message}");
+        assert!(
+            !message.contains("tamper") && !message.contains("rerun"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -6044,6 +6694,155 @@ pub(crate) mod tests {
         assert!(record.commands[0].output_tail.is_empty());
         let serialized = serde_json::to_value(&record.commands[0]).unwrap();
         assert!(serialized.get("output_tail").is_none(), "{serialized}");
+    }
+
+    #[test]
+    fn command_children_have_distinct_temporary_directories() {
+        let worktree = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let command = r#"pwsh -NoProfile -Command 'Write-Output ($env:TEMP + "|" + $env:TMP + "|" + $env:TMPDIR)'"#;
+        #[cfg(unix)]
+        let command = r#"sh -c 'printf "%s|%s|%s" "$TEMP" "$TMP" "$TMPDIR"'"#;
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let (code, _, output) = execute_command_with_isolation(
+                worktree.path(),
+                command,
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{output}");
+            let line = output.lines().find(|line| line.contains('|')).unwrap();
+            let directories: Vec<_> = line.trim().split('|').collect();
+            assert_eq!(directories.len(), 3, "{output}");
+            assert!(!directories[0].is_empty());
+            assert_eq!(directories[0], directories[1]);
+            assert_eq!(directories[0], directories[2]);
+            paths.push(directories[0].to_string());
+        }
+        assert_ne!(
+            paths[0], paths[1],
+            "canonical children must not share test temp names"
+        );
+        assert!(paths.iter().all(|path| !Path::new(path).exists()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_admitted_cargo_rejects_unresolved_artifact_target() {
+        let worktree = tempfile::tempdir().unwrap();
+        let cargo = worktree.path().join("cargo");
+        gwt_core::test_support::write_executable_script(
+            &cargo,
+            "#!/bin/sh\ncase \"$*\" in metadata*--format-version*) exit 1;; esac\nprintf '%s\\n' \"$*\" >> executed\n",
+        )
+        .unwrap();
+        let execute = |arguments: &str| {
+            execute_command_with_isolation(
+                worktree.path(),
+                &format!("{} {arguments}", serde_json::to_string(&cargo).unwrap()),
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+        };
+
+        for arguments in [
+            "build -p gwt --bin gwtd --target-dir target",
+            "doc --no-deps",
+            "--config fmt test -p metadata",
+        ] {
+            let result = execute(arguments);
+            assert!(
+                !worktree.path().join("executed").exists(),
+                "unresolved artifact command must not spawn: {arguments} / {result:?}"
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("Cargo artifact target is unresolved"),
+                "{arguments}"
+            );
+        }
+        for arguments in ["--config test fmt --all --check", "metadata --no-deps"] {
+            assert_eq!(execute(arguments).unwrap().0, 0, "{arguments}");
+        }
+        assert_eq!(
+            fs::read_to_string(worktree.path().join("executed")).unwrap(),
+            "--config test fmt --all --check\nmetadata --no-deps\n"
+        );
+    }
+
+    #[test]
+    fn non_admitted_cargo_holds_the_build_artifact_boundary() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(worktree.path().join("src")).unwrap();
+        fs::write(
+            worktree.path().join("Cargo.toml"),
+            "[package]\nname='resource-boundary-fixture'\nversion='0.0.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree.path().join("src/lib.rs"),
+            "#[test] fn resource_fixture() {}",
+        )
+        .unwrap();
+        fs::write(
+            worktree.path().join("build.rs"),
+            r#"fn main() {
+                let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+                std::fs::write(root.join("entered"), "").unwrap();
+                while !root.join("release").exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }"#,
+        )
+        .unwrap();
+        let root = worktree.path().to_path_buf();
+        let child_home = home.path().to_path_buf();
+        let child = std::thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(child_home);
+            execute_command_with_isolation(
+                &root,
+                "cargo t --lib resource_fixture --target-dir target",
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !worktree.path().join("entered").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let entered = worktree.path().join("entered").exists();
+        let protected = entered
+            && crate::cli::verification_lease::try_lock_build_artifacts(
+                &worktree.path().join("target"),
+            )
+            .unwrap()
+            .is_none();
+        // Release the real build child before asserting, including on RED.
+        fs::write(worktree.path().join("release"), "").unwrap();
+        let (code, _, output) = child.join().unwrap().unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(
+            entered,
+            "the Cargo build script must exercise the execution interval"
+        );
+        assert!(
+            protected,
+            "non-admitted Cargo must participate in the GC target boundary"
+        );
     }
 
     /// Issue #4409: the daemon-hosted path assembles its child from an
@@ -6224,6 +7023,9 @@ pub(crate) mod tests {
 
     #[test]
     fn failed_cargo_test_output_is_bounded_and_persisted() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Cargo.toml"),
@@ -6277,6 +7079,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn gwtd_artifact_restoration_failure_is_recorded_after_passing_tests() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src")).unwrap();
@@ -6309,6 +7114,17 @@ mod tests {
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
+        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit);
+        assert!(
+            recovery.contains("gwtd artifact restoration: failed"),
+            "{recovery}"
+        );
+        assert!(
+            recovery.contains("cargo build -p gwt --bin gwtd"),
+            "{recovery}"
+        );
+        assert!(recovery.contains("gwtd.rs"), "{recovery}");
+        assert_eq!(load(dir.path()).unwrap().unwrap(), persisted);
     }
 
     // Re-entered in child processes so this regression also runs on Windows.
@@ -6541,7 +7357,9 @@ mod tests {
     fn record_roundtrips_and_missing_is_none() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), None);
-        let record = VerificationRunRecord {
+        let record = VerificationRunRecord::from(VerificationRunData {
+            format_version: Some(1),
+            continuation: None,
             lifecycle: None,
             record_id: "vrr-test".to_string(),
             user_verification_result: None,
@@ -6571,7 +7389,7 @@ mod tests {
             verification_plan_snapshot: None,
             plan_derived: false,
             content_hash: String::new(),
-        };
+        });
         save(dir.path(), &record).unwrap();
         let loaded = load(dir.path()).unwrap().unwrap();
         assert!(integrity_ok(&loaded));
@@ -6879,7 +7697,8 @@ mod tests {
 
         let plan_result = save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6891,7 +7710,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         );
         let run_result = run_verification(dir.path(), "sess-1", &["git --version".to_string()]);
         release_tx.send(()).unwrap();
@@ -6945,7 +7764,16 @@ mod tests {
     // typed owner/base/PR disposition receives its own delivery status.
     #[test]
     fn typed_quarantine_is_distinct_from_raw_pass_and_plain_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='quarantine-target-fixture'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
         let test_identity = "app_runtime::tests::bounded_sync";
         let command = "cargo test -p definitely-missing-package --lib".to_string();
         let baseline_command = format!("{command} {test_identity} -- --exact");
@@ -7111,7 +7939,8 @@ mod tests {
             owner_issue: 3755,
             pr_number: 3854,
         };
-        let plan = VerificationPlanRecord {
+        let plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess".to_string(),
             owner_number: Some(3841),
             execution_binding: None,
@@ -7123,7 +7952,7 @@ mod tests {
             worktree_fingerprint: "fingerprint".to_string(),
             created_at: Utc::now(),
             content_hash: "hash".to_string(),
-        };
+        });
         let mut env = crate::cli::TestEnv::new(std::path::PathBuf::from("."));
         env.pr_quarantine_contexts.insert(
             3854,
@@ -7274,7 +8103,8 @@ mod tests {
         };
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-quarantine-runner".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7286,7 +8116,7 @@ mod tests {
                 worktree_fingerprint: worktree_fingerprint(dir.path()),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let prepared = PreparedQuarantineRequest {
@@ -7595,7 +8425,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-generated".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7607,7 +8438,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -7730,7 +8561,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-mixed".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7742,7 +8574,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -7784,7 +8616,8 @@ mod tests {
         // Plan with two commands; running only one is not covered.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7796,7 +8629,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, transcript) =
@@ -7828,7 +8661,8 @@ mod tests {
         // Another session's plan does not count for this session's run.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-other".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7840,7 +8674,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, _) =
@@ -7915,7 +8749,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7927,7 +8762,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
@@ -7944,7 +8779,8 @@ mod tests {
 
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7956,7 +8792,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let status = evaluate_evidence(dir.path(), "sess-1", None);
@@ -7984,7 +8820,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7996,7 +8833,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         fs::write(dir.path().join("new-rust-surface.rs"), "fn added() {}\n").unwrap();
@@ -8069,10 +8906,16 @@ mod tests {
             )
             .unwrap();
 
-        // Narrowed to one named integration test of one package, and pointed
-        // at a directory with no manifest so cargo answers immediately: the
+        // Narrowed to one named integration test of one package. Metadata
+        // resolves the target, but the missing test answers immediately: the
         // command's outcome is irrelevant here, its classification is not.
         let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='gwt'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
         let (_code, out) = crate::cli::run_collect(
             &mut env,
@@ -8116,7 +8959,7 @@ mod tests {
         let error = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
-                commands: plan.commands,
+                commands: plan.commands.clone(),
                 headed_e2e_commands: Vec::new(),
                 max_wait_secs: Some(0),
                 user_verification_result: None,
@@ -8139,6 +8982,14 @@ mod tests {
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-preflight");
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let marker = home.path().join("command-ran");
@@ -8229,7 +9080,7 @@ mod tests {
             dir.path(),
             "sess-preflight",
             commands.clone(),
-            plan.generated_outputs,
+            plan.generated_outputs.clone(),
             Vec::new(),
             false,
             &authority,
@@ -8258,8 +9109,23 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-mixed");
+        let original_home = dirs::home_dir().unwrap();
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .unwrap_or_else(|| original_home.join(".cargo").into_os_string());
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .unwrap_or_else(|| original_home.join(".rustup").into_os_string());
+        let _cargo_home = ScopedEnvVar::set("CARGO_HOME", cargo_home);
+        let _rustup_home = ScopedEnvVar::set("RUSTUP_HOME", rustup_home);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let coordinator = IndexCoordinator::open_default_verification().unwrap();
         let other = TargetKey::verification("other-repo", "other-worktree");
         let JobAdmission::Owner(guard) = coordinator
@@ -8320,11 +9186,110 @@ mod tests {
     }
 
     #[test]
+    fn admission_deferred_continuation_skips_passes_and_prioritizes_remaining_light() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        let commands = vec![
+            if cfg!(windows) {
+                r#"powershell -NoProfile -Command "[IO.File]::AppendAllText('.gwt/command-count','x')""#
+            } else {
+                "sh -c 'printf x >> .gwt/command-count'"
+            }
+            .to_string(),
+            "git --version".to_string(),
+            "cargo fmt --version".to_string(),
+        ];
+        let authority = snapshot_verification_caller_authority(dir.path(), "sess-resume").unwrap();
+        register_plan_for_caller(
+            dir.path(),
+            "sess-resume",
+            commands.clone(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        let mut admit = |command: &str, _: &VerificationHost| {
+            if command == commands[1] {
+                Err("verify: deferred — admission timeout".to_string())
+            } else {
+                Ok(None)
+            }
+        };
+        let error = run_verification_for_caller(
+            dir.path(),
+            "sess-resume",
+            &commands,
+            &authority,
+            &[],
+            RunOptions {
+                admit_command: Some(&mut admit),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("deferred"));
+        let mut predecessor = load(dir.path()).unwrap().unwrap();
+        let mut document = serde_json::to_value(&predecessor).unwrap();
+        document["commands"][0]["future_measurement"] = serde_json::json!({"count": 7});
+        predecessor = serde_json::from_value(document).unwrap();
+        save(dir.path(), &predecessor).unwrap();
+        let predecessor = load(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-resume", None),
+            EvidenceStatus::Deferred
+        );
+        let mut admitted = Vec::new();
+        let mut admit = |command: &str, _: &VerificationHost| {
+            admitted.push(command.to_string());
+            Ok(None)
+        };
+        let (record, transcript) = run_verification_for_caller(
+            dir.path(),
+            "sess-resume",
+            &commands,
+            &authority,
+            &[],
+            RunOptions {
+                admit_command: Some(&mut admit),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(dir.path().join(".gwt/command-count")).unwrap(),
+            b"x",
+            "a successful Heavy command must not run twice"
+        );
+        assert_eq!(admitted, vec![commands[2].clone(), commands[1].clone()]);
+        assert_eq!(record.started_at, predecessor.started_at);
+        assert_eq!(record.commands[0], predecessor.commands[0]);
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["commands"][0]["future_measurement"],
+            serde_json::json!({"count": 7})
+        );
+        assert!(transcript.contains(&predecessor.record_id));
+        assert!(record.all_passed && record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-resume", None),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
     fn derived_trivial_plan_allows_empty_run_and_fresh_evidence() {
         let dir = tempfile::tempdir().unwrap();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-trivial".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8336,7 +9301,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -8369,6 +9334,16 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
             .unwrap();
@@ -8395,7 +9370,8 @@ mod tests {
         // Registered plan + covering run settles.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-ob".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -8407,7 +9383,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
@@ -9168,6 +10144,12 @@ mod tests {
                 probe.governance.cause,
                 Some(crate::cli::governance::GovernanceCause::Authority)
             );
+            let reason = probe.reason.as_deref().unwrap_or_default();
+            assert!(
+                reason.contains("unavailable is a consequence")
+                    && reason.contains("recover the owning Session authority"),
+                "authority loss must explain verification unavailability and recovery: {probe:?}"
+            );
         }
     }
 
@@ -9180,6 +10162,12 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("blocked generation recovery repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();
@@ -9250,6 +10238,12 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("ledgerless compatibility repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();
@@ -12120,23 +13114,42 @@ mod tests {
 
     // Issue #4349 (AC-1): the run record itself binds the superset run to the
     // registered (derived) plan, so the completion gate never sees
-    // plan_not_covered / plan_changed for it. The commands fail fast here
-    // (no Cargo.toml in the fixture) — coverage is independent of exit codes.
+    // plan_not_covered / plan_changed for it. The missing packages fail fast
+    // here — coverage is independent of exit codes, with a resolved target.
     #[test]
     fn verify_run_covers_derived_plan_with_package_superset() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_home = dirs::home_dir().unwrap();
+        let _cargo_home = ScopedEnvVar::set(
+            "CARGO_HOME",
+            std::env::var_os("CARGO_HOME")
+                .unwrap_or_else(|| original_home.join(".cargo").into_os_string()),
+        );
+        let _rustup_home = ScopedEnvVar::set(
+            "RUSTUP_HOME",
+            std::env::var_os("RUSTUP_HOME")
+                .unwrap_or_else(|| original_home.join(".rustup").into_os_string()),
+        );
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='superset-target-fixture'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
+        fs::write(dir.path().join(".gitignore"), "/target\nCargo.lock\n").unwrap();
         let planned = "cargo test -p gwt --all-features".to_string();
         let ran = "cargo test -p gwt-core -p gwt --all-features".to_string();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-4349".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -12148,7 +13161,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 

@@ -65,7 +65,7 @@ test.describe("Surface rail", () => {
     await expect(left).toHaveAttribute("data-surface", "settings");
     await expect(left.locator(".workspace-window[data-preset='settings']")).toBeVisible();
     await expect(right).toHaveAttribute("data-surface", "agents");
-    await expect(left.getByRole("option", { name: "Agents (open in other pane)" })).toHaveJSProperty("disabled", true);
+    await expect(left.getByRole("option", { name: "Agents", exact: true })).toHaveJSProperty("disabled", false);
     await page.setViewportSize({ width: 1000, height: 800 });
     await expect(right.locator(".agent-tile").first()).toBeVisible();
     await expect(left).toHaveAttribute("data-surface", "settings");
@@ -77,6 +77,91 @@ test.describe("Surface rail", () => {
     await expect(page.locator("#split-surfaces")).toBeHidden();
     await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(6);
     expect((await sentMessages(page)).filter((message) => message.kind === "close_window")).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("the same non-Agent surfaces open as two live views with pane-local Settings labels", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    const left = page.getByRole("region", { name: "Left pane", exact: true });
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    for (const surface of ["board", "issues", "settings"]) {
+      await left.getByRole("combobox", { name: "Left pane surface" }).selectOption(surface);
+      await right.getByRole("combobox", { name: "Right pane surface" }).selectOption(surface);
+      const preset = surface === "issues" ? "issue" : surface;
+      const view = `.workspace-window[data-preset='${preset}']`;
+      await expect(left.locator(view)).toBeVisible();
+      await expect(right.locator(view)).toBeVisible();
+      expect(await left.locator(view).getAttribute("data-id")).not.toBe(await right.locator(view).getAttribute("data-id"));
+      await expect(right).toHaveAttribute("data-active", "true");
+    }
+    for (const pane of [left, right]) {
+      const language = pane.getByLabel("Output Language", { exact: true });
+      await expect(language).toBeVisible();
+      expect(await language.evaluate(node => node.closest(".split-pane")?.getAttribute("aria-label")))
+        .toBe(await pane.getAttribute("aria-label"));
+      await pane.getByRole("tab", { name: "Custom Agents", exact: true }).click();
+      await expect(pane.getByRole("tab", { name: "Custom Agents", exact: true })).toHaveAttribute("aria-selected", "true");
+    }
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(4);
+    await clearMessages(page);
+    await page.getByRole("button", { name: "Close split", exact: true }).click();
+    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(9);
+    expect((await sentMessages(page)).filter(message => message.kind === "close_window")).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("the same agent stays live in both panes and input follows the selected pane", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await page.getByRole("tab", { name: "agent-one", exact: true }).click();
+    await page.locator('.agent-tile[data-agent-id="agent-one"] .xterm').evaluate(node => { (window as any).__splitAgentTerminal = node; });
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    const left = page.getByRole("region", { name: "Left pane", exact: true });
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await right.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    await expect(right.locator('.agent-tile[data-agent-id="agent-one"] .xterm')).toBeVisible();
+    await expect(left.locator('.agent-tile[data-agent-id="agent-one"] pre')).toBeVisible();
+    await expect(left.locator("textarea")).toHaveCount(0);
+    const output = "SAME AGENT BOTH PANES";
+    await page.evaluate(text => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-one", data_base64: btoa(text + "\r\n") }), output);
+    await expect(left.locator('.agent-tile[data-agent-id="agent-one"] pre')).toContainText(output);
+    await expect(right.locator('.agent-tile[data-agent-id="agent-one"] .xterm-rows')).toContainText(output);
+    await page.evaluate(() => (window as any).__updateSurfaceAgent("agent-one", { dynamic_title: "Updated agent" }));
+    await expect(right.getByRole("tab", { name: "Updated agent", exact: true })).toBeVisible();
+    await expect(right).toHaveAttribute("data-active", "true");
+    await left.locator('.agent-tile[data-agent-id="agent-one"]').click();
+    await expect(left.locator('.agent-tile[data-agent-id="agent-one"] .xterm-helper-textarea')).toBeFocused();
+    await clearMessages(page);
+    await left.locator('.agent-tile[data-agent-id="agent-one"] .xterm-helper-textarea').press("a");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input"))
+      .toEqual([{ kind: "terminal_input", id: "agent-one", data: "a" }]);
+    await right.getByRole("combobox", { name: "Right pane surface" }).focus();
+    await expect(right.locator('.agent-tile[data-agent-id="agent-one"] .xterm')).toBeVisible();
+    expect(await right.locator('.agent-tile[data-agent-id="agent-one"] .xterm').evaluate(node => node === (window as any).__splitAgentTerminal)).toBe(true);
+    await page.setViewportSize({ width: 1000, height: 800 });
+    await expect(left.locator('.agent-tile[data-agent-id="agent-one"] pre')).toContainText(output);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: testInfo.outputPath("same-agent-both-panes.png") });
+    await right.getByRole("button", { name: "Close Updated agent tab", exact: true }).click();
+    await expect(left.locator('.agent-tile[data-agent-id="agent-two"]')).toBeVisible();
+    await right.getByRole("button", { name: "Open Updated agent tab", exact: true }).click();
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("agent-one"));
+    await expect(left.locator('.agent-tile[data-agent-id="agent-one"]')).toHaveCount(0);
+    await expect(right.getByRole("tab", { name: "All agents", exact: true })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("button", { name: "Close split", exact: true }).click();
+    await expect(page.locator(".agents-surface--preview")).toHaveCount(0);
+    expect((await sentMessages(page)).filter(message => ["close_window", "stop_agent"].includes(message.kind || ""))).toEqual([]);
     expect(errors).toEqual([]);
   });
 
@@ -161,6 +246,45 @@ test.describe("Surface rail", () => {
     await expect(all).toBeFocused();
     await expect(all).toHaveAttribute("aria-selected", "true");
     await expect(second).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("closing an agent tab keeps its terminal live and allows reopening", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const one = page.getByRole("tab", { name: "agent-one", exact: true });
+    const all = page.getByRole("tab", { name: "All agents", exact: true });
+    const tile = page.locator('.agent-tile[data-agent-id="agent-one"]');
+    await one.click();
+    await tile.locator(".xterm").evaluate(node => { (window as any).__closedTabTerminal = node; });
+    await clearMessages(page);
+    await page.getByRole("button", { name: "Close agent-one tab", exact: true }).click();
+    await expect(one).toHaveCount(0);
+    await expect(all).toBeFocused();
+    await expect(all).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".agent-tile")).toHaveCount(2);
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-one", data_base64: btoa("LIVE AFTER TAB CLOSE\r\n") }));
+    await expect(tile.locator(".xterm-rows")).toContainText("LIVE AFTER TAB CLOSE");
+    const reopen = page.getByRole("button", { name: "Open agent-one tab", exact: true });
+    await expect(reopen).toHaveText("Open tab");
+    await reopen.focus();
+    await reopen.press("Enter");
+    await expect(one).toHaveAttribute("aria-selected", "true");
+    await expect(one).toBeFocused();
+    expect(await tile.locator(".xterm").evaluate(node => node === (window as any).__closedTabTerminal)).toBe(true);
+    await tile.locator(".xterm-helper-textarea").press("c");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "agent-one", data: "c" });
+    await one.focus();
+    await one.press("Delete");
+    await expect(one).toHaveCount(0);
+    await expect(all).toBeFocused();
+    expect((await sentMessages(page)).filter(message => message.kind === "close_window" || message.kind === "stop_agent")).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("agents-tab-closed.png") });
     expect(errors).toEqual([]);
   });
 
@@ -503,7 +627,8 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
         }
         if (message.kind === "create_window" && message.preset) {
           zCounter += 1;
-          windows.push(canvasWindow(`${message.preset}-new`, { preset: message.preset, z_index: zCounter }));
+          const id = `${message.preset}-new`;
+          windows.push(canvasWindow(windows.some(data => data.id === id) ? `${id}-${zCounter}` : id, { preset: message.preset, z_index: zCounter }));
           this.emit(workspaceState());
         }
         if (message.kind === "activate_window_tab") {
@@ -537,6 +662,11 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
     (window as any).__removeSurfaceAgent = (id: string) => {
       const index = windows.findIndex(data => data.id === id);
       if (index >= 0) windows.splice(index, 1);
+      socket?.emit(workspaceState());
+    };
+    (window as any).__updateSurfaceAgent = (id: string, updates: Record<string, unknown>) => {
+      const data = windows.find(data => data.id === id);
+      if (data) Object.assign(data, updates);
       socket?.emit(workspaceState());
     };
   }, groupedSettings);

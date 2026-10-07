@@ -394,6 +394,7 @@ pub(super) fn run<E: CliEnv>(
         } => run_monitor_question_answer(env, project_root.as_deref(), &handoff_id, &answer, out)?,
         IssueCommand::MonitorConfigSet {
             project_root,
+            allowed_labels,
             enabled,
             autonomous_mode,
             max_active,
@@ -404,6 +405,7 @@ pub(super) fn run<E: CliEnv>(
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
+            allowed_labels.as_deref(),
             enabled,
             autonomous_mode,
             max_active,
@@ -653,9 +655,10 @@ fn merge_board_escalations_into_needs_human(
     status
         .active_launches
         .retain(|issue_number| !closed_issue_numbers.contains(issue_number));
-    status
-        .needs_human
-        .retain(|issue_number| !closed_issue_numbers.contains(issue_number));
+    status.needs_human.retain(|issue_number| {
+        !closed_issue_numbers.contains(issue_number)
+            && !status.label_excluded_issues.contains(issue_number)
+    });
     status
         .inbox
         .retain(|item| !closed_issue_numbers.contains(&item.issue_number));
@@ -669,9 +672,13 @@ fn merge_board_escalations_into_needs_human(
     for issue_number in escalated {
         // Issue #3602: Board is immutable coordination history, while
         // `needs_human` is a current-action projection. Suppress only when the
-        // canonical cache positively proves Closed; missing/corrupt cache data
-        // deliberately fails open so an unverified escalation is never hidden.
-        if closed_issue_numbers.contains(&issue_number) {
+        // canonical cache positively proves Closed or the scan positively
+        // identifies an owner outside the configured admission labels.
+        // Missing/corrupt cache data otherwise deliberately fails open so an
+        // unverified escalation is never hidden.
+        if closed_issue_numbers.contains(&issue_number)
+            || status.label_excluded_issues.contains(&issue_number)
+        {
             continue;
         }
         if !status.needs_human.contains(&issue_number) {
@@ -729,15 +736,16 @@ fn run_monitor_status<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
-    output["urgent_queue"] = serde_json::to_value(
-        prefs.urgent_queue.projection(
-            prefs
-                .terminal_queues
-                .get(&crate::process::current_hostname())
-                .unwrap_or(&crate::issue_monitor::IssueMonitorTerminalQueue::default()),
-        ),
-    )
-    .expect("urgent queue serializes");
+    let mut effective_queue = prefs
+        .terminal_queues
+        .get(&crate::process::current_hostname())
+        .cloned()
+        .unwrap_or_default();
+    effective_queue
+        .entries
+        .retain(|entry| !status.label_excluded_issues.contains(&entry.number));
+    output["urgent_queue"] = serde_json::to_value(prefs.urgent_queue.projection(&effective_queue))
+        .expect("urgent queue serializes");
     output["active_session_count"] = serde_json::json!(inventory.sessions.len());
     output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
     output["session_observation"] = serde_json::json!({
@@ -1082,6 +1090,7 @@ fn run_monitor_priority_move<E: CliEnv>(
             ));
         }
         prefs.priority_order.insert(index, number);
+        reorder_local_terminal_queue_by_priority(prefs);
         Ok(())
     })
     .map_err(io_as_api_error)?;
@@ -1090,6 +1099,28 @@ fn run_monitor_priority_move<E: CliEnv>(
     );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #5079: admission walks this host's stored terminal queue, never
+/// `priority_order`, so a priority write that left the queue untouched was
+/// acknowledged and then ignored — the scan kept launching in `queued_at`
+/// order. Sorting the stored entries here makes the written order the launch
+/// order: listed Issues first in `priority_order`, the rest in their existing
+/// (queued) order. The sort is stable, so unlisted entries keep their place.
+fn reorder_local_terminal_queue_by_priority(prefs: &mut crate::IssueMonitorPrefs) {
+    let Some(queue) = prefs
+        .terminal_queues
+        .get_mut(&crate::process::current_hostname())
+    else {
+        return;
+    };
+    let order = &prefs.priority_order;
+    queue.entries.sort_by_key(|entry| {
+        order
+            .iter()
+            .position(|number| *number == entry.number)
+            .unwrap_or(usize::MAX)
+    });
 }
 
 /// Issue #4231 AC-5: `priority_order` orders Issues the Monitor already
@@ -1135,6 +1166,7 @@ fn run_monitor_priority_set<E: CliEnv>(
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order = issue_numbers.to_vec();
+        reorder_local_terminal_queue_by_priority(prefs);
         Ok(())
     })
     .map_err(io_as_api_error)?;
@@ -2434,7 +2466,7 @@ fn run_monitor_requeue<E: CliEnv>(
         out.push('\n');
         return Ok(1);
     }
-    let (prefs, (outcome, released_hold)) =
+    let (prefs, (outcome, released_hold, cleared_retry)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
@@ -2442,7 +2474,19 @@ fn run_monitor_requeue<E: CliEnv>(
             );
             let outcome = monitor.requeue_failed_issue(number, reason, &now);
             let not_held = matches!(outcome, crate::IssueMonitorRequeueOutcome::NotHeld);
-            let released_hold = if not_held && monitor.clear_completion_hold(number) {
+            // Issue #4918 AC-3: a retry floor holds the row without a failure
+            // hold, so it reaches here as `NotHeld`. Tried before the holds
+            // below because it is the only one that also resets the attempt
+            // counter, and a row can carry both a floor and a stale closure
+            // record — clearing the floor is what admits it.
+            let cleared_retry = if not_held {
+                monitor.release_retry_hold_for_operator(number, &now)
+            } else {
+                None
+            };
+            let released_hold = if cleared_retry.is_some() {
+                Some("retry_backoff")
+            } else if not_held && monitor.clear_completion_hold(number) {
                 Some("completion")
             } else if not_held && monitor.reopened_issue_awaits_rescan(number) {
                 // Issue #4770: the scan that observed the close already dropped
@@ -2459,7 +2503,7 @@ fn run_monitor_requeue<E: CliEnv>(
                 monitor.terminal_queue_push(&[number], "operator", &now);
                 *prefs = monitor.prefs();
             }
-            Ok((outcome, released_hold))
+            Ok((outcome, released_hold, cleared_retry))
         })
         .map_err(io_as_api_error)?;
 
@@ -2495,6 +2539,18 @@ fn run_monitor_requeue<E: CliEnv>(
                         "status": "requeued",
                         "reason": reason,
                         "released_hold": released_hold,
+                        // Issue #4918 AC-3: name the floor and the counter that
+                        // were discarded. Without them a recovery that threw
+                        // away the cap-length backoff reads identically to one
+                        // that lifted a closure record.
+                        "cleared_retry_hold": cleared_retry.as_ref().map(|cleared| serde_json::json!({
+                            "attempts_before": cleared.attempts_before,
+                            "max_attempts": cleared.max_attempts,
+                            "retry_not_before": cleared.retry_not_before,
+                            "hold_reason": cleared.hold_reason,
+                            "hold_provider": cleared.hold_provider,
+                            "last_failure_message": cleared.last_failure_message,
+                        })),
                         "released_at": now,
                         "scan_requested": delivery.scan_requested,
                         "scan_delivery": delivery.scan_delivery,
@@ -3006,6 +3062,7 @@ fn issue_monitor_stop_refusal_detail(mismatch: crate::IssueMonitorStopMismatch) 
 #[allow(clippy::too_many_arguments)]
 fn apply_monitor_config_set(
     prefs: &mut crate::IssueMonitorPrefs,
+    allowed_labels: Option<&[String]>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
@@ -3016,6 +3073,7 @@ fn apply_monitor_config_set(
     caller_is_resident_pm: bool,
 ) -> io::Result<()> {
     validate_monitor_config_set(
+        allowed_labels,
         enabled,
         autonomous_mode,
         max_active,
@@ -3027,6 +3085,9 @@ fn apply_monitor_config_set(
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    if let Some(allowed_labels) = allowed_labels {
+        candidate.set_allowed_labels(allowed_labels.to_vec());
+    }
     if let Some(enabled) = enabled {
         candidate
             .set_enabled_with_effect_revocation(enabled)
@@ -3083,6 +3144,7 @@ pub(crate) fn apply_update_drain(
 
 #[allow(clippy::too_many_arguments)]
 fn validate_monitor_config_set(
+    allowed_labels: Option<&[String]>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
@@ -3098,7 +3160,8 @@ fn validate_monitor_config_set(
             crate::IssueMonitorLaunchProfileSwitchError::InvalidAgent.to_string(),
         ));
     }
-    if enabled.is_none()
+    if allowed_labels.is_none()
+        && enabled.is_none()
         && autonomous_mode.is_none()
         && max_active.is_none()
         && auto_close_merged_issues.is_none()
@@ -3141,6 +3204,7 @@ fn validate_monitor_config_set(
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    allowed_labels: Option<&[String]>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
@@ -3155,6 +3219,7 @@ fn run_monitor_config_set<E: CliEnv>(
     // fallback below cannot disagree about who the caller is.
     let caller_is_resident_pm = super::pm::caller_is_registered_pm(&project_root);
     validate_monitor_config_set(
+        allowed_labels,
         enabled,
         autonomous_mode,
         max_active,
@@ -3185,6 +3250,7 @@ fn run_monitor_config_set<E: CliEnv>(
         "control",
         serde_json::json!({
             "config_set": {
+                "allowed_labels": allowed_labels,
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
@@ -3210,6 +3276,7 @@ fn run_monitor_config_set<E: CliEnv>(
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             apply_monitor_config_set(
                 prefs,
+                allowed_labels,
                 enabled,
                 autonomous_mode,
                 max_active,
@@ -3228,6 +3295,7 @@ fn run_monitor_config_set<E: CliEnv>(
     .map_err(io_as_api_error)?;
     out.push_str(
         &serde_json::json!({
+            "allowed_labels": prefs.allowed_labels,
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": prefs.max_active_agents.max(1),
@@ -7986,6 +8054,94 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_status_keeps_label_excluded_escalations_and_urgent_entries_quiet() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        let cache = Cache::new(cache_root.clone());
+        for number in [1, 2, 3] {
+            cache
+                .write_snapshot(&IssueSnapshot {
+                    number: IssueNumber(number),
+                    title: format!("Issue {number}"),
+                    body: "## Acceptance Criteria\n\n- [ ] AC-1: Deliver the change.\n".to_string(),
+                    labels: vec![
+                        if number == 1 { "Server" } else { "Client" }.to_string(),
+                        "urgent".to_string(),
+                    ],
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new("2026-10-06T00:00:00Z"),
+                    comments: Vec::new(),
+                })
+                .expect("cache issue");
+        }
+        for number in [1, 2] {
+            let escalation = gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Claude Code",
+                gwt_core::coordination::BoardEntryKind::Blocked,
+                "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+                None,
+                None,
+                vec![],
+                vec![number.to_string()],
+            );
+            gwt_core::coordination::post_entry(&repo, escalation).expect("post escalation");
+        }
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 3,
+                    window_id: "tab-1::running".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.terminal_queue_push(&[1, 2], "operator", "2026-10-06T00:00:00Z");
+        let candidates =
+            crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
+                .expect("cached candidates");
+        crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-10-06T00:00:00Z");
+        monitor.set_allowed_labels(vec!["Server".to_string()]);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).expect("seed prefs");
+        let before = std::fs::read(&path).expect("prefs bytes");
+        let mut direct = monitor.agent_status();
+        direct.needs_human = vec![1, 2];
+        merge_board_escalations_into_needs_human(&repo, &mut direct);
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).expect("status");
+        let status: serde_json::Value = serde_json::from_str(&out).expect("status JSON");
+        let urgent_numbers = status["urgent_queue"]["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|entry| entry["number"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(status["active_launches"], serde_json::json!([3]));
+        assert_eq!(direct.active_launches, vec![3]);
+        assert_eq!(std::fs::read(&path).expect("prefs after status"), before);
+        assert_eq!(
+            (
+                direct.needs_human,
+                status["needs_human"].clone(),
+                urgent_numbers,
+                status["urgent_queue"]["urgent_count"].clone()
+            ),
+            (
+                vec![1],
+                serde_json::json!([1]),
+                vec![1],
+                serde_json::json!(1)
+            )
+        );
+    }
+
+    #[test]
     fn issue_monitor_status_attributes_errors_to_the_requested_project() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -8257,6 +8413,9 @@ mod tests {
             max_active: 1,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -8286,8 +8445,11 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -8307,6 +8469,9 @@ mod tests {
             max_active: 1,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -8370,8 +8535,11 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -8442,6 +8610,9 @@ mod tests {
                 max_active: 1,
                 enabled: true,
                 gui_status: None,
+                allowed_labels: Vec::new(),
+                label_excluded_count: 0,
+                label_excluded_issues: Vec::new(),
                 autonomous_mode: true,
                 auto_apply_updates: None,
                 auto_apply_updates_effective: None,
@@ -8505,8 +8676,11 @@ mod tests {
                 issue_cache: None,
                 review_windows: Vec::new(),
                 failure_surge: None,
+                launch_failures: None,
+                candidate_pool_degradation: None,
                 stall_reason: None,
                 gui_action: None,
+                slot_occupancy: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -8551,6 +8725,9 @@ mod tests {
             max_active: 1,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -8580,8 +8757,11 @@ mod tests {
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -8752,6 +8932,9 @@ mod tests {
                 // projection, and `active_launches` is whatever preferences
                 // still record — both facts ship with the numbers.
                 "source": "degraded_cache",
+                "allowed_labels": [],
+                "label_excluded_count": 0,
+                "label_excluded_issues": [],
                 "stall_reason": "unknown",
                 "project_root": std::fs::canonicalize(&repo).expect("canonical project"),
                 "active_launches_incomplete": true,
@@ -9309,6 +9492,143 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_priority_operations_reorder_the_local_terminal_queue() {
+        // Issue #5079: admission walks the stored terminal queue, so a
+        // priority write must reorder it or the scan keeps launching FIFO.
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let host = crate::process::current_hostname();
+        let entry =
+            |number: u64, queued_at: &str| crate::issue_monitor::IssueMonitorTerminalQueueEntry {
+                number,
+                queued_at: queued_at.to_string(),
+                queued_by: "operation".to_string(),
+                ..Default::default()
+            };
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.terminal_queues.insert(
+            host.clone(),
+            crate::issue_monitor::IssueMonitorTerminalQueue {
+                entries: vec![
+                    entry(1, "2026-10-01T00:00:00Z"),
+                    entry(2, "2026-10-02T00:00:00Z"),
+                    entry(3, "2026-10-03T00:00:00Z"),
+                    entry(4, "2026-10-04T00:00:00Z"),
+                ],
+                last_seen_at: None,
+            },
+        );
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let queue_order = || {
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("load prefs")
+                .terminal_queues
+                .get(&host)
+                .expect("local queue")
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>()
+        };
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorPrioritySet {
+                project_root: Some(repo.clone()),
+                issue_numbers: vec![3, 1],
+            },
+            &mut out,
+        )
+        .expect("priority set");
+        assert_eq!(queue_order(), vec![3, 1, 2, 4]);
+
+        out.clear();
+        run(
+            &mut env,
+            IssueCommand::MonitorPriorityMove {
+                project_root: Some(repo.clone()),
+                number: 4,
+                position: crate::cli::IssueMonitorPriorityPosition::Index(1),
+            },
+            &mut out,
+        )
+        .expect("priority move");
+        assert_eq!(queue_order(), vec![3, 4, 1, 2]);
+    }
+
+    #[test]
+    fn issue_monitor_priority_operations_select_the_next_runnable_issue() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let now = "2026-10-06T00:00:00Z";
+        let candidates = [1, 2, 3].map(|number| crate::IssueMonitorIssue {
+            number,
+            title: format!("Issue {number}"),
+            labels: vec!["bug".to_string()],
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        for (command, expected_head) in [
+            (
+                IssueCommand::MonitorPrioritySet {
+                    project_root: Some(repo.clone()),
+                    issue_numbers: vec![3, 1],
+                },
+                3,
+            ),
+            (
+                IssueCommand::MonitorPriorityMove {
+                    project_root: Some(repo.clone()),
+                    number: 2,
+                    position: crate::cli::IssueMonitorPriorityPosition::Head,
+                },
+                2,
+            ),
+        ] {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::IssueMonitorPrefs {
+                    enabled: true,
+                    ..Default::default()
+                },
+            );
+            monitor.set_gui_connected(true);
+            monitor.terminal_queue_push(&[1, 2, 3], "operation", now);
+            crate::scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+            assert_eq!(monitor.queued_issue_numbers(), vec![1, 2, 3]);
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+                .expect("seed FIFO queue");
+
+            run(&mut env, command, &mut String::new()).expect("priority operation");
+            let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("read priority update");
+            // The scan driver must pick up the write, rather than re-sorting
+            // through set_priority_order in a test-only candidate helper.
+            monitor.rebase_daemon_driver_prefs(&prefs);
+            crate::scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+            assert_eq!(
+                monitor
+                    .next_launch_request(now)
+                    .expect("free slot")
+                    .issue_number,
+                expected_head,
+                "the next scan must select the priority head instead of FIFO issue 1"
+            );
+        }
+    }
+
+    #[test]
     fn issue_monitor_priority_operations_roundtrip_and_reject_out_of_range() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -9503,6 +9823,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo.clone()),
                 enabled: None,
                 autonomous_mode: None,
@@ -9534,6 +9855,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo),
                 enabled: None,
                 autonomous_mode: None,
@@ -9576,6 +9898,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo),
                 enabled: Some(false),
                 autonomous_mode: Some(false),
@@ -9601,6 +9924,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
                 autonomous_mode: None,
@@ -9982,6 +10306,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorConfigSet {
+                    allowed_labels: None,
                     project_root: Some(repo.clone()),
                     enabled,
                     autonomous_mode,
@@ -10066,6 +10391,7 @@ mod tests {
             let result = run(
                 &mut env,
                 IssueCommand::MonitorConfigSet {
+                    allowed_labels: None,
                     project_root: Some(repo.clone()),
                     enabled,
                     autonomous_mode,
@@ -10918,6 +11244,9 @@ mod tests {
             max_active: 3,
             enabled: true,
             gui_status: None,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             autonomous_mode: true,
             auto_apply_updates: None,
             auto_apply_updates_effective: None,
@@ -10982,8 +11311,11 @@ mod tests {
             provider_usage: None,
             review_windows: Vec::new(),
             failure_surge: None,
+            launch_failures: None,
+            candidate_pool_degradation: None,
             stall_reason: None,
             gui_action: None,
+            slot_occupancy: None,
             issue_cache: None,
         };
 
@@ -12250,6 +12582,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo.clone()),
                 enabled: None,
                 autonomous_mode: None,
@@ -12291,6 +12624,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: Some(repo),
                 enabled: None,
                 autonomous_mode: None,

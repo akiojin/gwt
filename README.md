@@ -119,9 +119,10 @@ serve the current recovery and session-specific Stop contracts. The obsolete age
 identity reset is retired; startup preserves saved purpose and focus values and
 leaves `agent_identity.migration.json` unchanged (or absent).
 
-The embedded frontend uses the current Fast mode fields and requires an operation
-ID for cleanup requests. Reload older open tabs after upgrading; saved Fast mode
-preferences are retained.
+The embedded frontend requires an operation ID for cleanup requests. Reload older
+open tabs after upgrading. Launch Wizard always skips permission prompts and
+launches with Fast mode off; it reads older saved choices without rewriting them.
+Issue Monitor profiles and direct Session resume keep their existing preferences.
 
 ## Requirements
 
@@ -151,6 +152,23 @@ preferences are retained.
 
 Linux desktop builds also require WebKitGTK-related system packages. See
 [docs/docker-usage.md](docs/docker-usage.md) for the dependency set used in CI.
+
+### Supported built-in agents
+
+gwt supports the following built-in agents. Launch Agent lists only installed
+built-in agents that gwt detects; other CLI commands remain available through
+custom agents.
+
+| Agent | CLI command |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
 
 ## Usage
 
@@ -402,6 +420,15 @@ between its body and acceptance criteria and its agent's read-only output.
 **Windowize** moves the agent to Canvas. **Hide preview / Show preview** gives
 the board the full width or restores the detail pane; columns scroll horizontally
 instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
+
+**Allowed labels** controls which Issues this terminal's Monitor admits. Add or
+remove one label at a time; an Issue needs any label in the saved list. Matching
+ignores case and surrounding whitespace. An empty list allows all labels and
+preserves the existing admission rules. Changes apply on the next scan without
+cancelling running agents. The control shows the saved labels and excluded Issue
+count/numbers. Automation can set the same list with `issue.monitor.config.set`
+and `{"allowed_labels":["agent:mac"]}`; `issue.monitor.status` reports
+`allowed_labels`, `label_excluded_count`, and `label_excluded_issues`.
 
 Open GitHub Issues remain in Backlog until explicitly queued, added by enabled
 auto-refill, or admitted with an `urgent` label. Queue membership authorizes the monitor to consider an Issue; normal
@@ -1217,16 +1244,46 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
-### Serializing heavy verification
+### Capacity for heavy verification
 
 Only canonical `verify.run` acquires the host-wide verification lease.
 Register the verification matrix with `verify.plan`, then run it with
 `verify.run`; it acquires and releases the lease for each Heavy command.
-Light commands can overlap other runs. A deferred result from the first command's
-admission timeout writes no verification record; a timeout after at least one
-command ran writes an incomplete, non-PASS deferred record that retains the
-completed commands' results; a retry reruns the entire matrix (no partial resume).
-Inspect the holder before retrying:
+Light commands can overlap other runs and outstanding Light commands run before
+Heavy commands. Heavy commands retain their relative order; gwt artifact
+restoration runs last. An admission timeout before the first remaining command
+starts preserves any predecessor without writing a replacement record. Later
+timeouts retain completed results in an incomplete, non-PASS deferred record.
+
+Retry with the same full requested matrix and headed E2E nominations. `verify.run`
+automatically resumes only a valid admission-deferred record with identical
+owner, session, execution authority, plan content hash, source fingerprint and
+requested commands. All preceding commands must have passed without a signal.
+Other records, including failed, killed and crashed runs, start fresh; a
+registered plan mismatch still requires `verify.plan`. Resumed evidence refers
+to its immutable predecessor by id/hash and retains its original start time and
+per-command headed E2E, nextest and admission evidence. The full matrix and
+required headed Chromium results in dark/light must pass before Overall PASS
+or Ready.
+Heavy Cargo commands in independent worktrees and build directories share a
+bounded host pool. Its default capacity is the smallest of one slot per eight
+logical CPUs, one per 16 GiB of memory, and four, with a minimum of one. To override
+the capacity, set the following in `~/.gwt/config.toml`:
+
+```toml
+[verification]
+slots = 4
+```
+
+The same worktree or effective Cargo target directory stays serialized.
+Unknown command wrappers and older binaries retain exclusive admission.
+Each child gets its own temporary directory. Admission reserves disk space for
+the target and temporary volumes above the configured build-artifact GC floor;
+`verification.disk_budget_bytes` overrides the measured per-run byte budget.
+The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
+volume, based on measured target and temporary growth plus 20% headroom.
+`verify.lease.status` reports `capacity`, `running`, `available`, each holder in
+`slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 
 ```bash
 gwtd <<'JSON'
