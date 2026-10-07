@@ -49,6 +49,7 @@ mod repo_browser;
 mod runtime_health_poller;
 mod runtime_support;
 mod session_ledger_cache;
+mod session_retention;
 mod update_front_door;
 mod usage_poller;
 // Unix has no tree-wide CPU cap to lift (Issue #4405).

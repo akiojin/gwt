@@ -127,14 +127,9 @@ fn load_project_recovery_records(
     sessions_dir: &Path,
     tab: &ProjectTabRuntime,
 ) -> Result<Vec<RecoveryRecord>, ()> {
-    let entries = std::fs::read_dir(sessions_dir).map_err(|_| ())?;
+    let sessions = gwt_agent::session_ledger::load_sessions(sessions_dir).map_err(|_| ())?;
     let mut records = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|_| ())?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
-            continue;
-        }
-        let session = gwt_agent::Session::load(&path).map_err(|_| ())?;
+    for session in sessions {
         if !session_belongs_to_project(&session, tab) {
             continue;
         }

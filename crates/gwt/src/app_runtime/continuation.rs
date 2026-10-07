@@ -4886,28 +4886,17 @@ impl AppRuntime {
             return Ok(None);
         }
         let project_root = crate::runtime_support::normalize_recent_project_path(&tab.project_root);
-        let entries = std::fs::read_dir(&self.sessions_dir).map_err(|_| {
-            ContinueWorkFailure::failed(
-                "session_state_unavailable",
-                "Durable Session metadata could not be read for reconciliation.",
-                true,
-            )
-        })?;
+        let sessions =
+            gwt_agent::session_ledger::load_sessions(&self.sessions_dir).map_err(|_| {
+                ContinueWorkFailure::failed(
+                    "session_state_unavailable",
+                    "Durable Session metadata could not be read for reconciliation.",
+                    true,
+                )
+            })?;
         let mut matches = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("toml") {
-                continue;
-            }
-            let Ok(source_session) = gwt_agent::Session::load_and_migrate(&path) else {
-                continue;
-            };
-            let Some(file_session_id) = path.file_stem().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if gwt_agent::validate_session_id_path_component(file_session_id).is_err()
-                || source_session.id != file_session_id
-            {
+        for source_session in sessions {
+            if gwt_agent::validate_session_id_path_component(&source_session.id).is_err() {
                 continue;
             }
             if !session_matches_project_state(&source_session, &project_root) {

@@ -1143,6 +1143,17 @@ remain with their originating project when you switch projects.
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### Session history
+
+gwt keeps recent Session history in `~/.gwt/sessions/`. Background cleanup
+runs on the first ledger view and at most once every 24 hours, removing
+stopped history with startup restore disabled after 30 days of inactivity.
+Saved windows and Sessions needed by runtime, recovery, or unfinished work
+remain protected. Old abandoned write temporaries are also removed.
+Unreadable records stay on disk and are retried when their modification
+time or size changes; display and launch preferences are read separately
+from Sessions.
+
 ### macOS filesystem activity and Spotlight
 
 The per-worktree index watcher excludes the root `target/` directory's
