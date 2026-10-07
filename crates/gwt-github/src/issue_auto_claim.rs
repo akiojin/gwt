@@ -285,6 +285,15 @@ enum ClaimResolution {
     NoWinner,
 }
 
+fn same_queue_owner(left: &str, right: &str) -> bool {
+    fn host_user(owner: &str) -> Option<&str> {
+        let (prefix, pid) = owner.rsplit_once(':')?;
+        (prefix.contains(':') && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+            .then_some(prefix)
+    }
+    left == right || matches!((host_user(left), host_user(right)), (Some(a), Some(b)) if a == b)
+}
+
 fn classify_claim_resolution(
     claims: &[ClaimComment],
     requested: &ClaimComment,
@@ -294,7 +303,9 @@ fn classify_claim_resolution(
     if let Some(queued) = claims.iter().find(|existing| {
         claim_is_queued(existing, now)
             && existing.issue_number == issue_number.0
-            && existing.owner != requested.owner
+            // queue.push and the Monitor use different PIDs on the same host.
+            // Active claims below still require their exact logical identity.
+            && !same_queue_owner(&existing.owner, &requested.owner)
     }) {
         return ClaimResolution::Blocked(queued.clone());
     }
@@ -624,15 +635,18 @@ mod tests {
         queued.claim_id = "queued-claim".to_string();
         queued.status = ClaimStatus::Queued;
         queued.expires_at = "2026-09-10T01:00:00Z".to_string();
-        assert!(matches!(
-            classify_claim_resolution(
-                &[queued.clone()],
-                &requested,
-                IssueNumber(42),
-                "2026-09-10T00:30:00Z"
-            ),
-            ClaimResolution::Blocked(_)
-        ));
+        for owner in ["macbook:akiojin:40272", "studio:other-user:1", "studio"] {
+            queued.owner = owner.to_string();
+            assert!(matches!(
+                classify_claim_resolution(
+                    &[queued.clone()],
+                    &requested,
+                    IssueNumber(42),
+                    "2026-09-10T00:30:00Z"
+                ),
+                ClaimResolution::Blocked(_)
+            ));
+        }
         queued.expires_at = "2026-09-10T00:01:00Z".to_string();
         assert!(matches!(
             classify_claim_resolution(
