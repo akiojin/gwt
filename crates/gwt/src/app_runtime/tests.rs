@@ -4320,6 +4320,7 @@ fn sample_runtime_with_events(
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
+        work_merge_status_cache: Default::default(),
         work_cleanup_ready_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
@@ -39747,6 +39748,75 @@ fn worktree_listings_on_this_thread() -> u64 {
     WORKTREE_LISTINGS.with(std::cell::Cell::get)
 }
 
+/// Issue #5116 AC-2: an ordinary ingest tick shares one worktree listing
+/// between intake and reconcile, just as the startup path already does.
+#[test]
+fn work_events_ingest_tick_lists_worktrees_once() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let mut seed = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-session-ingest-tick",
+        chrono::Utc::now(),
+    );
+    seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+    seed.title = Some("existing tick work".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
+        .expect("seed existing work");
+    let project_key = gwt_core::paths::resolve_project_scope(&repo).hash;
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path(&project_key);
+    let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
+    let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
+    let before = worktree_listings_on_this_thread();
+
+    let event = AppRuntime::prepare_work_events_ingest(
+        repo,
+        &work_items_path,
+        &state_path,
+        &projection_path,
+        None,
+    );
+
+    assert!(matches!(
+        event,
+        Some(UserEvent::WorkEventsIngested {
+            local_branches: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        worktree_listings_on_this_thread() - before,
+        1,
+        "intake and reconcile must share the same tick's worktree listing"
+    );
+
+    // The grouped store writes index.json; state_path names its legacy file.
+    // A failed next listing preserves existing bytes or an absent cursor.
+    let intake_index_path = state_path.with_extension("").join("index.json");
+    let work_items = fs::read(&work_items_path).ok();
+    assert!(
+        work_items.is_some(),
+        "fixture must contain durable Work history"
+    );
+    let intake_state = fs::read(&intake_index_path).ok();
+    let unavailable_repo = temp.path().join("not-a-repo");
+    fs::create_dir_all(&unavailable_repo).expect("unavailable repository dir");
+    let before = worktree_listings_on_this_thread();
+    assert!(AppRuntime::prepare_work_events_ingest(
+        unavailable_repo,
+        &work_items_path,
+        &state_path,
+        &projection_path,
+        None,
+    )
+    .is_none());
+    assert_eq!(worktree_listings_on_this_thread() - before, 1);
+    assert_eq!(fs::read(&work_items_path).ok(), work_items);
+    assert_eq!(fs::read(&intake_index_path).ok(), intake_state);
+}
+
 /// Issue #4378 AC-1: bootstrap lists each project's worktrees once on the
 /// startup path. The orphan intake prune plan used to list them a second time
 /// on the GUI thread; the ingest and reconcile reuse is pinned above.
@@ -67019,6 +67089,20 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         "a change-free branch whose only diff is gwt's own writes stays cleanup-ready: \
          {cleanup_ready_branches:?}"
     );
+    // The worker must warm the persistent cache, not a private per-scan copy.
+    let tips = gwt_git::refs::branch_tip_snapshot(&repo).expect("tips");
+    let caches = runtime.work_merge_status_cache.borrow();
+    let mut cache = caches
+        .get(&repo)
+        .expect("project merge cache")
+        .lock()
+        .unwrap();
+    let before = gwt_core::process::thread_git_spawn_count();
+    assert!(cache
+        .base_target(&repo, "work/gwt-writes", &tips)
+        .unwrap()
+        .is_some());
+    assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
 }
 
 #[test]
