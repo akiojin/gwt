@@ -3177,14 +3177,19 @@ fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
 
 /// Keep recovery (including failures) in the deferred admission diagnostic,
 /// without presenting unexecuted commands as passing verification evidence.
-fn restore_gwtd_after_deferral(worktree: &Path, host: &VerificationHost) -> String {
+fn restore_gwtd_after_deferral(
+    worktree: &Path,
+    host: &VerificationHost,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+) -> String {
     let Some(command) = gwtd_artifact_restore_command(worktree) else {
         return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
     };
     // Restore this checkout's operational path, even when Cargo's environment
     // or user configuration points ordinary builds at another target directory.
     let command = format!("{command} --target-dir target");
-    match execute_command_with_isolation(worktree, &command, true, None, host, None) {
+    match execute_command_with_artifact_guard(worktree, &command, true, None, host, None, artifacts)
+    {
         Ok((0, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output)) => format!(
             "gwtd artifact restoration: failed (`{command}`, exit {code}); \
@@ -3289,6 +3294,26 @@ fn execute_command_with_isolation(
     host: &VerificationHost,
     progress: Option<&CommandProgress>,
 ) -> Result<(i32, Option<i32>, String), String> {
+    execute_command_with_artifact_guard(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        None,
+    )
+}
+
+fn execute_command_with_artifact_guard(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+) -> Result<(i32, Option<i32>, String), String> {
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
     // Heavy admission already holds this guard. Light Cargo and operational
     // artifact restoration participate in the same GC boundary without a slot.
@@ -3298,10 +3323,22 @@ fn execute_command_with_isolation(
             command,
             isolated_baseline,
         )? {
-            Some(target) => Some(
-                crate::cli::verification_lease::lock_build_artifacts(&target)
-                    .map_err(|error| format!("build artifact coordination failed: {error}"))?,
-            ),
+            Some(target) => {
+                let protected = artifacts
+                    .map(|guard| guard.protects(&target))
+                    .transpose()
+                    .map_err(|error| format!("build artifact coordination failed: {error}"))?
+                    .unwrap_or(false);
+                if protected {
+                    None
+                } else {
+                    Some(
+                        crate::cli::verification_lease::lock_build_artifacts(&target).map_err(
+                            |error| format!("build artifact coordination failed: {error}"),
+                        )?,
+                    )
+                }
+            }
             None if Path::new(&args[0])
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -5860,7 +5897,7 @@ pub(super) fn run<E: CliEnv>(
                         &worktree,
                         Some(command),
                         max_wait,
-                        || restore_gwtd_after_deferral(&worktree, host),
+                        |artifacts| restore_gwtd_after_deferral(&worktree, host, artifacts),
                     )
                     .map(Some)
                     .map_err(|error| error.to_string())
@@ -5950,6 +5987,182 @@ pub(super) fn run<E: CliEnv>(
 pub(crate) mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    // A deadlock must fail this regression rather than hang the test runner.
+    // The deadline is only a watchdog; admission below uses Duration::ZERO.
+    fn bounded_artifact_lock_test(name: &str, exercise: impl FnOnce()) {
+        if std::env::var("GWT_ARTIFACT_LOCK_CHILD").as_deref() == Ok(name) {
+            exercise();
+            return;
+        }
+        let mut child = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("GWT_ARTIFACT_LOCK_CHILD", name)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let timed_out = loop {
+            if child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                break true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !timed_out && output.status.success(),
+            "artifact lock regression: timed_out={timed_out}; {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_recovery_keeps_real_artifact_guard() {
+        bounded_artifact_lock_test(
+            "cli::verification_record::tests::timeout_recovery_keeps_real_artifact_guard",
+            || {
+                use crate::cli::verification_lease as lease;
+                use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+                use std::time::Duration;
+
+                let _env_lock = crate::env_test_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let home = tempfile::tempdir().unwrap();
+                let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+                let original_home = dirs::home_dir().unwrap();
+                let _cargo_home = ScopedEnvVar::set(
+                    "CARGO_HOME",
+                    std::env::var_os("CARGO_HOME")
+                        .unwrap_or_else(|| original_home.join(".cargo").into_os_string()),
+                );
+                let _rustup_home = ScopedEnvVar::set(
+                    "RUSTUP_HOME",
+                    std::env::var_os("RUSTUP_HOME")
+                        .unwrap_or_else(|| original_home.join(".rustup").into_os_string()),
+                );
+                let _home_env = ScopedEnvVar::set("HOME", home.path());
+                fs::create_dir_all(home.path().join(".gwt")).unwrap();
+                fs::write(
+                    gwt_config::Settings::global_config_path_for_home(home.path()),
+                    "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+                )
+                .unwrap();
+                let worktree = tempfile::tempdir().unwrap();
+                let package = worktree.path().join("crates/gwt");
+                fs::create_dir_all(package.join("src/bin")).unwrap();
+                fs::write(
+                    worktree.path().join("Cargo.toml"),
+                    "[workspace]\nmembers=['crates/gwt']\nresolver='2'\n",
+                )
+                .unwrap();
+                fs::write(
+                    package.join("Cargo.toml"),
+                    "[package]\nname='gwt'\nversion='0.0.0'\nedition='2021'\n[features]\ntest-gh-guard=[]\n[[bin]]\nname='gwtd'\npath='src/bin/gwtd.rs'\n",
+                )
+                .unwrap();
+                fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
+                let coordinator = lease::open_coordinator().unwrap();
+                let JobAdmission::Owner(holder) = coordinator
+                    .request_job(
+                        &TargetKey::verification("other", "holder"),
+                        JobPriority::ManualRebuild,
+                        Duration::ZERO,
+                    )
+                    .unwrap()
+                else {
+                    panic!("private holder must be admitted");
+                };
+                let _heavy = holder
+                    .acquire_exclusive_heavy_with_disk_budget(
+                        Duration::ZERO,
+                        Duration::from_secs(60),
+                        &[],
+                    )
+                    .unwrap();
+                let target = worktree.path().join("target");
+                let independent = worktree.path().join("independent-target");
+                let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+                let recovery = |artifacts: Option<&lease::BuildArtifactGuard>| {
+                    assert!(lease::try_lock_build_artifacts(&target).unwrap().is_none());
+                    // Probe a fresh FD directly, so process-local bookkeeping
+                    // alone cannot satisfy the target/GC exclusion assertions.
+                    let lock_path = fs::read_dir(coordinator.root().join("build-artifacts"))
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .path();
+                    let assert_kernel_held = || {
+                        let probe = fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&lock_path)
+                            .unwrap();
+                        let error = fs2::FileExt::try_lock_exclusive(&probe).unwrap_err();
+                        assert_eq!(
+                            error.raw_os_error(),
+                            fs2::lock_contended_error().raw_os_error()
+                        );
+                    };
+                    assert_kernel_held();
+                    let other = lease::lock_build_artifacts(&independent).unwrap();
+                    let restored = restore_gwtd_after_deferral(
+                        worktree.path(),
+                        &VerificationHost::Inherit,
+                        artifacts,
+                    );
+                    assert!(restored.contains("restoration: restored"), "{restored}");
+                    assert!(lease::try_lock_build_artifacts(&target).unwrap().is_none());
+                    assert_kernel_held();
+                    drop(other);
+                    restored
+                };
+                let error = lease::admission::admit(
+                    &mut env,
+                    worktree.path(),
+                    Some("cargo test --workspace --target-dir target"),
+                    Duration::ZERO,
+                    recovery,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("deferred"), "{error}");
+                assert!(target.join("debug/gwtd").is_file());
+                assert!(lease::try_lock_build_artifacts(&target).unwrap().is_some());
+            },
+        );
+    }
+
+    #[test]
+    fn duplicate_artifact_lock_reports_holder_instead_of_hanging() {
+        bounded_artifact_lock_test(
+            "cli::verification_record::tests::duplicate_artifact_lock_reports_holder_instead_of_hanging",
+            || {
+                use crate::cli::verification_lease as lease;
+                let home = tempfile::tempdir().unwrap();
+                let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+                let target = home.path().join("target");
+                let held = lease::lock_build_artifacts(&target).unwrap();
+                let error = lease::lock_build_artifacts(&target).unwrap_err().to_string();
+                for expected in ["already", "verification_record.rs", "build-artifacts", "pid"] {
+                    assert!(error.contains(expected), "{error}");
+                }
+                #[cfg(unix)]
+                assert!(error.contains("fd"), "{error}");
+                #[cfg(windows)]
+                assert!(error.contains("handle"), "{error}");
+                drop(held);
+                assert!(lease::lock_build_artifacts(&target).is_ok());
+            },
+        );
+    }
 
     /// Register a plan for the commands, then run them (the standard
     /// T-130-lite flow used everywhere Fresh evidence is needed).
@@ -7114,7 +7327,7 @@ mod tests {
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
-        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit);
+        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit, None);
         assert!(
             recovery.contains("gwtd artifact restoration: failed"),
             "{recovery}"
