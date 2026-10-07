@@ -14710,6 +14710,67 @@ fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
 }
 
 #[test]
+fn app_runtime_supported_agents_lists_catalog_and_distinguishes_missing_versions() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let options = vec![
+        gwt::AgentOption {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            available: true,
+            installed_version: Some(" 2.1.0 ".into()),
+            custom_agent: None,
+        },
+        gwt::AgentOption {
+            id: "codex".into(),
+            name: "Codex".into(),
+            available: true,
+            installed_version: None,
+            custom_agent: None,
+        },
+    ];
+    runtime.launch_wizard_cache =
+        LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, options);
+    let request: FrontendEvent = serde_json::from_str(r#"{"kind":"list_supported_agents"}"#)
+        .expect("L3 Settings must support the read-only list request");
+    let immediate = runtime.handle_frontend_event("settings-client".into(), request);
+    assert!(
+        immediate.is_empty(),
+        "detection cache reads run off the GUI loop"
+    );
+    wait_for_recorded_event("supported agent list", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(event, UserEvent::Dispatch(outbound) if outbound.iter().any(|reply|
+                serde_json::to_value(&reply.event).unwrap()["kind"] == "supported_agent_list"))
+        })
+    });
+    let events = recorded_events.lock().expect("events lock");
+    let payload = events
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(outbound) => Some(outbound),
+            _ => None,
+        })
+        .flatten()
+        .map(|reply| serde_json::to_value(&reply.event).unwrap())
+        .find(|value| value["kind"] == "supported_agent_list")
+        .expect("supported agent reply");
+    let rows = payload["agents"].as_array().expect("agent rows");
+    assert_eq!(rows.len(), gwt_agent::builtin_agent_descriptors().len());
+    for (row, descriptor) in rows.iter().zip(gwt_agent::builtin_agent_descriptors()) {
+        assert_eq!(row["id"], descriptor.command);
+        assert_eq!(row["name"], descriptor.display_name);
+    }
+    assert_eq!(rows[0]["installed"], true);
+    assert_eq!(rows[0]["installed_version"], "2.1.0");
+    assert_eq!(rows[1]["installed"], true);
+    assert!(rows[1]["installed_version"].is_null());
+    assert_eq!(rows[2]["installed"], false);
+    assert!(rows[2]["installed_version"].is_null());
+}
+
+#[test]
 fn issue_monitor_error_notification_keeps_project_in_ledger() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -57064,6 +57125,108 @@ fn open_agent_settings_sets(
         FrontendEvent::IssueMonitorConfigureProfile,
     );
     (runtime, recorded_events, events)
+}
+
+#[test]
+fn app_runtime_agent_settings_update_preserves_the_saved_profile_and_wizard() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let profile = codex_issue_monitor_launch_profile();
+    let (mut runtime, recorded, opened) =
+        open_agent_settings_sets(temp.path(), &repo, vec![profile]);
+    let before = agent_settings_view(&opened);
+    assert_eq!(before.selected_launch_target, "agent");
+    assert!(before.error.is_none());
+    let model = before.selected_model.clone();
+    let reasoning = before.selected_reasoning.clone();
+    // The update must never run the host's real package manager in a test.
+    let bin = write_fixture_runners(temp.path(), &["npm", "codex"]);
+    let mut settings = Settings::default();
+    pin_launch_agents(&mut settings, &bin);
+    let _path = ScopedEnvVar::set(
+        "PATH",
+        &settings.profiles.get("default").unwrap().env_vars["PATH"],
+    );
+    write_profile_config(runtime.profile_config_path.as_ref().unwrap(), &settings);
+    let context = runtime.test_context();
+    let wizard_id = runtime
+        .launch_wizard_for(&context)
+        .unwrap()
+        .wizard_id
+        .clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs_before = fs::read(&prefs_path).unwrap();
+
+    let events =
+        runtime.handle_launch_wizard_action(&context, LaunchWizardAction::RunAgentSetup, None);
+    let updated = agent_settings_view(&events);
+    assert!(updated.error.is_none(), "{:?}", updated.error);
+    assert_eq!(updated.selected_launch_target, "agent");
+    assert_eq!(updated.selected_model, model);
+    assert_eq!(updated.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert!(runtime.runtimes.is_empty());
+    assert!(updated.agent_setup.as_ref().unwrap().pending);
+    wait_for_recorded_event("CLI update result", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchWizardAgentUpdated { .. }
+            )
+        })
+    });
+    let (result_id, result) = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::LaunchWizardAgentUpdated { wizard_id, result } => {
+                Some((wizard_id.clone(), result.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(result_id, wizard_id);
+    let completed = runtime.handle_launch_wizard_agent_updated(result_id, *result);
+    let view = agent_settings_view(&completed);
+    assert!(!view.agent_setup.as_ref().unwrap().pending);
+    assert!(view
+        .agent_setup
+        .as_ref()
+        .unwrap()
+        .status
+        .as_ref()
+        .unwrap()
+        .contains("1.2.3"));
+    assert_eq!(view.selected_model, model);
+    assert_eq!(view.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert_eq!(
+        runtime
+            .launch_wizard_cache
+            .agent_options()
+            .into_iter()
+            .find(|agent| agent.id == "codex")
+            .unwrap()
+            .installed_version
+            .as_deref(),
+        Some("1.2.3")
+    );
 }
 
 fn agent_settings_view(events: &[OutboundEvent]) -> &gwt::LaunchWizardView {

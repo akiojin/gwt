@@ -1749,6 +1749,7 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::UpdateBoardProviderConfig { .. }
             | FrontendEvent::UpdateBoardOauthPort { .. }
             | FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListSupportedAgents
             | FrontendEvent::ListCustomAgentPresets
             | FrontendEvent::AddCustomAgentFromPreset { .. }
             | FrontendEvent::UpdateCustomAgent { .. }
@@ -2117,6 +2118,10 @@ enum UserEvent {
     LaunchWizardRuntimeResolved {
         wizard_id: String,
         result: Box<Result<gwt::LaunchWizardHydration, String>>,
+    },
+    LaunchWizardAgentUpdated {
+        wizard_id: String,
+        result: Box<Result<gwt::AgentOption, String>>,
     },
     LaunchWizardLaunchMaterializationRequested {
         wizard_id: String,
@@ -2596,6 +2601,10 @@ mod tests {
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::GetSystemSettings
         ));
+        let supported_agents: FrontendEvent =
+            serde_json::from_str(r#"{"kind":"list_supported_agents"}"#)
+                .expect("Supported Agents is a global read-only Settings request");
+        assert!(hub_frontend_event_allowed(&supported_agents));
         assert!(hub_frontend_event_allowed(&FrontendEvent::ApplyUpdateStart));
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::OpenProjectDialog
@@ -11197,6 +11206,10 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {
                 let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchWizardAgentUpdated { wizard_id, result }) => {
+                let events = app.handle_launch_wizard_agent_updated(wizard_id, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchWizardLaunchMaterializationRequested {
