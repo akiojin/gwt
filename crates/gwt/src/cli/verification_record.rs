@@ -866,12 +866,17 @@ fn derive_and_register_plan_for_caller(
     ),
     String,
 > {
+    let required = if pre_pr.is_some() {
+        crate::cli::verify_derivation::read_pre_pr_required_contexts(worktree)?
+    } else {
+        Vec::new()
+    };
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         let derived = match pre_pr {
-            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, acceptance, local),
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local),
             None => crate::cli::verify_derivation::derive(worktree),
         }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
@@ -6322,6 +6327,70 @@ pub(crate) mod tests {
         let loaded = load_plan(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.surfaces, derived.surfaces);
         assert!(plan_integrity_ok(&loaded));
+    }
+
+    #[test]
+    fn pre_pr_context_read_allows_a_concurrent_trusted_writer() {
+        crate::cli::test_support::with_fake_gh("pre-pr-writer-probe", |worktree| {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .status()
+                .unwrap()
+                .success());
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["checkout", "-q", "-b", "work/pre-pr-writer"])
+                .status()
+                .unwrap()
+                .success());
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            for path in [
+                "crates/gwt/Cargo.toml",
+                ".github/workflows/test.yml",
+                ".github/workflows/lint.yml",
+                ".github/workflows/coverage.yml",
+            ] {
+                let destination = worktree.join(path);
+                fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                fs::copy(root.join(path), destination).unwrap();
+            }
+            // Initialize the same kernel lease that registration uses; fake gh
+            // attempts an independent writer while its API read is in progress.
+            crate::cli::trusted_store::with_write_lease(worktree, || Ok(())).unwrap();
+            let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree).unwrap();
+            fs::write(
+                std::env::var_os("GWT_FAKE_GH_STATE_FILE").unwrap(),
+                trusted.join(".write-lease").to_str().unwrap(),
+            )
+            .unwrap();
+            let authority =
+                snapshot_verification_caller_authority(worktree, "sess-pre-pr").unwrap();
+            let acceptance = vec!["git --version".to_string()];
+            let (derived, plan) = derive_and_register_plan_for_caller(
+                worktree,
+                "sess-pre-pr",
+                Vec::new(),
+                Vec::new(),
+                &authority,
+                Some((&acceptance, &[])),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::cli::trusted_store::read(worktree, "pre-pr-writer-probe.json").unwrap(),
+                Some("written".into())
+            );
+            assert!(derived
+                .surfaces
+                .iter()
+                .any(|s| s.starts_with("ci-delegated(")));
+            assert!(plan.commands.contains(&acceptance[0]));
+            assert!(plan_integrity_ok(&plan));
+            assert_eq!(load_plan(worktree).unwrap().unwrap(), plan);
+        });
     }
 
     // P9b (T-174 core): the repo-scoped trusted copy wins over a forged
