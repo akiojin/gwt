@@ -155,6 +155,8 @@ pub struct AgentExecutionContinuationReceipt {
     pub operation_id: String,
     pub outcome: AgentExecutionContinuationOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predecessor_generation_id: Option<String>,
     pub generation_id: String,
     pub execution_binding: ExecutionBindingIdentity,
@@ -907,6 +909,55 @@ fn evaluate_authenticated_execution_continuation(
     })
 }
 
+fn continuation_requires_new_session(
+    project_state_root: &Path,
+    session_id: &str,
+) -> std::result::Result<bool, AgentWorkspaceUpdateError> {
+    let works = gwt_core::workspace_projection::load_workspace_work_items(project_state_root)
+        .map_err(|_| execution_binding_error("execution_continuation_work_unreadable"))?;
+    let projection = load_workspace_projection(project_state_root)
+        .map_err(|_| execution_binding_error("execution_continuation_assignment_unreadable"))?;
+    // Terminal membership survives Unassigned history and must never move to
+    // another lifetime. Active legacy Work keeps its existing continuation path.
+    if works.as_ref().is_some_and(|works| {
+        works.work_items.iter().any(|work| {
+            work.is_terminal()
+                && work
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session_id)
+        })
+    }) {
+        return Ok(true);
+    }
+    if let Some(assignment) = projection
+        .as_ref()
+        .and_then(|projection| projection.latest_agent_for_session(session_id))
+        .filter(|agent| agent.is_assigned() || agent.workspace_id.is_some())
+    {
+        let assigned_work = works
+            .as_ref()
+            .and_then(|works| {
+                works.work_items.iter().find(|work| {
+                    Some(work.id.as_str()) == assignment.workspace_id.as_deref()
+                        && work
+                            .agents
+                            .iter()
+                            .any(|agent| agent.session_id == session_id)
+                })
+            })
+            .ok_or_else(|| {
+                execution_binding_error("execution_continuation_work_authority_invalid")
+            })?;
+        return Ok(assigned_work.is_terminal());
+    }
+    // Absence on both surfaces is the supported legacy bootstrap case.
+    Ok(false)
+}
+
+const TERMINAL_WORK_CONTINUATION_GUIDANCE: &str =
+    "terminal Work cannot rebound in the same Session; run gwt-execute for the linked owner in a new Session using the regular fresh launch coordinator";
+
 /// Side-effect-free prerequisite evaluator shared by diagnosis and execution.
 pub(crate) fn probe_authenticated_execution_continuation(
     authenticated_project_root: &Path,
@@ -934,6 +985,34 @@ pub(crate) fn probe_authenticated_execution_continuation(
                 execution_generation: Some(authority.current_binding.generation_id.clone()),
                 ..GovernanceMetadata::default()
             };
+            match continuation_requires_new_session(
+                &authority.project_state_root,
+                &authority.session.id,
+            ) {
+                Ok(true) => {
+                    return RecoveryProbe::unavailable(
+                        "execution.continue",
+                        GovernanceMetadata {
+                            cause: Some(GovernanceCause::DomainInvalid),
+                            retryable: Some(false),
+                            ..governance
+                        },
+                        TERMINAL_WORK_CONTINUATION_GUIDANCE,
+                    );
+                }
+                Err(error) => {
+                    return RecoveryProbe::unavailable(
+                        "execution.continue",
+                        GovernanceMetadata {
+                            cause: Some(GovernanceCause::Authority),
+                            retryable: Some(false),
+                            ..governance
+                        },
+                        error.message,
+                    );
+                }
+                Ok(false) => {}
+            }
             if authority.record.status
                 == crate::cli::execution_state::ExecutionControlStatus::Blocked
             {
@@ -1014,6 +1093,12 @@ fn continue_authenticated_execution_inner(
         authenticated_project_root,
         authenticated_session_id,
     )?;
+    if continuation_requires_new_session(&authority.project_state_root, &authority.session.id)? {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+            TERMINAL_WORK_CONTINUATION_GUIDANCE,
+        ));
+    }
     let ExecutionContinuationAuthority {
         session,
         project_state_root,
@@ -1121,6 +1206,7 @@ fn continue_authenticated_execution_inner(
                 schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
                 operation_id: request.operation_id,
                 outcome: AgentExecutionContinuationOutcome::ReboundCurrent,
+                work_id: None,
                 predecessor_generation_id: None,
                 generation_id: binding.identity.generation_id.clone(),
                 execution_binding: binding.identity.clone(),
@@ -1167,6 +1253,7 @@ fn continue_authenticated_execution_inner(
                 schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
                 operation_id: request.operation_id,
                 outcome: AgentExecutionContinuationOutcome::ReboundCurrent,
+                work_id: None,
                 predecessor_generation_id: None,
                 generation_id: audit.generation_id,
                 execution_binding: audit.execution_binding,
@@ -1232,6 +1319,7 @@ fn continue_authenticated_execution_inner(
                     schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
                     operation_id: request.operation_id,
                     outcome: AgentExecutionContinuationOutcome::SuccessorCreated,
+                    work_id: None,
                     predecessor_generation_id: Some(existing.predecessor.generation_id.clone()),
                     generation_id: binding.identity.generation_id.clone(),
                     execution_binding: binding.identity.clone(),
@@ -1282,6 +1370,7 @@ fn continue_authenticated_execution_inner(
                 schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
                 operation_id: request.operation_id,
                 outcome: AgentExecutionContinuationOutcome::ReboundCurrent,
+                work_id: None,
                 predecessor_generation_id: None,
                 generation_id: binding.identity.generation_id.clone(),
                 execution_binding: binding.identity.clone(),
@@ -1356,6 +1445,7 @@ fn continue_authenticated_execution_inner(
             schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
             operation_id: request.operation_id,
             outcome: AgentExecutionContinuationOutcome::SuccessorCreated,
+            work_id: None,
             predecessor_generation_id: Some(predecessor_binding.generation_id.clone()),
             generation_id: binding.identity.generation_id.clone(),
             execution_binding: binding.identity.clone(),
@@ -6192,6 +6282,90 @@ mod tests {
                 ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
                 before,
                 "a probe must preserve Session, owner ledger, pointer, ECR, and Work bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn issue_5076_terminal_work_requires_a_fresh_session_without_rebinding() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, _) = bind_session_to_current_execution(repo, session);
+            let work_id = gwt_core::workspace_projection::canonical_work_id(
+                repo,
+                Some(&session.branch),
+                Some(repo),
+            )
+            .unwrap();
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, &work_id);
+            let mut works = gwt_core::workspace_projection::load_workspace_work_items(repo)
+                .unwrap()
+                .unwrap();
+            works
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == work_id)
+                .unwrap()
+                .status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+            save_mutation_work_items(repo, &works);
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+
+            let status = crate::cli::execution_state::diagnose(repo, Some(&session.id));
+            assert!(
+                status
+                    .available_recoveries
+                    .contains(&"gwt-execute".to_string()),
+                "{status:?}"
+            );
+            assert!(status
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("new Session")));
+            let error = continue_authenticated_execution(
+                repo,
+                &session.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "issue-5076-terminal-work".to_string(),
+                    readiness_nonce: None,
+                },
+            )
+            .expect_err("terminal Work must never rebound in the same Session");
+            assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::RelaunchRequired);
+            assert!(error.message.contains("new Session"));
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before
+            );
+
+            // An assigned Work with lost Session history is invalid authority,
+            // not an unassigned legacy execution eligible for rebound.
+            works
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == work_id)
+                .unwrap()
+                .agents
+                .clear();
+            save_mutation_work_items(repo, &works);
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let error = continue_authenticated_execution(
+                repo,
+                &session.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "issue-5076-missing-work-history".to_string(),
+                    readiness_nonce: None,
+                },
+            )
+            .expect_err("canonical assignment must not fall back to legacy rebound");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+            );
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before
             );
         });
     }
@@ -11271,6 +11445,7 @@ mod tests {
             schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
             operation_id: "operation-rebound".to_string(),
             outcome: AgentExecutionContinuationOutcome::ReboundCurrent,
+            work_id: None,
             predecessor_generation_id: None,
             generation_id: "generation-current".to_string(),
             execution_binding: ExecutionBindingIdentity {
@@ -11287,6 +11462,7 @@ mod tests {
             schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
             operation_id: "operation-successor".to_string(),
             outcome: AgentExecutionContinuationOutcome::SuccessorCreated,
+            work_id: None,
             predecessor_generation_id: Some("generation-current".to_string()),
             generation_id: "generation-successor".to_string(),
             execution_binding: ExecutionBindingIdentity {

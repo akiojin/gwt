@@ -4952,7 +4952,36 @@ fn leave_fresh_execution_activated_before_projection_commit(
     let transaction = gwt_core::workspace_projection::transact_workspace_state_with_commit(
         &fixture.repo,
         &fixture.operation_id,
-        |_projection, _work_items, _| Ok(((), Vec::new())),
+        |projection, work_items, _| {
+            let pending = fixture
+                .runtime
+                .pending_fresh_execution_launches
+                .get(&fixture.window_id)
+                .expect("pending fresh launch");
+            let active = fixture
+                .runtime
+                .active_agent_sessions
+                .get(&fixture.window_id)
+                .expect("active fresh candidate");
+            let live_session_ids = HashSet::from([fixture.candidate_session_id.clone()]);
+            let event = super::workspace::apply_workspace_launch_for_current_work(
+                &fixture.repo,
+                projection,
+                work_items,
+                active,
+                super::workspace::WorkspaceLaunchTransition {
+                    work_id: None,
+                    base_branch: pending.base_branch.as_deref(),
+                    linked_issue_number: pending.linked_issue_number,
+                    canonical_owner: Some(pending.owner),
+                    resume_context: pending.resume_context.as_ref(),
+                    kind: WorkspaceLaunchProjectionKind::StartWork,
+                    live_session_ids: &live_session_ids,
+                    now: Utc::now(),
+                },
+            )?;
+            Ok(((), vec![event]))
+        },
         || {
             gwt::cli::execution_state::activate_successor(
                 &fixture.repo,

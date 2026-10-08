@@ -866,6 +866,8 @@ pub fn build_frontend_sync_events(
                 id,
                 status,
                 detail: Some(detail),
+                error_code: None,
+                retryable: None,
             },
         ));
     }

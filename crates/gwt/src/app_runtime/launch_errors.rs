@@ -993,6 +993,8 @@ impl AppRuntime {
                     id: window_id,
                     status,
                     detail,
+                    error_code: None,
+                    retryable: None,
                 },
             ),
         ]

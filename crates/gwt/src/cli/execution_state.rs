@@ -5395,16 +5395,38 @@ pub fn begin_active_session_launch_handshake(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
 ) -> io::Result<Option<gwt_agent::SessionActiveLaunchHandshake>> {
+    begin_active_session_launch_handshake_classified(sessions_dir, expected).map(|outcome| {
+        match outcome {
+            ActiveSessionLaunchHandshakeOutcome::Acquired(handshake) => Some(*handshake),
+            ActiveSessionLaunchHandshakeOutcome::Conflict
+            | ActiveSessionLaunchHandshakeOutcome::AuthorityRejected => None,
+        }
+    })
+}
+
+#[derive(Debug)]
+pub enum ActiveSessionLaunchHandshakeOutcome {
+    Acquired(Box<gwt_agent::SessionActiveLaunchHandshake>),
+    Conflict,
+    AuthorityRejected,
+}
+
+/// Keep authority refusal distinct from a live exact launch fence. Only the
+/// latter is retryable; neither outcome issues a replacement capability.
+pub fn begin_active_session_launch_handshake_classified(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<ActiveSessionLaunchHandshakeOutcome> {
     let nonce = uuid::Uuid::new_v4().to_string();
     let Some(host_started_at) = crate::process::host_process_start_time(std::process::id()) else {
-        return Ok(None);
+        return Ok(ActiveSessionLaunchHandshakeOutcome::AuthorityRejected);
     };
     with_current_active_session_execution_identity_lease(sessions_dir, expected, || {
         if reconcile_active_launch_handshake_under_lease(sessions_dir, expected)? {
-            return Ok(None);
+            return Ok(ActiveSessionLaunchHandshakeOutcome::Conflict);
         }
         if exact_session_runtime_fences_active_launch(sessions_dir, expected)? {
-            return Ok(None);
+            return Ok(ActiveSessionLaunchHandshakeOutcome::Conflict);
         }
         gwt_agent::begin_session_active_launch_handshake_under_lease(
             sessions_dir,
@@ -5412,9 +5434,13 @@ pub fn begin_active_session_launch_handshake(
             &nonce,
             host_started_at,
         )
+        .map(|handshake| match handshake {
+            Some(handshake) => ActiveSessionLaunchHandshakeOutcome::Acquired(Box::new(handshake)),
+            None => ActiveSessionLaunchHandshakeOutcome::Conflict,
+        })
     })
     .and_then(|result| result.transpose())
-    .map(Option::flatten)
+    .map(|outcome| outcome.unwrap_or(ActiveSessionLaunchHandshakeOutcome::AuthorityRejected))
 }
 
 /// Whether a runtime sidecar proves the process it recorded is gone.
@@ -12993,10 +13019,10 @@ fn finalize_recovery_probes(
     {
         if let Some(guidance) = recovery_context
             .and_then(|context| context.as_ref().ok())
-            .and_then(discarded_canonical_work_guidance)
+            .and_then(terminal_canonical_work_guidance)
         {
-            // This is a human instruction, not an executable recovery operation.
-            // #4074 owns successor Work materialization.
+            // Advertise the existing fresh-launch workflow and its new-Session
+            // prerequisite; execution.continue never moves a terminal Session.
             snapshot
                 .available_recoveries
                 .push("gwt-execute".to_string());
@@ -13152,24 +13178,39 @@ fn execution_recovery_hint(snapshot: &ExecutionDiagnosisSnapshot) -> Option<Stri
         .then(|| RECOVERY_HINT_FRESH_LAUNCH_REQUIRED.to_string())
 }
 
-fn discarded_canonical_work_guidance(
+fn terminal_canonical_work_guidance(
     context: &crate::agent_project_state::ExecutionRecoveryContext,
 ) -> Option<String> {
-    let work_id = gwt_core::workspace_projection::canonical_work_id(
+    let works =
+        gwt_core::workspace_projection::load_workspace_work_items(context.project_state_root())
+            .ok()??;
+    let work_id = gwt_core::workspace_projection::current_work_id(
+        &works,
         context.project_state_root(),
         Some(context.session().branch.as_str()),
         Some(context.worktree()),
     )?;
-    let works_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(context.project_state_root());
-    let works =
-        gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path).ok()??;
-    let work = works.work_items.iter().find(|work| work.id == work_id)?;
-    work.discarded.then(|| {
+    let work = works
+        .work_items
+        .iter()
+        .find(|work| work.id == work_id && work.is_terminal())
+        .or_else(|| {
+            works.work_items.iter().find(|work| {
+                work.is_terminal()
+                    && work
+                        .agents
+                        .iter()
+                        .any(|agent| agent.session_id == context.session().id)
+            })
+        })?;
+    let work_id = &work.id;
+    Some({
+        let owner = work.owner.as_deref().unwrap_or("the linked owner");
         format!(
-            "canonical Work {work_id} is Discarded; successor Work materialization is required \
-             (owner #4074). Human action: open Issue #4074 in gwt and select Start Work to \
-             arrange implementation. The current Work cannot recover until that support is available."
+            "canonical Work {work_id} is terminal; run gwt-execute for {owner} in a new Session \
+             using the regular linked-owner fresh launch. The launch coordinator creates the \
+             successor Work and binding after authenticated readiness. Preserve the old Work \
+             and Session; release the previous live launch before retrying."
         )
     })
 }
@@ -13192,7 +13233,7 @@ pub(crate) fn terminal_recovery_refusal(
         )
         .ok()
         .as_ref()
-        .and_then(discarded_canonical_work_guidance)
+        .and_then(terminal_canonical_work_guidance)
         {
             let refusal = refusal
                 .split_once(
