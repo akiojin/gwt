@@ -1,6 +1,9 @@
 //! Branch information and tracking
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
@@ -270,6 +273,72 @@ pub fn cleanup_readiness_base_target_with_known_refs(
         }
     }
     Ok(None)
+}
+
+/// Successful merge/no-changes verdicts for immutable (branch, base) tips.
+/// Keep one cache per repository; errors are retried rather than cached.
+#[derive(Debug, Default)]
+pub struct CleanupReadinessCache {
+    verdicts: HashMap<(String, String), Option<CleanupReadinessReason>>,
+}
+
+impl CleanupReadinessCache {
+    pub fn base_target(
+        &mut self,
+        repo_path: &Path,
+        branch: &str,
+        tips: &HashMap<String, crate::refs::BranchTip>,
+    ) -> Result<Option<CleanupReadinessTarget>> {
+        if is_protected_branch(branch) {
+            return Ok(None);
+        }
+        let Some(branch_tip) = tips.get(branch) else {
+            return Ok(None);
+        };
+        for (base, kind) in CANONICAL_BASE_BRANCHES {
+            let reference = format!("origin/{base}");
+            let Some(base_tip) = tips.get(&reference) else {
+                continue;
+            };
+            let key = (branch_tip.sha.clone(), base_tip.sha.clone());
+            let reason = if let Some(reason) = self.verdicts.get(&key) {
+                *reason
+            } else {
+                // Use the captured SHAs, so a ref moving during this scan
+                // cannot store a newer result under the older cache key.
+                let reason = if is_branch_merged_into_existing_refs(
+                    repo_path,
+                    &branch_tip.sha,
+                    &base_tip.sha,
+                )? {
+                    Some(CleanupReadinessReason::Merged)
+                } else if branch_has_no_changes_against_existing_refs(
+                    repo_path,
+                    &branch_tip.sha,
+                    &base_tip.sha,
+                )? {
+                    Some(CleanupReadinessReason::NoChanges)
+                } else {
+                    None
+                };
+                // Prune obsolete tips only on insertion, keeping warm lookups constant-time.
+                let current_shas: HashSet<&str> =
+                    tips.values().map(|tip| tip.sha.as_str()).collect();
+                self.verdicts.retain(|(branch, base), _| {
+                    current_shas.contains(branch.as_str()) && current_shas.contains(base.as_str())
+                });
+                self.verdicts.insert(key, reason);
+                reason
+            };
+            if let Some(reason) = reason {
+                return Ok(Some(CleanupReadinessTarget {
+                    target: MergeTargetRef::new(*kind, reference),
+                    reason,
+                }));
+            }
+        }
+        Ok(None)
+    }
 }
 
 fn branch_has_no_changes_against_base(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
@@ -793,6 +862,43 @@ mod tests {
         std::fs::write(path.join(file), content).unwrap();
         run(&["add", file], path);
         run(&["commit", "-m", message], path);
+    }
+
+    #[test]
+    fn cleanup_readiness_unchanged_tips_spawn_no_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        init_named_repo(repo);
+        run(&["branch", "work/cache"], repo);
+        run(&["update-ref", "refs/remotes/origin/develop", "HEAD"], repo);
+        let tips = crate::refs::branch_tip_snapshot(repo).unwrap();
+        let mut cache = CleanupReadinessCache::default();
+        let first = cache.base_target(repo, "work/cache", &tips).unwrap();
+        let before = gwt_core::process::thread_git_spawn_count();
+        let second = cache.base_target(repo, "work/cache", &tips).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
+
+        make_commit(repo, "new.txt", "unmerged", "new tip");
+        run(&["update-ref", "refs/heads/work/cache", "HEAD"], repo);
+        let tips = crate::refs::branch_tip_snapshot(repo).unwrap();
+        let before = gwt_core::process::thread_git_spawn_count();
+        assert_eq!(cache.base_target(repo, "work/cache", &tips).unwrap(), None);
+        assert!(gwt_core::process::thread_git_spawn_count() > before);
+        let before = gwt_core::process::thread_git_spawn_count();
+        assert_eq!(cache.base_target(repo, "work/cache", &tips).unwrap(), None);
+        assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
+
+        run(&["update-ref", "refs/remotes/origin/develop", "HEAD"], repo);
+        let tips = crate::refs::branch_tip_snapshot(repo).unwrap();
+        let before = gwt_core::process::thread_git_spawn_count();
+        assert_eq!(cache.base_target(repo, "work/cache", &tips).unwrap(), first);
+        assert!(gwt_core::process::thread_git_spawn_count() > before);
+        assert_eq!(
+            cache.verdicts.len(),
+            1,
+            "obsolete SHA pairs must be evicted"
+        );
     }
 
     #[test]

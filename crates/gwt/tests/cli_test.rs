@@ -11,7 +11,6 @@ use gwt_github::{
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     Cache, SectionName,
 };
-use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
 fn s(v: &str) -> String {
@@ -22,9 +21,8 @@ fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(std::string::ToString::to_string).collect()
 }
 
-fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1667,6 +1665,8 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
             ci_status: "FAILURE".to_string(),
             merge_status: "BEHIND".to_string(),
             review_status: "CHANGES_REQUESTED".to_string(),
+            check_counts: None,
+            required_pending_count: None,
             checks: vec![PrCheckItem {
                 name: "test".to_string(),
                 state: "COMPLETED".to_string(),
@@ -1675,6 +1675,7 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
                 started_at: "2026-04-10T00:00:00Z".to_string(),
                 completed_at: "2026-04-10T00:01:00Z".to_string(),
                 workflow: "CI".to_string(),
+                is_required: None,
             }],
         },
     );

@@ -146,10 +146,14 @@ export function createLaunchPendingController({
       ) {
         continue;
       }
-      correlations.delete(key);
+      const retrySameOperation = event.outcome === "failed"
+        && event.retryable === true
+        && event.error_code === "continuation_reconciliation_required";
+      if (!retrySameOperation) correlations.delete(key);
       if (pending.delete(key) && correlation.timer !== null) {
         clearTimeoutFn(correlation.timer);
       }
+      correlation.timer = null;
       notify();
       return true;
     }

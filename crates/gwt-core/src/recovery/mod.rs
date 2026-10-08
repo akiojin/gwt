@@ -501,6 +501,46 @@ impl RecoveryStore {
         Self::new(recovery_root.join("intents"), authority)
     }
 
+    /// Open an existing authority without materializing empty recovery storage.
+    /// Missing storage is distinct from unreadable or malformed storage.
+    pub fn open_for_repo_if_exists(
+        repo_root: impl AsRef<Path>,
+        session_id: impl Into<String>,
+    ) -> RecoveryResult<Option<Self>> {
+        let project_hash = project_scope_hash(repo_root.as_ref());
+        let authority = RecoveryAuthority::new(project_hash.as_str(), session_id)?;
+        let project_root = gwt_project_dir_for_repo_path(repo_root.as_ref());
+        match fs::symlink_metadata(&project_root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RecoveryError::Storage),
+        }
+        let recovery_root = project_root.join("recovery");
+        match fs::symlink_metadata(&recovery_root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RecoveryError::Storage),
+        }
+        let intents_root = recovery_root.join("intents");
+        match fs::symlink_metadata(&intents_root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RecoveryError::Storage),
+        }
+        let root = intents_root.join(authority_storage_key(&authority));
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                Ok(Some(Self { root, authority }))
+            }
+            Ok(_) => Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(RecoveryError::Storage),
+        }
+    }
+
     pub fn authority(&self) -> &RecoveryAuthority {
         &self.authority
     }
@@ -652,6 +692,17 @@ impl RecoveryStore {
             .revisions
             .last()
             .map(|revision| revision.record.clone()))
+    }
+
+    /// Check emptiness without locking, repairing, or writing recovery records.
+    /// Any entry, including incomplete or unrecognized evidence, is retained.
+    pub fn has_no_records(&self) -> RecoveryResult<bool> {
+        fs::read_dir(&self.root)
+            .map_err(|_| RecoveryError::Storage)?
+            .next()
+            .transpose()
+            .map(|entry| entry.is_none())
+            .map_err(|_| RecoveryError::Storage)
     }
 
     pub fn list(&self) -> RecoveryResult<Vec<RecoveryRecord>> {
@@ -1668,4 +1719,51 @@ fn sync_directory(path: &Path) -> RecoveryResult<()> {
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> RecoveryResult<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    #[test]
+    fn opening_an_absent_recovery_authority_does_not_materialize_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(dir.path().join("home"));
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let root = gwt_project_dir_for_repo_path(&repo).join("recovery");
+
+        assert!(
+            RecoveryStore::open_for_repo_if_exists(&repo, "absent-session")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.exists());
+
+        let existing = RecoveryStore::for_repo(&repo, "existing-session").unwrap();
+        let entries_before = fs::read_dir(root.join("intents")).unwrap().count();
+        assert!(
+            RecoveryStore::open_for_repo_if_exists(&repo, "another-session")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fs::read_dir(root.join("intents")).unwrap().count(),
+            entries_before
+        );
+        let reopened = RecoveryStore::open_for_repo_if_exists(&repo, "existing-session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.authority(), existing.authority());
+
+        fs::remove_dir_all(&root).unwrap();
+        fs::write(&root, "regular file at the recovery directory path").unwrap();
+        assert!(RecoveryStore::open_for_repo_if_exists(&repo, "absent-session").is_err());
+
+        fs::remove_file(&root).unwrap();
+        let project = root.parent().unwrap();
+        fs::remove_dir(project).unwrap();
+        fs::write(project, "regular file at the project directory path").unwrap();
+        assert!(RecoveryStore::open_for_repo_if_exists(&repo, "absent-session").is_err());
+    }
 }

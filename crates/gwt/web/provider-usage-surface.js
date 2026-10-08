@@ -14,13 +14,20 @@
 // - sessionLabel(sessionId) (optional): resolve a gwt session id to the
 //   window title the user knows it by (Issue #3862). Returning a falsy
 //   value falls back to a shortened session id.
+import { createUiStateStore } from "./ui-state-store.js";
+
 export function createProviderUsageSurface({
   send,
   renderWorkspaceWindows,
   sessionLabel = () => null,
 }) {
       // ---- Provider usage & rate limits (SPEC-2970) ----
-      let latestProviderUsage = { accounts: [], sessions: [], consumption: [] };
+      const emptyUsage = { accounts: [], sessions: [], consumption: [] };
+      // Null means no snapshot has arrived; eager subscriptions must not call
+      // late-bound Workspace dependencies while app.js constructs its surfaces.
+      const usageModel = createUiStateStore(null);
+      const latestProviderUsage = () => usageModel.read() || emptyUsage;
+      const usagePanelSubscriptions = new Map();
 
       const USAGE_PROVIDER_NAME = { codex: "Codex", claude_code: "Claude Code" };
       const USAGE_WINDOW_LABEL = {
@@ -107,33 +114,12 @@ export function createProviderUsageSurface({
       }
 
       function applyProviderUsageUi(snapshot) {
-        latestProviderUsage = snapshot || { accounts: [], sessions: [], consumption: [] };
-        try {
-          window.__operatorShell?.applyProviderUsage?.(latestProviderUsage);
-        } catch (e) {
-          console.warn("usage pill update failed", e);
-        }
-        try {
-          refreshUsageHoverIfOpen();
-        } catch {
-          /* no-op */
-        }
-        // Re-render regardless of session count: when a snapshot drops back to
-        // sessions:[] (agent stopped, rollout/transcript unreadable, settings
-        // change) the Work surface must clear its stale token/context instead
-        // of keeping the previous poll's values. SPEC-2359 Phase W-12 Slice 3
-        // (FR-351): the sidebar Active Works overview is gone, so usage now
-        // refreshes through the Workspace Overview (Kanban) Work surface.
-        try {
-          renderWorkspaceWindows();
-        } catch {
-          /* no-op */
-        }
+        usageModel.update(() => snapshot || emptyUsage);
       }
 
       function usageForSession(sessionId) {
         return (
-          (latestProviderUsage.sessions || []).find(
+          (latestProviderUsage().sessions || []).find(
             (s) => s.session_id === sessionId,
           ) || null
         );
@@ -260,7 +246,7 @@ export function createProviderUsageSurface({
 
       function usageConsumptionFor(provider) {
         return (
-          (latestProviderUsage.consumption || []).find((c) => c.provider === provider) || null
+          (latestProviderUsage().consumption || []).find((c) => c.provider === provider) || null
         );
       }
 
@@ -324,7 +310,7 @@ export function createProviderUsageSurface({
       const USAGE_SESSION_ROWS_MAX = 5;
 
       function usageSessionsFor(provider) {
-        return (latestProviderUsage.sessions || []).filter(
+        return (latestProviderUsage().sessions || []).filter(
           (s) => s && s.provider === provider,
         );
       }
@@ -548,7 +534,7 @@ export function createProviderUsageSurface({
       // (Issue #3862) — the earlier unbounded table was removed because it
       // grew to hundreds of rows.
       function buildUsageFullSections(container) {
-        for (const account of latestProviderUsage.accounts || []) {
+        for (const account of latestProviderUsage().accounts || []) {
           container.appendChild(buildUsageProviderCard(account));
         }
       }
@@ -665,6 +651,8 @@ export function createProviderUsageSurface({
       // SPEC-2970 FR-009/FR-013 — Settings "Usage & Limits" panel: Claude
       // account usage is opt-in (Keychain + network); Codex is local + auto.
       function renderUsagePanel(panel) {
+        usagePanelSubscriptions.get(panel)?.();
+        usagePanelSubscriptions.delete(panel);
         while (panel.firstChild) panel.removeChild(panel.firstChild);
         const section = document.createElement("div");
         section.className = "settings-section";
@@ -683,14 +671,6 @@ export function createProviderUsageSurface({
         label.className = "settings-toggle";
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
-        const claudeAccount = (latestProviderUsage.accounts || []).find(
-          (a) => a.provider === "claude_code",
-        );
-        checkbox.checked = !!(
-          claudeAccount &&
-          claudeAccount.state &&
-          claudeAccount.state.kind !== "disabled"
-        );
         checkbox.addEventListener("change", () => {
           try {
             send({
@@ -714,7 +694,48 @@ export function createProviderUsageSurface({
         section.appendChild(consent);
 
         panel.appendChild(section);
+        let initialRender = true;
+        let unsubscribe;
+        unsubscribe = usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+          if (!initialRender && !checkbox.isConnected) {
+            unsubscribe?.();
+            usagePanelSubscriptions.delete(panel);
+            return;
+          }
+          initialRender = false;
+          const account = (snapshot?.accounts || []).find((a) => a.provider === "claude_code");
+          checkbox.checked = !!(account?.state && account.state.kind !== "disabled");
+        });
+        usagePanelSubscriptions.set(panel, unsubscribe);
       }
+
+      // These views live for the factory's lifetime, like its window hover
+      // hooks. The receive API updates data without choosing which view renders.
+      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        if (!snapshot) return;
+        try {
+          window.__operatorShell?.applyProviderUsage?.(snapshot);
+        } catch (e) {
+          console.warn("usage pill update failed", e);
+        }
+      });
+      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        if (!snapshot) return;
+        try {
+          refreshUsageHoverIfOpen();
+        } catch {
+          /* no-op */
+        }
+      });
+      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        if (!snapshot) return;
+        // Empty sessions must clear stale token/context values in Workspace.
+        try {
+          renderWorkspaceWindows();
+        } catch {
+          /* no-op */
+        }
+      });
 
       return {
         applyProviderUsageUi,

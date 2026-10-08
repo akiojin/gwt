@@ -1,4 +1,5 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
+import { markdownContent, renderUiContent } from "/ui-content.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -4780,6 +4781,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       // sites, wired through this factory.
       const {
         issueContextForNumber,
+        issueMonitorModel,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
@@ -4794,6 +4796,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
+        applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
       } = createKnowledgeKanbanSurface({
@@ -4854,6 +4857,10 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         reportSurfaceError: (error) => notificationCenter.recordError(error),
         resolveSurfaceError: (key) => notificationCenter.resolveError(key),
       });
+      issueMonitorModel.subscribe(model => model.status, status =>
+        window.__operatorShell?.applyIssueMonitorStatus?.(status));
+      issueMonitorModel.subscribe(model => model.status, status =>
+        updateCtaController.handleIssueMonitorStatus(status));
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
       // state maps, Work-id tracking for the Board Work filter, board chat
@@ -5035,15 +5042,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
-        const node = createNode("div", `${className} knowledge-markdown-body`);
-        const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
-        if (html) {
-          node.innerHTML = html;
-        } else {
-          node.classList.add("is-plaintext");
-          node.textContent = section?.body || "";
-        }
-        return node;
+        return renderUiContent(document, markdownContent(section), className);
       }
 
       // SPEC-2359 US-42 — Workspace Resume Picker controller. The
@@ -5651,6 +5650,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         applyAutostartError,
         applyCustomAgentDeleted,
         applyCustomAgentError,
+        applySupportedAgentList,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -6450,11 +6450,13 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
-            window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
             // Issue #3906 AC-12: the update CTA shows the drain progress.
-            updateCtaController.handleIssueMonitorStatus(event.status || {});
+            break;
+          case "issue_monitor_allowed_labels_write_failed":
+            applyKnowledgeReceiveEvent(event);
             break;
           case "issue_monitor_inbox":
+            applyKnowledgeIssueMonitorInbox(event.items);
             scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_launch_failed":
@@ -6762,6 +6764,9 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             customAgentsState.agents = event.agents || [];
             customAgentsState.loading = false;
             frontendUnits.knowledgeSettingsSurface.renderSettingsAgentList();
+            break;
+          case "supported_agent_list":
+            applySupportedAgentList(event);
             break;
           // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends WebSocket
           // events. `agent_backend_list` is a snapshot reply per
@@ -7583,8 +7588,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
-      function setAgentsHost(host) {
-        if (agentsHost === host) return;
+      function setAgentsHost(host, previewHost = null) {
+        if (agentsHost === host) { agentsSurface.setPreviewHost(previewHost); return; }
         agentsHost = host;
         const area = stage.closest(".canvas-area");
         area.classList.toggle("is-agents", host === area);
@@ -7601,6 +7606,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           agentPreviousHosts.clear();
           cleanupTextPreviews(true);
         }
+        agentsSurface.setPreviewHost(previewHost);
         renderedIssuePreviewBodyKeys.clear();
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
@@ -7613,7 +7619,14 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           }
           createTerminalRuntime(id, root);
         },
+        mountPreview: (id, root) => createTerminalTextPreview({
+          document, terminal: terminalMap.get(id).terminal, container: root,
+        }),
         onFocus: focusWindowLocally,
+        onPreviewFocus: (id) => {
+          focusWindowLocally(id);
+          terminalMap.get(id)?.terminal.focus();
+        },
         onLayout: () => requestAnimationFrame(() => {
           if (!agentsHost) return;
           for (const id of terminalMap.keys()) {

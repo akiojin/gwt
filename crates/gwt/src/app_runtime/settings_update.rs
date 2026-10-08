@@ -659,6 +659,21 @@ impl AppRuntime {
         });
     }
 
+    pub(crate) fn spawn_supported_agent_list(&self, client_id: ClientId) {
+        let cache = self.launch_wizard_cache.clone();
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            // The first cache read may join detection; keep that wait off
+            // the GUI loop, just like the other Settings probes.
+            let event = BackendEvent::SupportedAgentList {
+                agents: cache.supported_agents(),
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+    }
+
     pub(super) fn apply_pending_update_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         match self.pending_update.clone() {
             Some(

@@ -801,14 +801,14 @@ fn load_urgent_assignments_with<E: fmt::Display>(
     assignments
 }
 
-/// Load live candidates when available, retaining typed provenance for capped
-/// (therefore incomplete) live lists and cache fallbacks.
+/// Load live candidates with the complete REST queue label collection, while
+/// retaining the general open list's capped provenance and cache fallbacks.
 pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     repo_path: &Path,
     owner: &str,
     repo: &str,
 ) -> Result<LoadedIssueMonitorCandidates, String> {
-    let live_error = match gwt_git::issue::fetch_issue_listing(owner, repo) {
+    let live_error = match gwt_git::issue::fetch_issue_monitor_listing(owner, repo) {
         Ok(listing) => {
             let source = live_candidate_source(listing.capped);
             let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
