@@ -42,7 +42,7 @@
 ### Decision rules
 
 1. **Do not create or switch branches.** Always use the current branch as head.
-2. **Only `develop` may target `main`.** Refuse any other branch targeting `main`.
+2. **`main` accepts `develop` or validated `release/vX.Y.Z` snapshots.** A same-repository snapshot must match its merge base's source tree on `develop`, as proven by required `check-source-branch`. Refuse other sources. Prepare Release owns snapshot creation; never create or advance release branches locally.
 3. **No PR exists** --> create a new PR.
 4. **Open unmerged PR exists and merge state is clean** --> push only (do not create a new PR). Only update title/body/labels if explicitly requested.
 5. **Open unmerged PR exists and mergeable is `CONFLICTING` / `DIRTY` / `BEHIND`** --> switch to fix mode before push-only.

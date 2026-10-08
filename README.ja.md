@@ -1176,6 +1176,16 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
+### フロントエンドの共有状態（SPEC-5016）
+
+移行したフロントエンド domain は `web/ui-state-store.js` で immutable なデータを保持します。
+受信ハンドラはモデルを更新し、各面は selector を購読して確定した snapshot を描画します。
+取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
+通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
+共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
+Markdown 描画を選びます。移行対象と受け入れ条件は
+[SPEC-5016](https://github.com/akiojin/gwt/issues/5016) を参照してください。
+
 ### 重量級検証の容量制御
 
 ホスト全体の verification lease を取得するのは canonical `verify.run`
@@ -1360,14 +1370,15 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 
 リリースは GitHub Actions の **Prepare Release** ワークフロー（Actions →
 `Prepare Release` → `Run workflow`）で起動します。CI が `develop` を対象に
-バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
-を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
+バージョン更新・`CHANGELOG` 再生成後、その develop commit を固定した
+`release/vX.Y.Z → main` の Release PR を作成します。以降 develop へ着地しても
+release head とその CI は変わりません。ローカルで `develop` に切り替えずにどのブランチからでも
 リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
 `auto` がメジャーになることはありません。コミットの breaking marker は
 Release PR 本文に列挙されるだけで、メジャー昇格は `major` を明示した場合のみです。
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
-ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+ます。リリース復旧手順は `.claude/commands/release.md` にあります。
 
 Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
 closing keyword は書きません。`main` は default branch なので、そこに
