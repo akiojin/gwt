@@ -1775,7 +1775,7 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
     )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::TerminalStatus { id, status, detail }
+        BackendEvent::TerminalStatus { id, status, detail, .. }
             if id == &window_id
                 && *status == WindowProcessStatus::Running
                 && detail.is_none()

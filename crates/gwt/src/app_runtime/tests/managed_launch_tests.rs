@@ -1715,7 +1715,7 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     let events = capture_tracing_events(|| {
         let _ = runtime.handle_launch_complete_and_drain(
                 window_id,
-                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".to_string()),
+                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".into()),
             );
     });
 
@@ -1736,6 +1736,54 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     assert!(error.contains("--api-key [REDACTED]"));
     assert!(error.contains("GWT_HOOK_TOKEN=[REDACTED]"));
     assert!(error.contains("--token [REDACTED]"));
+}
+
+#[test]
+fn launch_failure_retains_structured_retry_metadata_in_terminal_status() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+
+    use super::super::launch::AgentLaunchError;
+    for (error, error_code, retryable) in [
+        (
+            AgentLaunchError::from("simulated launch failure"),
+            "launch_failed",
+            true,
+        ),
+        (
+            AgentLaunchError::active_conflict("exact launch conflict"),
+            "active_launch_conflict",
+            true,
+        ),
+        (
+            AgentLaunchError::authority_rejected("exact authority mismatch"),
+            "active_launch_authority_rejected",
+            false,
+        ),
+    ] {
+        let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Err(error));
+        let response = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    &event.event,
+                    BackendEvent::TerminalStatus { id, status: WindowProcessStatus::Error, .. }
+                        if id == &window_id
+                )
+            })
+            .expect("caller launch failure response");
+        let value = serde_json::to_value(&response.event).expect("serialize launch response");
+        assert_eq!(value["error_code"], error_code);
+        assert_eq!(value["retryable"], retryable);
+    }
 }
 
 #[test]

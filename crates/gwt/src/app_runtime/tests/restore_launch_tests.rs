@@ -138,7 +138,7 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
         let completed = capture_tracing_events(|| {
             runtime.handle_launch_complete_and_drain(
                 window_id.clone(),
-                Err("restore preparation failed".to_string()),
+                Err("restore preparation failed".into()),
             );
         });
         let summary = restore_admission_summary(&completed);
@@ -1136,7 +1136,7 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
 
     let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("PTY creation failed: too many open files".to_string()),
+        Err("PTY creation failed: too many open files".into()),
     );
 
     assert!(
@@ -1186,7 +1186,7 @@ fn user_started_launch_failure_before_pty_keeps_the_error_window() {
 
     let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("PTY creation failed: too many open files".to_string()),
+        Err("PTY creation failed: too many open files".into()),
     );
 
     assert_eq!(
@@ -1242,7 +1242,7 @@ fn restore_launch_failures_do_not_accumulate_error_windows_across_generations() 
 
         let _ = runtime.handle_launch_complete_and_drain(
             window_id,
-            Err(format!("PTY creation failed in generation {generation}")),
+            Err(format!("PTY creation failed in generation {generation}").into()),
         );
 
         persisted_after_each_generation.push(
@@ -1509,7 +1509,7 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
     for window_id in &restored {
         let _ = runtime.handle_launch_complete_and_drain(
             window_id.clone(),
-            Err("PTY creation failed: Too many open files (os error 24)".to_string()),
+            Err("PTY creation failed: Too many open files (os error 24)".into()),
         );
     }
 

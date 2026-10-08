@@ -160,11 +160,42 @@ pub(crate) struct PendingFreshExecutionFinalization {
 fn fresh_execution_readiness_receipt(
     pending: &PendingFreshExecutionLaunch,
     operation_id: String,
-) -> gwt::AgentExecutionContinuationReceipt {
-    gwt::AgentExecutionContinuationReceipt {
+) -> Result<gwt::AgentExecutionContinuationReceipt, gwt::AgentWorkspaceUpdateError> {
+    let work_id = gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
+        .ok()
+        .flatten()
+        .and_then(|works| {
+            let work_id = gwt_core::workspace_projection::current_work_id(
+                &works,
+                &pending.project_root,
+                Some(&pending.session_identity.branch),
+                Some(&pending.worktree_path),
+            )?;
+            works
+                .work_items
+                .iter()
+                .find(|work| {
+                    work.id == work_id
+                        && !work.is_terminal()
+                        && projection_continue_authority_matches(
+                            work,
+                            &pending.project_root,
+                            pending.owner,
+                            &pending.worktree_path,
+                            &pending.session_identity.branch,
+                            &pending.session_identity.agent_id,
+                            Some(&pending.session_identity.session_id),
+                            true,
+                        )
+                })
+                .map(|work| work.id.clone())
+        })
+        .ok_or_else(fresh_execution_readiness_conflict)?;
+    Ok(gwt::AgentExecutionContinuationReceipt {
         schema_version: gwt::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
         operation_id,
         outcome: gwt::AgentExecutionContinuationOutcome::SuccessorCreated,
+        work_id: Some(work_id),
         predecessor_generation_id: Some(pending.predecessor_binding.generation_id.clone()),
         generation_id: pending.binding.identity.generation_id.clone(),
         execution_binding: pending.binding.identity.clone(),
@@ -172,7 +203,7 @@ fn fresh_execution_readiness_receipt(
         superseded_execution_binding: None,
         takeover_audit_id: None,
         validated: true,
-    }
+    })
 }
 
 fn fresh_execution_readiness_conflict() -> gwt::AgentWorkspaceUpdateError {
@@ -6833,13 +6864,20 @@ impl AppRuntime {
                 );
             }
         }
-        self.finish_continue_work_launch_failure(window_id, detail, &context, &pending, pane, false)
+        self.finish_continue_work_launch_failure(
+            window_id,
+            &detail.into(),
+            &context,
+            &pending,
+            pane,
+            false,
+        )
     }
 
     pub(super) fn apply_prepared_continue_work_launch_failure(
         &mut self,
         window_id: &str,
-        detail: &str,
+        error: &super::launch::AgentLaunchError,
         pending: &PendingContinueWork,
         cleanup: Result<bool, String>,
         activation_status: Option<bool>,
@@ -6863,7 +6901,7 @@ impl AppRuntime {
                     return Vec::new();
                 };
                 self.finish_continue_work_launch_failure(
-                    window_id, detail, &context, pending, LaunchPaneDisposition::Teardown, true,
+                    window_id, error, &context, pending, LaunchPaneDisposition::Teardown, true,
                 )
             }
             Ok(false) => Vec::new(),
@@ -6882,7 +6920,7 @@ impl AppRuntime {
     fn finish_continue_work_launch_failure(
         &mut self,
         window_id: &str,
-        detail: &str,
+        error: &super::launch::AgentLaunchError,
         context: &super::ProjectContext,
         pending: &PendingContinueWork,
         pane: LaunchPaneDisposition,
@@ -6898,7 +6936,7 @@ impl AppRuntime {
             LaunchPaneDisposition::Retain => Vec::new(),
         };
         self.pending_continue_work.remove(window_id);
-        let message = format!("Continue work launch failed before activation: {detail}");
+        let message = format!("Continue work launch failed before activation: {error}");
         self.cache_continue_work_outcome(
             context,
             pending.operation_id.clone(),
@@ -6906,16 +6944,16 @@ impl AppRuntime {
                 work_id: pending.work_id.clone(),
                 outcome: gwt::ContinueWorkOutcomeKind::Failed,
                 message: Some(message.clone()),
-                error_code: Some("launch_failed".to_string()),
-                retryable: true,
+                error_code: Some(error.error_code.to_string()),
+                retryable: error.retryable,
             },
         );
         events.extend(self.continue_work_pending_outcome_events(
             pending,
             gwt::ContinueWorkOutcomeKind::Failed,
             Some(message),
-            Some("launch_failed".to_string()),
-            true,
+            Some(error.error_code.to_string()),
+            error.retryable,
         ));
         events
     }
@@ -7383,6 +7421,8 @@ impl AppRuntime {
                 id: window_id.to_string(),
                 status,
                 detail: Some(detail),
+                error_code: None,
+                retryable: None,
             },
         )]
     }
@@ -7509,10 +7549,9 @@ impl AppRuntime {
             return (Some(Err(fresh_execution_readiness_conflict())), events);
         }
         (
-            Some(Ok(Some(fresh_execution_readiness_receipt(
-                &pending,
-                request.operation_id.clone(),
-            )))),
+            Some(
+                fresh_execution_readiness_receipt(&pending, request.operation_id.clone()).map(Some),
+            ),
             events,
         )
     }
@@ -7672,10 +7711,7 @@ impl AppRuntime {
         let (committed, events) = self.apply_fresh_execution_finalized(completion);
         for (operation_id, reply) in inflight.readiness_replies {
             let result = if committed {
-                Ok(Some(fresh_execution_readiness_receipt(
-                    &pending,
-                    operation_id,
-                )))
+                fresh_execution_readiness_receipt(&pending, operation_id).map(Some)
             } else {
                 Err(fresh_execution_readiness_conflict())
             };

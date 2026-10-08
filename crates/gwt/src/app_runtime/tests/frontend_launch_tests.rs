@@ -2028,7 +2028,7 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_project_client_and_star
     )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::TerminalStatus { id, status, detail }
+        BackendEvent::TerminalStatus { id, status, detail, .. }
             if id == &window_id
                 && *status == WindowProcessStatus::Ready
                 && detail.as_deref() == Some("Shell ready")
