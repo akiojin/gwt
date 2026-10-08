@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use gwt_github::client::{OwnerMutationError, OwnerMutationResult};
 use gwt_github::issue_auto_claim::{
     acquire_claim, acquire_claim_mutation, claim_is_active, parse_claim_comment, release_claim,
-    release_claim_mutation, render_claim_comment, select_winning_claim, ClaimAcquireOutcome,
-    ClaimComment, ClaimReleaseOutcome, ClaimStatus,
+    release_claim_mutation, render_claim_comment, renew_claim_mutation, select_winning_claim,
+    ClaimAcquireOutcome, ClaimComment, ClaimReleaseOutcome, ClaimRenewOutcome, ClaimStatus,
 };
 use gwt_github::{
     ApiError, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient, IssueNumber,
@@ -1419,4 +1419,168 @@ fn mutation_release_promotes_partial_presubmit_failure_and_replay_converges() {
         stored_claim(&client.inner, 10).status,
         ClaimStatus::Released
     );
+}
+
+fn renewal_own_claim() -> ClaimComment {
+    claim(
+        "claim-own",
+        "host-a/session-a",
+        "2026-06-23T10:00:00Z",
+        "2026-06-23T10:30:00Z",
+    )
+}
+
+fn renew_fixture_claim(client: &impl IssueClient) -> OwnerMutationResult<ClaimRenewOutcome> {
+    renew_claim_mutation(
+        client,
+        IssueNumber(42),
+        "claim-own",
+        "host-a/session-a",
+        "2026-06-23T11:00:00Z",
+        "2026-06-23T11:30:00Z",
+    )
+}
+
+#[test]
+fn renewal_extends_an_expired_active_claim_and_replay_does_not_patch_again() {
+    let client = FakeIssueClient::new();
+    let own = renewal_own_claim();
+    client.seed(snapshot(vec![comment(100, &own)]));
+    let now = "2026-06-23T11:00:00Z";
+    let expires = "2026-06-23T11:30:00Z";
+
+    let renewed = renew_fixture_claim(&client)
+        .expect("a proven-live holder may renew its expired Active claim");
+
+    assert!(
+        matches!(renewed, ClaimRenewOutcome::Renewed { ref claim, ref conflicting_claims }
+        if claim.comment_id == own.comment_id && claim.heartbeat_at == now
+            && claim.expires_at == expires && claim.launched_work_id == own.launched_work_id
+            && conflicting_claims.is_empty())
+    );
+    for (replay_now, replay_expiry) in [
+        (now, expires),
+        (own.heartbeat_at.as_str(), own.expires_at.as_str()),
+    ] {
+        assert!(matches!(
+            renew_claim_mutation(
+                &client,
+                IssueNumber(42),
+                &own.claim_id,
+                &own.owner,
+                replay_now,
+                replay_expiry
+            )
+            .unwrap(),
+            ClaimRenewOutcome::Renewed { .. }
+        ));
+    }
+    assert_eq!(client.comments(IssueNumber(42)).len(), 1);
+    assert_eq!(
+        client.call_log(),
+        vec![
+            "fetch:#42",
+            "patch_comment:comment:100",
+            "fetch:#42",
+            "fetch:#42",
+            "fetch:#42",
+        ]
+    );
+}
+
+#[test]
+fn renewal_never_revives_non_active_or_missing_exact_claims() {
+    let own = renewal_own_claim();
+    let mut cases = vec![Vec::new()];
+    for status in [
+        ClaimStatus::Queued,
+        ClaimStatus::Released,
+        ClaimStatus::Completed,
+        ClaimStatus::Lost,
+    ] {
+        let mut terminal = own.clone();
+        terminal.status = status;
+        cases.push(vec![comment(100, &terminal)]);
+    }
+    let mut wrong_owner = own.clone();
+    wrong_owner.owner = "host-b/session-b".to_string();
+    cases.push(vec![comment(100, &wrong_owner)]);
+    let mut wrong_issue = own.clone();
+    wrong_issue.issue_number = 43;
+    cases.push(vec![comment(100, &wrong_issue)]);
+    for comments in cases {
+        let client = FakeIssueClient::new();
+        client.seed(snapshot(comments.clone()));
+        assert!(matches!(
+            renew_fixture_claim(&client).unwrap(),
+            ClaimRenewOutcome::NotRenewed { .. }
+        ));
+        assert_eq!(client.comments(IssueNumber(42)), comments);
+        assert_eq!(client.call_log(), vec!["fetch:#42"]);
+    }
+}
+
+#[test]
+fn renewal_refuses_an_existing_foreign_active_claim_without_arbitration() {
+    let client = FakeIssueClient::new();
+    let own = renewal_own_claim();
+    let foreign = claim(
+        "claim-foreign",
+        "host-b/session-b",
+        "2026-06-23T10:31:00Z",
+        "2026-06-23T11:30:00Z",
+    );
+    client.seed(snapshot(vec![comment(100, &own), comment(101, &foreign)]));
+    let result = renew_fixture_claim(&client).unwrap();
+    assert!(
+        matches!(result, ClaimRenewOutcome::NotRenewed { ref conflicting_claims, .. }
+        if conflicting_claims.len() == 1 && conflicting_claims[0].claim_id == foreign.claim_id)
+    );
+    assert_eq!(stored_claim(&client, 100), own);
+    assert_eq!(client.call_log(), vec!["fetch:#42"]);
+}
+
+#[test]
+fn renewal_reports_a_collision_that_appears_in_fresh_post_patch_readback() {
+    let inner = FakeIssueClient::new();
+    let own = renewal_own_claim();
+    inner.seed(snapshot(vec![comment(100, &own)]));
+    let foreign = claim(
+        "claim-foreign",
+        "host-b/session-b",
+        "2026-06-23T11:00:00Z",
+        "2026-06-23T11:30:00Z",
+    );
+    let client = PatchFaultClient::inject_after_first_patch(inner, IssueNumber(42), &foreign);
+    let result = renew_fixture_claim(&client).unwrap();
+    assert!(
+        matches!(result, ClaimRenewOutcome::Renewed { ref claim, ref conflicting_claims }
+        if claim.heartbeat_at == "2026-06-23T11:00:00Z"
+            && conflicting_claims.len() == 1 && conflicting_claims[0].claim_id == foreign.claim_id)
+    );
+    assert_eq!(client.patch_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(stored_claim(&client.inner, 101).status, ClaimStatus::Active);
+}
+
+#[test]
+fn renewal_requires_readback_of_the_actual_updated_timestamps() {
+    let own = renewal_own_claim();
+    let unchanged = snapshot(vec![comment(100, &own)]);
+    let client = OmittedClaimReadbackClient::new(unchanged.clone(), unchanged);
+    let result = renew_fixture_claim(&client);
+    assert!(matches!(
+        result,
+        Err(OwnerMutationError::RemoteOutcomeUnknown(_))
+    ));
+}
+
+#[test]
+fn renewal_preserves_a_patch_presubmit_error_without_claiming_success() {
+    let inner = FakeIssueClient::new();
+    let own = renewal_own_claim();
+    inner.seed(snapshot(vec![comment(100, &own)]));
+    let client = PatchFaultClient::fail_at(inner, 1);
+    let result = renew_fixture_claim(&client);
+    assert!(matches!(result, Err(OwnerMutationError::PreSubmit(_))));
+    assert_eq!(stored_claim(&client.inner, 100), own);
 }
