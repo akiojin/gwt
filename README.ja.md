@@ -1339,14 +1339,15 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 
 リリースは GitHub Actions の **Prepare Release** ワークフロー（Actions →
 `Prepare Release` → `Run workflow`）で起動します。CI が `develop` を対象に
-バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
-を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
+バージョン更新・`CHANGELOG` 再生成後、その develop commit を固定した
+`release/vX.Y.Z → main` の Release PR を作成します。以降 develop へ着地しても
+release head とその CI は変わりません。ローカルで `develop` に切り替えずにどのブランチからでも
 リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
 `auto` がメジャーになることはありません。コミットの breaking marker は
 Release PR 本文に列挙されるだけで、メジャー昇格は `major` を明示した場合のみです。
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
-ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+ます。リリース復旧手順は `.claude/commands/release.md` にあります。
 
 Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
 closing keyword は書きません。`main` は default branch なので、そこに

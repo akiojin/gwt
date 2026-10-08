@@ -1432,14 +1432,15 @@ decision a periodic read would get right now.
 To cut a release, trigger the **Prepare Release** workflow from GitHub
 Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
 and bumps the version, regenerates the `CHANGELOG`, and opens a
-`develop → main` Release PR — so you can release from any branch without
+`release/vX.Y.Z → main` Release PR from that frozen develop commit. Later
+develop merges leave the release head and its CI unchanged. You can release from any branch without
 switching to `develop` locally. The `bump` input is `auto` (default),
 `patch`, `minor`, or `major`. `auto` never produces a major release:
 breaking markers in commits are only listed in the Release PR body, and a
 major bump requires choosing `major` explicitly. Review and merge the
 generated Release PR;
 merging to `main` then runs the release pipeline (tag, GitHub Release,
-cross‑platform binaries). The manual fallback procedure lives in
+cross‑platform binaries). Release recovery instructions live in
 `.claude/commands/release.md`.
 
 The Release PR body is reference-only: it lists delivered Issues as bare
