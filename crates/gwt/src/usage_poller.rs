@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gwt_agent::{AgentId, AgentStatus, Session};
+use gwt_agent::{AgentId, AgentStatus};
 use gwt_config::{usage_config::UsageConfig, Settings};
 use gwt_core::usage::{
     claude, codex, consumption,
@@ -386,17 +386,8 @@ fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
     let dir = gwt_core::paths::gwt_sessions_dir();
     let codex_home = codex::codex_home();
     let claude_home = claude::claude_home();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
-        let Ok(session) = Session::load_and_migrate(&path) else {
-            continue;
-        };
+    let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load(&dir);
+    for session in sessions {
         if !is_active_status(session.status) {
             continue;
         }
@@ -492,6 +483,52 @@ mod tests {
         assert!(is_active_status(AgentStatus::WaitingInput));
         assert!(!is_active_status(AgentStatus::Stopped));
         assert!(!is_active_status(AgentStatus::Unknown));
+    }
+
+    #[test]
+    fn repeated_collection_skips_preferences_and_caches_bad_sessions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::prelude::*;
+
+        struct Warnings(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN
+                    && event.metadata().target().starts_with("gwt_agent::session")
+                {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("display.toml"), "display_mode = 'grid'").unwrap();
+        std::fs::write(sessions.join("broken.toml"), "id = [").unwrap();
+        gwt_agent::Session::new(home.path(), "work/valid", AgentId::Codex)
+            .save(&sessions)
+            .unwrap();
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(Warnings(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                collect_sessions(&UsageConfig {
+                    codex_enabled: false,
+                    claude_account_enabled: false,
+                });
+            }
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "only the first bad Session read warns"
+        );
     }
 
     #[test]

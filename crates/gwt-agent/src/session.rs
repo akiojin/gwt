@@ -993,6 +993,12 @@ impl Session {
         Ok(session)
     }
 
+    pub(crate) fn from_toml_value(value: toml::Value) -> Result<Self, toml::de::Error> {
+        let mut session: Self = value.try_into()?;
+        session.normalize_fast_mode_fields();
+        Ok(session)
+    }
+
     /// Load a session and apply any pending legacy migrations. Production
     /// call sites (runtime hooks, daemon, wizard Quick Start, board view)
     /// should prefer this over [`Session::load`] so legacy TOML files get

@@ -642,6 +642,8 @@ fn recovery_center_projects_only_active_project_records_without_rewriting_sessio
         )
         .expect("prepare foreign");
 
+    // One unreadable ledger entry must not hide the valid recovery records.
+    fs::write(runtime.sessions_dir.join("broken.toml"), "id = [").unwrap();
     let events = runtime.handle_frontend_event(
         "client-recovery".to_string(),
         FrontendEvent::LoadRecoveryCenter {
@@ -40807,6 +40809,83 @@ fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() 
         gwt_agent::Session::CURRENT_SCHEMA_VERSION
     );
     assert_eq!(persisted.status, gwt_agent::AgentStatus::Interrupted);
+}
+
+/// Issue #5025 AC-3: startup uses shared classification and failed-read caching.
+#[test]
+fn app_runtime_startup_recovery_classifies_preferences_and_caches_failed_candidates() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    // Resolve the setup's empty background load before writing failures; it
+    // must not prime the shared failure cache outside the tracing capture.
+    let _ = runtime.launch_wizard_cache.agent_preferences();
+    let mut session =
+        gwt_agent::Session::new(temp.path(), "work/startup", gwt_agent::AgentId::Codex);
+    session.id = "valid-startup".to_string();
+    session.status = gwt_agent::AgentStatus::Stopped;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save valid Session");
+    for (name, content) in [
+        ("window-state.toml", "display_mode = 'grid'\n"),
+        ("legacy-launch-prefs.toml", "last_branch = 'main'\n"),
+        (".writer-temporary.toml", "not = [valid toml"),
+        ("malformed-session.toml", "not = [valid toml"),
+    ] {
+        fs::write(runtime.sessions_dir.join(name), content).expect("write ledger fixture");
+    }
+    let mut missing_agent = toml::Value::try_from(&session).expect("Session TOML value");
+    let table = missing_agent.as_table_mut().expect("Session table");
+    table.insert("id".to_string(), "missing-agent".into());
+    table.remove("agent_id");
+    fs::write(
+        runtime.sessions_dir.join("missing-agent.toml"),
+        toml::to_string(&missing_agent).expect("serialize missing-agent fixture"),
+    )
+    .expect("write missing-agent fixture");
+
+    let events = capture_tracing_events(|| {
+        for _ in 0..2 {
+            let loaded = runtime.load_recovery_sessions();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].id, session.id);
+        }
+    });
+    let warnings = events
+        .iter()
+        .filter(|event| {
+            event
+                .fields
+                .get("message")
+                .is_some_and(|message| message.starts_with("Cannot load session"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        warnings.len() <= 2,
+        "preferences/hidden temporary must not reach typed Session reads, and unchanged failed candidates must not flood warnings; captured={events:?}"
+    );
+    // Other background readers can emit a failure outside this thread-local
+    // capture. Candidate parse-count tests prove unchanged failures are not
+    // reread; every diagnostic captured here must still belong to a bad file.
+    assert!(warnings
+        .iter()
+        .all(|event| event.fields.get("path").is_some_and(|path| {
+            path.ends_with("malformed-session.toml") || path.ends_with("missing-agent.toml")
+        })));
+    for name in ["malformed-session.toml", "missing-agent.toml"] {
+        assert!(
+            warnings
+                .iter()
+                .filter(|event| event
+                    .fields
+                    .get("path")
+                    .is_some_and(|path| path.ends_with(name)))
+                .count()
+                <= 1,
+            "failed candidate {name} must not warn repeatedly across startup reads"
+        );
+    }
 }
 
 /// Issue #4377 (AC-1 / AC-3): startup reads only the Sessions it may restore.
