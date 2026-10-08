@@ -1176,6 +1176,16 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
+### フロントエンドの共有状態（SPEC-5016）
+
+移行したフロントエンド domain は `web/ui-state-store.js` で immutable なデータを保持します。
+受信ハンドラはモデルを更新し、各面は selector を購読して確定した snapshot を描画します。
+取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
+通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
+共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
+Markdown 描画を選びます。移行対象と受け入れ条件は
+[SPEC-5016](https://github.com/akiojin/gwt/issues/5016) を参照してください。
+
 ### 重量級検証の容量制御
 
 ホスト全体の verification lease を取得するのは canonical `verify.run`

@@ -778,7 +778,13 @@ jobs:
       - name: Run verification reporter regressions
         run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
       - name: Run frontend unit tests
-        run: bash scripts/run-frontend-unit-tests.sh
+        env:
+          GWT_PULL_RENDER_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          if [ -n "$GWT_PULL_RENDER_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$GWT_PULL_RENDER_BASE_SHA"
+          fi
+          bash scripts/run-frontend-unit-tests.sh --test-concurrency=1
         timeout-minutes: 10
       - name: Run frontend smoke tests
         run: bash scripts/run-frontend-smoke-tests.sh
