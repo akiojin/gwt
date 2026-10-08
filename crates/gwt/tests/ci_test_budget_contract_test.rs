@@ -113,6 +113,23 @@ fn consolidated_gwt_suites_register_every_integration_source_once() {
         registered, originals,
         "no original test source may disappear"
     );
+
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
+    let steps = workflow["jobs"]["changes"]["steps"]
+        .as_sequence()
+        .expect("classification steps");
+    let classify = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("classify"))
+        .expect("classification step");
+    assert!(
+        steps[..classify].iter().any(|step| step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            && step.get("if").is_none()),
+        "the consolidated source mapper needs a checkout for pull requests and merge groups"
+    );
 }
 
 /// Separate integration files now share a process and must share its env lock.

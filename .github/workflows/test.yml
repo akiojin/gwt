@@ -79,12 +79,10 @@ jobs:
       flake_targets: ${{ steps.classify.outputs.flake_targets }}
       verify_timings: ${{ steps.classify.outputs.verify_timings }}
     steps:
-      # Issue #4872: a merge group has no pull request number to ask the API
-      # about, so its files come from its own diff against the commit it was
-      # built on. `blob:none` keeps the full-history fetch to commits and
-      # trees, which is all `--name-only` reads.
+      # Source mapping reads Cargo registrations and harnesses for both events.
+      # A merge group also needs history for its changed-file diff. `blob:none`
+      # keeps that full-history fetch to commits and trees.
       - uses: actions/checkout@v7
-        if: github.event_name == 'merge_group'
         with:
           fetch-depth: 0
           filter: blob:none
