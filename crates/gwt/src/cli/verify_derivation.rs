@@ -477,16 +477,19 @@ pub fn derive_pre_pr(
     required: &[String],
     acceptance: &[String],
     local: &[String],
+    generated_outputs: &[String],
 ) -> Result<DerivedPlan, String> {
-    derive_pre_pr_for_host(
+    derive_pre_pr_for_host_excluding(
         worktree,
         VerificationHost::current(),
         required,
         acceptance,
         local,
+        generated_outputs,
     )
 }
 
+#[cfg(test)]
 fn derive_pre_pr_for_host(
     worktree: &Path,
     host: VerificationHost,
@@ -494,7 +497,18 @@ fn derive_pre_pr_for_host(
     acceptance: &[String],
     local: &[String],
 ) -> Result<DerivedPlan, String> {
-    let mut plan = derive_for_host(worktree, host)?;
+    derive_pre_pr_for_host_excluding(worktree, host, required, acceptance, local, &[])
+}
+
+fn derive_pre_pr_for_host_excluding(
+    worktree: &Path,
+    host: VerificationHost,
+    required: &[String],
+    acceptance: &[String],
+    local: &[String],
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
+    let mut plan = derive_for_host_excluding(worktree, host, generated_outputs)?;
     if plan.trivial_reason.is_some() {
         for command in acceptance.iter().chain(local) {
             if command.trim().is_empty() {
@@ -525,6 +539,9 @@ fn derive_pre_pr_for_host(
     let mut packages = BTreeSet::new();
     let mut workspace = false;
     for path in changed_paths(worktree).map_err(|reason| reason.as_str().to_string())? {
+        if generated_outputs.contains(&path) {
+            continue;
+        }
         if is_rust_path(&path) {
             if let Some(package) = crate_of(&path) {
                 packages.insert(package.to_string());
@@ -537,7 +554,12 @@ fn derive_pre_pr_for_host(
             packages.insert("gwt".to_string());
         }
     }
-    plan.commands.clear();
+    // Required Rust/coverage contexts do not cover the derived Node runner.
+    let node_commands: Vec<_> = plan
+        .commands
+        .drain(..)
+        .filter(|command| command.starts_with("node --test "))
+        .collect();
     if workspace || !packages.is_empty() {
         plan.commands.push(CI_FMT_GATE.to_string());
         let scope = if workspace {
@@ -552,6 +574,7 @@ fn derive_pre_pr_for_host(
         plan.commands
             .push(CI_CLIPPY_GATE.replace("--workspace", &scope));
     }
+    plan.commands.extend(node_commands);
     for command in acceptance.iter().chain(local) {
         if command.trim().is_empty() {
             return Err("pre-pr commands must not be empty".into());
@@ -726,6 +749,7 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
 
 /// [`derive()`] against an explicit host, so both branches of the
 /// host-sensitive matrix stay reachable from tests on any machine (#4182).
+#[cfg(test)]
 fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPlan, String> {
     derive_for_host_excluding(worktree, host, &[])
 }
@@ -1138,6 +1162,36 @@ mod tests {
         assert_eq!(
             derive_pre_pr_for_host(dir.path(), VerificationHost::Other, &[], &[], &[]).unwrap(),
             derive_for_host(dir.path(), VerificationHost::Other).unwrap()
+        );
+    }
+
+    #[test]
+    fn pre_pr_keeps_node_runner_outside_required_ci() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        git(dir.path(), &["add", "."]);
+        git(
+            dir.path(),
+            &["commit", "-qm", "test: existing pre-pr workflow"],
+        );
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(dir.path(), "scripts/tool.mjs", "export {};\n");
+        write(dir.path(), "scripts/tool.test.mjs", "import 'node:test';\n");
+        let plan = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Windows,
+            &["Test (Rust)".into(), "Clippy & Rustfmt".into()],
+            &["git --version".into()],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            plan.commands
+                .contains(&r#"node --test "scripts/tool.test.mjs""#.into()),
+            "{plan:?}"
         );
     }
 

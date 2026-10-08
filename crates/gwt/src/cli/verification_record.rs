@@ -876,7 +876,7 @@ fn derive_and_register_plan_for_caller(
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         let derived = match pre_pr {
-            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local),
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local, &generated_outputs),
             None => crate::cli::verify_derivation::derive_excluding(worktree, &generated_outputs),
         }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
@@ -6559,6 +6559,7 @@ pub(crate) mod tests {
             vec!["artifacts/report.json".to_string()],
             Vec::new(),
             &authority,
+            None,
         )
         .expect_err("unsupported source must refuse automatic registration");
         assert!(
@@ -6619,6 +6620,21 @@ pub(crate) mod tests {
                 fs::create_dir_all(destination.parent().unwrap()).unwrap();
                 fs::copy(root.join(path), destination).unwrap();
             }
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "test: pre-pr baseline"],
+                vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            ] {
+                assert!(gwt_core::process::hidden_command("git")
+                    .current_dir(worktree)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            fs::write(worktree.join("crates/gwt/change.rs"), "// change\n").unwrap();
+            fs::create_dir_all(worktree.join("artifacts")).unwrap();
+            fs::write(worktree.join("artifacts/report.json"), "{}").unwrap();
             // Initialize the same kernel lease that registration uses; fake gh
             // attempts an independent writer while its API read is in progress.
             crate::cli::trusted_store::with_write_lease(worktree, || Ok(())).unwrap();
@@ -6634,7 +6650,7 @@ pub(crate) mod tests {
             let (derived, plan) = derive_and_register_plan_for_caller(
                 worktree,
                 "sess-pre-pr",
-                Vec::new(),
+                vec!["artifacts/report.json".to_string()],
                 Vec::new(),
                 &authority,
                 Some((&acceptance, &[])),
@@ -6649,6 +6665,7 @@ pub(crate) mod tests {
                 .iter()
                 .any(|s| s.starts_with("ci-delegated(")));
             assert!(plan.commands.contains(&acceptance[0]));
+            assert!(derived.unsupported_reason().is_none(), "{derived:?}");
             assert!(plan_integrity_ok(&plan));
             assert_eq!(load_plan(worktree).unwrap().unwrap(), plan);
         });
