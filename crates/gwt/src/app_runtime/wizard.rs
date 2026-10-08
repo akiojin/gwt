@@ -3784,9 +3784,20 @@ impl AppRuntime {
                 issue_number,
                 delivery_id.as_deref(),
             );
-            gwt::issue_monitor_launch_prompt_with_requeue_reason(
-                linked_issue_kind,
-                issue_number,
+            // Issue #5043: a relaunch whose owner branch still holds
+            // undelivered source is told to deliver it, not to close over it.
+            let delivery = gwt::issue_monitor_owner_branch_delivery(
+                &project_root,
+                &base_branch_name,
+                &target_branch,
+            );
+            gwt::append_issue_monitor_requeue_reason(
+                gwt::issue_monitor_launch_prompt_for_base(
+                    linked_issue_kind,
+                    issue_number,
+                    &base_branch_name,
+                    delivery,
+                ),
                 requeue_reason.as_deref(),
             )
         });

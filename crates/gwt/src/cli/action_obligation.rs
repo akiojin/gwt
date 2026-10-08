@@ -758,6 +758,7 @@ mod tests {
             "fix this; do not create a PR",
             "fix this; don't open a pull request",
             "Before changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
+            "Before changing code, evaluate every remaining acceptance criterion against origin/develop, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If origin/develop already satisfies all criteria, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
         ] {
             assert_ne!(classify_prompt(prompt), Some(ObligationKind::Pr), "{prompt}");
         }
