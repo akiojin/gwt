@@ -967,6 +967,36 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 body: required_string(params, "body")?,
             })
         }
+        "actions.dispatch" => {
+            reject_unknown_params(params, &["workflow", "ref", "inputs"], "actions.dispatch")?;
+            let workflow = match lookup(params, "workflow") {
+                Some(Value::String(name)) => name.clone(),
+                Some(Value::Number(id)) if id.as_u64().is_some() => id.to_string(),
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "workflow",
+                        reason: "must be a workflow filename or positive ID",
+                    })
+                }
+            };
+            let inputs = match lookup(params, "inputs") {
+                None => Map::new(),
+                Some(Value::Object(inputs)) => inputs.clone(),
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "inputs",
+                        reason: "must be a JSON object",
+                    })
+                }
+            };
+            let call = super::ActionsDispatchCall {
+                workflow,
+                git_ref: required_string(params, "ref")?,
+                inputs,
+            };
+            super::actions::validate_dispatch_call(&call)?;
+            CliCommand::Actions(ActionsCommand::Dispatch { call })
+        }
         "actions.logs" => CliCommand::Actions(ActionsCommand::Logs {
             run_id: required_u64(params, "run_id")?,
         }),
@@ -5913,6 +5943,32 @@ mod tests {
             ),
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody { .. })
         ));
+    }
+
+    #[test]
+    fn actions_dispatch_accepts_selectors_and_rejects_invalid_contract() {
+        for workflow in [
+            json!("prepare-release.yml"),
+            json!("日本語 Release.yml"),
+            json!(42),
+        ] {
+            assert!(matches!(
+                ok(
+                    "actions.dispatch",
+                    json!({"workflow":workflow,"ref":"develop","inputs":{"bump":"auto"}})
+                ),
+                CliCommand::Actions(_)
+            ));
+        }
+        for params in [
+            json!({"workflow":"../release.yml","ref":"develop"}),
+            json!({"workflow":0,"ref":"develop"}),
+            json!({"workflow":"release.yml","ref":""}),
+            json!({"workflow":"release.yml","ref":"develop","inputs":[]}),
+            json!({"workflow":"release.yml","ref":"develop","force":true}),
+        ] {
+            let _ = err("actions.dispatch", params);
+        }
     }
 
     #[test]

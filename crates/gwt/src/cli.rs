@@ -64,7 +64,7 @@ pub(crate) mod worktree_gc;
 
 use std::{io, path::PathBuf};
 
-pub use actions::{ActionsCommand, ActionsRerunTarget};
+pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;

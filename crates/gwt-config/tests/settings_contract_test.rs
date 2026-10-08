@@ -46,6 +46,34 @@ fn load_from_path_fills_missing_sections_with_defaults() {
     assert!(loaded.debug);
     assert_eq!(loaded.default_base_branch, "main");
     assert!(loaded.protected_branches.contains(&"main".to_string()));
+    let serialized = toml::Value::try_from(&loaded).expect("serialize loaded settings");
+    assert!(
+        serialized
+            .get("allowed_workflows")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|workflows| workflows.is_empty()),
+        "older settings must default to an empty workflow allowlist"
+    );
+}
+
+#[test]
+fn load_and_save_preserves_repo_scoped_allowed_workflows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("source.toml");
+    let rewritten = dir.path().join("rewritten.toml");
+    let content = "[allowed_workflows]\n\"akiojin/gwt\" = [\"prepare-release.yml\"]\n";
+    std::fs::write(&source, content).expect("write workflow allowlist");
+
+    let loaded = Settings::load_from_path(&source).expect("workflow allowlist must load");
+    loaded.save(&rewritten).expect("save workflow allowlist");
+    let restored = Settings::load_from_path(&rewritten).expect("reload workflow allowlist");
+    let actual = toml::Value::try_from(&restored).expect("serialize restored settings");
+    let expected: toml::Value = toml::from_str(content).expect("parse expected allowlist");
+    assert_eq!(
+        actual.get("allowed_workflows"),
+        expected.get("allowed_workflows"),
+        "explicit repository permissions must survive a load/save roundtrip"
+    );
 }
 
 #[test]

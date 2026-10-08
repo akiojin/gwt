@@ -279,6 +279,29 @@ gwtd <<'JSON'
 JSON
 ```
 
+`actions.dispatch` は共有 GitHub API budget を使って workflow を起動します。
+既定ではすべて拒否します。`~/.gwt/config.toml` でリポジトリごとに
+workflow のファイル名を許可します。
+
+```toml
+[allowed_workflows]
+"akiojin/gwt" = ["prepare-release.yml"]
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
+JSON
+```
+
+`workflow` はファイル名または正の workflow ID を受け付けます。ID の場合も
+解決したファイル名が許可されている必要があります。checkout の
+`.github/workflows/` にファイルが存在し、指定した branch / tag 上で
+`workflow_dispatch` を宣言していることを検査します。`inputs` は省略可能な
+JSON object です。入力名、必須値、型、choice の選択肢を送信前に検査します。
+成功応答は送信の受付を示します。実際の run は GitHub Actions で確認してください。
+拒否時は修正すべき設定や入力契約を示し、入力値や GitHub の生エラー本文は出力しません。
+
 `board.show` は、選択された workspace / session から見える最新20件を時系列順で
 返します。`params.limit` に非負整数（例: `15`、`0` は空）を指定して件数を変更できます。
 `params.all: true` は全宛先を対象にして既定上限を解除しますが、明示した `limit` が

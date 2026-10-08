@@ -1,6 +1,7 @@
 //! Top-level application settings backed by `~/.gwt/config.toml`.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     num::NonZeroU16,
     path::{Path, PathBuf},
@@ -180,6 +181,9 @@ pub struct Settings {
     pub server: ServerConfig,
     /// GitHub API budget throttle knobs (SPEC #4093 FR-007).
     pub github_budget: crate::GitHubBudgetConfig,
+    /// Workflow filenames allowed for `actions.dispatch`, keyed by `owner/repository`.
+    /// An empty map denies every workflow (SPEC #4249 FR-006).
+    pub allowed_workflows: BTreeMap<String, Vec<String>>,
     /// Snapshot and running-check refresh intervals for `pr.list`.
     pub pr_inventory: PrInventoryConfig,
     /// Automatic build-artifact reclaim on low disk (Issue #4391).
@@ -209,6 +213,7 @@ impl Default for Settings {
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
             github_budget: crate::GitHubBudgetConfig::default(),
+            allowed_workflows: BTreeMap::new(),
             pr_inventory: PrInventoryConfig::default(),
             build_artifact_gc: crate::BuildArtifactGcConfig::default(),
             verification: VerificationConfig::default(),

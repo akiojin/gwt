@@ -565,6 +565,86 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         &self.transport
     }
 
+    /// Resolve a workflow ID or filename to its repository-relative path.
+    pub fn workflow_path(&self, workflow: &str) -> Result<String, ApiError> {
+        let workflow = encode_path_segment(workflow);
+        let body = self.workflow_get(
+            format!(
+                "{}/repos/{}/{}/actions/workflows/{workflow}",
+                self.rest_base, self.owner, self.repo
+            ),
+            "application/vnd.github+json",
+        )?;
+        let metadata: Value = serde_json::from_str(&body)
+            .map_err(|_| ApiError::Unexpected("GitHub workflow metadata is invalid".into()))?;
+        metadata
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ApiError::Unexpected("GitHub workflow path is missing".into()))
+    }
+
+    /// Read the raw workflow YAML at the exact ref selected for dispatch.
+    pub fn workflow_definition(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+    ) -> Result<String, ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/contents/.github/workflows/{workflow_filename}",
+            self.rest_base, self.owner, self.repo
+        ))
+        .map_err(|_| ApiError::Unexpected("GitHub workflow contents URL is invalid".into()))?;
+        url.query_pairs_mut().append_pair("ref", git_ref);
+        self.workflow_get(url.to_string(), "application/vnd.github.raw+json")
+    }
+
+    /// Dispatch a validated workflow without retrying the mutation.
+    pub fn dispatch_workflow(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, Value>,
+    ) -> Result<(), ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        self.rest_post(
+            &format!(
+                "/repos/{}/{}/actions/workflows/{workflow_filename}/dispatches",
+                self.owner, self.repo
+            ),
+            json!({ "ref": git_ref, "inputs": inputs }),
+        )
+        .map(|_| ())
+        .map_err(sanitize_workflow_error)
+    }
+
+    fn workflow_get(&self, url: String, accept: &str) -> Result<String, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                for (name, value) in &mut headers {
+                    if name == "Accept" {
+                        *value = accept.to_string();
+                    }
+                }
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url,
+                        headers,
+                        body: None,
+                    })
+                    .map_err(|_| ApiError::Network("GitHub workflow request failed".into()))?;
+                check_status(&response).map_err(sanitize_workflow_error)?;
+                Ok(response.body)
+            })(),
+        )
+    }
+
     fn auth_headers(&self) -> Vec<(String, String)> {
         vec![
             (
@@ -855,6 +935,18 @@ impl<T: HttpTransport> HttpIssueClient<T> {
 // ---------------------------------------------------------------------------
 // Status / parsing helpers
 // ---------------------------------------------------------------------------
+
+fn sanitize_workflow_error(error: ApiError) -> ApiError {
+    match error {
+        error
+        @ (ApiError::RateLimited { .. } | ApiError::Unauthorized | ApiError::BodyTooLarge) => error,
+        ApiError::PermissionDenied { .. } => ApiError::PermissionDenied {
+            message: "GitHub workflow access is forbidden".into(),
+        },
+        ApiError::Network(_) => ApiError::Network("GitHub workflow request failed".into()),
+        _ => ApiError::Unexpected("GitHub workflow request was rejected".into()),
+    }
+}
 
 fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
     let lowercase_body = resp.body.to_ascii_lowercase();

@@ -7,6 +7,8 @@ use crate::cli::{CliEnv, CliParseError};
 /// SPEC-1942 command model for `actions.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionsCommand {
+    /// Issue #4249: submit an explicitly permitted workflow dispatch.
+    Dispatch { call: ActionsDispatchCall },
     /// `actions.logs`.
     Logs { run_id: u64 },
     /// `actions.job_logs`. Issue #4849: `failed_only` returns only the lines
@@ -20,6 +22,98 @@ pub enum ActionsCommand {
     /// `actions.rerun` (Issue #3515): re-run a failed run or a single failed
     /// job without pushing a throwaway commit to retrigger CI.
     Rerun { target: ActionsRerunTarget },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionsDispatchCall {
+    pub workflow: String,
+    pub git_ref: String,
+    pub inputs: serde_json::Map<String, serde_json::Value>,
+}
+
+pub(super) fn validate_dispatch_call(call: &ActionsDispatchCall) -> Result<(), CliParseError> {
+    let workflow = &call.workflow;
+    let valid_id = workflow.parse::<u64>().is_ok_and(|id| id > 0);
+    if !valid_id && !is_workflow_filename(workflow) {
+        return Err(CliParseError::InvalidValue {
+            flag: "workflow",
+            reason: "must be a workflow filename or positive ID",
+        });
+    }
+    if call.git_ref.trim().is_empty() {
+        return Err(CliParseError::InvalidValue {
+            flag: "ref",
+            reason: "must be a nonempty branch or tag",
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn is_workflow_filename(name: &str) -> bool {
+    (name.ends_with(".yml") || name.ends_with(".yaml"))
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control)
+}
+
+/// Check the workflow at the requested ref before submitting a mutation.
+pub(super) fn validate_dispatch_inputs(
+    yaml: &str,
+    inputs: &serde_json::Map<String, serde_json::Value>,
+) -> io::Result<()> {
+    use serde_yaml::Value as Yaml;
+    let workflow: Yaml = serde_yaml::from_str(yaml)
+        .map_err(|_| io::Error::other("workflow definition is invalid YAML"))?;
+    let on = &workflow["on"];
+    let dispatch = match on {
+        Yaml::Mapping(events) => events.get(Yaml::String("workflow_dispatch".into())),
+        Yaml::String(event) if event == "workflow_dispatch" => Some(&Yaml::Null),
+        Yaml::Sequence(events)
+            if events
+                .iter()
+                .any(|event| event.as_str() == Some("workflow_dispatch")) =>
+        {
+            Some(&Yaml::Null)
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        io::Error::other("workflow does not declare workflow_dispatch at the requested ref")
+    })?;
+    let declarations = dispatch["inputs"].as_mapping();
+    let invalid = || {
+        io::Error::other("inputs do not match the workflow_dispatch declarations (names, required values, types or choices)")
+    };
+    for (name, value) in inputs {
+        let declaration = declarations
+            .and_then(|declared| declared.get(Yaml::String(name.clone())))
+            .ok_or_else(invalid)?;
+        let valid = match declaration["type"].as_str().unwrap_or("string") {
+            "boolean" => value.is_boolean(),
+            "number" => value.is_number(),
+            "string" | "environment" => value.is_string(),
+            "choice" => value.as_str().is_some_and(|choice| {
+                declaration["options"].as_sequence().is_some_and(|options| {
+                    options.iter().any(|option| option.as_str() == Some(choice))
+                })
+            }),
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid());
+        }
+    }
+    if let Some(declarations) = declarations {
+        for (name, declaration) in declarations {
+            let name = name.as_str().ok_or_else(invalid)?;
+            if declaration["required"].as_bool() == Some(true)
+                && declaration["default"].is_null()
+                && !inputs.contains_key(name)
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What an [`ActionsCommand::Rerun`] re-runs (Issue #3515).
@@ -37,6 +131,36 @@ pub enum ActionsRerunTarget {
 pub(super) fn parse(args: &[String]) -> Result<ActionsCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
+        Some("dispatch") => {
+            super::expect_flag(it.next(), "--workflow")?;
+            let workflow = it
+                .next()
+                .ok_or(CliParseError::MissingFlag("--workflow"))?
+                .clone();
+            super::expect_flag(it.next(), "--ref")?;
+            let git_ref = it
+                .next()
+                .ok_or(CliParseError::MissingFlag("--ref"))?
+                .clone();
+            let inputs = if it.peek().map(|arg| arg.as_str()) == Some("--inputs") {
+                it.next();
+                serde_json::from_str(it.next().ok_or(CliParseError::MissingFlag("--inputs"))?)
+                    .map_err(|_| CliParseError::InvalidValue {
+                        flag: "inputs",
+                        reason: "must be a JSON object",
+                    })?
+            } else {
+                Default::default()
+            };
+            super::ensure_no_remaining_args(it)?;
+            let call = ActionsDispatchCall {
+                workflow,
+                git_ref,
+                inputs,
+            };
+            validate_dispatch_call(&call)?;
+            Ok(ActionsCommand::Dispatch { call })
+        }
         Some("logs") => {
             super::expect_flag(it.next(), "--run")?;
             let run_id = super::parse_required_number(it.next())?;
@@ -101,6 +225,12 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        ActionsCommand::Dispatch { call } => {
+            let outcome = env.dispatch_actions(call).map_err(super::io_as_api_error)?;
+            out.push_str(outcome.trim_end());
+            out.push('\n');
+            0
+        }
         ActionsCommand::Logs { run_id } => {
             let log = env
                 .fetch_actions_run_log(run_id)
@@ -471,6 +601,42 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    #[test]
+    fn dispatch_validates_trigger_declared_inputs_and_types_without_echoing_values() {
+        let yaml = r#"on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        type: choice
+        options: [auto, patch]
+        default: auto
+      enabled:
+        type: boolean
+      count:
+        type: number
+      name:
+        type: string
+        required: true
+"#;
+        let inputs = serde_json::json!({"bump":"auto","enabled":true,"count":2,"name":"release"});
+        validate_dispatch_inputs(yaml, inputs.as_object().unwrap()).unwrap();
+        for inputs in [
+            serde_json::json!({"name":"release","bump":"secret-invalid"}),
+            serde_json::json!({"name":"release","enabled":"secret-invalid"}),
+            serde_json::json!({"name":"release","count":"secret-invalid"}),
+            serde_json::json!({"name":false}),
+            serde_json::json!({"unknown":"secret-invalid","name":"release"}),
+            serde_json::json!({}),
+        ] {
+            let error = validate_dispatch_inputs(yaml, inputs.as_object().unwrap()).unwrap_err();
+            assert!(error.to_string().contains("inputs"));
+            assert!(!error.to_string().contains("secret-invalid"));
+        }
+        let error = validate_dispatch_inputs("on: push", &Default::default()).unwrap_err();
+        assert!(error.to_string().contains("workflow_dispatch"));
+        validate_dispatch_inputs("on: [push, workflow_dispatch]", &Default::default()).unwrap();
     }
 
     #[test]

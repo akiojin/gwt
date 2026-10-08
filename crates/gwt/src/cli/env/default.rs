@@ -531,6 +531,69 @@ impl CliEnv for DefaultCliEnv {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
     }
+
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
+        use gwt_config::Settings;
+        crate::cli::actions::validate_dispatch_call(&call)
+            .map_err(|_| io::Error::other("invalid workflow dispatch selector or ref"))?;
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        let config_path = gwt_core::paths::gwt_home().join("config.toml");
+        let settings = if config_path.exists() {
+            Settings::load_from_path(&config_path)
+                .map_err(|_| io::Error::other("cannot read allowed_workflows from config.toml"))?
+        } else {
+            Settings::default()
+        };
+        let repo_key = format!("{}/{}", self.owner, self.repo);
+        let allowed = settings
+            .allowed_workflows
+            .get(&repo_key)
+            .filter(|names| !names.is_empty())
+            .ok_or_else(|| {
+                io::Error::other(
+                    "workflow dispatch denied: configure allowed_workflows for this repository",
+                )
+            })?;
+        let filename = if call.workflow.parse::<u64>().is_ok() {
+            let path = self
+                .client
+                .resolve()
+                .map_err(api_to_io)?
+                .workflow_path(&call.workflow)
+                .map_err(api_to_io)?;
+            path.strip_prefix(".github/workflows/")
+                .filter(|name| crate::cli::actions::is_workflow_filename(name))
+                .ok_or_else(|| io::Error::other("workflow ID does not resolve to a workflow file"))?
+                .to_string()
+        } else {
+            call.workflow.clone()
+        };
+        if !allowed.contains(&filename) {
+            return Err(io::Error::other(format!(
+                "workflow dispatch denied: filename is not in allowed_workflows for this repository; allowed filenames: {}",
+                allowed.iter().filter(|name| crate::cli::actions::is_workflow_filename(name)).cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        if !self
+            .repo_path
+            .join(".github/workflows")
+            .join(&filename)
+            .is_file()
+        {
+            return Err(io::Error::other(
+                "workflow file does not exist in checkout .github/workflows",
+            ));
+        }
+        let client = self.client.resolve().map_err(api_to_io)?;
+        let definition = client
+            .workflow_definition(&filename, &call.git_ref)
+            .map_err(api_to_io)?;
+        crate::cli::actions::validate_dispatch_inputs(&definition, &call.inputs)?;
+        client
+            .dispatch_workflow(&filename, &call.git_ref, &call.inputs)
+            .map_err(api_to_io)?;
+        Ok("workflow dispatch requested".into())
+    }
     fn run_internal_command(
         &mut self,
         args: &[String],

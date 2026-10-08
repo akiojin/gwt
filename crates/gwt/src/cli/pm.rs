@@ -91,12 +91,6 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         "Issue Monitor panel: Autonomous switch -> On",
     ),
     (
-        "actions.dispatch",
-        "",
-        CapabilityGapReason::MissingOperation,
-        "GitHub Actions: Run workflow on the target workflow (e.g. prepare-release.yml)",
-    ),
-    (
         "pr.close",
         "",
         CapabilityGapReason::MissingOperation,

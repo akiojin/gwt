@@ -312,6 +312,185 @@ fn lazy_issue_client_defers_resolution_until_first_issue_call() {
 }
 
 #[test]
+fn dispatch_default_denial_does_not_initialize_github_client() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let repo = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        failing_factory(calls.clone()),
+    );
+    let call = crate::cli::ActionsDispatchCall {
+        workflow: "prepare-release.yml".into(),
+        git_ref: "develop".into(),
+        inputs: Default::default(),
+    };
+    let error = env.dispatch_actions(call.clone()).unwrap_err();
+    assert!(error.to_string().contains("allowed_workflows"));
+    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_home().join("config.toml"),
+        "[allowed_workflows]\n\"akiojin/gwt\" = [\"prepare-release.yml\"]\n",
+    )
+    .unwrap();
+    let mut denied = call.clone();
+    denied.workflow = "denied.yml".into();
+    let error = env.dispatch_actions(denied).unwrap_err();
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("allowed_workflows"), "{diagnostic}");
+    assert!(diagnostic.contains("prepare-release.yml"), "{diagnostic}");
+    let error = env.dispatch_actions(call).unwrap_err();
+    assert!(error.to_string().contains("does not exist"), "{error}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dispatch_prepare_release_uses_allowed_loopback_http_and_rejects_invalid_inputs() {
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
+    use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
+
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_home().join("config.toml"),
+        "[allowed_workflows]\n\"akiojin/gwt\" = [\"日本語 Release.yml\"]\n",
+    )
+    .unwrap();
+    let yaml = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.github/workflows/prepare-release.yml"
+    ));
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".github/workflows")).unwrap();
+    fs::write(
+        repo.path().join(".github/workflows/日本語 Release.yml"),
+        yaml,
+    )
+    .unwrap();
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let app = axum::Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: String| {
+            let captured = captured.clone();
+            async move {
+                let response = match (method.as_str(), uri.path()) {
+                    ("GET", "/repos/akiojin/gwt/actions/workflows/1234") => (
+                        StatusCode::OK,
+                        r#"{"path":".github/workflows/日本語 Release.yml"}"#.to_string(),
+                    ),
+                    (
+                        "GET",
+                        "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml",
+                    ) => (StatusCode::OK, yaml.to_string()),
+                    (
+                        "POST",
+                        "/repos/akiojin/gwt/actions/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml/dispatches",
+                    ) => (StatusCode::NO_CONTENT, String::new()),
+                    _ => (StatusCode::NOT_FOUND, String::new()),
+                };
+                captured.lock().unwrap().push((method, uri, headers, body));
+                response
+            }
+        },
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let factory: Arc<IssueClientFactory> = Arc::new(move |owner, repo| {
+        HttpIssueClient::with_transport(
+            ReqwestTransport::new().unwrap(),
+            "loopback-token".into(),
+            owner,
+            repo,
+        )
+        .with_test_endpoints(base.clone(), format!("{base}/graphql"), true)
+    });
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        factory,
+    );
+    let mut call = crate::cli::ActionsDispatchCall {
+        workflow: "日本語 Release.yml".into(),
+        git_ref: "develop".into(),
+        inputs: serde_json::json!({"bump": "auto"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    assert_eq!(
+        env.dispatch_actions(call.clone()).unwrap(),
+        "workflow dispatch requested"
+    );
+    call.workflow = "1234".into();
+    assert_eq!(
+        env.dispatch_actions(call.clone()).unwrap(),
+        "workflow dispatch requested"
+    );
+    call.workflow = "日本語 Release.yml".into();
+    call.inputs
+        .insert("bump".into(), serde_json::Value::Bool(true));
+    assert!(env
+        .dispatch_actions(call)
+        .unwrap_err()
+        .to_string()
+        .contains("inputs do not match"));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|(method, uri, _, _)| (method.as_str(), uri.path()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "GET",
+                "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml"
+            ),
+            (
+                "POST",
+                "/repos/akiojin/gwt/actions/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml/dispatches"
+            ),
+            ("GET", "/repos/akiojin/gwt/actions/workflows/1234"),
+            (
+                "GET",
+                "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml"
+            ),
+            (
+                "POST",
+                "/repos/akiojin/gwt/actions/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml/dispatches"
+            ),
+            (
+                "GET",
+                "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml"
+            ),
+        ]
+    );
+    for (method, uri, headers, body) in requests.iter() {
+        assert_eq!(headers["authorization"], "Bearer loopback-token");
+        if uri.path().contains("/contents/") {
+            assert_eq!(uri.query(), Some("ref=develop"));
+            assert_eq!(headers["accept"], "application/vnd.github.raw+json");
+        }
+        if method == Method::POST {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body).unwrap(),
+                serde_json::json!({"ref": "develop", "inputs": {"bump": "auto"}})
+            );
+        }
+    }
+}
+
+#[test]
 fn default_cli_env_construction_does_not_touch_issue_client_factory() {
     let calls = Arc::new(AtomicUsize::new(0));
     let env = DefaultCliEnv::new_with_client_factory(
