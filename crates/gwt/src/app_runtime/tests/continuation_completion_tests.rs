@@ -793,6 +793,49 @@ fn launch_complete_dropped_prepared_handoff_defers_exact_cleanup() {
 }
 
 #[test]
+fn stale_prepared_cleanup_preserves_same_id_replacement_and_inflight_key() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    runtime.handle_launch_complete(window_id.clone(), result);
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+
+    runtime.handle_launch_complete(window_id.clone(), Err("replacement pending".into()));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("feature/test")
+        .build();
+    let key = super::super::launch::inflight_launch_key("tab-1", &config).expect("dedup key");
+    let replacement_launch = (window_id.clone(), Instant::now());
+    runtime
+        .inflight_launches
+        .insert(key.clone(), replacement_launch.clone());
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let mut replacement = gwt_agent::Session::load(&session_path).expect("Session");
+    replacement.agent_id = gwt_agent::AgentId::Custom("replacement".into());
+    replacement
+        .save(&runtime.sessions_dir)
+        .expect("replacement");
+    let replacement_bytes = fs::read(&session_path).expect("replacement bytes");
+    let queued = tasks.lock().unwrap().len();
+
+    runtime.handle_agent_launch_prepared(prepared.clone());
+    runtime.handle_agent_launch_prepared(prepared);
+    assert_eq!(tasks.lock().unwrap().len(), queued + 1, "one-shot cleanup");
+    let cleanup = tasks.lock().unwrap().pop().expect("stale cleanup");
+    cleanup();
+
+    assert!(runtime.pending_launch_completions.contains_key(&window_id));
+    assert_eq!(
+        runtime.inflight_launches.get(&key),
+        Some(&replacement_launch)
+    );
+    assert_eq!(fs::read(session_path).unwrap(), replacement_bytes);
+}
+
+#[test]
 fn launch_complete_defers_all_session_and_pty_work() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

@@ -1297,6 +1297,32 @@ gwtd <<'JSON'
 JSON
 ```
 
+各 `verify.run` は admission を待つ前に試行記録を作成します。
+`verify.status` で自分の最新の試行を確認し、`params.attempt_id` を渡すと
+特定の試行を確認できます。JSON 出力には試行 ID、状態、中断理由、
+FIFO 予約が残っているかを含みます。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.status","params":{}}
+JSON
+```
+
+不要になった試行は、返された ID と理由を指定して取り消します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.cancel","params":{"attempt_id":"<attempt-id>","reason":"superseded matrix"}}
+JSON
+```
+
+取消には同じ project・worktree・session・execution authority が必要です。
+他者の試行は `not your verification attempt` として拒否します。
+対象を `interrupted` と記録し、その試行の予約だけを直ちに解放して、
+所有する command tree を停止します。runner が終了した場合も予約 TTL を待たずに解放します。
+中断は PASS やテスト失敗とは区別し、同じ行列を再実行すると新しい試行を開始します。
+最初のコマンド開始前に取り消した場合は、以前の検証記録を保持します。
+
 初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
 lint、coverage、直接の headed browser 確認、pre-push 確認は verification
 lease なしでそのまま実行します。完了判定には引き続き canonical な検証証跡が

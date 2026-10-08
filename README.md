@@ -1386,6 +1386,33 @@ gwtd <<'JSON'
 JSON
 ```
 
+Each `verify.run` publishes an attempt before waiting for admission. Inspect
+your latest attempt with `verify.status`, or pass `params.attempt_id` to inspect
+an exact attempt. Its JSON output includes the attempt ID, lifecycle status,
+interruption reason and whether its FIFO reservation remains:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.status","params":{}}
+JSON
+```
+
+Cancel a superseded attempt using the returned ID and a reason:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.cancel","params":{"attempt_id":"<attempt-id>","reason":"superseded matrix"}}
+JSON
+```
+
+Cancellation requires the same project, worktree, session and execution
+authority. Foreign attempts are refused with `not your verification attempt`.
+It records `interrupted`, releases only that attempt's reservation immediately,
+and stops its owned command tree. Runner death also releases its reservation
+without waiting for the reservation TTL. An interruption is neither PASS nor a
+test failure; rerunning the same matrix creates a fresh attempt. A cancellation
+before the first command starts preserves the previous verification record.
+
 Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
 lint, coverage, direct headed browser checks, and pre-push checks run
 directly without a verification lease. Completion still requires canonical
