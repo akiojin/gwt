@@ -3182,16 +3182,9 @@ impl LaunchWizardMemoryCache {
     }
 
     fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-        let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-            })
-            .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+        gwt_agent::session_ledger::load_sessions(sessions_dir)
+            .unwrap_or_default()
+            .into_iter()
             .filter(|session| !durable_launch_recovery_exists(sessions_dir, &session.id))
             .collect()
     }

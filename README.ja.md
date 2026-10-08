@@ -1075,6 +1075,15 @@ Logs サーフェスの **Project** でそのプロジェクトのイベント�
 - プロジェクト単位のワークスペース状態:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### セッション履歴
+
+gwt は最近の Session 履歴を `~/.gwt/sessions/` に保持します。台帳の初回表示時と
+以後24時間以上の間隔でバックグラウンド整理を行い、起動時の復元が無効な停止済み履歴を
+30日間の非活動後に削除します。保存窓、実行中の処理、復旧、未完了の作業が必要とする
+Session は保護します。古い書き込み一時ファイルの残骸も整理します。
+保持方針と読めない記録の扱いは
+[Issue #5025](https://github.com/akiojin/gwt/issues/5025) に記載しています。
+
 ### macOS のファイルシステム負荷と Spotlight
 
 worktree の index watcher は、自身の macOS FSEvents stream から直下の

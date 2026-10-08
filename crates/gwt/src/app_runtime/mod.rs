@@ -5575,7 +5575,29 @@ impl AppRuntime {
         if let Some(failure) = self.provider_quota_holds.get(window_id) {
             return Some(failure.clone());
         }
-        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode)?;
+        let mut failure = runtime_events::classify_issue_monitor_failure(message, session_mode)
+            .filter(|failure| match failure {
+                gwt::IssueMonitorFailure::ProviderUsageLimit { provider, .. } => {
+                    gwt::issue_monitor::usage_provider_for_agent(provider)
+                        == self.quota_provider_for_window(window_id)
+                }
+                _ => true,
+            })?;
+        if let gwt::IssueMonitorFailure::ProviderUsageLimit { evidence, .. } = &mut failure {
+            let recorded_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let mut native_evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                &recorded_at,
+                window_id,
+                message,
+            )
+            .with_poller(
+                self.pane_agent_id(window_id).as_deref(),
+                &self.provider_usage_accounts,
+            );
+            native_evidence.source = "failure_notice".to_string();
+            *evidence = Some(Box::new(native_evidence));
+        }
         let gwt::IssueMonitorFailure::ResumeWriterConflict {
             holder_window_id: None,
         } = failure
