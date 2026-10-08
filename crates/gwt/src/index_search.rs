@@ -21,7 +21,16 @@ const INDEX_SEARCH_LIMIT: usize = 50;
 const SEARCH_ATTEMPT_HARD_LIMIT_MS: u64 = 30_000;
 const RUNNER_DIAGNOSTIC_MAX_BYTES: usize = 512;
 pub(crate) const SEARCH_UNAVAILABLE_START_DECISION: &str = "known_approved_owner_only";
-pub(crate) const SEARCH_UNAVAILABLE_RECOVERY: &str = "Retry the search after the indicated delay; inspect index.status for the runner holder. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Recover semantic search before choosing or routing an owner or creating an Issue/SPEC.";
+/// Reasons caused by contention for the host-wide heavy lease rather than by
+/// a runner that failed to start or finish (Issue #4840 AC-h).
+const SEARCH_LEASE_CONTENTION_REASONS: [&str; 3] = [
+    "search heavy lease unavailable",
+    "search admission deadline expired",
+    "search coordinator unavailable",
+];
+const SEARCH_UNAVAILABLE_LEASE_RECOVERY: &str = "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild.";
+const SEARCH_UNAVAILABLE_RUNNER_RECOVERY: &str = "The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay.";
+const SEARCH_UNAVAILABLE_COMMON_RECOVERY: &str = "For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.";
 
 /// Exit code for retryable "index not ready" search failures (Phase 70
 /// FR-388): missing / corrupt scopes that did not repair within the wait
@@ -69,6 +78,18 @@ pub(crate) struct IndexSearchUnavailable {
     pub(crate) reason: String,
     pub(crate) retry_after_ms: u64,
     pub(crate) holder: Option<Box<crate::index_resources::IndexRunnerHolder>>,
+}
+
+impl IndexSearchUnavailable {
+    /// Caller action for this reason, plus the shared start/fallback guidance.
+    pub(crate) fn recovery(&self) -> String {
+        let specific = if SEARCH_LEASE_CONTENTION_REASONS.contains(&self.reason.as_str()) {
+            SEARCH_UNAVAILABLE_LEASE_RECOVERY
+        } else {
+            SEARCH_UNAVAILABLE_RUNNER_RECOVERY
+        };
+        format!("{specific} {SEARCH_UNAVAILABLE_COMMON_RECOVERY}")
+    }
 }
 
 /// Non-retryable stop state that only an explicit `index.repair` clears
@@ -210,7 +231,7 @@ impl std::fmt::Display for IndexSearchAttemptError {
                 if let Some(holder) = &unavailable.holder {
                     write!(f, "; holder: {holder}")?;
                 }
-                write!(f, "; {SEARCH_UNAVAILABLE_RECOVERY}")
+                write!(f, "; {}", unavailable.recovery())
             }
             Self::RepairRequired(required) => write!(
                 f,
