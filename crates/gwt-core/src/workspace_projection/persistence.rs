@@ -974,7 +974,7 @@ fn record_launch_container_detachments_locked(
         }
         for item in &work_items.work_items {
             if item.id == event.work_item_id
-                || item.discarded
+                || item.is_terminal()
                 || projection.agents.iter().any(|agent| {
                     agent.workspace_id.as_deref() == Some(item.id.as_str())
                         || item
@@ -5737,7 +5737,7 @@ fn current_canonical_work_item<'a>(
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
     for _ in 0..projection.work_items.len() {
-        if !current.discarded {
+        if !current.is_terminal() {
             break;
         }
         let successor_id = successor_work_id(&current.id);

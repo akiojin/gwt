@@ -2022,6 +2022,10 @@ pub enum BackendEvent {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
     },
     /// Client-scoped reply to [`FrontendEvent::PaneSendInput`]
     /// (SPEC-3050 FR-005: failures must be explicit, never silent).
