@@ -298,11 +298,14 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
             || step.get("uses").and_then(Value::as_str) == Some("Swatinem/rust-cache@v2")));
 }
 
-/// A failed or skipped stability job must fail the existing protected check,
+/// Either failed, cancelled, or skipped Windows job must fail the protected check,
 /// rather than letting GitHub treat a skipped dependent job as success.
 #[test]
-fn the_required_windows_check_requires_successful_core_stability() {
-    let windows = job(&test_workflow(), "test-windows-rust");
+fn the_required_windows_check_aggregates_both_parallel_jobs() {
+    let windows = job(&test_workflow(), "test-windows-result");
+    assert_eq!(windows["name"], "Test (Rust, Windows)");
+    assert_eq!(windows["runs-on"], "ubuntu-latest");
+    assert!(windows.get("continue-on-error").is_none());
     assert_eq!(
         windows
             .get("needs")
@@ -311,13 +314,15 @@ fn the_required_windows_check_requires_successful_core_stability() {
             .iter()
             .map(|dependency| dependency.as_str().unwrap())
             .collect::<Vec<_>>(),
-        [CORE_STABILITY_JOB, "source-sync"]
+        [CORE_STABILITY_JOB, "test-windows-rust", "source-sync"]
     );
     assert_eq!(
         windows.get("if").and_then(Value::as_str),
         Some("${{ always() }}")
     );
-    let guard = &windows.get("steps").and_then(Value::as_sequence).unwrap()[0];
+    let steps = windows.get("steps").and_then(Value::as_sequence).unwrap();
+    assert_eq!(steps.len(), 1, "aggregation needs no checkout or build");
+    let guard = &steps[0];
     assert_eq!(guard.get("shell").and_then(Value::as_str), Some("bash"));
     assert_eq!(
         guard
@@ -326,11 +331,47 @@ fn the_required_windows_check_requires_successful_core_stability() {
             .and_then(Value::as_str),
         Some("${{ needs.test-windows-core-stability.result }}")
     );
+    assert_eq!(
+        guard["env"]["RUST_REGRESSIONS_RESULT"],
+        "${{ needs.test-windows-rust.result }}"
+    );
     let run = guard
         .get("run")
         .and_then(Value::as_str)
         .expect("guard must run");
     assert!(run.contains("echo"), "report the dependency result");
-    assert!(run.contains("test \"$CORE_STABILITY_RESULT\" = success"));
+    assert!(run.contains(
+        "test \"$CORE_STABILITY_RESULT\" = success && test \"$RUST_REGRESSIONS_RESULT\" = success"
+    ));
     assert!(guard.get("continue-on-error").is_none() && guard.get("if").is_none());
+}
+
+/// Exercise the actual Ubuntu guard, including a successful pair to catch
+/// a gate that rejects legitimate results as well as each unsafe outcome.
+#[cfg(unix)]
+#[test]
+fn windows_aggregate_guard_accepts_only_two_successful_jobs() {
+    use gwt_core::process::{resolved_command, ProcessPlanRequest};
+
+    let aggregate = job(&test_workflow(), "test-windows-result");
+    let script = aggregate["steps"][0]["run"].as_str().unwrap();
+    for (core, regressions, expected) in [
+        ("success", "success", true),
+        ("failure", "success", false),
+        ("success", "failure", false),
+        ("cancelled", "success", false),
+        ("success", "cancelled", false),
+        ("skipped", "success", false),
+        ("success", "skipped", false),
+    ] {
+        let output = resolved_command(
+            ProcessPlanRequest::new("bash").args(["-e", "-o", "pipefail", "-c", script]),
+        )
+        .expect("resolve the Ubuntu guard shell")
+        .env("CORE_STABILITY_RESULT", core)
+        .env("RUST_REGRESSIONS_RESULT", regressions)
+        .output()
+        .expect("run the aggregate guard");
+        assert_eq!(output.status.success(), expected, "{core}/{regressions}");
+    }
 }

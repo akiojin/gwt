@@ -370,6 +370,28 @@ fn docs_only_changes_skip_the_heavy_windows_and_webview_jobs() {
     }
 }
 
+/// Issue #5172: both Windows workloads start after source classification,
+/// without either waiting for the other to finish.
+#[test]
+fn windows_stability_and_regressions_run_independently() {
+    let doc = workflow(TEST_WORKFLOW);
+    for id in ["test-windows-core-stability", "test-windows-rust"] {
+        let windows = job(&doc, id);
+        assert_eq!(needs(windows), ["source-sync"], "{id} must run in parallel");
+        assert_eq!(windows["runs-on"], "windows-latest");
+        assert_eq!(condition(windows), "${{ !cancelled() }}");
+        assert!(windows.get("continue-on-error").is_none());
+    }
+    assert_eq!(
+        jobs(&doc)
+            .values()
+            .filter(|body| body["name"].as_str() == Some("Test (Rust, Windows)"))
+            .count(),
+        1,
+        "only the aggregate may publish the protected check name"
+    );
+}
+
 /// AC-2: the path filter must not change what branch protection gates on.
 /// Every required check still exists under its protected name, and none of
 /// them depends on or conditions on the `changes` job.
