@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -262,26 +263,25 @@ fn format_bullets(items: &[String]) -> String {
 }
 
 fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> String {
-    let mut ranges = Vec::new();
-    let mut offset = 0;
-    for line in content.split_inclusive('\n') {
-        if line.trim_end() == heading {
-            ranges.push(offset);
-        }
-        offset += line.len();
-    }
-    let Some(start) = ranges.first().copied() else {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(start_line) = lines.iter().position(|line| line.trim_end() == heading) else {
         let mut output = content.trim_end().to_string();
         output.push_str("\n\n");
         output.push_str(entry.trim_end());
         output.push('\n');
         return output;
     };
-    let tail = &content[start + heading.len()..];
-    let next = tail
-        .find("\n## ")
-        .map(|index| start + heading.len() + index + 1)
-        .unwrap_or(content.len());
+    // Issue #5075: the entry ends at the next discussion entry heading, not at
+    // any `## ` line. A summary may carry its own `## Discussion TODO`, and
+    // splitting there left the old proposals behind as stale duplicates.
+    let end_line = crate::discussion_resume::discussion_entry_heading_indices(&lines)
+        .into_iter()
+        .find(|index| *index > start_line)
+        .unwrap_or(lines.len());
+    let line_offset =
+        |line: usize| -> usize { content.split_inclusive('\n').take(line).map(str::len).sum() };
+    let start = line_offset(start_line);
+    let next = line_offset(end_line);
     // Issue #4434: proposals are `### Proposal ...` blocks stored *inside*
     // the entry being replaced. Carry them over, or the update silently
     // drops them along with the fields it is refreshing.
@@ -297,13 +297,52 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
 
 /// Re-attaches the proposal blocks of the entry being replaced to the freshly
 /// formatted entry, so they keep following their own discussion fields.
+///
+/// Issue #5075: a proposal is identified by its label and title. One that the
+/// new entry re-sends replaces its stored block but keeps the stored status
+/// (status changes belong to `discuss.*`), and stored copies of one proposal
+/// collapse into the first.
 fn preserve_existing_proposal_blocks(entry: &str, existing_section: &str) -> String {
     let Some(blocks) = proposal_blocks(existing_section) else {
         return entry.to_string();
     };
-    let mut output = entry.trim_end().to_string();
-    output.push_str("\n\n");
-    output.push_str(blocks.trim());
+    let mut stored_status = HashMap::new();
+    let mut kept = Vec::new();
+    for block in split_proposal_blocks(blocks) {
+        match proposal_identity(block) {
+            Some((key, status)) => {
+                if !stored_status.contains_key(&key) {
+                    stored_status.insert(key.clone(), status);
+                    kept.push((Some(key), block));
+                }
+            }
+            None => kept.push((None, block)),
+        }
+    }
+    let mut resent = HashSet::new();
+    let mut output: String = entry
+        .split_inclusive('\n')
+        .map(|line| {
+            let Some((key, _)) = proposal_identity(line) else {
+                return line.to_string();
+            };
+            let status = stored_status.get(&key).copied();
+            resent.insert(key);
+            status
+                .and_then(|status| {
+                    crate::discussion_resume::replace_trailing_status_tag(line, status)
+                })
+                .unwrap_or_else(|| line.to_string())
+        })
+        .collect();
+    output.truncate(output.trim_end().len());
+    for (key, block) in kept {
+        if key.is_some_and(|key| resent.contains(&key)) {
+            continue;
+        }
+        output.push_str("\n\n");
+        output.push_str(block.trim());
+    }
     output.push('\n');
     output
 }
@@ -318,6 +357,39 @@ fn proposal_blocks(section: &str) -> Option<&str> {
         offset += line.len();
     }
     None
+}
+
+/// Splits proposal blocks so that each one starts at its own header.
+fn split_proposal_blocks(blocks: &str) -> Vec<&str> {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in blocks.split_inclusive('\n') {
+        if line.trim_start().starts_with("### Proposal ") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    let ends = starts.iter().skip(1).copied().chain([blocks.len()]);
+    starts
+        .iter()
+        .zip(ends)
+        .map(|(start, end)| &blocks[*start..end])
+        .collect()
+}
+
+/// `(label + title, status)` of the `### Proposal <label> - <title> [status]`
+/// header on the first line of `text`.
+fn proposal_identity(text: &str) -> Option<(String, &str)> {
+    let header = text.lines().next()?.trim();
+    let head = header.strip_prefix("### ")?;
+    if !head.starts_with("Proposal ") {
+        return None;
+    }
+    let (head, status) = head.rsplit_once('[')?;
+    let status = status.strip_suffix(']')?.trim();
+    let (label, title) = head.trim().split_once(" - ")?;
+    let key = format!("{}\n{}", label.trim().to_ascii_lowercase(), title.trim());
+    Some((key, status))
 }
 
 fn io_as_spec_error(err: std::io::Error) -> SpecOpsError {
@@ -375,5 +447,144 @@ mod tests {
             pending.next_question.as_deref(),
             Some("Keep this proposal while refreshing the summary?")
         );
+    }
+
+    const RESENT_SUMMARY: &str = "Width slice
+
+## Discussion TODO
+
+### Proposal A - Preserve the minimum [active]
+- Implementation Proof: crates/gwt/web/app.js:10
+- Exit Blockers: none
+";
+
+    fn proposal_headers(content: &str, header: &str) -> usize {
+        content
+            .lines()
+            .filter(|line| line.trim_start().starts_with(header))
+            .count()
+    }
+
+    /// Issue #5075 (AC-1/AC-2): re-sending the same proposal in the summary
+    /// replaces it instead of stacking copies, so a title + origin resolve
+    /// still finds exactly one candidate.
+    #[test]
+    fn resending_a_proposal_in_the_summary_does_not_duplicate_it() {
+        let repo = tempfile::tempdir().expect("repo");
+        let _home = ScopedGwtHome::set(repo.path().join("gwt-home"));
+
+        update_discussion_entry(repo.path(), &update_command(RESENT_SUMMARY), Some("s1"))
+            .expect("first update");
+        let resent = RESENT_SUMMARY.replace("app.js:10", "app.js:42");
+        let path = update_discussion_entry(repo.path(), &update_command(&resent), Some("s1"))
+            .expect("second update");
+        update_discussion_entry(repo.path(), &update_command(&resent), Some("s1"))
+            .expect("third update");
+
+        let content = fs::read_to_string(&path).expect("read discussions");
+        assert_eq!(
+            proposal_headers(&content, "### Proposal A - Preserve the minimum"),
+            1,
+            "{content}"
+        );
+        assert!(content.contains("app.js:42"), "{content}");
+        assert!(!content.contains("app.js:10"), "{content}");
+
+        let target = crate::discussion_resume::ProposalTarget {
+            title: "Preserve the minimum".to_string(),
+            origin_session: Some("s1".to_string()),
+        };
+        let updated = crate::discussion_resume::set_proposal_status_by_label(
+            repo.path(),
+            "Proposal A",
+            "parked",
+            Some("s1"),
+            Some(&target),
+        )
+        .expect("resolve must not be ambiguous");
+        assert!(updated.is_some());
+    }
+
+    /// Issue #5075 (AC-3): a summary update keeps other sessions' entries,
+    /// other proposals, and the resolved state of a re-sent proposal.
+    #[test]
+    fn summary_update_keeps_other_entries_proposals_and_resolved_state() {
+        let repo = tempfile::tempdir().expect("repo");
+        let _home = ScopedGwtHome::set(repo.path().join("gwt-home"));
+
+        let path =
+            update_discussion_entry(repo.path(), &update_command(RESENT_SUMMARY), Some("s1"))
+                .expect("first update");
+        let seeded = fs::read_to_string(&path)
+            .expect("read discussions")
+            .replace(
+                "Preserve the minimum [active]",
+                "Preserve the minimum [chosen]",
+            )
+            + "
+### Proposal B - Other option [parked]
+- Implementation Proof: other.rs:1
+
+## 2026-09-17 — Foreign entry
+
+Status: active
+Origin Session: s2
+
+### Proposal A - Preserve the minimum [active]
+- Implementation Proof: foreign.rs:1
+";
+        fs::write(&path, seeded).expect("seed");
+
+        update_discussion_entry(repo.path(), &update_command(RESENT_SUMMARY), Some("s1"))
+            .expect("second update");
+
+        let content = fs::read_to_string(&path).expect("read discussions");
+        assert_eq!(
+            proposal_headers(&content, "### Proposal A - Preserve the minimum [chosen]"),
+            1,
+            "{content}"
+        );
+        assert_eq!(
+            proposal_headers(&content, "### Proposal A - Preserve the minimum [active]"),
+            1,
+            "foreign entry proposal must survive: {content}"
+        );
+        assert!(
+            content.contains(
+                "### Proposal B - Other option [parked]
+- Implementation Proof: other.rs:1"
+            ),
+            "{content}"
+        );
+        assert!(content.contains("Origin Session: s2"), "{content}");
+        assert!(content.contains("foreign.rs:1"), "{content}");
+    }
+
+    /// Issue #5075 (AC-4): an entry already holding duplicate copies of the
+    /// same proposal is normalized to one copy on its next update.
+    #[test]
+    fn summary_update_normalizes_existing_duplicate_proposals() {
+        let repo = tempfile::tempdir().expect("repo");
+        let _home = ScopedGwtHome::set(repo.path().join("gwt-home"));
+
+        let path = update_discussion_entry(repo.path(), &update_command("Plain"), Some("s1"))
+            .expect("first update");
+        let block = "
+### Proposal A - Preserve the minimum [active]
+- Implementation Proof: a.rs:1
+";
+        let seeded = fs::read_to_string(&path).expect("read") + block + block + block;
+        fs::write(&path, seeded).expect("seed duplicates");
+
+        update_discussion_entry(repo.path(), &update_command("Plain again"), Some("s1"))
+            .expect("second update");
+
+        let content = fs::read_to_string(&path).expect("read discussions");
+        assert_eq!(
+            proposal_headers(&content, "### Proposal A - Preserve the minimum [active]"),
+            1,
+            "{content}"
+        );
+        assert!(content.contains("a.rs:1"), "{content}");
     }
 }
