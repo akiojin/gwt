@@ -9612,10 +9612,16 @@ impl IssueMonitorState {
         })
     }
 
-    fn has_observed_monitor_runtime(&self, issue_number: u64) -> bool {
+    /// Process-census evidence only. Canvas panes need a fresh snapshot to
+    /// stand in for a lost launch ACK (#4802), so expiry consults this alone.
+    fn has_monitor_runtime_census(&self, issue_number: u64) -> bool {
         self.monitor_runtime_counts
             .values()
             .any(|observation| observation.counts.get(&issue_number).copied().unwrap_or(0) > 0)
+    }
+
+    fn has_observed_monitor_runtime(&self, issue_number: u64) -> bool {
+        self.has_monitor_runtime_census(issue_number)
             || self.monitor_canvas_windows().any(|window| {
                 !window.review_dispatch
                     && window.issue_number == Some(issue_number)
@@ -11306,7 +11312,7 @@ impl IssueMonitorState {
                 // its first canvas snapshot; that launch is still alive too.
                 if stale
                     && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
-                        || self.has_observed_monitor_runtime(issue_number))
+                        || self.has_monitor_runtime_census(issue_number))
                 {
                     continue;
                 }
@@ -11333,7 +11339,7 @@ impl IssueMonitorState {
                     // Issue #4802 AC-1: see the delivery branch above.
                     if stale
                         && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
-                            || self.has_observed_monitor_runtime(issue_number))
+                            || self.has_monitor_runtime_census(issue_number))
                     {
                         continue;
                     }
