@@ -459,8 +459,11 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
 
     // The exact Claude wording observed on 2026-08-17, printed by a child that
     // then stays alive and unresponsive — the shape the exit path cannot see.
+    // Issue #5178: require acknowledgement between writes to force a partial
+    // PTY read without relying on the child or parent being scheduled first.
     let script = "printf '\\n> read the file\\n\\n'; \
          printf \"You've hit your weekly limit \\302\\267 resets Aug 20 at 6am (Asia/Tokyo)\\n\"; \
+         read -r release; \
          printf '/usage-credits to finish what you are working on.\\n'; \
          sleep 30";
     let pane = Pane::new(
@@ -490,6 +493,8 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
         .reader()
         .expect("pty reader");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let first = instant("2026-08-17T09:20:00Z");
+    let mut released = false;
     let mut rendered = false;
     let mut buffer = [0_u8; 4096];
     while std::time::Instant::now() < deadline {
@@ -497,19 +502,34 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
         if read == 0 {
             break;
         }
-        let mut locked = pane.lock().expect("pane lock");
-        locked.process_bytes(&buffer[..read]);
-        if locked.screen().contents().contains("weekly limit") {
+        let screen = {
+            let mut locked = pane.lock().expect("pane lock");
+            locked.process_bytes(&buffer[..read]);
+            locked.screen().contents()
+        };
+        if !released && screen.contains("weekly limit") {
+            let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, first);
+            assert!(
+                !runtime.provider_quota_candidates.contains_key(&window_id)
+                    && !runtime.provider_quota_holds.contains_key(&window_id),
+                "a heading without its native refusal footer must not form a quota candidate or hold"
+            );
+            pane.lock()
+                .expect("pane lock")
+                .write_input(b"\n")
+                .expect("release quota notice footer");
+            released = true;
+        }
+        if screen.contains("/usage-credits to finish what you are working on.") {
             rendered = true;
             break;
         }
     }
     assert!(
         rendered,
-        "precondition: the child's notice must reach the vt100 screen"
+        "precondition: the child's complete notice must reach the vt100 screen"
     );
 
-    let first = instant("2026-08-17T09:20:00Z");
     let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, first);
     assert!(
         !runtime.provider_quota_holds.contains_key(&window_id),
@@ -522,7 +542,8 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
     assert_eq!(
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Waiting),
-        "a real pane showing a real notice must render as waiting, not idle"
+        "a real pane showing a real notice must render as waiting, not idle; screen: {:?}",
+        pane.lock().expect("pane lock").screen().contents()
     );
     let hold = runtime
         .provider_quota_holds

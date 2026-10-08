@@ -559,6 +559,86 @@ test("Usage hover shows account label while status strip stays compact", async (
   }
 });
 
+test("Usage snapshot owns its data so strip and hover stay consistent", async () => {
+  const { createProviderUsageSurface } = await import(resolve(here, "../provider-usage-surface.js"));
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document, window } = parseHTML(
+    "<html><body><button id='op-strip-usage'></button></body></html>",
+  );
+  const previous = {
+    document: globalThis.document,
+    window: globalThis.window,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+  };
+  Object.assign(globalThis, { document, window, requestAnimationFrame: (cb) => cb() });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  window.__operatorShell = { applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot) };
+  const payload = {
+    accounts: [{ provider: "codex", windows: [{ kind: "weekly", used_percent: 10 }], state: { kind: "ok" } }],
+    sessions: [],
+    consumption: [],
+  };
+  try {
+    let workspaceRefreshes = 0;
+    const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => workspaceRefreshes++ });
+    assert.equal(workspaceRefreshes, 0, "factory construction must not call a late-bound Workspace view");
+    surface.applyProviderUsageUi(payload);
+    // A caller changing the received payload must not change model data.
+    payload.accounts[0].windows[0].used_percent = 70;
+    const strip = document.getElementById("op-strip-usage");
+    strip.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(strip);
+    const popover = document.getElementById("provider-usage-popover");
+    assert.match(strip.textContent, /CX 10%/);
+    assert.match(popover.textContent, /Weekly\s*10%/);
+
+    surface.applyProviderUsageUi(payload);
+    assert.match(strip.textContent, /CX 70%/);
+    assert.match(popover.textContent, /Weekly\s*70%/);
+    assert.equal(workspaceRefreshes, 2);
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
+test("Mounted usage panel follows snapshots while preserving local controls", async () => {
+  const { createProviderUsageSurface } = await import(resolve(here, "../provider-usage-surface.js"));
+  const { document, window } = parseHTML("<html><body><section id='usage-panel'></section></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window };
+  Object.assign(globalThis, { document, window });
+  const usage = (kind) => ({ accounts: [{ provider: "claude_code", state: { kind } }] });
+  try {
+    const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => {} });
+    const panel = document.getElementById("usage-panel");
+    surface.applyProviderUsageUi(usage("disabled"));
+    surface.renderUsagePanel(panel);
+    const checkbox = panel.querySelector("input");
+    assert.equal(checkbox.checked, false);
+    surface.applyProviderUsageUi(usage("ok"));
+    assert.equal(checkbox.checked, true);
+    assert.equal(panel.querySelector("input"), checkbox, "snapshot must preserve the mounted control");
+
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new window.Event("change"));
+    assert.equal(checkbox.checked, false, "the local toggle remains immediate");
+    surface.applyProviderUsageUi(usage("ok"));
+    assert.equal(checkbox.checked, true, "the next canonical snapshot reflects backend truth");
+
+    surface.renderUsagePanel(panel);
+    const remountedCheckbox = panel.querySelector("input");
+    surface.applyProviderUsageUi(usage("disabled"));
+    assert.equal(remountedCheckbox.checked, false);
+    assert.equal(checkbox.checked, true, "remount must release the old control's subscription");
+    panel.remove();
+    remountedCheckbox.checked = true;
+    surface.applyProviderUsageUi(usage("disabled"));
+    assert.equal(remountedCheckbox.checked, true, "disconnected controls must not receive model updates");
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
 async function importOperatorShell() {
   const modulePath = resolve(here, "../operator-shell.js");
   const source = readFileSync(modulePath, "utf8")
