@@ -18,7 +18,7 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
   if (!liveUrl) await installEmbeddedRoutes(page);
-  await installBackend(page);
+  await installBackend(page, { includeAgent: info.title.startsWith("T-7a:") });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
@@ -92,8 +92,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await expect(autonomous).toBeFocused();
   await expect(popup).toBeVisible();
   await expect(popup).toHaveText("Allow eligible issues to run without waiting for human approval.");
+  await page.screenshot({ path: test.info().outputPath("issue-control-explanation.png") });
   await expect(autonomous).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await autonomous.hover();
   await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  await page.mouse.move(1590, 1090);
   await expect(popup).not.toBeVisible();
   await expect(autonomous).toBeFocused();
 
@@ -109,6 +113,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await confirm(page, [3, 4, 1]);
   await expect(column(page, "queued").locator(".issue-queue-heading")).toHaveText("Queued · 3");
   await expect(column(page, "queued").locator(".issue-queue-heading")).toBeFocused();
+  await expect(popup).toBeVisible();
+  await page.keyboard.press("Escape");
+  await confirm(page, [3, 4, 1, 2]);
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toHaveText("Queued · 4");
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toBeFocused();
+  await expect(popup).not.toBeVisible();
   await expect(popup).toContainText("launch order");
   await page.locator(".knowledge-search").focus();
   await page.mouse.move(1590, 1090);
@@ -148,9 +158,11 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const source = page.locator(".issue-detail-provenance");
   await source.focus();
   await expect(popup).toContainText("Auto-refill added this issue");
+  await page.keyboard.press("Escape");
   await page.evaluate(() => (window as any).__queueRefreshDetail());
   await expect(page.locator(".issue-detail-title")).toHaveText("Refreshed issue");
   await expect(source).toBeFocused();
+  await expect(popup).not.toBeVisible();
   await expect(popup).toContainText("Auto-refill added this issue");
   await page.keyboard.press("Escape");
   await expect(popup).not.toBeVisible();
@@ -166,6 +178,22 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await source.focus();
   await expect(popup).toContainText("Auto-refill added this issue");
   await expect(popup).toBeVisible();
+  await row(page, 5).locator(".knowledge-row-select").focus();
+  await expect(popup).toHaveText("The agent is working on this issue.");
+  await row(page, 5).locator(".knowledge-row-select").click();
+  await page.getByRole("button", { name: "Output", exact: true }).click();
+  for (const selector of [".issue-preview .knowledge-monitor-chip", ".issue-split-pair .knowledge-row-badge"]) {
+    if (selector.startsWith(".issue-split")) await page.getByRole("button", { name: "Split", exact: true }).click();
+    const badge = page.locator(selector);
+    await badge.focus();
+    await expect(badge).toBeFocused();
+    await expect(popup).toHaveText("The agent is working on this issue.");
+    await badge.hover();
+    await expect(popup).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.mouse.move(1590, 1090);
+    await expect(popup).not.toBeVisible();
+  }
 });
 
 
@@ -261,9 +289,9 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect(page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true})).toHaveValue("5");
 });
 
-async function installBackend(page: Page) {
+async function installBackend(page: Page, { includeAgent = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey})=>{
+  await page.addInitScript(({projectKey, includeAgent})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -290,7 +318,10 @@ async function installBackend(page: Page) {
         if(message.kind==="frontend_ready") this.emit({kind:"workspace_state",workspace:{app_version:"playwright",tabs:[{
           id:"tab-queue",title:"Queue fixture",project_root:"/fixture",project_key:projectKey,kind:"git",
           workspace:{viewport:{x:0,y:0,zoom:1},windows:[{id:"tab-queue::issue-1",title:"Issues",preset:"issue",
-            geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false}]} }],active_tab_id:"tab-queue",recent_projects:[]}});
+            geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false},
+            ...(includeAgent ? [{id:"tab-queue::agent-5",session_id:"agent-5-session",title:"Issue 5 agent",preset:"agent",agent_id:"codex",
+              geometry:{x:80,y:80,width:900,height:600},z_index:2,status:"running",persist:true,minimized:false,maximized:false,
+              placement:{kind:"issue_preview",issue_window_id:"tab-queue::issue-1",issue_number:5}}] : [])]} }],active_tab_id:"tab-queue",recent_projects:[]}});
         else if(message.kind==="list_issue_monitor") this.emit({kind:"issue_monitor_status",status});
         else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) this.emit({kind:"knowledge_entries",id:message.id,knowledge_kind:"issue",request_id:message.request_id,entries,selected_number:null,refresh_enabled:true});
         else if(message.kind==="select_knowledge_bridge_entry") {
@@ -301,5 +332,5 @@ async function installBackend(page: Page) {
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey});
+  },{projectKey, includeAgent});
 }

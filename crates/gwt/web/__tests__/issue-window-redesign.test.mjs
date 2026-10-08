@@ -520,14 +520,19 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   assert.ok(popup.classList.contains("op-runtime-health-detail"), "reuse the existing popover shell");
   assert.equal(popup.hidden, false);
   assert.match(popup.textContent, /without waiting for human approval/i);
+  event(autonomous, "mouseover");
   event(autonomous, "keydown", { key: "Escape" });
   assert.equal(popup.hidden, true, "Escape dismisses without changing focus or settings");
+  event(autonomous, "mouseout");
+  assert.equal(popup.hidden, true, "pointer departure must not reopen an Escape-dismissed explanation");
   event(autonomous, "focusout");
   const heading = root.querySelector('[data-queue-column="queued"] .issue-queue-heading');
   assert.equal(heading.getAttribute("tabindex"), "0", "static headings are keyboard reachable");
   event(heading, "mouseover");
   assert.equal(popup.hidden, false);
   assert.match(popup.textContent, /launch order/i);
+  event(document, "scroll");
+  assert.equal(popup.hidden, false, "scrolling the anchor into view keeps its explanation readable");
   event(heading, "mouseout", { relatedTarget: popup });
   assert.equal(popup.hidden, false, "the explanation stays visible while reading it");
   event(popup, "mouseleave");
@@ -549,6 +554,8 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   event(heading, "mouseover");
   event(document, "keydown", { key: "Escape" });
   assert.equal(popup.hidden, true, "Escape also dismisses a hovered explanation when focus is outside the window");
+  event(document, "scroll");
+  assert.equal(popup.hidden, true, "scrolling cannot reopen a dismissed explanation");
   const selectBadge = select.querySelector(".knowledge-row-badge");
   event(selectBadge, "mouseover");
   event(selectBadge, "mouseout", { relatedTarget: select });
@@ -559,6 +566,9 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   event(heading, "mouseover");
   event(heading, "pointerdown");
   assert.equal(popup.hidden, true, "beginning a pointer action dismisses the explanation");
+  event(heading, "focusin");
+  assert.equal(popup.hidden, true, "pointer-derived focus cannot reopen an explanation over the next action");
+  event(document, "pointerup");
   event(heading, "mouseover", { buttons: 1 });
   assert.equal(popup.hidden, true, "pointer movement with a held button cannot obstruct dragging");
   event(heading, "dragstart");
@@ -569,6 +579,35 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   assert.equal(popup.hidden, false, "hover explanations resume after the drag");
   surface.clearKnowledgeBridgeState("win-1");
   assert.equal(popup.isConnected, false, "closing a window removes its detached explanation");
+});
+
+test("T-7a: known monitor, agent and Work states explain their meaning", async (t) => {
+  const agent = { id: "agent-12", status: "running", placement: { kind: "issue_preview", issue_window_id: "win-1", issue_number: 12 } };
+  const { body, document, surface, state } = await makeFixture({
+    windows: [agent],
+    surface: {
+      getActiveWorkProjection: () => ({ active_works: [{ id: "work-13" }] }),
+      workAttentionFor: () => ({ lane: "paused" }),
+    },
+  });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  state.entries = [entry(11, "not_ready"), entry(12, null), entry(13, null, { related_work_refs: [{ id: "work-13" }] })];
+  surface.renderKnowledgeBridge("win-1");
+  for (const [number, meaning] of [[11, /launch requirements/i], [12, /agent is working/i], [13, /work is paused/i]]) {
+    const select = body.querySelector(`.knowledge-row[data-issue-number="${number}"] .knowledge-row-select`);
+    assert.match(select.getAttribute("aria-description"), meaning);
+  }
+  state.selectedNumber = 12;
+  state.issueDetailView = "output";
+  state.detail = { number: 12, title: "Issue 12", sections: [] };
+  for (const [viewMode, selector] of [["list", ".issue-preview .knowledge-monitor-chip"], ["split", ".issue-split-pair .knowledge-row-badge"]]) {
+    state.viewMode = viewMode;
+    surface.renderKnowledgeBridge("win-1");
+    const badge = body.querySelector(selector);
+    assert.equal(badge?.getAttribute("tabindex"), "0", `${viewMode} status is keyboard reachable`);
+    badge.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+    assert.match(document.getElementById(badge.getAttribute("aria-describedby"))?.textContent, /agent is working/i);
+  }
 });
 
 test("T-7a: two Issue windows keep independent explanation identities and cleanup", async (t) => {

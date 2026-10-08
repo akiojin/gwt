@@ -654,6 +654,7 @@ export function createKnowledgeKanbanSurface({
         let focused = null;
         let hovered = null;
         let dragging = false;
+        let pointerActive = false;
         const target = event => event.target?.closest?.("[data-issue-explanation]");
         const hide = () => {
           if (anchor) {
@@ -700,32 +701,46 @@ export function createKnowledgeKanbanSurface({
           if (popup.contains(event.relatedTarget)) return;
           if (focused) show(focused); else hide();
         };
-        const focus = event => { focused = target(event); if (focused) show(focused); };
+        const focus = event => { focused = pointerActive ? null : target(event); if (focused) show(focused); };
         const blur = () => { focused = null; if (hovered) show(hovered); else hide(); };
         const escape = event => {
           if (event.key !== "Escape" || popup.hidden) return;
+          focused = null;
+          hovered = null;
           hide();
           event.preventDefault();
           event.stopPropagation();
         };
         const leavePopup = () => { if (focused) show(focused); else hide(); };
-        const pointerDown = () => { hovered = null; hide(); };
+        const refresh = () => { if (anchor) show(anchor); };
+        const pointerDown = () => { pointerActive = true; focused = null; hovered = null; hide(); };
+        const pointerEnd = () => { pointerActive = false; };
         const dragStart = () => { dragging = true; pointerDown(); };
-        const dragEnd = () => { dragging = false; };
+        const dragEnd = () => { dragging = false; pointerEnd(); };
         const listeners = { mouseover: over, mouseout: out, focusin: focus, focusout: blur,
           pointerdown: pointerDown, dragstart: dragStart, dragend: dragEnd };
         for (const [type, listener] of Object.entries(listeners)) root.addEventListener(type, listener);
         popup.addEventListener("mouseleave", leavePopup);
         document.addEventListener("keydown", escape);
-        document.addEventListener("scroll", hide, true);
+        document.addEventListener("scroll", refresh, true);
+        document.addEventListener("pointerup", pointerEnd);
+        document.addEventListener("pointercancel", pointerEnd);
         document.defaultView?.addEventListener("resize", hide);
         issueControlExplanations.set(windowId, {
-          refresh() { if (anchor) show(anchor); },
+          get visible() { return !popup.hidden; },
+          restoreFocus(node, visible) {
+            node?.focus();
+            // Cache refresh restores focus, not a dismissed explanation.
+            if (!visible) { focused = null; hovered = null; hide(); }
+          },
+          refresh,
           dispose() {
             hide();
             for (const [type, listener] of Object.entries(listeners)) root.removeEventListener(type, listener);
-            document.removeEventListener("scroll", hide, true);
+            document.removeEventListener("scroll", refresh, true);
             document.removeEventListener("keydown", escape);
+            document.removeEventListener("pointerup", pointerEnd);
+            document.removeEventListener("pointercancel", pointerEnd);
             document.defaultView?.removeEventListener("resize", hide);
             popup.remove();
           },
@@ -744,9 +759,28 @@ export function createKnowledgeKanbanSurface({
       function issueStateExplanation(primary) {
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
+          "monitor:not_ready": "This issue does not yet meet the monitor's launch requirements, such as a usable plan and tasks.",
+          "monitor:hold_excluded": "A hold label excludes this issue from automatic launches.",
           "monitor:launching": "The monitor is starting an agent for this issue.",
           "monitor:launched": "The monitor launched an agent for this issue.",
+          "monitor:merged": "The current execution is complete; the GitHub issue may remain open until release.",
+          "monitor:released": "The monitor observed this issue closed on GitHub.",
+          "monitor:launch_failed": "The monitor could not start an agent for this issue.",
+          "monitor:agent_failed": "The launched agent did not complete this issue successfully.",
+          "monitor:blocked_by_claim": "Another agent holds the execution claim, so the monitor will not launch duplicate work.",
+          "monitor:skipped": "The monitor skipped this issue during its scan.",
           "monitor:needs_human": "This issue needs a human decision before automatic work can continue.",
+          "agent:running": "The agent is working on this issue.",
+          "agent:starting": "The agent session is starting.",
+          "agent:idle": "The agent is idle; its session remains available.",
+          "agent:waiting": "The agent is waiting for input or approval before it can continue.",
+          "agent:stopped": "The agent session has stopped; its output remains available.",
+          "agent:error": "The agent session reported an error.",
+          "work:closed": "This Work is completed or discarded.",
+          "work:remote": "This Work is only available remotely.",
+          "work:needs_attention": "This Work needs attention before it can continue.",
+          "work:running": "This Work is active.",
+          "work:paused": "This Work is paused with no active agent.",
           "issue:open": "The issue is open on GitHub; this alone does not mean an agent is running.",
           "issue:closed": "The issue is closed on GitHub.",
         };
@@ -3350,6 +3384,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-monitor-chip", statusView.label);
         badge.dataset.tone = statusView.tone;
         badge.dataset.status = statusView.status;
+        explainIssueControl(badge, issueStateExplanation({ key: `agent:${statusView.status}`, label: statusView.label }), `preview-state-${target.id}`);
         header.appendChild(badge);
 
         const windowize = createNode("button", "wizard-button", "Windowize");
@@ -3498,6 +3533,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
         badge.dataset.stateKey = model.primary.key;
+        explainIssueControl(badge, issueStateExplanation(model.primary), `split-state-${entry.number}`);
         header.appendChild(badge);
         const elapsed = createNode("span", "issue-split-elapsed", issueAgentElapsedLabel(target));
         elapsed.title = elapsed.textContent
@@ -3829,10 +3865,11 @@ export function createKnowledgeKanbanSurface({
 
       function renderKnowledgeDetailPane(windowId, state, detailPane, { agentPreview = true } = {}) {
         if (state.kind === "issue") {
+          const explanationVisible = issueControlExplanations.get(windowId)?.visible;
           const focusedKey = detailPane.contains(document.activeElement)
             ? document.activeElement?.dataset.issueExplanationKey : null;
           renderIssueDetailPane(windowId, state, detailPane, { agentPreview });
-          if (focusedKey) detailPane.querySelector(`[data-issue-explanation-key="${focusedKey}"]`)?.focus();
+          if (focusedKey) issueControlExplanations.get(windowId)?.restoreFocus(detailPane.querySelector(`[data-issue-explanation-key="${focusedKey}"]`), explanationVisible);
           issueControlExplanations.get(windowId)?.refresh();
           return;
         }
@@ -4407,6 +4444,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderIssueKnowledgeBridge(windowId, element, state) {
+        const explanationVisible = issueControlExplanations.get(windowId)?.visible;
         const focusedKey = element.contains(document.activeElement)
           ? document.activeElement?.dataset.issueExplanationKey : null;
         const list = element.querySelector(".knowledge-list");
@@ -4483,7 +4521,7 @@ export function createKnowledgeKanbanSurface({
         }
         renderOtherWork(list, windowId, { laneFilter: state.issueLaneFilter || "all" });
         renderKnowledgeDetailPane(windowId, state, detailPane, { agentPreview: !splitMode });
-        if (focusedKey) element.querySelector(`[data-issue-explanation-key="${focusedKey}"]`)?.focus();
+        if (focusedKey) issueControlExplanations.get(windowId)?.restoreFocus(element.querySelector(`[data-issue-explanation-key="${focusedKey}"]`), explanationVisible);
         issueControlExplanations.get(windowId)?.refresh();
       }
 
