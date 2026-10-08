@@ -81,6 +81,10 @@ pub struct TestEnv {
     pub rerun_call_log: Vec<crate::cli::ActionsRerunTarget>,
     /// Issue #3515: when set, `rerun_actions` refuses with this message.
     pub rerun_rejection: Option<String>,
+    pub cancel_call_log: Vec<u64>,
+    pub cancel_rejection: Option<String>,
+    pub queued_actions: Option<String>,
+    pub queued_actions_call_count: usize,
     pub internal_command_call_log: Vec<InternalCommandCall>,
 }
 
@@ -131,6 +135,10 @@ impl TestEnv {
             job_log_call_log: Vec::new(),
             rerun_call_log: Vec::new(),
             rerun_rejection: None,
+            cancel_call_log: Vec::new(),
+            cancel_rejection: None,
+            queued_actions: None,
+            queued_actions_call_count: 0,
             internal_command_call_log: Vec::new(),
         }
     }
@@ -186,6 +194,14 @@ impl TestEnv {
     /// Issue #3515: make the next `actions.rerun` fail the repository guard.
     pub fn seed_rerun_rejection(&mut self, message: impl Into<String>) {
         self.rerun_rejection = Some(message.into());
+    }
+
+    pub fn seed_cancel_rejection(&mut self, message: impl Into<String>) {
+        self.cancel_rejection = Some(message.into());
+    }
+
+    pub fn seed_queued_actions(&mut self, runs: impl Into<String>) {
+        self.queued_actions = Some(runs.into());
     }
 
     pub fn seed_job_log(&mut self, job_id: u64, log: impl Into<String>) {
@@ -471,6 +487,19 @@ impl CliEnv for TestEnv {
             return Err(io::Error::other(message));
         }
         Ok(format!("rerun requested for {target:?}"))
+    }
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        self.cancel_call_log.push(run_id);
+        if let Some(message) = self.cancel_rejection.clone() {
+            return Err(io::Error::other(message));
+        }
+        Ok(format!("cancel requested for run {run_id}"))
+    }
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        self.queued_actions_call_count += 1;
+        self.queued_actions
+            .clone()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no queued actions"))
     }
     fn run_internal_command(
         &mut self,
