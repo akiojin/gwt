@@ -146,7 +146,11 @@ impl Arena {
     fn spawn_sibling_heavy(&self) -> Child {
         let ready = self.home.path().join("development-ready");
         let mut child = hidden_command(std::env::current_exe().expect("test binary path"))
-            .args(["--ignored", "--exact", "fake_heavy_process_parks"])
+            .args([
+                "--ignored",
+                "--exact",
+                "verification_admission_cli_test::fake_heavy_process_parks",
+            ])
             .env("ADMISSION_DEVELOPMENT_READY", &ready)
             .current_dir(&self.sibling)
             .stdout(Stdio::null())
@@ -197,7 +201,7 @@ impl CanonicalRun {
         let release = arena.home.path().join("canonical-release");
         let exe = std::env::current_exe().unwrap();
         let command = format!(
-            "\"{}\" --ignored --exact canonical_command_parks",
+            "\"{}\" --ignored --exact verification_admission_cli_test::canonical_command_parks",
             exe.display()
         );
         let child = spawn_gwtd(
@@ -497,7 +501,7 @@ fn admission_continuation_blocker_command() {
 
 fn continuation_command(name: &str) -> String {
     format!(
-        "\"{}\" --ignored --exact {name}",
+        "\"{}\" --ignored --exact verification_admission_cli_test::{name}",
         std::env::current_exe().unwrap().display()
     )
 }
