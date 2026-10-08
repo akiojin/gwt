@@ -146,6 +146,8 @@ pub struct ManagedHookFailureSnapshot {
     surface_audits: Arc<SurfaceAuditCounters>,
     /// Issue #4257: bare hook binaries resolved during this projection.
     hook_binaries: HookBinaryResolutionCache,
+    /// Session selection, health and recovery share one runtime read per projection.
+    runtime_states: RefCell<HashMap<PathBuf, Arc<CachedRuntimeState>>>,
 }
 
 /// Memo of bare hook-binary resolution for one projection.
@@ -225,6 +227,7 @@ impl ManagedHookFailureSnapshot {
             by_worktree,
             surface_audits: Arc::default(),
             hook_binaries: HookBinaryResolutionCache::default(),
+            runtime_states: RefCell::default(),
         }
     }
 
@@ -244,6 +247,25 @@ impl ManagedHookFailureSnapshot {
             refreshed: self.surface_audits.refreshed.load(Ordering::Relaxed),
             reused: self.surface_audits.reused.load(Ordering::Relaxed),
         }
+    }
+
+    /// Session ordering uses the same JSON snapshot as its eventual health read.
+    pub fn runtime_state_updated_at(
+        &self,
+        path: &Path,
+    ) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        self.runtime_state(path).updated_at
+    }
+
+    fn runtime_state(&self, path: &Path) -> Arc<CachedRuntimeState> {
+        if let Some(state) = self.runtime_states.borrow().get(path) {
+            return Arc::clone(state);
+        }
+        let state = cached_runtime_state(path);
+        self.runtime_states
+            .borrow_mut()
+            .insert(path.to_path_buf(), Arc::clone(&state));
+        state
     }
 }
 
@@ -288,23 +310,24 @@ fn read_managed_hook_health_with(
         return health;
     };
 
-    if !runtime_state_path.exists() {
+    let runtime = failures.runtime_state(runtime_state_path);
+    let Some(state) = runtime.state.as_ref() else {
         if health.status == ManagedHookHealthStatus::Ready {
             health.status = ManagedHookHealthStatus::WaitingForFirstHookEvent;
         }
         apply_self_healed_marker(input, &mut health);
         return health;
-    }
+    };
 
-    match read_runtime_state(runtime_state_path) {
+    match state {
         Ok(runtime_state) => {
-            if let Some(source_event) = runtime_state.source_event {
-                health.last_event = Some(source_event);
-                health.last_event_at = Some(runtime_state.updated_at);
+            if let Some(source_event) = runtime_state.source_event.as_ref() {
+                health.last_event = Some(source_event.clone());
+                health.last_event_at = Some(runtime_state.updated_at.clone());
             } else if health.status == ManagedHookHealthStatus::Ready {
                 health.status = ManagedHookHealthStatus::WaitingForFirstHookEvent;
             }
-            health.pending_discussion = runtime_state.pending_discussion;
+            health.pending_discussion = runtime_state.pending_discussion.clone();
             if runtime_state.status == "Stopped" && health.status == ManagedHookHealthStatus::Ready
             {
                 health.status = ManagedHookHealthStatus::Inactive;
@@ -433,7 +456,7 @@ fn audit_hook_failures(
         let completed_at = input
             .runtime_state_path
             .as_deref()
-            .and_then(read_last_completed_hook_event_at);
+            .and_then(|path| failures.runtime_state(path).completed_at);
         let recovered = completed_at.is_some_and(|at| at > row.recorded_at);
         let state = if recovered { "recovered" } else { "unresolved" };
         let issue = describe_hook_failure(row, state);
@@ -464,15 +487,6 @@ fn describe_hook_failure(row: &gwt_core::error_ledger::ErrorRecord, state: &str)
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         row.id
     )
-}
-
-fn read_last_completed_hook_event_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
-    let raw = fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&raw).ok()?;
-    let at = value.get("last_completed_hook_event_at")?.as_str()?;
-    chrono::DateTime::parse_from_rfc3339(at)
-        .ok()
-        .map(|at| at.with_timezone(&chrono::Utc))
 }
 
 fn comparable_path(path: &Path) -> PathBuf {
@@ -1180,9 +1194,63 @@ fn push_unique_issue(health: &mut ManagedHookHealth, issue: String) {
     }
 }
 
-fn read_runtime_state(path: &Path) -> Result<RuntimeStateReadModel, String> {
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&raw).map_err(|error| error.to_string())
+/// Issue #5120: unchanged runtime files reuse their decoded result across projections.
+static RUNTIME_STATES: OnceLock<Mutex<HashMap<PathBuf, Arc<CachedRuntimeState>>>> = OnceLock::new();
+
+#[derive(Debug)]
+struct CachedRuntimeState {
+    stamp: Option<FileStamp>,
+    updated_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Missing files remain distinct from malformed or unreadable files.
+    state: Option<Result<RuntimeStateReadModel, String>>,
+}
+
+fn cached_runtime_state(path: &Path) -> Arc<CachedRuntimeState> {
+    // Stamp before reading so a concurrent rewrite is noticed next projection.
+    let stamp = file_stamp(path);
+    let cache = RUNTIME_STATES.get_or_init(Mutex::default);
+    if let Some(cached) = cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(path)
+    {
+        if cached.stamp == stamp {
+            return Arc::clone(cached);
+        }
+    }
+    let mut runtime = CachedRuntimeState {
+        stamp,
+        updated_at: None,
+        completed_at: None,
+        state: None,
+    };
+    if stamp.is_some() {
+        let value = fs::read(path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| {
+                serde_json::from_slice::<Value>(&raw).map_err(|error| error.to_string())
+            });
+        runtime.state = Some(value.and_then(|value| {
+            // Preserve selection/recovery timestamps even when typed health is invalid.
+            let timestamp = |field| {
+                value
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            };
+            runtime.updated_at = timestamp("updated_at");
+            runtime.completed_at =
+                timestamp("last_completed_hook_event_at").map(|at| at.with_timezone(&chrono::Utc));
+            serde_json::from_value(value).map_err(|error| error.to_string())
+        }));
+    }
+    let runtime = Arc::new(runtime);
+    cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(path.to_path_buf(), Arc::clone(&runtime));
+    runtime
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {

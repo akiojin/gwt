@@ -17872,6 +17872,11 @@ impl IssueMonitorState {
             item.claim_id = None;
             item.launched_window_id = None;
             item.error_message = retry_record.and_then(|record| record.last_failure_message);
+            item.blocked_by_owner = None;
+            item.blocked_by_claim_id = None;
+            item.claim_expires_at = None;
+            item.claim_block_issue_updated_at = None;
+            item.exclusion_reason = None;
         }
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);

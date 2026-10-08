@@ -461,15 +461,7 @@ pub(super) fn managed_hook_health_view_for_worktree(
         .iter()
         .map(|session| {
             let path = gwt_agent::runtime_state_path(sessions_dir, &session.session_id);
-            let updated_at = std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| {
-                    value
-                        .get("updated_at")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                });
+            let updated_at = hook_failures.runtime_state_updated_at(&path);
             (updated_at, session.session_id.as_str(), path)
         })
         .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
