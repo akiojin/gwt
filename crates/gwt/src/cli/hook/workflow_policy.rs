@@ -798,6 +798,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "actions.logs"
             | "actions.job_logs"
             | "actions.job-logs"
+            | "actions.queued"
             | "index.status"
             | "diagnostics.cpu"
             | "daemon.status"
@@ -1817,6 +1818,19 @@ mod tests {
             HookOutput::Silent,
             "production source writes must pass ownerless after the owner guard removal"
         );
+    }
+
+    #[test]
+    fn issue_4188_queued_diagnostic_is_read_only_through_the_hook() {
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        let command = envelope_command("actions.queued", "{}");
+        assert_eq!(
+            evaluate_with_context(&bash_event(&command), repo.path(), &context).expect("policy"),
+            HookOutput::Silent,
+            "a GET-only Actions diagnostic must stay available before Work identity is set"
+        );
+        assert!(!is_read_only_json_envelope_operation("actions.cancel"));
     }
 
     #[test]

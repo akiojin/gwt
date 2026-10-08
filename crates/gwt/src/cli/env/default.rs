@@ -542,6 +542,13 @@ impl CliEnv for DefaultCliEnv {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
     }
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::actions::cancel_actions_via_gh(&self.owner, &self.repo, &self.repo_path, run_id)
+    }
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        crate::cli::actions::fetch_queued_actions_via_gh(&self.owner, &self.repo, &self.repo_path)
+    }
     fn run_internal_command(
         &mut self,
         args: &[String],

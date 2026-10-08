@@ -180,6 +180,14 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.rerun_actions(target)
     }
 
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        self.inner.cancel_actions(run_id)
+    }
+
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        self.inner.fetch_queued_actions()
+    }
+
     fn run_internal_command(
         &mut self,
         args: &[String],

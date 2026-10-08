@@ -119,6 +119,10 @@ pub trait CliEnv {
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;
     /// Issue #3515: re-run a failed run or job. Returns the outcome line.
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
+    /// Issue #4188: cancel an active run in the current repository.
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String>;
+    /// Issue #4188: list queued runs, including runs without jobs.
+    fn fetch_queued_actions(&mut self) -> io::Result<String>;
     fn run_internal_command(
         &mut self,
         args: &[String],

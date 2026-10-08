@@ -995,6 +995,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
             target: actions_rerun_target(params)?,
         }),
+        "actions.cancel" => CliCommand::Actions(ActionsCommand::Cancel {
+            run_id: required_u64(params, "run_id")?,
+        }),
+        "actions.queued" => CliCommand::Actions(ActionsCommand::Queued),
         "index.status" => CliCommand::Index(IndexCommand::Status),
         "index.cancel" | "index.repair" => {
             if optional_string(params, "scope")?.is_some_and(|scope| scope != "issues") {
@@ -5951,6 +5955,33 @@ mod tests {
             ),
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody { .. })
         ));
+    }
+
+    #[test]
+    fn issue_4188_actions_cancel_requires_a_run_id() {
+        assert_eq!(
+            ok("actions.cancel", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Cancel { run_id: 5 })
+        );
+        assert!(matches!(
+            err("actions.cancel", json!({})),
+            CliParseError::MissingFlag("run_id")
+        ));
+        assert!(parse(&envelope("actions.cancel", json!({"run_id": "five"}))).is_err());
+        assert!(parse(&envelope(
+            "actions.cancel",
+            json!({"run_id": 5, "job_id": 7})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn issue_4188_actions_queued_takes_no_params() {
+        assert_eq!(
+            ok("actions.queued", json!({})),
+            CliCommand::Actions(ActionsCommand::Queued)
+        );
+        assert!(parse(&envelope("actions.queued", json!({"run_id": 5}))).is_err());
     }
 
     #[test]
