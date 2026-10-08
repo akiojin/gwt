@@ -22082,13 +22082,37 @@ fn continue_work_activated_successor_recovery_case(
             },
         ));
     }
-    let events = restarted_runtime.continue_work_events(
-        &restarted_runtime.test_context(),
-        "client-retry",
-        operation_id.to_string(),
-        work_id.to_string(),
-        canvas_bounds(),
-    );
+    // A parallel agent probe can inherit the operation flock until its exec.
+    // Retry only that transient Busy response; retain all recovery assertions.
+    let retry_deadline = Instant::now() + Duration::from_secs(30);
+    let events = loop {
+        let events = restarted_runtime.continue_work_events(
+            &restarted_runtime.test_context(),
+            "client-retry",
+            operation_id.to_string(),
+            work_id.to_string(),
+            canvas_bounds(),
+        );
+        let busy = events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                message: Some(message),
+                error_code: Some(code),
+                retryable: true,
+                ..
+            } if code == "continuation_reconciliation_required"
+                && message == "The committed continuation Work transaction is still being reconciled."
+        ));
+        if !busy {
+            break events;
+        }
+        assert!(
+            Instant::now() < retry_deadline,
+            "operation lock remained Busy: {events:#?}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
     if capability_generation != 1
         || mutate_candidate_after_repair
         || mutate_candidate_before_work_commit
