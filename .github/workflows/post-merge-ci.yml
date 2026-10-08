@@ -1,0 +1,41 @@
+name: Report post-merge CI failure
+
+on:
+  workflow_call:
+
+# Called from the failed push's own tree, including before develop is released
+# to the default branch (main). Serialize each workflow's Issue lookup/create.
+concurrency:
+  group: post-merge-ci-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  report-failure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: File or update the post-merge failure Issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CI_WORKFLOW: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          title="fix(ci): develop $CI_WORKFLOW post-merge verification failed"
+          existing=$(gh issue list --repo "$REPO" --state open \
+            --search "\"develop $CI_WORKFLOW post-merge verification failed\" in:title label:bug" \
+            --json number --jq '.[0].number // empty')
+          body_file=$(mktemp "$RUNNER_TEMP/post-merge-ci-XXXXXX.md")
+          printf 'The develop push failed %s after merge.\n\nRun: %s\nCommit: %s\n\nStrict status checks are disabled; this run tests the combined develop tree (Issue #5169). PM: investigate and arrange a fix or a deliberate revert. Do not automatically revert unrelated changes.\n' \
+            "$CI_WORKFLOW" "$RUN_URL" "$HEAD_SHA" > "$body_file"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file "$body_file"
+          else
+            gh issue create --repo "$REPO" --title "$title" --label bug \
+              --assignee akiojin --body-file "$body_file"
+          fi

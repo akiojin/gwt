@@ -248,6 +248,100 @@ fn gates_develop_pull_requests(doc: &Value) -> bool {
         .is_some_and(|branches| branches.iter().any(|b| b.as_str() == Some("develop")))
 }
 
+/// Issue #5169 AC-1: strict=false permits combinations that were never tested
+/// together before merge. Run the same gates on the resulting develop tree.
+#[test]
+fn required_ci_workflows_run_on_develop_pushes() {
+    for name in ["test.yml", "lint.yml", "build.yml"] {
+        let doc = workflow(name);
+        let branches = triggers(&doc)
+            .get("push")
+            .and_then(|event| event.get("branches"))
+            .and_then(Value::as_sequence)
+            .unwrap_or_else(|| panic!("{name}: develop pushes must run post-merge CI"));
+        assert_eq!(branches, &vec![Value::String("develop".into())]);
+        for (id, body) in jobs(&doc) {
+            let condition = condition(body);
+            assert!(
+                !condition.contains("github.event_name") || condition.contains("push"),
+                "{name}/{id:?}: an event condition must not skip post-merge CI"
+            );
+        }
+    }
+}
+
+/// Issue #5169 AC-1: push runs have no PR files API; classify their own diff.
+#[test]
+fn changed_files_on_develop_push_use_the_push_commit_range() {
+    let doc = workflow(TEST_WORKFLOW);
+    let steps = job(&doc, CHANGES_JOB)["steps"].as_sequence().unwrap();
+    let classify = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("classify"))
+        .unwrap();
+    let env = serde_yaml::to_string(&classify["env"]).unwrap();
+    assert!(env.contains("github.event.before"));
+    assert!(env.contains("github.event.after"));
+    let script = classify["run"].as_str().unwrap();
+    assert!(
+        script.contains("push") && script.contains("PUSH_BASE") && script.contains("PUSH_HEAD")
+    );
+}
+
+#[test]
+fn post_merge_runs_do_not_cancel_other_develop_trees_or_their_coverage() {
+    for name in ["test.yml", "lint.yml", "build.yml", "coverage.yml"] {
+        let doc = workflow(name);
+        let policy = concurrency(name, &doc);
+        let group = policy["group"].as_str().unwrap();
+        assert!(
+            group.contains("github.sha") || group.contains("github.run_id"),
+            "{name}: push trees need independent groups"
+        );
+        if name == TEST_WORKFLOW {
+            for (_, body) in jobs(&doc) {
+                let group = body["concurrency"]["group"].as_str().unwrap();
+                assert!(
+                    group.contains("github.event_name == 'push'") && group.contains("github.sha")
+                );
+            }
+        }
+    }
+}
+
+/// Issue #5169 AC-2: a develop failure must have a durable notification target.
+#[test]
+fn post_merge_failures_are_reported_to_a_bug_issue() {
+    let doc = workflow("post-merge-ci.yml");
+    // The default branch is main. A workflow_run listener added to develop
+    // cannot report anything until release, so call from the tested tree.
+    assert!(triggers(&doc).get("workflow_call").is_some());
+    for name in ["test.yml", "lint.yml", "build.yml"] {
+        let caller = workflow(name);
+        let report = job(&caller, "report-post-merge-failure");
+        let guard = condition(report);
+        assert!(guard.contains("github.event_name == 'push'") && guard.contains("failure()"));
+        assert_eq!(
+            report["uses"].as_str(),
+            Some("./.github/workflows/post-merge-ci.yml")
+        );
+        for (id, _) in jobs(&caller) {
+            let id = id.as_str().unwrap();
+            if id != "report-post-merge-failure" {
+                assert!(
+                    needs(report).iter().any(|dependency| dependency == id),
+                    "{name}: {id} failures must reach the reporter"
+                );
+            }
+        }
+    }
+    let report = job(&doc, "report-failure");
+    assert_eq!(report["permissions"]["issues"].as_str(), Some("write"));
+    let script = serde_yaml::to_string(&report["steps"]).unwrap();
+    assert!(script.contains("gh issue create") && script.contains("--label bug"));
+    assert!(script.contains("gh issue comment") && script.contains("RUN_URL"));
+}
+
 /// Issue #4872: develop lands through a GitHub merge queue, which re-tests each
 /// pull request on the latest base under a `merge_group` event. A required
 /// check that no workflow reports for that event stays pending forever and
@@ -269,6 +363,10 @@ fn develop_pull_request_workflows_also_run_for_the_merge_queue() {
         );
         for (id, body) in jobs(&doc) {
             let id = id.as_str().expect("job ids are strings");
+            if id == "report-post-merge-failure" {
+                // Notifications are for failed push runs, not merge-queue gates.
+                continue;
+            }
             let condition = condition(body);
             assert!(
                 !condition.contains("github.event_name") || condition.contains("merge_group"),

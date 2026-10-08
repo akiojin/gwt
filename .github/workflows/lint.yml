@@ -1,9 +1,13 @@
 name: Lint
 
 on:
+  push:
+    branches: [develop]
   pull_request:
     branches: [develop, main]
-  # Issue #4872: develop lands through a GitHub merge queue. The queue re-tests
+  # Issue #4872: retain merge-queue compatibility for organization repositories.
+  # Issue #5169: this User-owned repository uses non-strict protection and
+  # develop push CI. The queue re-tests
   # each pull request on the latest base under this event, and a required
   # check nobody reports for it stays pending forever, so every job here runs
   # for the queue exactly as it does for a pull request. Pinned by
@@ -19,7 +23,7 @@ on:
 # only this PR's older run of this workflow. Pinned by
 # crates/gwt/tests/ci_concurrency_contract_test.rs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
 jobs:
@@ -192,7 +196,6 @@ jobs:
     runs-on: ubuntu-latest
     # Issue #4872: a job skipped by event name reports Success, so the queue
     # would count this required check without running it.
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -201,8 +204,8 @@ jobs:
       - name: Validate commit messages
         continue-on-error: true
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.event.after }}
         run: |
           MERGE_BASE=$(git merge-base "$HEAD_SHA" "$BASE_SHA" || true)
           LAST_BASE_MERGE=$(
@@ -221,3 +224,10 @@ jobs:
           else
             bunx --package @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
           fi
+
+  report-post-merge-failure:
+    needs: [coverage, audit, lint, lint-windows, lint-macos, commitlint]
+    if: ${{ github.event_name == 'push' && failure() }}
+    permissions:
+      issues: write
+    uses: ./.github/workflows/post-merge-ci.yml

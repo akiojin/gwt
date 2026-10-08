@@ -2769,6 +2769,7 @@ mod tests {
                 fallback_owner_closed: false,
                 auto_merge_enabled: false,
                 merge_queue: None,
+                required_status_checks_strict: None,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {

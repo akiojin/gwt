@@ -1,9 +1,13 @@
 name: Test
 
 on:
+  push:
+    branches: [develop]
   pull_request:
     branches: [develop, main]
-  # Issue #4872: develop lands through a GitHub merge queue. The queue re-tests
+  # Issue #4872: retain merge-queue compatibility for organization repositories.
+  # Issue #5169: this User-owned repository uses non-strict protection and
+  # develop push CI. The queue re-tests
   # each pull request on the latest base under this event, and a required
   # check nobody reports for it stays pending forever, so every job here runs
   # for the queue exactly as it does for a pull request. Pinned by
@@ -19,7 +23,7 @@ on:
 # base sync replaces only pending jobs and lets the running measurement finish.
 # Unknown history preserves running work rather than guessing the cause.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -31,7 +35,7 @@ jobs:
       contents: read
       actions: read
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-source-sync
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-source-sync
       cancel-in-progress: true
     outputs:
       base_only: ${{ steps.relation.outputs.base_only }}
@@ -65,7 +69,7 @@ jobs:
   changes:
     name: Classify changed files
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-changes
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-changes
       cancel-in-progress: true
     runs-on: ubuntu-latest
     outputs:
@@ -84,7 +88,7 @@ jobs:
       # built on. `blob:none` keeps the full-history fetch to commits and
       # trees, which is all `--name-only` reads.
       - uses: actions/checkout@v7
-        if: github.event_name == 'merge_group'
+        if: github.event_name == 'merge_group' || github.event_name == 'push'
         with:
           fetch-depth: 0
           filter: blob:none
@@ -96,9 +100,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
           MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BASE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.event.after }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
             files=$(git diff --name-only --no-renames "$MERGE_GROUP_BASE" "$MERGE_GROUP_HEAD")
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            files=$(git diff --name-only --no-renames "$PUSH_BASE" "$PUSH_HEAD")
           else
             files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
           fi
@@ -157,7 +165,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs: source-sync
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     # Issue #4055 / #4191: the step budgets below are the operative limits;
@@ -273,7 +281,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs: source-sync
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-linux-infrastructure
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-linux-infrastructure
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -327,7 +335,7 @@ jobs:
   test-rust-required:
     name: Test (Rust)
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-rust-required
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-rust-required
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     needs: [test, test-linux-infrastructure, test-windows-verify-timings, source-sync]
@@ -359,7 +367,7 @@ jobs:
   flake-detection:
     name: Flake detection (changed test targets)
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-flake-detection
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-flake-detection
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     needs: [changes, source-sync]
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.flake_targets != '' }}
@@ -397,7 +405,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs: source-sync
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-python-runner
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-python-runner
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     steps:
@@ -422,7 +430,7 @@ jobs:
     name: Test (e5 e2e, optional)
     needs: source-sync
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-index-e2e
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-index-e2e
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     if: ${{ github.event.pull_request.draft == false }}
@@ -459,7 +467,7 @@ jobs:
   test-windows-verify-timings:
     name: Windows derived verification timings (paired)
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-verify-timings
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-verify-timings
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     needs: [changes, source-sync]
     # Admission must cancel obsolete paired work on a product push even when
@@ -518,7 +526,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs: source-sync
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-core-stability
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-core-stability
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
@@ -548,7 +556,7 @@ jobs:
   test-windows-rust:
     name: Test (Rust, Windows)
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-rust
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-rust
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     needs: [test-windows-core-stability, source-sync]
     if: ${{ always() }}
@@ -709,7 +717,7 @@ jobs:
   test-windows-agent-launch-e2e:
     name: Test (Windows agent launch)
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-agent-launch-e2e
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-agent-launch-e2e
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     needs: [changes, source-sync]
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
@@ -759,7 +767,7 @@ jobs:
   test-frontend:
     name: Test (Frontend + WebView E2E)
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-frontend
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-frontend
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     needs: [changes, source-sync]
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
@@ -805,3 +813,13 @@ jobs:
       - name: Run WebView E2E (embedded Playwright specs)
         run: bash scripts/run-visual-tests.sh
         timeout-minutes: 15
+
+  report-post-merge-failure:
+    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-verify-timings, test-windows-core-stability, test-windows-rust, test-windows-agent-launch-e2e, test-frontend]
+    if: ${{ github.event_name == 'push' && failure() }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-report-post-merge-failure
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    permissions:
+      issues: write
+    uses: ./.github/workflows/post-merge-ci.yml
