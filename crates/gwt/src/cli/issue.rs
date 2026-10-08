@@ -9039,6 +9039,16 @@ mod tests {
             status["active_launches"].as_array().unwrap().len()
         );
         assert_eq!(gui_status["max_active_agents"], status["max_active"]);
+        let expected_unclaimed_claim = serde_json::json!({
+            "state": "unclaimed",
+            "claim_id": null,
+            "owner": null,
+            "expires_at": null,
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "last_failure_at": null,
+            "last_failure": null,
+        });
         assert_eq!(
             status,
             serde_json::json!({
@@ -9109,6 +9119,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 1,
@@ -9119,6 +9130,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 9,
@@ -9128,6 +9140,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                 ],
                 "inbox_coverage": {

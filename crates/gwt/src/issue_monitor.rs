@@ -20449,7 +20449,7 @@ mod tests {
         monitor.record_blocked_by_claim(candidate, "other-agent", "2026-08-03T00:05:00Z", None);
 
         assert_eq!(
-            monitor.agent_status(),
+            monitor.agent_status_without_scan_at("2026-08-03T00:00:00Z"),
             IssueMonitorAgentStatus {
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,
@@ -20462,7 +20462,7 @@ mod tests {
                 pending_claim_issues: Some(Vec::new()),
                 max_active: 3,
                 enabled: true,
-                gui_status: Some(monitor.status_view()),
+                gui_status: Some(monitor.status_view_at("2026-08-03T00:00:00Z")),
                 autonomous_mode: false,
                 auto_apply_updates: None,
                 auto_apply_updates_effective: Some(false),
@@ -20487,7 +20487,17 @@ mod tests {
                     completion_reason: None,
                     blocked_by_owner: Some("other-agent".to_string()),
                     claim_expires_at: Some("2026-08-03T00:05:00Z".to_string()),
-                    claim_diagnostics: Default::default(),
+                    claim_diagnostics: IssueMonitorClaimDiagnostics {
+                        state: IssueMonitorClaimHealth::Active,
+                        claim_id: None,
+                        owner: Some("other-agent".to_string()),
+                        expires_at: Some("2026-08-03T00:05:00Z".to_string()),
+                        last_attempt_at: None,
+                        last_success_at: None,
+                        last_failure_at: None,
+                        last_failure: None,
+                        concurrent_claims: Vec::new(),
+                    },
                     blocked_by_claim_id: None,
                     exclusion_reason: Some(
                         "blocked by claim owned by other-agent until 2026-08-03T00:05:00Z"
