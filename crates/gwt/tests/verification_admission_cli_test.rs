@@ -156,7 +156,11 @@ impl Arena {
     fn spawn_sibling_heavy(&self) -> Child {
         let ready = self.home.path().join("development-ready");
         let mut child = hidden_command(std::env::current_exe().expect("test binary path"))
-            .args(["--ignored", "--exact", "fake_heavy_process_parks"])
+            .args([
+                "--ignored",
+                "--exact",
+                "verification_admission_cli_test::fake_heavy_process_parks",
+            ])
             .env("ADMISSION_DEVELOPMENT_READY", &ready)
             .current_dir(&self.sibling)
             .stdout(Stdio::null())
@@ -210,7 +214,10 @@ impl CanonicalRun {
         let ready = arena.home.path().join("canonical-ready");
         let release = arena.home.path().join("canonical-release");
         let exe = std::env::current_exe().unwrap();
-        let command = format!("\"{}\" --ignored --exact {fixture}", exe.display());
+        let command = format!(
+            "\"{}\" --ignored --exact verification_admission_cli_test::{fixture}",
+            exe.display()
+        );
         let child = spawn_gwtd(
             arena.home.path(),
             cwd,
@@ -613,7 +620,11 @@ fn cancellation_command_tree_parks() {
     let descendant_ready = ready.with_extension("descendant");
     let release = PathBuf::from(std::env::var_os("ADMISSION_RELEASE").unwrap());
     let mut descendant = hidden_command(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "cancellation_descendant_parks"])
+        .args([
+            "--ignored",
+            "--exact",
+            "verification_admission_cli_test::cancellation_descendant_parks",
+        ])
         .env("ADMISSION_READY", &descendant_ready)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -756,7 +767,7 @@ fn admission_continuation_blocker_command() {
 
 fn continuation_command(name: &str) -> String {
     format!(
-        "\"{}\" --ignored --exact {name}",
+        "\"{}\" --ignored --exact verification_admission_cli_test::{name}",
         std::env::current_exe().unwrap().display()
     )
 }

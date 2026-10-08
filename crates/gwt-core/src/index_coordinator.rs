@@ -1028,7 +1028,27 @@ impl IndexCoordinator {
     /// only reported as `held` while its ticket's holder is still there —
     /// process alive, and no terminal status published for the target it took
     /// the lease for.
+    /// Issue #5051: a registration being replaced or probed by another handle
+    /// can briefly read as empty or locked. Reread a few times within a
+    /// bounded budget instead of reporting the whole lease state unavailable.
     pub fn heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
+        let mut delays = HEAVY_STATUS_REREAD_DELAYS.iter();
+        loop {
+            match self.read_heavy_lease_status() {
+                Err(err) if is_transient_read_failure(&err) => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err);
+                    };
+                    #[cfg(test)]
+                    tests::before_status_retry();
+                    std::thread::sleep(*delay);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn read_heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
         if self.verification_pool || self.root.join("slots").is_dir() {
             let pool = self.heavy_pool_status()?;
             let mut status = pool
@@ -2339,6 +2359,24 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Rereads after an empty/torn payload or a lock held by another handle
+/// (Windows os error 33). Three reads in total, well under one second.
+const HEAVY_STATUS_REREAD_DELAYS: [Duration; 2] =
+    [Duration::from_millis(150), Duration::from_millis(300)];
+
+fn is_transient_read_failure(err: &CoordinatorError) -> bool {
+    match err {
+        CoordinatorError::Io(err) => {
+            is_contended(err)
+                || matches!(
+                    err.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                )
+        }
+        _ => false,
+    }
+}
+
 fn is_contended(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::WouldBlock
         || err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
@@ -3069,6 +3107,15 @@ mod tests {
             const { std::cell::RefCell::new(None) };
         static NEW_SLOT_CREATED_HOOK: std::cell::RefCell<Option<NewSlotCreatedHook>> =
             const { std::cell::RefCell::new(None) };
+        static STATUS_RETRY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn before_status_retry() {
+        let hook = STATUS_RETRY_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     pub(super) fn after_registration_snapshot(path: &Path) {
@@ -3193,6 +3240,80 @@ mod tests {
         let queue = coordinator.heavy_lease_status().unwrap().queue;
         assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
         assert_eq!(queue[0].priority, JobPriority::ManualRebuild);
+    }
+
+    #[test]
+    fn lease_status_rereads_a_reservation_another_handle_has_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+        let probe = open_lock_file(&coordinator.heavy_reservation_path(&key)).unwrap();
+        fs2::FileExt::lock_exclusive(&probe).unwrap();
+        STATUS_RETRY_HOOK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || drop(probe))));
+
+        let queue = coordinator
+            .heavy_lease_status()
+            .expect("a transient lock conflict must be reread, not reported")
+            .queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
+    }
+
+    #[test]
+    fn lease_status_rereads_an_empty_reservation_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        let path = coordinator.heavy_reservation_path(&key);
+        let registration = heavy_queue_entry(
+            &coordinator.heavy_pending_dir(),
+            &key.file_stem(),
+            JobPriority::ManualRebuild,
+        )
+        .unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"").unwrap();
+        STATUS_RETRY_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut registration = registration;
+                registration.reserved_until_ms = Some(now_ms() + 60_000);
+                write_json_atomic(&path, &registration).unwrap();
+            }))
+        });
+
+        let queue = coordinator
+            .heavy_lease_status()
+            .expect("an empty payload must be reread, not reported as EOF")
+            .queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
+    }
+
+    #[test]
+    fn lease_status_never_fails_while_a_writer_refreshes_reservations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let key = verification_key();
+        let writer = std::thread::spawn({
+            let root = root.clone();
+            let key = key.clone();
+            move || {
+                let coordinator = open(&root);
+                for _ in 0..200 {
+                    coordinator
+                        .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+                        .unwrap();
+                }
+            }
+        });
+        let coordinator = open(&root);
+        while !writer.is_finished() {
+            coordinator
+                .heavy_lease_status()
+                .expect("a reader must never observe a torn reservation");
+        }
+        writer.join().unwrap();
     }
 
     #[test]

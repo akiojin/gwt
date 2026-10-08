@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -55,9 +55,8 @@ impl RunnerSpawner for RecordingSpawner {
 #[cfg(unix)]
 use gwt_core::test_support::ScopedEnvVar;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 #[test]
