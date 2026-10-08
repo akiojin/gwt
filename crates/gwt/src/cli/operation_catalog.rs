@@ -500,6 +500,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.close",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.comment",
         aliases: &[],
     },

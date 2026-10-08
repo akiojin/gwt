@@ -406,6 +406,7 @@ impl CliEnv for DefaultCliEnv {
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
@@ -415,9 +416,19 @@ impl CliEnv for DefaultCliEnv {
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
+            base,
             title,
             body,
             add_labels,
+        )
+    }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::close_pr_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+            comment,
         )
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {

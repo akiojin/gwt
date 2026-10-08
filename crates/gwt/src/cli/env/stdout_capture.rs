@@ -96,11 +96,15 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
     ) -> io::Result<PrStatus> {
-        self.inner.edit_pr(number, title, body, add_labels)
+        self.inner.edit_pr(number, base, title, body, add_labels)
+    }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        self.inner.close_pr(number, comment)
     }
 
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
