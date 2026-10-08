@@ -1311,6 +1311,29 @@ restoration runs last. An admission timeout before the first remaining command
 starts preserves any predecessor without writing a replacement record. Later
 timeouts retain completed results in an incomplete, non-PASS deferred record.
 
+The following short non-Cargo gates are Light and run without a Heavy lease:
+
+| Command | Resource bound |
+| --- | --- |
+| `git diff --check` (including `--cached`) | Checks whitespace in a diff |
+| `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | Reads an existing coverage JSON; does not run tests |
+| `actionlint` without custom checker options, `shellcheck`, `yamllint` | Static analysis of workflow, shell, or YAML files |
+| `taplo check`, `taplo fmt --check` | TOML validation or formatting checks |
+| `typos` | Static spelling checks |
+
+These gates have a 60-second execution timeout on both local and daemon hosts.
+A timeout records a failure (exit 124), preserves diagnostic output, and stops
+the command's process tree. Fix the reported command and rerun the full matrix.
+Existing markdownlint and scoped Cargo classification is unchanged. Unknown
+commands, script wrappers, the coverage producer `coverage-summary.mjs`, Cargo
+builds or broad tests, and headed Playwright remain Heavy.
+`actionlint -shellcheck` / `-pyflakes` overrides also remain Heavy because they
+can launch arbitrary wrappers. Bounded commands reclaim descendants on normal
+completion as well as on timeout.
+The Node reader also remains Heavy when its effective `NODE_OPTIONS` is nonempty,
+because those options can preload arbitrary modules. An explicit `NODE_OPTIONS=`
+disables inherited options and retains Light classification.
+
 Retry with the same full requested matrix and headed E2E nominations. `verify.run`
 automatically resumes only a valid admission-deferred record with identical
 owner, session, execution authority, plan content hash, source fingerprint and

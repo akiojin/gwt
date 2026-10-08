@@ -1229,6 +1229,27 @@ Markdown 描画を選びます。移行対象と受け入れ条件は
 残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
 
+次の短命な non-Cargo ゲートは Light として Heavy lease を取らずに実行します。
+
+| コマンド | 資源を限定できる根拠 |
+| --- | --- |
+| `git diff --check`（`--cached` を含む） | 差分の空白を検査する |
+| `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | 既存の coverage JSON を読む。テストは実行しない |
+| custom checker 指定のない `actionlint`、`shellcheck`、`yamllint` | workflow・shell・YAML ファイルの静的解析 |
+| `taplo check`、`taplo fmt --check` | TOML の検証・書式確認 |
+| `typos` | 静的な綴り検査 |
+
+これらのゲートには local・daemon 両方で 60 秒の実行タイムアウトを設けます。
+時間切れは失敗（exit 124）として診断出力を残し、そのコマンドの process tree を停止します。
+診断されたコマンドを修正してから行列全体を再実行してください。
+既存の markdownlint・スコープ付き Cargo の分類は従来どおりです。
+unknown コマンド、script wrapper、coverage を生成する `coverage-summary.mjs`、Cargo build・
+広範囲の test、headed Playwright は Heavy のままです。
+`actionlint -shellcheck` / `-pyflakes` の上書き指定も任意の wrapper を起動できるため Heavy です。
+bounded command は時間切れ時に加え、通常終了時にも子孫プロセスを回収します。
+Node reader も実効 `NODE_OPTIONS` が空でない場合は、任意 module を preload できるため Heavy です。
+明示的な `NODE_OPTIONS=` は継承オプションを無効にし、Light 分類を維持します。
+
 再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
 execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、
 先行コマンドがすべて signal なしで成功した、有効な admission-deferred 記録だけを自動再開します。

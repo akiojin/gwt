@@ -153,6 +153,13 @@ pub(crate) struct DelegatedRun {
     pub reclaimed_survivors: bool,
 }
 
+/// A timeout is an owned failure, distinct from an external termination signal.
+#[derive(Debug)]
+pub(crate) enum DelegatedRunError {
+    Failed(String),
+    TimedOut(std::time::Duration),
+}
+
 /// Find a daemon that can host verification for `worktree`.
 ///
 /// The exact endpoint for this worktree is preferred, but any live daemon in
@@ -290,12 +297,22 @@ pub(crate) fn run<G>(
     endpoint: &DaemonEndpoint,
     request: &VerificationSpawnRequest,
     on_started: impl FnOnce(u32) -> G,
-) -> Result<DelegatedRun, String> {
+    timeout: Option<std::time::Duration>,
+) -> Result<DelegatedRun, DelegatedRunError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| format!("tokio runtime build failed: {err}"))?;
-    runtime.block_on(async {
+        .map_err(|err| DelegatedRunError::Failed(format!("tokio runtime build failed: {err}")))?;
+    runtime.block_on(run_async(endpoint, request, on_started, timeout))
+}
+
+async fn run_async<G>(
+    endpoint: &DaemonEndpoint,
+    request: &VerificationSpawnRequest,
+    on_started: impl FnOnce(u32) -> G,
+    timeout: Option<std::time::Duration>,
+) -> Result<DelegatedRun, DelegatedRunError> {
+    let execution = async {
         let mut client = DaemonClient::connect(endpoint).await?;
         client
             .send_frame(&ClientFrame::SpawnVerification(request.clone()))
@@ -312,8 +329,6 @@ pub(crate) fn run<G>(
         // The PID is already part of the existing protocol response.
         let _command_scope = on_started(accepted.pid);
 
-        // No timeout: a verification matrix legitimately runs for an hour, and
-        // the daemon already bounds the child by this connection's lifetime.
         loop {
             match client.read_frame::<DaemonFrame>().await? {
                 DaemonFrame::VerificationFinished(finished) => {
@@ -332,7 +347,17 @@ pub(crate) fn run<G>(
                 _ => continue,
             }
         }
-    })
+    };
+    match timeout {
+        // The whole exchange is bounded, including connect and Accepted. On
+        // expiry the future drops the client: the daemon's existing connection
+        // leash reclaims only this command's owned child and descendants.
+        Some(timeout) => tokio::time::timeout(timeout, execution)
+            .await
+            .map_err(|_| DelegatedRunError::TimedOut(timeout))?
+            .map_err(DelegatedRunError::Failed),
+        None => execution.await.map_err(DelegatedRunError::Failed),
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +367,109 @@ mod tests {
 
     fn scratch() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn short_command_timeout_disconnects_and_reclaims_the_delegated_tree() {
+        use std::time::Duration;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = scratch();
+        let root = directory.path();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root);
+        let socket = root.join("daemon.sock");
+        let scope = RuntimeScope::from_project_root(root, RuntimeTarget::Host).unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            socket.to_string_lossy().into_owned(),
+            "token".into(),
+            "fixture".into(),
+        );
+        let server = super::super::server::spawn_server(
+            endpoint.clone(),
+            socket,
+            root.join("endpoint.json"),
+            super::super::broadcast::BroadcastHub::new(),
+        )
+        .unwrap();
+        let request = VerificationSpawnRequest {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "sleep 120 & echo $! > grandchild.pid; echo partial-stdout; \
+                 echo partial-stderr >&2; touch ready; \
+                 while [ ! -f release ]; do sleep 0.1; done; \
+                 kill $(cat grandchild.pid); wait; exit 0"
+                    .into(),
+            ],
+            cwd: root.into(),
+            env: std::env::vars().collect(),
+            stdout_path: root.join("stdout"),
+            stderr_path: root.join("stderr"),
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut runner = tokio::spawn(async move {
+            run_async(
+                &endpoint,
+                &request,
+                |pid| {
+                    let _ = started_tx.send(pid);
+                },
+                Some(Duration::from_secs(60)),
+            )
+            .await
+        });
+        let child_pid = started_rx.await.unwrap();
+        let safety = std::time::Instant::now() + Duration::from_secs(30);
+        while !root.join("ready").exists() {
+            assert!(std::time::Instant::now() < safety, "fixture did not start");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let grandchild_pid = std::fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(1), &mut runner);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let outcome = outcome.await;
+        tokio::time::resume();
+        // Release the old unbounded runner before making the RED assertion.
+        if outcome.is_err() {
+            std::fs::write(root.join("release"), "release").unwrap();
+            let _ = runner.await;
+        }
+        let safety = std::time::Instant::now() + Duration::from_secs(30);
+        while (crate::process::is_process_alive(child_pid)
+            || crate::process::is_process_alive(grandchild_pid))
+            && std::time::Instant::now() < safety
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        server.abort();
+        let _ = server.await;
+        let timed_out = outcome.ok().and_then(Result::ok).is_some_and(|result| {
+            matches!(result,
+                Err(DelegatedRunError::TimedOut(timeout)) if timeout == Duration::from_secs(60))
+        });
+        assert!(
+            timed_out,
+            "the daemon execution deadline was never enforced"
+        );
+        assert!(!crate::process::is_process_alive(child_pid));
+        assert!(!crate::process::is_process_alive(grandchild_pid));
+        assert!(std::fs::read_to_string(root.join("stdout"))
+            .unwrap()
+            .contains("partial-stdout"));
+        assert!(std::fs::read_to_string(root.join("stderr"))
+            .unwrap()
+            .contains("partial-stderr"));
     }
 
     /// Hold the env lock with `GWT_VERIFY_SPAWN_HOST` cleared.
