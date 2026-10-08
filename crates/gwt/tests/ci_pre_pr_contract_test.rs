@@ -1,4 +1,4 @@
-//! Coverage delegated by pre-PR verification must block the existing CI gate.
+//! Coverage and lint must run independently under separate required CI checks.
 
 use serde_yaml::Value;
 
@@ -11,7 +11,7 @@ fn workflow(name: &str) -> Value {
 }
 
 #[test]
-fn pr_coverage_failure_blocks_the_existing_required_lint_check() {
+fn pr_coverage_and_lint_run_independently_under_stable_check_names() {
     let coverage = workflow("coverage.yml");
     assert!(
         coverage["on"].get("workflow_call").is_some(),
@@ -22,15 +22,22 @@ fn pr_coverage_failure_blocks_the_existing_required_lint_check() {
         lint["jobs"]["coverage"]["uses"],
         "./.github/workflows/coverage.yml"
     );
-    assert_eq!(lint["jobs"]["lint"]["needs"], "coverage");
-    assert_eq!(lint["jobs"]["lint"]["if"], "${{ !cancelled() }}");
+    assert!(lint["jobs"]["coverage"].get("name").is_none());
+    assert!(lint["jobs"]["coverage"].get("needs").is_none());
+    assert!(lint["jobs"]["coverage"].get("if").is_none());
+    assert!(lint["jobs"]["coverage"].get("continue-on-error").is_none());
+    assert_eq!(coverage["jobs"]["rust-coverage"]["name"], "Rust Coverage");
+    assert!(coverage["jobs"]["rust-coverage"].get("if").is_none());
+    assert!(coverage["jobs"]["rust-coverage"]
+        .get("continue-on-error")
+        .is_none());
+    assert!(lint["jobs"]["lint"].get("needs").is_none());
+    assert!(lint["jobs"]["lint"].get("if").is_none());
     assert_eq!(lint["jobs"]["lint"]["name"], "Clippy & Rustfmt");
     let steps = lint["jobs"]["lint"]["steps"].as_sequence().unwrap();
-    assert_eq!(
-        steps[0]["env"]["COVERAGE_RESULT"],
-        "${{ needs.coverage.result }}"
-    );
-    assert_eq!(steps[0]["run"], "test \"$COVERAGE_RESULT\" = success");
+    assert!(!steps.iter().any(|step| step["run"]
+        .as_str()
+        .is_some_and(|run| run.contains("COVERAGE_RESULT"))));
 }
 
 #[test]

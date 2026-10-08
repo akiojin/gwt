@@ -174,10 +174,10 @@
 
 ### Merge queue と post-merge CI（develop の着地経路、Issue #5169）
 
-GitHub merge queue は organization 所有のリポジトリに限定され、User 所有の `akiojin/gwt` では有効化できない（#4937 の実操作は `422 Invalid rule 'merge_queue'`）。2026-10-08 のユーザー裁定で develop の `required_status_checks.strict` を `false` に変更し、必須チェック 11 件は維持した。全緑の PR は `BEHIND` でも auto-merge で着地できる。最新 base と組み合わせた事前検証は保証されないため、develop push の post-merge CI で検出し、PM が修正または revert の Issue を起票する。
+GitHub merge queue は organization 所有のリポジトリに限定され、User 所有の `akiojin/gwt` では有効化できない（#4937 の実操作は `422 Invalid rule 'merge_queue'`）。2026-10-08 のユーザー裁定で develop の `required_status_checks.strict` を `false` に変更し、元の必須チェック 11 件は維持した（#5173 で独立した coverage チェックを加えて現在は 12 件）。全緑の PR は `BEHIND` でも auto-merge で着地できる。最新 base と組み合わせた事前検証は保証されないため、develop push の post-merge CI で検出し、PM が修正または revert の Issue を起票する。
 
 - **workflow 側の契約:** `test.yml` / `lint.yml` / `build.yml` は develop push でも PR と同じ Test / Lint / Build を走らせる。PR の同期判定と concurrency（#5059 / #4119）は維持し、push の commit range でファイルを分類する。将来の organization 移行に備え `merge_group` 対応も残す。`crates/gwt/tests/ci_concurrency_contract_test.rs` が固定する。
-- **必須チェック（2026-10-08 実測、11 件）:** `Commit Message Lint` / `Clippy & Rustfmt` / `Test (Rust)` / `Build` / `Test (Python runner)` / `Test (Rust, Windows)` / `Cargo Deny (advisories + sources)` / `Check (Windows)` / `Check (macOS)` / `Test (Windows agent launch)` / `Flake detection (changed test targets)`。現在値は `gh api repos/akiojin/gwt/branches/develop/protection --jq '.required_status_checks'` で strict と contexts を一緒に読む。
+- **必須チェック（2026-10-08 実測、12 件）:** `Commit Message Lint` / `Clippy & Rustfmt` / `Test (Rust)` / `Build` / `Test (Python runner)` / `Test (Rust, Windows)` / `Cargo Deny (advisories + sources)` / `Check (Windows)` / `Check (macOS)` / `Test (Windows agent launch)` / `Flake detection (changed test targets)` / `coverage / Rust Coverage`。#5173 により coverage の閾値判定を Clippy から独立した必須チェックへ分離した。現在値は `gh api repos/akiojin/gwt/branches/develop/protection --jq '.required_status_checks'` で strict と contexts を一緒に読む。
 - **必須チェックを追加・改名するときの順序:** 先にその job（develop push / PR / `merge_group` で走るもの）を develop に着地させ、その後で branch protection の contexts を変える。逆順にすると、全 PR が報告されない check を待って止まる。
 - **失敗の検出と復旧:** `post-merge-ci.yml` が develop push の Test / Lint / Build の失敗を検出し、run URL を付けた `bug` Issue を作成または既存 Issue に追記する。PM は通知 Issue を確認し、原因調査から修正または revert を手配する。自動 revert は行わない。
 - **BEHIND の扱い:** strict は base の branch protection から読む。`strict=false` の `BEHIND` は同期不要で、`pr.list` は `leave:` と operation なしを返す。`BEHIND` だけを理由に `pr.update_branch` しない。strict=true または strict 不明の場合は従来の同期指示を維持する。merge queue が有効な他リポジトリでは既存の queue に任せる挙動を維持する。
@@ -322,7 +322,7 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 ### pre-PR ローカル検証（SPEC #5082 FR-6〜9、既存ローカル全matrixより優先）
 
 - 配送スライスは `verify.plan` の `derive:true, mode:"pre-pr"` を使用する。ローカル必須は fmt、変更クレートの clippy、当該 Issue の AC を固定する `acceptance_commands`、required CI にない検証。GUI の headed dark/light と Agent Visual Check は維持する。
-- 除外できるのは、実測 `required_status_checks.contexts` に含まれる context が覆う項目だけ。Rust 全体テストは `Test (Rust)`、workspace clippy / rustdoc / Markdown / coverage 90%・80% は `Clippy & Rustfmt` が覆う。optional job の実行だけを理由に除外しない。
+- 除外できるのは、実測 `required_status_checks.contexts` に含まれる context が覆う項目だけ。Rust 全体テストは `Test (Rust)`、workspace clippy / rustdoc / Markdown は `Clippy & Rustfmt`、coverage 90%・80% は `coverage / Rust Coverage` が覆う。optional job の実行だけを理由に除外しない。
 - CI 対応表の job / trigger / failure propagation が欠けたら縮小を拒否する。CI 契約を修復するか `mode:"full"` で再導出し、返された全matrixを canonical `verify.run` で実行する。
 - ローカル pre-PR PASS は PR 作成条件。配送の完了は必須 CI の成功とマージで判定し、未実施の全体テストやcoverageをローカル PASS と報告しない。既存の Ready / auto-merge / integrity / freshness / review ゲートを維持する。
 

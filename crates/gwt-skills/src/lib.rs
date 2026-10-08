@@ -1445,19 +1445,11 @@ mod tests {
             "expected release command to use the canonical issue.comment JSON operation"
         );
         assert!(
-            release_command.contains("\"operation\":\"pr.current\"")
-                || release_command.contains("\"operation\": \"pr.current\""),
-            "expected release command to use the canonical pr.current JSON operation"
-        );
-        assert!(
-            release_command.contains("\"operation\":\"pr.create\"")
-                || release_command.contains("\"operation\": \"pr.create\""),
-            "expected release command to use the canonical pr.create JSON operation"
-        );
-        assert!(
-            release_command.contains("\"operation\":\"pr.edit\"")
-                || release_command.contains("\"operation\": \"pr.edit\""),
-            "expected release command to use the canonical pr.edit JSON operation"
+            release_command.contains("\"operation\":\"release.status\"")
+                && release_command.contains("\"release_branch\":\"release/v{NEW_VERSION}\"")
+                && release_command.contains("\"base_branch\":\"main\"")
+                && release_command.contains("\"ensure_release_pr\":true"),
+            "expected release command to recover the explicit frozen snapshot through release.status"
         );
         assert!(
             !release_command.contains("gh issue comment"),
