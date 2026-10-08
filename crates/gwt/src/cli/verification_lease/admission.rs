@@ -45,7 +45,7 @@ const BOARD_NOTICE_AFTER: Duration = POLL;
 /// the target job, in the reverse of the acquisition order.
 pub(crate) struct Admission {
     guard: Option<TargetJobGuard>,
-    artifacts: Option<std::fs::File>,
+    artifacts: Option<verification_lease::BuildArtifactGuard>,
     lease: Option<Arc<Mutex<HeavyLease>>>,
     renewal: Option<super::renewal::Renewal>,
     commands: Arc<super::CommandProgress>,
@@ -365,7 +365,7 @@ fn deferred(
     };
     unexpected(format!(
         "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — a deferral is \
-         not a failure and there is no attempt cap: your turn stays reserved, so keep rerunning \
+         not a failure and there is no attempt cap: keep rerunning \
          `verify.run` while the holder makes progress",
         started.elapsed().as_secs(),
         max_wait.as_secs()
@@ -425,7 +425,7 @@ pub(crate) fn admit<E: CliEnv>(
     worktree: &Path,
     command: Option<&str>,
     max_wait: Duration,
-    on_host_deferred: impl FnOnce() -> String,
+    on_host_deferred: impl FnOnce(Option<&verification_lease::BuildArtifactGuard>) -> String,
 ) -> Result<Admission, SpecOpsError> {
     let key = verification_lease::verification_key(env)?;
     let coordinator = verification_lease::open_coordinator()?;
@@ -548,7 +548,9 @@ pub(crate) fn admit<E: CliEnv>(
                     // Issue #4982: recover before releasing this worktree's
                     // target guard, so another admitted run cannot rearm the
                     // operational artifact while recovery is in progress.
-                    let recovery = on_host_deferred();
+                    // Issue #5106: lend the artifact boundary to recovery;
+                    // reacquiring it through a new FD would deadlock this run.
+                    let recovery = on_host_deferred(artifacts.as_ref());
                     // A long recovery may outlive the reservation's existing
                     // TTL. Refresh it before reporting the rerun's final state.
                     let reserved = coordinator.reserve_heavy(
@@ -567,13 +569,15 @@ pub(crate) fn admit<E: CliEnv>(
                     // Issue #4337 AC-3: name the reservation outcome outright.
                     // `queue_position` below only ever appears on success, so
                     // on its own it leaves the rerun unable to tell a failed
-                    // reservation from a failed status read — and the two call
-                    // for opposite expectations: a reserved turn is kept for
-                    // the rerun, an unreserved one rejoins at the back.
+                    // reservation from a failed status read. Issue #4969 AC-2:
+                    // a refresh error cannot establish that an earlier valid
+                    // reservation is absent, so report that state as unknown.
                     match &reserved {
                         Ok(_) => detail.push_str("; next_turn_reserved: yes"),
                         Err(err) => {
-                            detail.push_str(&format!("; next_turn_reserved: no ({err})"));
+                            detail.push_str(&format!(
+                                "; next_turn_reserved: unknown (reservation refresh failed: {err})"
+                            ));
                         }
                     }
                     if let Ok(status) = coordinator.heavy_lease_status() {
@@ -940,12 +944,13 @@ mod tests {
             !without_eta.contains("verify.lease.acquire"),
             "canonical admission must not recommend detached manual acquisition: {without_eta}"
         );
-        // Issue #4280 AC-3: a deferral is a reserved turn, not a spent
-        // attempt — counting it toward a cap is what made waiters give up.
+        // Issue #4280 AC-3 / #4969 AC-2: keep retrying without an attempt
+        // cap, but a failed reservation refresh cannot promise a reserved turn.
         for message in [&with_eta, &without_eta] {
             assert!(!message.contains("lease attempt"), "{message}");
             assert!(message.contains("no attempt cap"), "{message}");
-            assert!(message.contains("turn stays reserved"), "{message}");
+            assert!(message.contains("keep rerunning"), "{message}");
+            assert!(!message.contains("your turn stays reserved"), "{message}");
         }
     }
 
@@ -1046,7 +1051,7 @@ mod tests {
             worktree: &Path,
             budget: Duration,
         ) -> Result<Admission, SpecOpsError> {
-            super::admit(env, worktree, None, budget, String::new)
+            super::admit(env, worktree, None, budget, |_| String::new())
                 .map_err(|err| unexpected(format!("{err}; {}", self.describe())))
         }
 
@@ -1242,7 +1247,7 @@ mod tests {
             first.path(),
             Some(&command),
             Duration::ZERO,
-            String::new,
+            |_| String::new(),
         )
         .unwrap();
         let error = super::admit(
@@ -1250,7 +1255,7 @@ mod tests {
             second.path(),
             Some(&command),
             Duration::ZERO,
-            String::new,
+            |_| String::new(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("Cargo target"), "{error}");
@@ -1263,7 +1268,7 @@ mod tests {
             second.path(),
             Some(&independent_command),
             Duration::ZERO,
-            String::new,
+            |_| String::new(),
         )
         .unwrap();
         let pool = verification_lease::open_coordinator()
@@ -1359,7 +1364,7 @@ mod tests {
         let first = lease_root
             .admit(&mut env, worktree.path(), Duration::ZERO)
             .unwrap();
-        let second = super::admit(&mut env, worktree.path(), None, Duration::ZERO, || {
+        let second = super::admit(&mut env, worktree.path(), None, Duration::ZERO, |_| {
             panic!("a contender must not restore another verifier's artifact")
         });
         assert!(
@@ -1582,7 +1587,7 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
         let key = verification_lease::verification_key(&mut env).unwrap();
         let recovery_calls = std::cell::Cell::new(0);
-        let recover = || {
+        let recover = |_: Option<&verification_lease::BuildArtifactGuard>| {
             recovery_calls.set(recovery_calls.get() + 1);
             let reservation = lease_root.coordinator.heavy_reservation_path(&key);
             assert!(reservation.exists());

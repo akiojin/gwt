@@ -1936,6 +1936,85 @@ mod surface_audit_cache {
     }
 }
 
+/// Issue #5120: selection and health must observe one runtime read per projection.
+#[test]
+fn runtime_state_is_shared_within_a_projection_and_refreshes_on_the_next() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = tempfile::tempdir().unwrap();
+    let runtime_path = worktree.path().join("runtime.json");
+    runtime_state::write_for_event(&runtime_path, "PreToolUse").unwrap();
+    let input = ManagedHookHealthInput::new(worktree.path()).with_runtime_state_path(&runtime_path);
+    let snapshot = ManagedHookFailureSnapshot::default();
+    assert_eq!(
+        snapshot.read_health(&input).last_event.as_deref(),
+        Some("PreToolUse")
+    );
+
+    runtime_state::write_for_event(&runtime_path, "UserPromptSubmit").unwrap();
+    assert_eq!(
+        snapshot.read_health(&input).last_event.as_deref(),
+        Some("PreToolUse")
+    );
+    assert_eq!(
+        ManagedHookFailureSnapshot::default()
+            .read_health(&input)
+            .last_event
+            .as_deref(),
+        Some("UserPromptSubmit")
+    );
+    fs::write(&runtime_path, "invalid runtime JSON").unwrap();
+    let invalid = ManagedHookFailureSnapshot::default().read_health(&input);
+    assert_eq!(invalid.status, ManagedHookHealthStatus::Degraded);
+    assert!(invalid
+        .issues
+        .iter()
+        .any(|issue| issue.contains("runtime state could not be read")));
+    fs::remove_file(&runtime_path).unwrap();
+    let missing = ManagedHookFailureSnapshot::default().read_health(&input);
+    assert_eq!(missing.last_event, None);
+    assert!(!missing
+        .issues
+        .iter()
+        .any(|issue| issue.contains("runtime state could not be read")));
+}
+
+/// Unchanged mtime/length must reuse the previous decoded result without rereading JSON.
+#[test]
+fn runtime_state_reuses_the_previous_projection_when_the_stamp_is_unchanged() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = tempfile::tempdir().unwrap();
+    let runtime_path = worktree.path().join("runtime.json");
+    runtime_state::write_for_event(&runtime_path, "PreToolUse").unwrap();
+    let original = fs::read(&runtime_path).unwrap();
+    let stamp = fs::metadata(&runtime_path).unwrap().modified().unwrap();
+    let input = ManagedHookHealthInput::new(worktree.path()).with_runtime_state_path(&runtime_path);
+    let first = ManagedHookFailureSnapshot::default().read_health(&input);
+    // Same-sized corrupt content proves the second projection does not read it.
+    fs::write(&runtime_path, vec![b'x'; original.len()]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&runtime_path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(stamp))
+        .unwrap();
+    assert_eq!(
+        ManagedHookFailureSnapshot::default().read_health(&input),
+        first
+    );
+}
+
 /// Issue #4257: a bare fallback such as `gwtd` is resolved by walking the whole
 /// PATH (~11ms per lookup on a 59-entry Windows PATH), and the answer depends
 /// only on process-wide state. One projection shares one snapshot across every

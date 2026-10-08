@@ -1301,7 +1301,7 @@ fn run_monitor_queue_push<E: CliEnv>(
             let claim = gwt_github::issue_auto_claim::ClaimComment {
                 comment_id: None,
                 claim_id: format!("gwt-queue:{}:{}", number, uuid::Uuid::new_v4()),
-                owner: crate::process::current_hostname(),
+                owner: crate::process::current_claim_owner(),
                 issue_number: *number,
                 status: gwt_github::issue_auto_claim::ClaimStatus::Queued,
                 heartbeat_at: now.clone(),
@@ -6139,6 +6139,58 @@ mod tests {
         }
     }
 
+    /// Issue #5080 AC-3: the actual mutation readback and status scanner must
+    /// agree even when no terminal queue membership was written.
+    #[test]
+    fn queue_label_inbox_coverage_label_scan_status_integration() {
+        let isolation = TempDir::new().expect("isolated home");
+        let _home = ScopedGwtHome::set(isolation.path().join("home"));
+        let (_repo, mut env) = seeded_edit_env(&["bug"]);
+        env.cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&env.repo_path);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["gwt-queued".to_string()],
+                confirm_queue: true,
+                confirm_design_gate: false,
+                confirm_auto_merge: false,
+            },
+            &mut out,
+        )
+        .expect("label mutation");
+        assert_eq!(code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["changed"],
+            true
+        );
+        // Offline status takes the shared scan path over the canonical cache.
+        out.clear();
+        run_monitor_status(&env, None, &mut out).expect("status after scan");
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let row = status["inbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["issue_number"] == 7)
+            .expect("labelled state row");
+        assert_eq!(row["state"], "skipped");
+        assert_eq!(
+            row["exclusion_reason"],
+            "not selected in this terminal queue"
+        );
+        assert_eq!(status["inbox_coverage"]["github_target_count"], 1);
+        assert_eq!(
+            status["inbox_coverage"]["missing_issue_numbers"],
+            serde_json::json!([])
+        );
+        assert_eq!(status["inbox_coverage"]["source"], "cache");
+        assert!(status["queue"].as_array().unwrap().is_empty());
+    }
+
     /// Issue #3865 AC-2: title / body / labels are each optional and only the
     /// supplied fields change; the local cache reflects the write.
     #[test]
@@ -7846,6 +7898,61 @@ mod tests {
         assert_eq!(queued_numbers(&repo), vec![4812]);
     }
 
+    /// #5133 AC-1/AC-4: queue.push and the Monitor run in different processes.
+    #[test]
+    fn queue_push_claim_launches_on_the_next_scan_from_another_monitor_pid() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        queue_push_issue(&mut env, 5133, None);
+        let (code, _) = run_queue_push(&mut env, vec![5133], false);
+        assert_eq!(code, 0);
+        let claims = gwt_github::issue_auto_claim::extract_claim_comments(
+            &env.client.comments(IssueNumber(5133)),
+        );
+        let queued = claims.first().expect("queue.push wrote a claim");
+        assert_eq!(queued.owner, crate::process::current_claim_owner());
+        let (host_user, _) = queued.owner.rsplit_once(':').expect("host:user:pid");
+        let monitor_owner = format!("{host_user}:{}", u64::from(std::process::id()) + 1);
+        let mut prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .expect("persisted queue");
+        prefs.enabled = true;
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        let now = queued.heartbeat_at.as_str();
+        crate::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[crate::IssueMonitorIssue {
+                number: 5133,
+                title: "queued issue".to_string(),
+                labels: vec!["bug".to_string(), "gwt-queued".to_string()],
+                state: crate::IssueMonitorIssueState::Open,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
+                body: None,
+                url: None,
+                updated_at: None,
+            }],
+            crate::IssueMonitorCandidateSource::Live,
+            &repo,
+            now,
+        );
+        let launches = monitor.claim_next_launch_requests(&env.client, &monitor_owner, now);
+        assert_eq!(launches.len(), 1, "our live queue claim must permit launch");
+        assert_eq!(launches[0].issue_number, 5133);
+        assert_eq!(
+            monitor.inbox_item(5133).expect("inbox row").state,
+            crate::MonitorInboxState::Launching
+        );
+        assert_eq!(
+            monitor.agent_status_at(now).last_scan_at.as_deref(),
+            Some(now)
+        );
+    }
+
     /// SPEC #4093 AC-8 (Issue #3737 AC-4): `launch_now` inside a GitHub
     /// refusal window names the window and its resume time instead of
     /// answering as if the scan will read GitHub right now.
@@ -8429,6 +8536,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
@@ -8519,6 +8627,7 @@ mod tests {
                 pane_hold_reason: None,
                 runtime_consistency: None,
             }],
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
@@ -8660,6 +8769,7 @@ mod tests {
                     pane_state: None,
                     runtime_consistency: None,
                 }],
+                inbox_coverage: None,
                 closure_held: Vec::new(),
                 last_error: None,
                 last_scan_at: None,
@@ -8741,6 +8851,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
@@ -9016,6 +9127,12 @@ mod tests {
                         "tier_input": 0,
                     },
                 ],
+                "inbox_coverage": {
+                    "github_target_count": 0,
+                    "inbox_row_count": 0,
+                    "missing_issue_numbers": [],
+                    "source": "cache",
+                },
                 // Issue #3633 AC-5: this branch rebuilds the queue from the
                 // local Issue cache, which is a projection and not a scan. It
                 // used to stamp the literal string `gwtd-status` into
@@ -11294,6 +11411,7 @@ mod tests {
                 pane_hold_reason: None,
                 runtime_consistency: None,
             }],
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
@@ -12727,6 +12845,8 @@ mod tests {
                         issue_number: Some(42),
                         window_id: Some("tab-1::agent-42".to_string()),
                         screen_text: Some("You've hit your usage limit".to_string()),
+                        screen_region: Some("provider_response".to_string()),
+                        matched_pattern: Some("codex_usage_limit".to_string()),
                         account_id: None,
                         poller_observed_at: None,
                         poller_state: Some("ok".to_string()),
@@ -12767,6 +12887,17 @@ mod tests {
             listed["provider_quota_holds"][0]["evidence"]["screen_text"],
             "You've hit your usage limit"
         );
+        let evidence = &listed["provider_quota_holds"][0]["evidence"];
+        assert_eq!(evidence["window_id"], "tab-1::agent-42");
+        assert_eq!(evidence["screen_region"], "provider_response");
+        assert_eq!(evidence["matched_pattern"], "codex_usage_limit");
+        let mut legacy = evidence.clone();
+        legacy.as_object_mut().unwrap().remove("screen_region");
+        legacy.as_object_mut().unwrap().remove("matched_pattern");
+        let legacy: crate::IssueMonitorProviderQuotaHoldEvidence =
+            serde_json::from_value(legacy).expect("legacy evidence remains readable");
+        assert_eq!(legacy.screen_region, None);
+        assert_eq!(legacy.matched_pattern, None);
         assert_eq!(
             listed["provider_quota_holds"][0]["evidence"]["poller_windows"][0]["used_percent"],
             26

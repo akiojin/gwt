@@ -119,6 +119,9 @@ root_js_modules! {
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
+    // SPEC-5016 — shared immutable model and selector subscriptions.
+    "ui-state-store.js" => "createUiStateStore",
+    "ui-content.js" => "renderUiContent",
     // Issue #3365 — render-key lifecycle with per-window exception isolation
     // (a failed sync retries on the next workspace_state instead of freezing
     // the minimap / window list / telemetry behind a committed key).

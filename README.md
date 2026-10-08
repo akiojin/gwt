@@ -1143,6 +1143,16 @@ remain with their originating project when you switch projects.
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### Session history
+
+gwt keeps recent Session history in `~/.gwt/sessions/`. Background cleanup
+runs on the first ledger view and at most once every 24 hours, removing
+stopped history with startup restore disabled after 30 days of inactivity.
+Saved windows and Sessions needed by runtime, recovery, or unfinished work
+remain protected. Old abandoned write temporaries are also removed.
+See [Issue #5025](https://github.com/akiojin/gwt/issues/5025) for the
+retention policy and unreadable-record handling.
+
 ### macOS filesystem activity and Spotlight
 
 The per-worktree index watcher excludes the root `target/` directory's
@@ -1243,6 +1253,17 @@ cargo test -p gwt-core -p gwt --all-features --doc
 ```
 
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
+
+### Shared frontend state (SPEC-5016)
+
+Migrated frontend domains use `web/ui-state-store.js` to own immutable data. Receive
+handlers update the model; views subscribe to selectors and render the committed
+snapshot. Retain each unsubscribe function for views that can be removed. Keep
+DOM nodes and renderer functions outside the model. Notifications also run for
+unfocused windows, without a focus or animation-frame trigger. The shared
+`ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
+the content type. See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
+the migration inventory and acceptance criteria.
 
 ### Capacity for heavy verification
 
@@ -1349,6 +1370,13 @@ a time), and neither lane waits for the other.
 
 ### PR head verification
 
+Use `pr.head_check` with `params.base` (for example, `develop`) and optional
+`params.head` to compare a canonical passing verification record with the live
+remote head without creating or editing a PR. The JSON diagnostic reports the
+record ID, verified/remote/base SHAs, product commits/files, and whether local
+verification is still fresh. A base-only comparison does not refresh stale
+evidence; missing, incomplete, failed, or corrupt records are unprovable.
+
 Before creating a Ready PR, `pr.create` compares the live remote branch with
 the HEAD recorded by `verify.run`. Its response and the PR body preserve both
 SHAs, the base SHA, and the comparison result. Bookkeeping under `.gwt/` and
@@ -1415,14 +1443,15 @@ decision a periodic read would get right now.
 To cut a release, trigger the **Prepare Release** workflow from GitHub
 Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
 and bumps the version, regenerates the `CHANGELOG`, and opens a
-`develop → main` Release PR — so you can release from any branch without
+`release/vX.Y.Z → main` Release PR from that frozen develop commit. Later
+develop merges leave the release head and its CI unchanged. You can release from any branch without
 switching to `develop` locally. The `bump` input is `auto` (default),
 `patch`, `minor`, or `major`. `auto` never produces a major release:
 breaking markers in commits are only listed in the Release PR body, and a
 major bump requires choosing `major` explicitly. Review and merge the
 generated Release PR;
 merging to `main` then runs the release pipeline (tag, GitHub Release,
-cross‑platform binaries). The manual fallback procedure lives in
+cross‑platform binaries). Release recovery instructions live in
 `.claude/commands/release.md`.
 
 The Release PR body is reference-only: it lists delivered Issues as bare

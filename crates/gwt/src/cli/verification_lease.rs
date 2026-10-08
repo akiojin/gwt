@@ -1141,11 +1141,20 @@ pub(super) fn command_disk_budgets(
     paths: &[PathBuf],
 ) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
     let settings = gwt_config::Settings::load().map_err(|error| error.to_string())?;
+    command_disk_budgets_with_inventory(paths, &settings, sysinfo::Disks::new_with_refreshed_list)
+}
+
+fn command_disk_budgets_with_inventory(
+    paths: &[PathBuf],
+    settings: &gwt_config::Settings,
+    _disk_inventory: impl FnOnce() -> sysinfo::Disks,
+) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
     let bytes = settings
         .verification
         .disk_budget_bytes
         .unwrap_or(DEFAULT_VERIFICATION_DISK_BUDGET_BYTES);
-    let disks = sysinfo::Disks::new_with_refreshed_list();
+    #[cfg(not(unix))]
+    let disks = _disk_inventory();
     let mut budgets: Vec<gwt_core::index_coordinator::VerificationDiskBudget> = Vec::new();
     for path in paths {
         let mut probe = path.clone();
@@ -1155,6 +1164,7 @@ pub(super) fn command_disk_budgets(
             }
         }
         let probe = dunce::canonicalize(probe).map_err(|error| error.to_string())?;
+        #[cfg(not(unix))]
         let mount = disks
             .iter()
             .filter(|disk| probe.starts_with(disk.mount_point()))
@@ -1169,6 +1179,7 @@ pub(super) fn command_disk_budgets(
         let volume = mount.mount_point().to_string_lossy().to_lowercase();
         #[cfg(unix)]
         let volume = {
+            // Bind mounts may have different mount paths on the same device.
             use std::os::unix::fs::MetadataExt;
             format!(
                 "device:{}",
@@ -1179,8 +1190,6 @@ pub(super) fn command_disk_budgets(
         };
         #[cfg(not(any(windows, unix)))]
         let volume = mount.mount_point().to_string_lossy().into_owned();
-        // Unix bind mounts may have different mount paths on the same device.
-        let _ = mount;
         if budgets.iter().any(|budget| budget.volume == volume) {
             continue;
         }
@@ -1199,12 +1208,95 @@ pub(super) fn command_disk_budgets(
     Ok(budgets)
 }
 
+/// Own the target boundary and its process-local acquisition diagnostic.
+/// Recovery borrows this guard; it never opens a second FD for the same lock.
+#[derive(Debug)]
+pub(crate) struct BuildArtifactGuard {
+    file: fs::File,
+    lock_path: PathBuf,
+    locked: bool,
+}
+
+fn artifact_claims() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, String>> {
+    static CLAIMS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
+    > = std::sync::OnceLock::new();
+    CLAIMS.get_or_init(Default::default)
+}
+
+impl BuildArtifactGuard {
+    #[track_caller]
+    fn claim(target: &Path) -> std::io::Result<Self> {
+        let lock_path = build_artifact_lock_path(target)?;
+        let mut claims = artifact_claims()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holder) = claims.get(&lock_path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!(
+                    "artifact lock already claimed by this process: {holder}; lock {}; requested at {}; borrow the held BuildArtifactGuard for recovery",
+                    lock_path.display(),
+                    std::panic::Location::caller()
+                ),
+            ));
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        claims.insert(
+            lock_path.clone(),
+            format!(
+                "pid {} {file:?}; acquired at {}",
+                std::process::id(),
+                std::panic::Location::caller()
+            ),
+        );
+        // Never hold this registry mutex while waiting on a kernel lock:
+        // unrelated targets must remain independent (Issue #5106 AC-4).
+        Ok(Self {
+            file,
+            lock_path,
+            locked: false,
+        })
+    }
+
+    pub(super) fn protects(&self, target: &Path) -> std::io::Result<bool> {
+        Ok(self.locked && self.lock_path == build_artifact_lock_path(target)?)
+    }
+}
+
+impl Drop for BuildArtifactGuard {
+    fn drop(&mut self) {
+        let mut claims = artifact_claims()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.locked {
+            let _ = fs2::FileExt::unlock(&self.file);
+        }
+        claims.remove(&self.lock_path);
+    }
+}
+
 /// The shared target-directory boundary for canonical verification and GC.
 /// The lock lives outside the target, so deletion never removes its identity.
-pub(crate) fn try_lock_build_artifacts(target: &Path) -> std::io::Result<Option<fs::File>> {
-    let file = build_artifact_lock(target)?;
-    match fs2::FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(Some(file)),
+#[track_caller]
+pub(crate) fn try_lock_build_artifacts(
+    target: &Path,
+) -> std::io::Result<Option<BuildArtifactGuard>> {
+    let mut guard = match BuildArtifactGuard::claim(target) {
+        Ok(guard) => guard,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match fs2::FileExt::try_lock_exclusive(&guard.file) {
+        Ok(()) => {
+            guard.locked = true;
+            Ok(Some(guard))
+        }
         Err(error)
             if error.kind() == std::io::ErrorKind::WouldBlock
                 || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
@@ -1215,13 +1307,15 @@ pub(crate) fn try_lock_build_artifacts(target: &Path) -> std::io::Result<Option<
     }
 }
 
-pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<fs::File> {
-    let file = build_artifact_lock(target)?;
-    fs2::FileExt::lock_exclusive(&file)?;
-    Ok(file)
+#[track_caller]
+pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<BuildArtifactGuard> {
+    let mut guard = BuildArtifactGuard::claim(target)?;
+    fs2::FileExt::lock_exclusive(&guard.file)?;
+    guard.locked = true;
+    Ok(guard)
 }
 
-fn build_artifact_lock(target: &Path) -> std::io::Result<fs::File> {
+fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let mut existing = if target.is_absolute() {
         target.to_path_buf()
@@ -1256,12 +1350,7 @@ fn build_artifact_lock(target: &Path) -> std::io::Result<fs::File> {
     let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
     let locks = verification_coordinator_root().join("build-artifacts");
     fs::create_dir_all(&locks)?;
-    fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(locks.join(format!("{digest}.lock")))
+    Ok(dunce::canonicalize(locks)?.join(format!("{digest}.lock")))
 }
 
 pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
@@ -1457,6 +1546,44 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn unix_disk_budgets_do_not_require_a_listed_mount() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join("temporary");
+        std::fs::create_dir(&temporary).unwrap();
+        let settings = toml::from_str::<gwt_config::Settings>(
+            "[verification]\ndisk_budget_bytes=1234\n[build_artifact_gc]\nbelow_bytes=21474836480\nbelow_percent=5\n",
+        )
+        .unwrap();
+        let inventory_called = std::cell::Cell::new(false);
+        let budgets = super::command_disk_budgets_with_inventory(
+            &[directory.path().join("missing/target"), temporary],
+            &settings,
+            || {
+                inventory_called.set(true);
+                sysinfo::Disks::new()
+            },
+        )
+        .expect("Unix device identity must work without a listed ancestor mount");
+
+        assert!(!inventory_called.get(), "Unix must not enumerate mounts");
+        assert_eq!(budgets.len(), 1, "same-device paths share one reservation");
+        let probe = dunce::canonicalize(directory.path()).unwrap();
+        assert_eq!(budgets[0].path, probe);
+        assert_eq!(
+            budgets[0].volume,
+            format!("device:{}", std::fs::metadata(&probe).unwrap().dev())
+        );
+        assert_eq!(budgets[0].bytes, 1234);
+        assert_eq!(
+            budgets[0].floor_bytes,
+            21_474_836_480.max(fs2::total_space(&probe).unwrap().saturating_mul(5) / 100)
+        );
+    }
+
     #[test]
     fn status_lists_both_slot_holders_and_remaining_capacity() {
         let home = tempfile::tempdir().unwrap();

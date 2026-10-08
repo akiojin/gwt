@@ -476,14 +476,7 @@ fn fast_forward_stale_launch_ref(
 /// A surviving GUI Host alone must not keep an exited agent's worktree held.
 fn live_session_holding_worktree(sessions_dir: &Path, worktree: &Path) -> Option<String> {
     let target = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
-    for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
-            continue;
-        }
-        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
-            continue;
-        };
+    for session in gwt_agent::session_ledger::load_sessions(sessions_dir).ok()? {
         let session_worktree = dunce::canonicalize(&session.worktree_path)
             .unwrap_or_else(|_| session.worktree_path.clone());
         if session_worktree != target {
