@@ -290,7 +290,13 @@ fn changed_files_on_develop_push_use_the_push_commit_range() {
 
 #[test]
 fn post_merge_runs_do_not_cancel_other_develop_trees_or_their_coverage() {
-    for name in ["test.yml", "lint.yml", "build.yml", "coverage.yml"] {
+    for name in [
+        "test.yml",
+        "lint.yml",
+        "build.yml",
+        "coverage.yml",
+        "post-merge-ci.yml",
+    ] {
         let doc = workflow(name);
         let policy = concurrency(name, &doc);
         let group = policy["group"].as_str().unwrap();

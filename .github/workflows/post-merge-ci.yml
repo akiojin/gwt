@@ -4,9 +4,10 @@ on:
   workflow_call:
 
 # Called from the failed push's own tree, including before develop is released
-# to the default branch (main). Serialize each workflow's Issue lookup/create.
+# to the default branch (main). Serialize retries of one pushed tree without
+# replacing a different commit's pending failure notification.
 concurrency:
-  group: post-merge-ci-${{ github.workflow }}
+  group: post-merge-ci-${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
