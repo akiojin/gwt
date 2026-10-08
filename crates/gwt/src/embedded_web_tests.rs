@@ -3363,7 +3363,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         )
         .expect("valid regex");
     let terminal_event = regex::Regex::new(
-            r#"case\s*"terminal_output":\s*frontendUnits\.terminalHost\.writeOutput\(event\.id,\s*event\.data_base64\);\s*break;\s*case\s*"terminal_snapshot":\s*frontendUnits\.terminalHost\.replaceTerminalSnapshot\(event\.id,\s*event\.data_base64\);\s*break;"#,
+            r#"case\s*"terminal_output":\s*applyPmWindowReceiveEvent\(event\);\s*break;\s*case\s*"terminal_snapshot":\s*applyPmWindowReceiveEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
     // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the
@@ -3409,7 +3409,16 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     );
     assert!(
         terminal_event.is_match(html),
-        "expected terminal output and snapshot events to flow through the terminal host unit",
+        "expected terminal output and snapshot events to update the shared window model",
+    );
+    assert!(
+        html.contains(
+            "subscribePmWindowState(state => state.windows[state.changedWindowId], state => {"
+        ) && html.contains(
+            "frontendUnits.terminalHost.replaceTerminalSnapshot(state.windowId, packet.dataBase64)"
+        ) && html
+            .contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)"),
+        "expected shared window subscriptions to retain the named terminal host delivery contract",
     );
     assert!(
         profile_event.is_match(html) && profile_event_delegate.is_match(html),
@@ -4335,18 +4344,24 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
 #[test]
 fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     let js = app_js();
-    assert!(js.contains("import { createPmChat } from \"/pm-chat.js\""));
-    assert!(root_js_module_source("/pm-chat.js").contains("export function createPmChat"));
+    let pm_chat = root_js_module_source("/pm-chat.js");
+    assert!(js.contains("import { createPmChat, createPmWindowModel } from \"/pm-chat.js\""));
+    assert!(pm_chat.contains("export function createPmChat"));
+    assert!(pm_chat.contains("export function createPmWindowModel"));
     assert!(js.contains("windowData.is_pm && presetSurface(windowData.preset) === \"terminal\""));
-    assert!(js.contains("event.session_id === view.sessionId"));
+    assert!(pm_chat.contains("event.session_id !== previous.sessionId"));
     let render_key = js_braced_block_after(js, "function workspaceWindowsRenderKey(").unwrap();
     assert!(render_key.contains("windowData?.session_id"));
     assert!(render_key.contains("windowData?.is_pm"));
-    assert!(js.contains("view.controller.setSession(windowData.session_id)"));
+    assert!(js.contains("bindPmWindowState(windowData.id, windowData.session_id)"));
+    assert!(js.contains("view.controller.update(state)"));
+    assert!(js.contains("view.unsubscribe()"));
     assert!(js.contains("view.controller.dispose()"));
     assert!(js.contains("kind: \"load_pm_conversation\", id: windowData.id"));
     assert!(js.contains("window.setInterval(requestVisiblePmConversations, 5000)"));
     assert!(js.contains("case \"pm_conversation\""));
     assert!(js.contains("case \"pane_send_result\""));
-    assert!(js.contains("frontendUnits.terminalHost.writeOutput(event.id, event.data_base64)"));
+    assert!(
+        js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
+    );
 }
