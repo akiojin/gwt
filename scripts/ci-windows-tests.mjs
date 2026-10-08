@@ -17,6 +17,7 @@ const defaultTargets = [
     .map((name) => ["gwt-core", "test", name]),
   ["gwt-agent", "lib", "gwt_agent"],
   ["gwt-terminal", "lib", "gwt_terminal"],
+  ["gwt-terminal", "test", "pty_start_gate_test"],
 ];
 
 export function targets(group) {
