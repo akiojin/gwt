@@ -93,6 +93,12 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
         self.inner.fetch_pr_head_sha(number)
     }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.inner.fetch_completion_pr(number)
+    }
     fn edit_pr(
         &mut self,
         number: u64,

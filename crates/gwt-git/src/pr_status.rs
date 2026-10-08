@@ -660,6 +660,25 @@ impl PrInventoryHistory {
 }
 
 impl PrInventoryItem {
+    /// #5034: completion applies the Ready predicate to either an open Draft
+    /// or an already Ready PR, without changing the PM inventory taxonomy.
+    pub fn completion_blocker(&self) -> Option<&'static str> {
+        if !self.ci_status.eq_ignore_ascii_case("SUCCESS") {
+            return Some("checks_not_green");
+        }
+        if self.review_status.eq_ignore_ascii_case("CHANGES_REQUESTED") {
+            return Some("changes_requested");
+        }
+        let mut fields = self.fields();
+        fields.is_draft = true;
+        if fields.merge_state_status.eq_ignore_ascii_case("BEHIND")
+            && fields.required_status_checks_strict == Some(false)
+        {
+            fields.merge_state_status = "CLEAN".to_string();
+        }
+        ready_to_promote_blocker(&fields)
+    }
+
     fn fields(&self) -> PrInventoryFields {
         PrInventoryFields {
             number: self.number,
@@ -2272,6 +2291,66 @@ fn probe_review_state<F>(
 where
     F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
 {
+    parse_review_state(&read_review_state_json(
+        repo_path,
+        url,
+        number,
+        REVIEW_STATE_QUERY,
+        run_gh,
+    )?)
+}
+
+// Completion cannot interpret a partial thread list as "all reviews resolved".
+// Keep the Monitor's existing query and parser unchanged.
+const COMPLETION_REVIEW_STATE_QUERY: &str = r#"
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
+      latestReviews(first: 20) { nodes { submittedAt author { login } } }
+      commits(last: 1) { nodes { commit { committedDate } } }
+    }
+  }
+}
+"#;
+
+fn probe_completion_review_state<F>(
+    repo_path: &Path,
+    url: &str,
+    number: u64,
+    run_gh: &F,
+) -> Option<PrReviewState>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let json = read_review_state_json(
+        repo_path,
+        url,
+        number,
+        COMPLETION_REVIEW_STATE_QUERY,
+        run_gh,
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    if value
+        .pointer("/data/repository/pullRequest/reviewThreads/pageInfo/hasNextPage")?
+        .as_bool()
+        != Some(false)
+    {
+        return None;
+    }
+    parse_review_state(&json)
+}
+
+fn read_review_state_json<F>(
+    repo_path: &Path,
+    url: &str,
+    number: u64,
+    query: &str,
+    run_gh: &F,
+) -> Option<String>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
     let (owner, repo) = owner_repo_from_pr_url(url)?;
     let output = run_gh(
         repo_path,
@@ -2279,7 +2358,7 @@ where
             "api",
             "graphql",
             "-f",
-            &format!("query={REVIEW_STATE_QUERY}"),
+            &format!("query={query}"),
             "-f",
             &format!("owner={owner}"),
             "-f",
@@ -2289,7 +2368,7 @@ where
         ],
     )
     .ok()?;
-    output.success.then(|| parse_review_state(&output.stdout))?
+    output.success.then_some(output.stdout)
 }
 
 /// One `gh pr view <n> --json <fields>` for the heavy fields.
@@ -3350,6 +3429,88 @@ pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
 /// Checked variant used by deadline-integral scans.
 pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+/// Fresh, targeted completion evidence. This never reads the PM inventory
+/// cache: a completion decision must describe the current PR head and gates.
+#[derive(Debug, Clone)]
+pub struct PrCompletionSnapshot {
+    pub state: PrState,
+    pub head_sha: String,
+    pub inventory: PrInventoryItem,
+}
+
+pub fn fetch_pr_completion_snapshot(repo_path: &Path, number: u64) -> Result<PrCompletionSnapshot> {
+    fetch_pr_completion_snapshot_with(repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_completion_snapshot_with<F>(
+    repo_path: &Path,
+    number: u64,
+    run_gh: F,
+) -> Result<PrCompletionSnapshot>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number_arg = number.to_string();
+    let fields = "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,body";
+    let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view {number}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view {number} JSON: {error}")))?;
+    let head_sha = value
+        .get("headRefOid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|head| !head.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| GwtError::Other("PR head SHA is unknown".into()))?;
+    if value.get("number").and_then(serde_json::Value::as_u64) != Some(number)
+        || value
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+        || !matches!(
+            value.get("state").and_then(serde_json::Value::as_str),
+            Some("OPEN" | "CLOSED" | "MERGED")
+        )
+        || value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(GwtError::Other(
+            "PR identity, state or Draft status is unknown".into(),
+        ));
+    }
+    let state = parse_pr_status_json(&output.stdout)?.state;
+    let now = Utc::now();
+    if state == PrState::Open {
+        let url = value
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if let Some(review) = probe_completion_review_state(repo_path, url, number, &run_gh) {
+            value[GWT_REVIEW_STATE_KEY] =
+                serde_json::to_value(review).map_err(|error| GwtError::Other(error.to_string()))?;
+        }
+        probe_merge_queue(
+            repo_path,
+            std::slice::from_mut(&mut value),
+            &BudgetLedger::global(),
+            now,
+            &mut |path, args| run_gh(path, args),
+        );
+    }
+    Ok(PrCompletionSnapshot {
+        state,
+        head_sha,
+        inventory: inventory_item_from_value(&value, now, &PrInventoryOptions::default())?,
+    })
 }
 
 fn try_fetch_pr_head_sha_with<F>(
@@ -5236,6 +5397,86 @@ mod tests {
                 .to_string(),
             ..sample_inventory_fields()
         }
+    }
+
+    #[test]
+    fn completion_snapshot_reads_current_pr_and_review_without_inventory_cache() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+            calls.borrow_mut().push(args.join(" "));
+            let stdout = if args[0] == "pr" {
+                serde_json::json!({"number":42,"state":"OPEN","isDraft":false,"headRefName":"work/issue-5034","headRefOid":"verified-head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"}).to_string()
+            } else {
+                serde_json::json!({"data":{"repository":{"pullRequest":{
+                    "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}},
+                    "commits":{"nodes":[{"commit":{"committedDate":"2026-10-09T00:00:00Z"}}]},
+                    "latestReviews":{"nodes":[{"author":{"login":"coderabbitai"},"submittedAt":"2026-10-09T00:01:00Z"}]}
+                }}}}).to_string()
+            };
+            Ok(GhCliOutput { success: true, stdout, stderr: String::new() })
+        }).unwrap();
+        assert_eq!(snapshot.head_sha, "verified-head");
+        assert_eq!(snapshot.inventory.completion_blocker(), None);
+        assert_eq!(calls.borrow().len(), 2);
+        assert!(calls.borrow()[0].starts_with("pr view 42 --json"));
+        assert!(calls.borrow()[1].starts_with("api graphql"));
+        assert!(calls.borrow()[1].contains("pageInfo { hasNextPage }"));
+    }
+
+    #[test]
+    fn completion_snapshot_refuses_unknown_draft_and_unread_review() {
+        let payload = serde_json::json!({"number":42,"state":"OPEN","headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"});
+        let read = |value: serde_json::Value| {
+            fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+                Ok(GhCliOutput {
+                    success: args[0] == "pr",
+                    stdout: value.to_string(),
+                    stderr: "unread review".into(),
+                })
+            })
+        };
+        assert!(read(payload.clone()).is_err());
+        let mut with_draft = payload;
+        with_draft["isDraft"] = serde_json::json!(true);
+        let snapshot = read(with_draft).unwrap();
+        assert_eq!(
+            snapshot.inventory.completion_blocker(),
+            Some("review_threads_unknown")
+        );
+    }
+
+    #[test]
+    fn completion_snapshot_refuses_truncated_review_threads() {
+        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+            let stdout = if args[0] == "pr" {
+                serde_json::json!({"number":42,"state":"OPEN","isDraft":true,"headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"})
+            } else {
+                serde_json::json!({"data":{"repository":{"pullRequest":{
+                    "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":true}},
+                    "latestReviews":{"nodes":[{"author":{"login":"coderabbitai"},"submittedAt":"2026-10-09T00:01:00Z"}]}
+                }}}})
+            };
+            Ok(GhCliOutput { success: true, stdout: stdout.to_string(), stderr: String::new() })
+        }).unwrap();
+        assert_eq!(
+            snapshot.inventory.completion_blocker(),
+            Some("review_threads_unknown")
+        );
+    }
+
+    #[test]
+    fn completion_uses_non_strict_behind_policy_without_changing_promotion_taxonomy() {
+        let mut fields = promotable_fields();
+        fields.merge_state_status = "BEHIND".into();
+        assert_eq!(ready_to_promote_blocker(&fields), Some("behind_base"));
+        let row =
+            |fields| inventory_item_from_fields(fields, Utc::now(), &PrInventoryOptions::default());
+        assert_eq!(
+            row(fields.clone()).completion_blocker(),
+            Some("behind_base")
+        );
+        fields.required_status_checks_strict = Some(false);
+        assert_eq!(row(fields).completion_blocker(), None);
     }
 
     #[test]

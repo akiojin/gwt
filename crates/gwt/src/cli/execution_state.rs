@@ -15813,7 +15813,18 @@ fn run_impl<E: CliEnv>(
                     .flatten()
                     .map(|record| record.owner_number),
             );
-            let mut expected_verification_hash = None;
+            let mut expected_verification_hash =
+                match super::completion_pr::admit(env, &session_id, None, out) {
+                    Ok(hash) => hash,
+                    Err(reason) => {
+                        out.push_str(&format!("execution: completion refused — {reason}\n"));
+                        *refusal = Some(agent_recoverable_refusal(
+                            "completion_pr_not_ready",
+                            "pr.view",
+                        ));
+                        return Ok(2);
+                    }
+                };
             if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
                 let verification = crate::cli::verification_record::load(&worktree)
                     .map_err(|error| {
@@ -15840,6 +15851,13 @@ fn run_impl<E: CliEnv>(
                         "verification_quarantine_not_current",
                         "verify.run",
                     ));
+                    return Ok(2);
+                }
+                if expected_verification_hash
+                    .as_ref()
+                    .is_some_and(|hash| hash != &verification.content_hash)
+                {
+                    out.push_str("execution: completion refused — verification evidence changed after PR validation\n");
                     return Ok(2);
                 }
                 expected_verification_hash = Some(verification.content_hash.clone());

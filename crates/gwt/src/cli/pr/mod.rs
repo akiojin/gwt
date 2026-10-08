@@ -305,7 +305,7 @@ fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<
 }
 
 /// #4326: use the launch route and measured verification for Ready handoffs.
-fn ready_verification(
+pub(super) fn ready_verification(
     worktree: &std::path::Path,
     session_id: Option<&str>,
     body: &str,
@@ -1856,6 +1856,41 @@ mod tests {
         }
     }
 
+    fn seed_prepared_completion_pr(
+        env: &mut crate::cli::TestEnv,
+        repo: &std::path::Path,
+        head_sha: &str,
+    ) {
+        let branch = gwt_git::Repository::open(repo)
+            .unwrap()
+            .current_branch()
+            .unwrap()
+            .unwrap();
+        let value = serde_json::json!({
+            "number": 7, "url": "https://example.com/pr/7", "state": "OPEN", "isDraft": false,
+            "headRefName": branch, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+            "body": "User Verification Result: n/a (autonomous)\nAgent Visual Check: n/a (no UI surface)\n"
+        });
+        let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
+        let mut inventory =
+            gwt_git::pr_status::parse_pr_inventory_json(&format!("[{value}]"), chrono::Utc::now())
+                .unwrap()
+                .remove(0);
+        inventory.unresolved_review_threads = Some(0);
+        inventory.coderabbit_review_complete = Some(true);
+        env.seed_current_pr(Some(pr.clone()));
+        env.seed_pr(7, pr);
+        env.completion_prs.insert(
+            7,
+            gwt_git::pr_status::PrCompletionSnapshot {
+                state: gwt_git::pr_status::PrState::Open,
+                head_sha: head_sha.to_string(),
+                inventory,
+            },
+        );
+    }
+
     #[test]
     fn issue_4979_create_checks_remote_only_commits_before_dispatch() {
         let _env_lock = crate::env_test_lock()
@@ -3001,7 +3036,7 @@ mod tests {
                     base: s("develop"),
                     head: None,
                     title: s("PR shard delivery"),
-                    body: s("User Verification Result: n/a (autonomous)"),
+                    body: s("User Verification Result: n/a (autonomous)\nAgent Visual Check: n/a (no UI surface)\n"),
                     labels: vec![],
                     draft: false,
                 },
@@ -3010,6 +3045,11 @@ mod tests {
             .unwrap(),
             0,
             "{out}"
+        );
+        seed_prepared_completion_pr(
+            &mut env,
+            &fixture.repo,
+            verified.verified_head.as_deref().unwrap(),
         );
         let items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
             .unwrap()
@@ -3268,6 +3308,17 @@ mod tests {
             "{verify_out}",
         );
 
+        // #5034: autonomous completion requires a prepared owner PR. This
+        // fixture still exercises Completed receipt/authority and non-Draft
+        // creation; it no longer completes before any PR exists.
+        let verification = crate::cli::verification_record::load(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        seed_prepared_completion_pr(
+            &mut env,
+            &fixture.repo,
+            verification.verified_head.as_deref().unwrap(),
+        );
         let mut completion_out = String::new();
         assert_eq!(
             crate::cli::execution_state::run(
