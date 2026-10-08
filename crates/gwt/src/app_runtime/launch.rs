@@ -3698,6 +3698,36 @@ pub(crate) fn continue_work_readiness_decision(
     })
 }
 
+/// Issue #5194 AC-2: name the SessionStart hook configuration the agent should
+/// have discovered, so an unready handoff tells a missing hook file apart from
+/// a hook that ran but did not reach gwt in time.
+pub(crate) fn readiness_hook_config_diagnosis(agent_id: &str, worktree: &Path) -> Option<String> {
+    let paths = if agent_id == gwt_agent::AgentId::Codex.command() {
+        gwt_skills::codex_hooks_paths_for_codex_discovery(
+            worktree,
+            gwt_skills::CodexHookDiscoveryMode::Both,
+        )
+    } else if agent_id == gwt_agent::AgentId::ClaudeCode.command() {
+        vec![worktree.join(".claude").join("settings.local.json")]
+    } else {
+        return None;
+    };
+    let states = paths
+        .iter()
+        .map(|path| {
+            let state = if path.is_file() { "present" } else { "missing" };
+            format!("{} {state}", path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let cause = if paths.first().is_some_and(|path| !path.is_file()) {
+        "the agent may not have discovered its SessionStart hook"
+    } else {
+        "the hook config exists, so the hook ran late or could not reach gwt          (check hook health and project-state lock contention)"
+    };
+    Some(format!("SessionStart hook config: {states}. {cause}"))
+}
+
 fn readiness_timeout_detail(waited_secs: u64, observation: &str) -> String {
     format!("authenticated SessionStart readiness timed out after {waited_secs}s: {observation}")
 }
@@ -3857,10 +3887,14 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
     let version = semver::Version::parse(token).ok()?;
     let boundary =
         semver::Version::parse("0.131.0-alpha.21").expect("valid Codex hook discovery boundary");
+    // Issue #5194: newer Codex releases do not reliably read the
+    // workspace-home copy from a linked worktree (0.160 never ran SessionStart
+    // when only that copy existed), so every Codex at or above the cutover
+    // also gets the worktree-local file instead of trusting the cutover alone.
     Some(if version < boundary {
         gwt_skills::CodexHookDiscoveryMode::WorktreeLocal
     } else {
-        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome
+        gwt_skills::CodexHookDiscoveryMode::Both
     })
 }
 

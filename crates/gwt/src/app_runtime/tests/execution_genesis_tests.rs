@@ -2040,6 +2040,42 @@ fn readiness_pane_evidence_separates_live_dead_and_foreign_panes() {
     );
 }
 
+/// Issue #5194 AC-2: an unready handoff is not silent. It lands in the error
+/// ledger with the hook configuration the agent should have discovered, so a
+/// missing `.codex/hooks.json` is visible from `errors.list`.
+#[test]
+fn continue_work_ready_timeout_handoff_records_the_missing_hook_config() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-handoff-ledger");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Running);
+
+    fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &readiness_watch_at_last_extension(&fixture.operation_id, 0),
+    );
+
+    let rows = gwt_core::error_ledger::list_since(None).expect("read error ledger");
+    let row = rows
+        .iter()
+        .find(|row| row.target.window_id.as_deref() == Some(fixture.window_id.as_str()))
+        .unwrap_or_else(|| panic!("the handoff must be recorded: {rows:#?}"));
+    assert_eq!(row.kind, gwt_core::error_ledger::ErrorKind::LaunchFailure);
+    assert!(row.message.contains("SessionStart"), "{}", row.message);
+    assert!(
+        row.message.contains(".codex") && row.message.contains("hooks.json missing"),
+        "the ledger row must name the undiscovered hook config: {}",
+        row.message
+    );
+}
+
 /// Issue #3482 AC-2: the readiness deadline bounds *waiting*, not the life of
 /// the agent. When the budget runs out on a pane that is still the exact live
 /// launch pane, the launch is handed to the user with its process, its window,

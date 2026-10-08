@@ -7306,6 +7306,7 @@ impl AppRuntime {
                     operation_id = %operation_id,
                     "handed an unready but live launch pane to the user"
                 );
+                self.record_readiness_handoff(window_id, &detail);
                 self.readiness_handoff_events(window_id, detail)
             }
             ReadinessDeadlineDecision::Abort { detail, pane } => {
@@ -7334,6 +7335,30 @@ impl AppRuntime {
                 }
             }
         }
+    }
+
+    /// Issue #5194 AC-2: a handoff leaves the launch without execution
+    /// authority, so it is recorded where the PM looks (`errors.list`) together
+    /// with the hook configuration the agent should have discovered.
+    fn record_readiness_handoff(&self, window_id: &str, detail: &str) {
+        let session = self.active_agent_sessions.get(window_id);
+        let diagnosis = session.and_then(|session| {
+            super::readiness_hook_config_diagnosis(&session.agent_id, &session.worktree_path)
+        });
+        let message = match diagnosis {
+            Some(diagnosis) => format!("{detail} {diagnosis}"),
+            None => detail.to_string(),
+        };
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            message,
+            gwt_core::error_ledger::ErrorTarget {
+                window_id: Some(window_id.to_string()),
+                session_id: session.map(|session| session.session_id.clone()),
+                project_root: session.map(|session| session.agent_project_root.clone()),
+                issue: None,
+            },
+        );
     }
 
     /// Issue #3482: publish the handoff so the pane says why it is still
