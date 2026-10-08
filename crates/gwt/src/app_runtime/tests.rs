@@ -58486,11 +58486,18 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
     assert_eq!(pool.active_index, 0, "the open set moves with its form");
     let previewed_summary = pool.resulting_summary.clone();
 
-    let saved_events = save_agent_settings_sets(&mut runtime, &recorded_events);
-    assert!(saved_events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorToast { message, .. } if message == "Issue Monitor settings saved"
-    )));
+    let saved_events = {
+        // Verify settings and order independently of host fsync latency.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        save_agent_settings_sets(&mut runtime, &recorded_events)
+    };
+    assert!(
+        saved_events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, .. } if message == "Issue Monitor settings saved"
+        )),
+        "Agent Settings save failed: {saved_events:#?}"
+    );
 
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
         .expect("load prefs");
