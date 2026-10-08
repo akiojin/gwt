@@ -4069,7 +4069,8 @@ fn continue_work_activated_successor_recovery_case(
         && !substitute_live_agent
         && !candidate_only_durable_fallback
     {
-        let current_path = work_items_path.with_file_name("current.json");
+        let current_path =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
         let lock_path = gwt_core::workspace_projection::external_workspace_operation_lock_path(
             &current_path,
             &work_items_path,
