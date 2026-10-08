@@ -22120,6 +22120,74 @@ fn continue_work_activated_successor_recovery_case(
             },
         ));
     }
+    if capability_generation == 1
+        && !mutate_candidate_after_repair
+        && !mutate_candidate_before_work_commit
+        && !same_generation_takeover
+        && !substitute_candidate_agent
+        && !substitute_live_agent
+        && !candidate_only_durable_fallback
+    {
+        let current_path = work_items_path.with_file_name("current.json");
+        let lock_path = gwt_core::workspace_projection::external_workspace_operation_lock_path(
+            &current_path,
+            &work_items_path,
+            operation_id,
+        );
+        let legacy_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open staged operation lock");
+        legacy_lock
+            .try_lock_exclusive()
+            .expect("hold operation lock without holder metadata");
+        let holder_path = lock_path.with_extension("lock.holder.json");
+        match fs::remove_file(holder_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove operation holder metadata: {error}"),
+        }
+        let busy_events = restarted_runtime.continue_work_events(
+            &restarted_runtime.test_context(),
+            "client-busy-retry",
+            operation_id.to_string(),
+            work_id.to_string(),
+            canvas_bounds(),
+        );
+        let message = busy_events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ContinueWorkOutcome {
+                    error_code: Some(code),
+                    message: Some(message),
+                    retryable: true,
+                    ..
+                } if code == "continuation_reconciliation_required" => Some(message),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("operation contention must remain retryable: {busy_events:#?}")
+            });
+        assert!(message.contains(operation_id), "{message}");
+        assert!(
+            message.contains(&lock_path.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("holder_unknown_reason=file_absent"),
+            "{message}"
+        );
+        assert!(
+            message.contains("OS lock") && message.contains("release"),
+            "{message}"
+        );
+        assert!(
+            message.contains("same operation") && message.contains("retry"),
+            "{message}"
+        );
+        FileExt::unlock(&legacy_lock).expect("release operation lock before retry");
+    }
     let events = restarted_runtime.continue_work_events(
         &restarted_runtime.test_context(),
         "client-retry",
