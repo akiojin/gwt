@@ -177,7 +177,7 @@
 develop への着地は GitHub merge queue を通す（ユーザー裁定 2026-10-02）。`strict` な branch protection は 1 本着地するたびに残りの全 PR を `BEHIND` に戻すため、着地が CI 1 周あたり 1 本に律速されていた。merge queue は「最新 base でテスト済みの変更だけが着地する」保証を保ったまま、その再同期と再テストを GitHub 側が引き受ける。
 
 - **workflow 側の契約:** develop 向け PR を判定する workflow（`test.yml` / `lint.yml` / `build.yml`）は `merge_group` でも同じジョブを同じ条件で走らせる。必須チェックが `merge_group` で報告されないとキュー内で永久に pending になり、何も着地しなくなる。イベント名で skip したジョブは Success として数えられるため、`pull_request` 限定の条件も置かない。`crates/gwt/tests/ci_concurrency_contract_test.rs` が固定する。
-- **必須チェック（2026-10-02 実測、11 件）:** `Commit Message Lint` / `Clippy & Rustfmt` / `Test (Rust)` / `Build` / `Test (Python runner)` / `Test (Rust, Windows)` / `Cargo Deny (advisories + sources)` / `Check (Windows)` / `Check (macOS)` / `Test (Windows agent launch)` / `Flake detection (changed test targets)`。現在値は `gh api repos/akiojin/gwt/branches/develop/protection --jq '.required_status_checks.contexts'` で読む。
+- **必須チェック（2026-10-08 実測、12 件）:** `Commit Message Lint` / `Clippy & Rustfmt` / `Test (Rust)` / `Build` / `Test (Python runner)` / `Test (Rust, Windows)` / `Cargo Deny (advisories + sources)` / `Check (Windows)` / `Check (macOS)` / `Test (Windows agent launch)` / `Flake detection (changed test targets)` / `coverage / Rust Coverage`。#5173 により coverage の閾値判定を Clippy から独立した必須チェックへ分離した。現在値は `gh api repos/akiojin/gwt/branches/develop/protection --jq '.required_status_checks.contexts'` で読む。
 - **必須チェックを追加・改名するときの順序:** 先にその job（`merge_group` でも走るもの）を develop に着地させ、その後で branch protection の contexts を変える。逆順にすると、全 PR とキューが報告されない check を待って止まる。
 - **有効化の順序:** (1) `merge_group` トリガを持つ workflow を develop に着地させる → (2) 着地を確認する（`git grep -n merge_group origin/develop -- .github/workflows`）→ (3) branch protection の「Require merge queue」を有効にする。(3) はリポジトリ設定の変更であり、エージェントは行わない。
 - **キューの設定値（UI にしか無い状態にしないための記録）:**
@@ -189,7 +189,7 @@ develop への着地は GitHub merge queue を通す（ユーザー裁定 2026-1
   | Build concurrency | 3 | CI 1 周で複数本を着地させる。1 エントリごとに全ジョブが走るため、runner 枠の枯渇（#4119）を避けて控えめに始め、実測で調整する |
   | Minimum / maximum group size | 1 / 5 | 待ち合わせで着地を遅らせない |
   | Status check timeout | 120 分 | ジョブ単体の上限（`Test (Rust workspace)` の 110 分）より長くする |
-  | Required status checks | 上記 11 件のまま | キューの導入で必須チェックを緩めない |
+  | Required status checks | 上記 12 件 | キューの導入で必須チェックを緩めない |
 
 - **現在の状態の読み方:** `gh api graphql -f query='query{repository(owner:"akiojin",name:"gwt"){mergeQueue(branch:"develop"){id}}}'` が `null` ならキューは無効、id を返せば有効。設定値を変えたらこの表も更新する。
 - **有効化直後に確認すること:** `strict`（Require branches to be up to date）を残したまま `BEHIND` の PR がキューに入れるかは未実測である。入れない場合は `strict` を外す（最新 base でのテストはキューが担うので保証は変わらない）。確認せずに「update-branch 不要」と運用を切り替えない。
@@ -335,7 +335,7 @@ develop への着地は GitHub merge queue を通す（ユーザー裁定 2026-1
 ### pre-PR ローカル検証（SPEC #5082 FR-6〜9、既存ローカル全matrixより優先）
 
 - 配送スライスは `verify.plan` の `derive:true, mode:"pre-pr"` を使用する。ローカル必須は fmt、変更クレートの clippy、当該 Issue の AC を固定する `acceptance_commands`、required CI にない検証。GUI の headed dark/light と Agent Visual Check は維持する。
-- 除外できるのは、実測 `required_status_checks.contexts` に含まれる context が覆う項目だけ。Rust 全体テストは `Test (Rust)`、workspace clippy / rustdoc / Markdown / coverage 90%・80% は `Clippy & Rustfmt` が覆う。optional job の実行だけを理由に除外しない。
+- 除外できるのは、実測 `required_status_checks.contexts` に含まれる context が覆う項目だけ。Rust 全体テストは `Test (Rust)`、workspace clippy / rustdoc / Markdown は `Clippy & Rustfmt`、coverage 90%・80% は `coverage / Rust Coverage` が覆う。optional job の実行だけを理由に除外しない。
 - CI 対応表の job / trigger / failure propagation が欠けたら縮小を拒否する。CI 契約を修復するか `mode:"full"` で再導出し、返された全matrixを canonical `verify.run` で実行する。
 - ローカル pre-PR PASS は PR 作成条件。配送の完了は必須 CI の成功とマージで判定し、未実施の全体テストやcoverageをローカル PASS と報告しない。既存の Ready / auto-merge / integrity / freshness / review ゲートを維持する。
 

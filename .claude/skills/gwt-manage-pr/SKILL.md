@@ -107,7 +107,7 @@ impossible.**
 1. **Repo + branches:**
    - `git rev-parse --show-toplevel` / `git rev-parse --abbrev-ref HEAD`
    - Base defaults to `develop` unless user specifies.
-2. **Branch protection:** Only `develop` may target `main`. Refuse any other branch targeting `main`.
+2. **Branch protection:** `main` accepts `develop` or same-repository `release/vX.Y.Z` snapshots whose source tree matches their merge base with `develop`. The required `check-source-branch` workflow proves the snapshot; a release branch name alone is insufficient. Refuse other source branches. Never create or advance release branches locally; Prepare Release owns them.
 3. **Working tree state:** `git status --porcelain`. If dirty, pause and present options (continue / abort / cleanup). Do not auto-commit/stash.
 4. **Fetch:** `git fetch origin`
 5. **Commit count against base (mandatory first check):**

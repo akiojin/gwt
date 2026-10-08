@@ -809,8 +809,8 @@ test("phase19: controller exposes the Phase 19 event handlers required by app.js
   assert.equal(typeof controller.handleIssueMonitorStatus, "function");
   assert.match(
     appSource,
-    /case "issue_monitor_status":[\s\S]{0,400}updateCtaController\.handleIssueMonitorStatus\(event\.status \|\| \{\}\)/,
-    "app.js must hand issue_monitor_status to the update CTA controller",
+    /issueMonitorModel\.subscribe\(model => model\.status, status =>\s*updateCtaController\.handleIssueMonitorStatus\(status\)\)/,
+    "update CTA must subscribe independently to the committed Monitor status",
   );
 });
 
