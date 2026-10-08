@@ -13206,10 +13206,13 @@ fn terminal_canonical_work_guidance(
     let work_id = &work.id;
     Some({
         let owner = work.owner.as_deref().unwrap_or("the linked owner");
+        let terminal_status = if work.discarded { "Discarded" } else { "Done" };
         format!(
-            "canonical Work {work_id} is terminal; run gwt-execute for {owner} in a new Session \
-             using the regular linked-owner fresh launch. The launch coordinator creates the \
-             successor Work and binding after authenticated readiness. Preserve the old Work \
+            "canonical Work {work_id} is {terminal_status} (terminal); run gwt-execute for {owner} \
+             in a new Session using the regular linked-owner fresh launch \
+             (Launch Agent / Start Work workflow). \
+             The launch coordinator provides successor Work materialization (#4074) and binding \
+             after authenticated readiness. Preserve the old Work \
              and Session; release the previous live launch before retrying."
         )
     })
