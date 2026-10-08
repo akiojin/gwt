@@ -1094,3 +1094,62 @@ fn repository_gitignore_tracks_only_bucketed_new_event_shards() {
         "W-33 flat shards are read compatibility only and must not be re-included for new writes"
     );
 }
+
+/// Issue #5105: a branch that is only behind its base must reach a PR at the
+/// verified HEAD. Merging an unrelated base advance before creation moves HEAD
+/// and voids the canonical verification record, so the local merge (and the
+/// re-verification it forces) is reserved for a real textual conflict, detected
+/// without touching the worktree by `git merge-tree --write-tree`.
+#[test]
+fn create_flow_keeps_verified_head_when_only_behind_base() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_root = workspace_root.join(".claude/skills/gwt-manage-pr");
+    let read = |relative: &str| {
+        let path = skill_root.join(relative);
+        fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+    };
+    let create_flow = read("references/create-flow.md");
+    let skill = read("SKILL.md");
+
+    let step = markdown_block(
+        &create_flow,
+        "## Step 4: Check branch sync against base",
+        Some("## Step 5"),
+    );
+    assert!(
+        !step.contains("into the current branch before PR creation"),
+        "behind > 0 alone must not require a merge before PR creation:\n{step}"
+    );
+    for required in [
+        "git merge-tree --write-tree HEAD \"origin/$base\"",
+        "pr.update_branch",
+        "verify.plan",
+        "verify.run",
+    ] {
+        assert!(
+            step.contains(required),
+            "create-flow Step 4 must state {required:?}:\n{step}"
+        );
+    }
+
+    let script = markdown_block(&create_flow, "behind_count=", Some("# Check existing PRs"));
+    let merge_at = script
+        .find("git merge \"origin/$base\"")
+        .expect("conflicting branches still merge the base locally");
+    let probe_at = script
+        .find("git merge-tree --write-tree HEAD \"origin/$base\"")
+        .expect("the sample script must probe for conflicts first");
+    assert!(
+        probe_at < merge_at,
+        "the local merge must be gated by the conflict probe:\n{script}"
+    );
+
+    let rule = line_starting_with(
+        markdown_block(&skill, "### Decision Rules", Some("### PR Title Rules")),
+        "6. **Branch sync:**",
+    );
+    assert!(
+        rule.contains("git merge-tree") && rule.contains("only"),
+        "SKILL.md decision rule 6 must merge only on conflict: {rule}"
+    );
+}
