@@ -1226,7 +1226,11 @@ mod tests {
         let plan = derive_pre_pr_for_host(
             dir.path(),
             VerificationHost::Windows,
-            &["Test (Rust)".into(), "Clippy & Rustfmt".into()],
+            &[
+                "Test (Rust)".into(),
+                "Clippy & Rustfmt".into(),
+                "coverage / Rust Coverage".into(),
+            ],
             &["git --version".into()],
             &[],
         )
