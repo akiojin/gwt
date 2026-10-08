@@ -385,11 +385,13 @@ fn format_pr_help() -> String {
         "",
         "Operations:",
         "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
-        "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
+        "  pr.create | pr.edit | pr.ready | pr.draft | pr.close | pr.comment",
         "  pr.update_branch | pr.review_threads.reply_and_resolve",
         "",
         "Key params:",
-        "  number, base, head, title, body, labels, add_labels, draft",
+        "  number, base, head, title, body, labels, add_labels, draft, comment",
+        "  pr.edit: base alone is a valid update; existing edit authority applies.",
+        "  pr.close: number and optional comment; preserves the branch.",
         "",
     ]
     .join("\n")

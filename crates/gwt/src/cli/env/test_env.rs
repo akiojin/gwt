@@ -334,12 +334,14 @@ impl CliEnv for TestEnv {
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
     ) -> io::Result<PrStatus> {
         self.pr_edit_call_log.push(PrEditCall {
             number,
+            base: base.map(ToOwned::to_owned),
             title: title.map(ToOwned::to_owned),
             body: body.map(ToOwned::to_owned),
             add_labels: add_labels.to_vec(),
@@ -348,6 +350,15 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        let mut pr = self.fetch_pr(number)?;
+        if let Some(comment) = comment {
+            self.comment_on_pr(number, comment)?;
+        }
+        pr.state = gwt_git::pr_status::PrState::Closed;
+        self.prs.insert(number, pr.clone());
+        Ok(pr)
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_view_call_log.push(number);

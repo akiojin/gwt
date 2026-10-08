@@ -32175,6 +32175,7 @@ exit 1
                 &mut env,
                 CliCommand::Pr(crate::cli::PrCommand::EditBody {
                     number: 4122,
+                    base: None,
                     title: None,
                     body: Some("recovered handoff body".to_string()),
                     add_labels: Vec::new(),

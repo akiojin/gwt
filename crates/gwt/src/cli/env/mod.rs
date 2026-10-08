@@ -89,10 +89,12 @@ pub trait CliEnv {
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
     ) -> io::Result<PrStatus>;
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus>;
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus>;
     fn fetch_pr_quarantine_context(
         &mut self,

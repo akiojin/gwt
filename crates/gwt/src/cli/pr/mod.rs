@@ -18,9 +18,9 @@ pub(crate) mod types;
 
 #[allow(unused_imports)]
 pub(super) use gh::{
-    comment_on_pr_via_gh, convert_pr_to_draft_via_gh, create_pr_via_gh, edit_or_create_repo_guard,
-    edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh, fetch_pr_checks_via_gh,
-    fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
+    close_pr_via_gh, comment_on_pr_via_gh, convert_pr_to_draft_via_gh, create_pr_via_gh,
+    edit_or_create_repo_guard, edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh,
+    fetch_pr_checks_via_gh, fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
     fetch_pr_review_thread_state_via_gh, fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh,
     mark_pr_ready_via_gh, parse_available_fields, parse_github_remote_url as parse_pr_remote_url,
     parse_pr_checks_items_json, parse_pr_checks_items_response, parse_pr_number_from_url,
@@ -65,6 +65,20 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
         Some("list") => parse_pr_list_args(it.collect::<Vec<_>>().as_slice()),
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
+        Some("close") => {
+            let number = super::parse_required_number(it.next())?;
+            let comment = match it.next().map(String::as_str) {
+                None => None,
+                Some("--comment") => Some(
+                    it.next()
+                        .ok_or(CliParseError::MissingFlag("--comment"))?
+                        .clone(),
+                ),
+                Some(other) => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+            };
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::Close { number, comment })
+        }
         Some("view") => {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
@@ -434,6 +448,8 @@ pub(super) fn run<E: CliEnv>(
     // terminally blocked execution refuses every PR mutation, draft creation
     // and edits included; an active execution keeps the mid-work Draft flow
     // available.
+    // Close is containment, like demoting to Draft: it must remain available
+    // when producing authority or verification is unavailable (Issue #3693).
     let is_pr_mutation = matches!(
         cmd,
         PrCommand::Create { .. }
@@ -778,12 +794,14 @@ pub(super) fn run<E: CliEnv>(
         }
         PrCommand::Edit {
             number,
+            base,
             title,
             add_labels,
             ..
         }
         | PrCommand::EditBody {
             number,
+            base,
             title,
             add_labels,
             ..
@@ -799,6 +817,7 @@ pub(super) fn run<E: CliEnv>(
                 || {
                     let pr = env.edit_pr(
                         number,
+                        base.as_deref(),
                         title.as_deref(),
                         mutation_body.as_deref(),
                         &add_labels,
@@ -813,6 +832,14 @@ pub(super) fn run<E: CliEnv>(
             )
             .map_err(super::io_as_api_error)?;
             out.push_str("updated pull request\n");
+            render_pr(out, &pr);
+            0
+        }
+        PrCommand::Close { number, comment } => {
+            let pr = env
+                .close_pr(number, comment.as_deref())
+                .map_err(super::io_as_api_error)?;
+            out.push_str("closed pull request\n");
             render_pr(out, &pr);
             0
         }
@@ -1474,12 +1501,20 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let number = number_arg
         .parse()
         .map_err(|_| CliParseError::InvalidNumber((*number_arg).clone()))?;
+    let mut base: Option<String> = None;
     let mut title: Option<String> = None;
     let mut file: Option<String> = None;
     let mut add_labels: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--base" => {
+                i += 1;
+                if i >= args.len() || args[i].trim().is_empty() {
+                    return Err(CliParseError::MissingFlag("--base"));
+                }
+                base = Some(args[i].clone());
+            }
             "--title" => {
                 i += 1;
                 if i >= args.len() {
@@ -1505,11 +1540,12 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
         }
         i += 1;
     }
-    if title.is_none() && file.is_none() && add_labels.is_empty() {
+    if base.is_none() && title.is_none() && file.is_none() && add_labels.is_empty() {
         return Err(CliParseError::Usage);
     }
     Ok(PrCommand::Edit {
         number,
+        base,
         title,
         file,
         add_labels,
@@ -2125,6 +2161,7 @@ mod tests {
             },
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated")),
                 body: None,
                 add_labels: vec![],
@@ -2277,6 +2314,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated")),
                 body: None,
                 add_labels: vec![s("auto-merge")],
@@ -2330,6 +2368,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated again")),
                 body: None,
                 add_labels: vec![],
@@ -2389,6 +2428,7 @@ mod tests {
                 &mut env,
                 PrCommand::EditBody {
                     number: 7,
+                    base: None,
                     title: Some(s("updated")),
                     body: None,
                     add_labels: vec![],
@@ -2569,6 +2609,7 @@ mod tests {
                 &mut env,
                 PrCommand::EditBody {
                     number: 7,
+                    base: None,
                     title: Some(s("completed update")),
                     body: None,
                     add_labels: vec![],
@@ -3405,6 +3446,7 @@ mod tests {
             },
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated without receipt")),
                 body: Some(s("updated body")),
                 add_labels: vec![],
@@ -3632,6 +3674,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("t2")),
                 body: None,
                 add_labels: vec![],
@@ -3641,6 +3684,33 @@ mod tests {
         .expect("run pr edit while blocked");
         assert_eq!(code, 2, "{out}");
         assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "pr.edit",
+            "params": {"number": 7, "base": "develop"}
+        })
+        .to_string();
+        assert_eq!(crate::cli::dispatch(&mut env, &[s("gwtd")]), 2);
+        assert!(
+            env.pr_edit_call_log.is_empty(),
+            "base edit must not bypass authority"
+        );
+
+        // Issue #3693: containment remains available when producing changes
+        // are blocked, without requiring a new verification record.
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "pr.close",
+            "params": {"number": 7}
+        })
+        .to_string();
+        assert_eq!(crate::cli::dispatch(&mut env, &[s("gwtd")]), 0);
+        assert_eq!(
+            env.fetch_pr(7).unwrap().state,
+            gwt_git::pr_status::PrState::Closed
+        );
+        assert!(env.pr_comments.is_empty(), "a closure comment is optional");
     }
 
     #[test]
@@ -4305,6 +4375,7 @@ mod tests {
             },
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: None,
                 body: Some(s(body)),
                 add_labels: vec![],
@@ -4320,6 +4391,7 @@ mod tests {
             },
             PrCommand::Edit {
                 number: 7,
+                base: None,
                 title: None,
                 file: Some(s("body.md")),
                 add_labels: vec![],
@@ -4347,6 +4419,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: None,
                 body: Some(s(corrected)),
                 add_labels: vec![],
@@ -5456,6 +5529,7 @@ mod tests {
     fn pr_family_edit_writes_work_event_pr_metadata() {
         assert_pr_command_writes_work_event_pr_metadata(PrCommand::EditBody {
             number: 3672,
+            base: None,
             title: Some("Updated PR".to_string()),
             body: None,
             add_labels: vec![],
@@ -5793,6 +5867,7 @@ mod tests {
                 "akiojin/gwt",
                 repo_path,
                 12,
+                None,
                 Some("Edited"),
                 Some("Updated body"),
                 &["tested".to_string()],
@@ -5807,6 +5882,7 @@ mod tests {
                 "akiojin/gwt",
                 repo_path,
                 12,
+                None,
                 Some("Edited"),
                 None,
                 &["no-such-label".to_string()],

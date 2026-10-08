@@ -29,7 +29,7 @@ pub fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
 
 pub fn compile_fake_gh(bin_dir: &Path) {
     let source = r###"
-use std::{env, fs, process::ExitCode};
+use std::{env, fs, io::Write, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
     format!(
@@ -56,6 +56,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mode = env::var("GWT_FAKE_GH_MODE").unwrap_or_else(|_| "success".to_string());
     let state_file = env::var("GWT_FAKE_GH_STATE_FILE").ok();
+    if let Ok(path) = env::var("GWT_FAKE_GH_ARGV_FILE") {
+        let mut log = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(log, "{args:?}").unwrap();
+    }
 
     match args.as_slice() {
         [repo, view, json, field, jq, selector]
@@ -123,7 +127,10 @@ fn main() -> ExitCode {
         [pr, view, number, repo_flag, _, json_flag, ..]
             if pr == "pr" && view == "view" && repo_flag == "--repo" && json_flag == "--json" =>
         {
-            if mode.starts_with("checks-pending") || mode.starts_with("checks-merge-") {
+            if mode.starts_with("issue-3693")
+                && state_file.as_deref().and_then(|path| fs::read_to_string(path).ok()).as_deref() == Some("closed") {
+                println!("{}", pr_json(number, "Fetched PR").replace("\"OPEN\"", "\"CLOSED\""));
+            } else if mode.starts_with("checks-pending") || mode.starts_with("checks-merge-") {
                 let merge_state = mode.strip_prefix("checks-merge-").unwrap_or("BLOCKED");
                 println!("{}", pr_json(number, "Fetched PR").replace("\"CLEAN\"", &format!("\"{merge_state}\"")));
             } else if mode == "behind" {
@@ -141,6 +148,10 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, comment, ..] if pr == "pr" && comment == "comment" => {
+            if mode == "issue-3693-comment-failure" {
+                eprintln!("closure comment failed");
+                return ExitCode::FAILURE;
+            }
             return ExitCode::SUCCESS;
         }
         [pr, checks, _, json_flag, fields] if pr == "pr" && checks == "checks" && json_flag == "--json" => {
@@ -201,6 +212,20 @@ fn main() -> ExitCode {
                 && endpoint.contains("/pulls/") =>
         {
             // pr.edit title/body via REST PATCH (replaces `gh pr edit`).
+            if mode == "issue-3693-edit-failure" && args.iter().any(|arg| arg == "base=develop") {
+                eprintln!("base update failed");
+                return ExitCode::FAILURE;
+            }
+            if mode.starts_with("issue-3693") && args.iter().any(|arg| arg == "base=develop") {
+                fs::write(state_file.as_deref().expect("PR state file"), "develop").unwrap();
+            }
+            if mode.starts_with("issue-3693") && args.iter().any(|arg| arg == "state=closed") {
+                if mode == "issue-3693-close-failure" {
+                    eprintln!("PR close failed");
+                    return ExitCode::FAILURE;
+                }
+                fs::write(state_file.as_deref().expect("PR state file"), "closed").unwrap();
+            }
             println!("{{\"number\":12}}");
             return ExitCode::SUCCESS;
         }
