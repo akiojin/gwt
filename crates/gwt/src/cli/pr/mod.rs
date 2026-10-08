@@ -1590,6 +1590,9 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
             if let Some(queue) = &item.merge_queue {
                 row["merge_queue"] = serde_json::json!(queue);
             }
+            if let Some(strict) = item.required_status_checks_strict {
+                row["required_status_checks_strict"] = serde_json::json!(strict);
+            }
             row
         })
         .collect();
@@ -1763,6 +1766,7 @@ mod tests {
             age_hours: None,
             auto_merge_enabled: false,
             merge_queue: None,
+            required_status_checks_strict: None,
             check_counts: None,
             conflict: None,
             unresolved_review_threads: None,
@@ -4094,6 +4098,7 @@ mod tests {
         assert!(!out.contains("CLI family split body"), "{out}");
         assert!(!out.contains("deferred_user_verification"), "{out}");
         assert!(!out.contains("merge_queue"), "{out}");
+        assert!(!out.contains("required_status_checks_strict"), "{out}");
         // Issue #3891 AC-1 / AC-4: where the rows came from and what the read
         // cost are part of every answer, so a throttled or cached read is
         // observable by the PM.
@@ -4135,6 +4140,7 @@ mod tests {
     #[test]
     fn pr_list_renders_the_merge_queue_state_of_a_probed_row() {
         let mut item = seeded_inventory_item();
+        item.required_status_checks_strict = Some(false);
         item.merge_queue = Some(gwt_git::PrMergeQueueState {
             enabled: true,
             position: Some(2),
@@ -4157,6 +4163,10 @@ mod tests {
         assert_eq!(
             payload["pull_requests"][0]["merge_queue"],
             serde_json::json!({"enabled": true, "position": 2, "state": "AWAITING_CHECKS"})
+        );
+        assert_eq!(
+            payload["pull_requests"][0]["required_status_checks_strict"],
+            false
         );
     }
 

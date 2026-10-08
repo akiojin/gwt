@@ -876,10 +876,13 @@ fn derive_and_register_plan_for_caller(
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         let derived = match pre_pr {
-            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local),
-            None => crate::cli::verify_derivation::derive(worktree),
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local, &generated_outputs),
+            None => crate::cli::verify_derivation::derive_excluding(worktree, &generated_outputs),
         }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+        if let Some(reason) = derived.unsupported_reason() {
+            return Err(io::Error::new(ErrorKind::InvalidData, reason));
+        }
         validate_quarantine_requests(&quarantines, &derived.commands)?;
         let fingerprint_after =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
@@ -3156,7 +3159,8 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
 fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
-    // Windows' default library-only matrix does not overwrite the binary.
+    // Windows' canonical unit-target matrix avoids rebuilding the regular
+    // gwtd.exe (#4182, #4968). That default matrix does not overwrite the binary.
     // Explicit binary matrices include their own bootstrap as the last command.
     if cfg!(windows)
         || !commands.iter().any(|command| {
@@ -6113,7 +6117,10 @@ pub(super) fn run<E: CliEnv>(
                 // plan leaves uncovered now, not after a heavy run. Derivation
                 // is best-effort here — an underivable change set is not a
                 // registration failure.
-                if let Ok(derived) = crate::cli::verify_derivation::derive(&worktree) {
+                if let Ok(derived) = crate::cli::verify_derivation::derive_excluding(
+                    &worktree,
+                    &plan.generated_outputs,
+                ) {
                     if let Some(note) = derived_coverage_note(&commands, &derived) {
                         out.push_str(&note);
                     }
@@ -6741,6 +6748,48 @@ pub(crate) mod tests {
         let loaded = load_plan(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.surfaces, derived.surfaces);
         assert!(plan_integrity_ok(&loaded));
+
+        // Issue #4968: unknown source cannot pass through the fallback matrix.
+        // Declared generated outputs above must remain exempt from this gate.
+        let script = dir.path().join("scripts/no-tests.mjs");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(script, "export {};\n").unwrap();
+        let error = derive_and_register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            vec!["artifacts/report.json".to_string()],
+            Vec::new(),
+            &authority,
+            None,
+        )
+        .expect_err("unsupported source must refuse automatic registration");
+        assert!(
+            error.contains("unsupported(scripts/no-tests.mjs)"),
+            "{error}"
+        );
+        assert!(error.contains("params.commands"), "{error}");
+        assert_eq!(
+            load_plan(dir.path()).unwrap().unwrap().content_hash,
+            plan.content_hash
+        );
+
+        let commands = vec!["git --version".to_string()];
+        register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            commands.clone(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        let (record, _) = run_verification(dir.path(), "sess-cov", &commands).unwrap();
+        assert!(record.all_passed && record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-cov", None),
+            EvidenceStatus::Fresh
+        );
     }
 
     #[test]
@@ -6772,6 +6821,21 @@ pub(crate) mod tests {
                 fs::create_dir_all(destination.parent().unwrap()).unwrap();
                 fs::copy(root.join(path), destination).unwrap();
             }
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "test: pre-pr baseline"],
+                vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            ] {
+                assert!(gwt_core::process::hidden_command("git")
+                    .current_dir(worktree)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            fs::write(worktree.join("crates/gwt/change.rs"), "// change\n").unwrap();
+            fs::create_dir_all(worktree.join("artifacts")).unwrap();
+            fs::write(worktree.join("artifacts/report.json"), "{}").unwrap();
             // Initialize the same kernel lease that registration uses; fake gh
             // attempts an independent writer while its API read is in progress.
             crate::cli::trusted_store::with_write_lease(worktree, || Ok(())).unwrap();
@@ -6787,7 +6851,7 @@ pub(crate) mod tests {
             let (derived, plan) = derive_and_register_plan_for_caller(
                 worktree,
                 "sess-pre-pr",
-                Vec::new(),
+                vec!["artifacts/report.json".to_string()],
                 Vec::new(),
                 &authority,
                 Some((&acceptance, &[])),
@@ -6802,6 +6866,7 @@ pub(crate) mod tests {
                 .iter()
                 .any(|s| s.starts_with("ci-delegated(")));
             assert!(plan.commands.contains(&acceptance[0]));
+            assert!(derived.unsupported_reason().is_none(), "{derived:?}");
             assert!(plan_integrity_ok(&plan));
             assert_eq!(load_plan(worktree).unwrap().unwrap(), plan);
         });

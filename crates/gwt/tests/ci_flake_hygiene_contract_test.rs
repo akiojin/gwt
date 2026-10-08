@@ -290,7 +290,12 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
     let steps = run_steps(&core);
     let build = index_of_step_running(&steps, "cargo test -p gwt-core --all-features --no-run")
         .expect("build the complete core suite before each stability run");
-    let repeat = index_of_step_running(&steps, "Remove-Item Env:RUST_TEST_THREADS")
+    let repeat = steps
+        .iter()
+        .position(|(_, run)| {
+            run.lines()
+                .any(|line| line.trim() == "cargo test -p gwt-core --all-features")
+        })
         .expect("each matrix runner must use default test parallelism");
     assert!(build < repeat);
     let run = &steps[repeat].1;
