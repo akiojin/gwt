@@ -36783,6 +36783,7 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     let gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider,
         resets_at,
+        evidence,
         ..
     } = failure.clone().expect("a quota notice is a typed failure")
     else {
@@ -36792,6 +36793,14 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     assert!(
         resets_at.is_some(),
         "the notice states when access returns; dropping it forces the PM to guess"
+    );
+    let evidence = evidence.expect("native message fallback retains its refusal evidence");
+    assert_eq!(evidence.source, "failure_notice");
+    assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
+    assert_eq!(evidence.screen_region.as_deref(), Some("provider_response"));
+    assert_eq!(
+        evidence.matched_pattern.as_deref(),
+        Some("codex_usage_limit")
     );
 
     let payload = AppRuntime::issue_monitor_agent_failed_payload_with_failure(
@@ -80552,6 +80561,9 @@ fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence
     assert_eq!(evidence.source, "screen_notice");
     assert_eq!(evidence.recorded_at, "2026-09-02T09:00:00.000Z");
     assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
+    let provenance = serde_json::to_value(evidence).expect("evidence JSON");
+    assert_eq!(provenance["screen_region"], "provider_response");
+    assert_eq!(provenance["matched_pattern"], "codex_usage_limit");
     assert!(
         evidence
             .screen_text
@@ -80569,6 +80581,61 @@ fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence
             used_percent: 100,
         }]
     );
+
+    // Issue #5037: an exit detail can contain the refusal while the pane still
+    // shows startup output. Retain the text that actually authenticated it.
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime.runtimes[&window_id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"Starting provider CLI\r\n");
+    runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
+        true,
+    );
+    let exit_hold = serde_json::to_value(&runtime.provider_quota_holds[&window_id])
+        .expect("exit evidence JSON");
+    assert_eq!(exit_hold["evidence"]["screen_region"], "provider_response");
+    assert_eq!(
+        exit_hold["evidence"]["matched_pattern"],
+        "codex_usage_limit"
+    );
+}
+
+/// Issue #5037: neither full usage nor persistence authenticates a quotation
+/// (including the incident's Claude wording printed by a Codex agent).
+#[test]
+fn quoted_or_other_provider_notices_never_hold_a_codex_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    for screen in [
+        r#"{"body":"旧 Claude PM pane: You've hit your weekly limit · resets Oct 8, 6am"}"#,
+        "```text\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n  to purchase more credits or try again at Oct 8, 2026 6am.\n```",
+        CLAUDE_USAGE_LIMIT_SCREEN,
+    ] {
+        let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+        runtime.set_provider_usage_accounts(vec![codex_usage_account(100.0, true)]);
+        for now in ["2026-10-05T05:31:32Z", "2026-10-05T05:36:32Z"] {
+            runtime.observe_provider_quota_notice(&window_id, Some(screen), instant(now));
+            assert!(!runtime.provider_quota_holds.contains_key(&window_id), "{screen}");
+            assert!(!runtime.provider_quota_candidates.contains_key(&window_id), "{screen}");
+        }
+        runtime.handle_runtime_status_with_exit_confirmation(
+            window_id.clone(),
+            WindowProcessStatus::Stopped,
+            Some(screen.to_string()),
+            true,
+        );
+        assert!(!runtime.provider_quota_holds.contains_key(&window_id),
+            "a terminal status must not authenticate the quotation: {screen}");
+    }
 }
 
 // Issue #3927 (SPEC #3340 T-624 / AS-40〜42 / FR-045〜046): the Tao thread

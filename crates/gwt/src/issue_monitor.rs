@@ -3080,7 +3080,8 @@ pub struct IssueMonitorProviderQuotaHoldEvidence {
     /// RFC3339 instant the hold was recorded. Compared against a release's
     /// `released_at` to decide whether that release fences this hold.
     pub recorded_at: String,
-    /// `screen_notice` (a provider notice on the pane), `usage_poller` (the
+    /// `screen_notice` (a provider notice on the pane), `failure_notice` (a
+    /// native provider failure message), `usage_poller` (the
     /// legacy poller-driven release), or `unrecorded` for a path that gave no
     /// detail.
     pub source: String,
@@ -3092,9 +3093,14 @@ pub struct IssueMonitorProviderQuotaHoldEvidence {
     pub issue_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
-    /// The screen tail the notice was matched in.
+    /// The rendered screen, preserving quote boundaries and indentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_text: Option<String>,
+    /// Native CLI region and refusal pattern; absent on legacy evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_pattern: Option<String>,
     /// The poller's `UsageState` for the agent's provider (`ok`, `stale`, ...),
     /// `None` when the poller had no reading for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3132,12 +3138,19 @@ pub struct IssueMonitorProviderQuotaAttempt {
 impl IssueMonitorProviderQuotaHoldEvidence {
     /// Evidence for a hold read from a provider notice on `window_id`'s screen.
     pub fn screen_notice(recorded_at: &str, window_id: &str, screen_text: &str) -> Self {
+        let matched = gwt_core::usage::limit_notice::detect_provider_limit_screen_match(
+            screen_text,
+            &chrono::Local::now(),
+        );
         Self {
             recorded_at: recorded_at.to_string(),
             source: "screen_notice".to_string(),
             issue_number: None,
             window_id: Some(window_id.to_string()),
-            screen_text: Some(screen_text.trim().to_string()).filter(|text| !text.is_empty()),
+            screen_text: Some(screen_text.trim_end().to_string())
+                .filter(|text| !text.trim().is_empty()),
+            screen_region: matched.as_ref().map(|matched| matched.region.to_string()),
+            matched_pattern: matched.as_ref().map(|matched| matched.pattern.to_string()),
             account_id: None,
             poller_observed_at: None,
             poller_state: None,
@@ -10016,6 +10029,8 @@ impl IssueMonitorState {
             issue_number: None,
             window_id: None,
             screen_text: None,
+            screen_region: None,
+            matched_pattern: None,
             account_id: None,
             poller_observed_at: None,
             poller_state: None,
@@ -16451,6 +16466,8 @@ impl IssueMonitorState {
                 issue_number: Some(issue_number),
                 window_id: Some(window_id.to_string()),
                 screen_text: None,
+                screen_region: None,
+                matched_pattern: None,
                 account_id: None,
                 poller_observed_at: None,
                 poller_state: None,
@@ -36278,6 +36295,8 @@ mod tests {
                  to purchase more credits or try again at Sep 7th, 2026 12:58 PM."
                     .to_string(),
             ),
+            screen_region: None,
+            matched_pattern: None,
             account_id: None,
             poller_observed_at: None,
             poller_state: Some("ok".to_string()),
