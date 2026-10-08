@@ -4779,6 +4779,27 @@ button.workspace-board-ref:focus-visible {
   display: none;
 }
 
+:root[data-theme] .settings-supported-agents {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  color: var(--color-text);
+}
+
+:root[data-theme] .settings-supported-agents th,
+:root[data-theme] .settings-supported-agents td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+:root[data-theme] .settings-supported-agents th {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  font-weight: 600;
+}
+
 :root[data-theme] .settings-section {
   display: flex;
   flex-direction: column;
@@ -7091,6 +7112,24 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-surface-elevated);
   color: var(--color-text);
 }
+.agents-tab { display: flex; flex-shrink: 0; }
+.agents-tabs .agents-tab-close {
+  align-self: center;
+  padding: var(--space-1);
+  border-bottom: 0;
+}
+.agent-tile__open {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.agent-tile h3 { flex: 1; }
+.agent-tile__open[hidden] { display: none; }
+.agent-tile__open:focus-visible { outline: 2px solid var(--color-focus-ring); }
 .agents-grid.is-single { flex: 1; grid-auto-rows: minmax(0, 1fr); }
 /* Stack tab panels so new background terminals can measure their initial grid
    without painting or accepting input before their tab is selected. */
@@ -7107,6 +7146,8 @@ button.workspace-board-ref:focus-visible {
   overflow: hidden;
 }
 .agent-tile:focus-within { border-color: var(--color-focus-ring); }
+.agents-surface--preview .agent-tile:focus-visible { outline: 2px solid var(--color-focus-ring); }
+.agents-surface--preview .agents-toolbar span { color: var(--color-text-muted); font-size: var(--type-xs); }
 .agent-tile__header { border-bottom: 1px solid var(--color-border); }
 .issue-preview-mode { grid-column: 1 / -1; }
 .agent-tile__header span, .issue-preview-mode { color: var(--color-text-muted); font-size: var(--type-xs); }

@@ -128,6 +128,16 @@ struct ObservedLockHolder {
 }
 
 impl NamedFileLock {
+    /// Describe an already-observed contention without acquiring the OS lock.
+    /// Holder metadata is observational and may be missing or stale.
+    pub fn contention_error(path: &Path, operation: &str) -> io::Error {
+        named_lock_error(
+            &named_lock_holder_path(path),
+            operation,
+            io::Error::new(io::ErrorKind::WouldBlock, "file lock contended"),
+        )
+    }
+
     /// Wait for ownership using the ambient operation deadline.
     pub fn acquire(path: &Path, operation: &str) -> io::Result<Self> {
         Self::acquire_observed(path, operation, || {})
@@ -284,13 +294,25 @@ fn open_named_lock_holder(path: &Path) -> io::Result<File> {
 
 fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io::Error {
     // Bound diagnostic IO, and do not require valid metadata from old writers.
-    let holder = std::fs::symlink_metadata(holder_path)
-        .ok()
-        .filter(|metadata| metadata.file_type().is_file())
-        .and_then(|_| open_named_lock_holder(holder_path).ok())
-        .and_then(|reader| {
-            serde_json::from_reader::<_, ObservedLockHolder>(reader.take(4096)).ok()
-        });
+    // Issue #4975 AC-1: four distinct outcomes used to collapse into the same
+    // `pid=unknown`, so a reader could not tell "another process holds this and
+    // never wrote its metadata" from "there is no holder file at all". The
+    // caller has to pick a different remedy for each, so the reason is carried
+    // alongside the unknown pid rather than replacing it (`pid=unknown` stays,
+    // because existing readers match on it).
+    let (holder, holder_unknown_reason) = match std::fs::symlink_metadata(holder_path) {
+        Err(_) => (None, "file_absent"),
+        Ok(metadata) if !metadata.file_type().is_file() => (None, "not_a_regular_file"),
+        Ok(_) => match open_named_lock_holder(holder_path) {
+            Err(_) => (None, "metadata_unreadable"),
+            Ok(reader) => {
+                match serde_json::from_reader::<_, ObservedLockHolder>(reader.take(4096)) {
+                    Err(_) => (None, "metadata_unparsable"),
+                    Ok(holder) => (Some(holder), "identified"),
+                }
+            }
+        },
+    };
     let pid = holder
         .as_ref()
         .map(|holder| holder.pid.to_string())
@@ -306,11 +328,12 @@ fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io
     tracing::warn!(
         operation, observed_holder_pid = %pid,
         observed_holder_operation = holder_operation,
-        observed_holder_acquired_at = acquired_at, %error,
+        observed_holder_acquired_at = acquired_at,
+        holder_unknown_reason, %error,
         "named file lock acquisition failed or contended; holder metadata is observational"
     );
     io::Error::new(error.kind(), format!(
-        "{error}; operation={operation}; observed holder pid={pid}, operation={holder_operation}, acquired_at={acquired_at} (metadata may be stale)"
+        "{error}; operation={operation}; observed holder pid={pid}, operation={holder_operation}, acquired_at={acquired_at}, holder_unknown_reason={holder_unknown_reason} (metadata may be stale)"
     ))
 }
 
@@ -475,6 +498,56 @@ mod tests {
         .join()
         .unwrap();
         FileExt::unlock(&owner).unwrap();
+    }
+
+    /// Issue #4975 AC-1/AC-4: when the holder cannot be named, the error says
+    /// which of the reasons it was.
+    ///
+    /// `pid=unknown` alone sent the PM looking for a process that may not
+    /// exist: the same text covered "another process holds this and wrote no
+    /// metadata" and "there is no holder file at all", which need different
+    /// remedies. The pid stays `unknown` — readers match on it — and the reason
+    /// rides alongside.
+    #[test]
+    fn issue_4975_an_unnameable_holder_reports_why_it_could_not_be_named() {
+        let directory = tempfile::tempdir().expect("tempdir");
+
+        // No holder metadata was ever written: the file is simply absent.
+        let absent = directory.path().join("absent-lock");
+        let owner = File::create(&absent).unwrap();
+        owner.lock_exclusive().unwrap();
+        let contender = absent.clone();
+        std::thread::spawn(move || {
+            let error = NamedFileLock::try_acquire(&contender, "try").unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains("pid=unknown"), "{text}");
+            assert!(
+                text.contains("holder_unknown_reason=file_absent"),
+                "an absent holder file must be distinguishable: {text}"
+            );
+        })
+        .join()
+        .unwrap();
+        FileExt::unlock(&owner).unwrap();
+
+        // Metadata exists but is not JSON the reader accepts.
+        let garbled = directory.path().join("garbled-lock");
+        let garbled_owner = File::create(&garbled).unwrap();
+        garbled_owner.lock_exclusive().unwrap();
+        std::fs::write(named_lock_holder_path(&garbled), b"not json").unwrap();
+        let contender = garbled.clone();
+        std::thread::spawn(move || {
+            let error = NamedFileLock::try_acquire(&contender, "try").unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains("pid=unknown"), "{text}");
+            assert!(
+                text.contains("holder_unknown_reason=metadata_unparsable"),
+                "unreadable metadata is not the same as no metadata: {text}"
+            );
+        })
+        .join()
+        .unwrap();
+        FileExt::unlock(&garbled_owner).unwrap();
     }
 
     #[test]

@@ -68,7 +68,7 @@ the generic matrix in this skill. The matrix here is the fallback frame.
 |---|---|---|
 | `--mode quick` (default) | TDD loop, narrow check during implementation | Only surfaces touched by uncommitted / working-tree changes; the narrowest representative command per runner (e.g. single-package test invocation). Skip heavy integration / E2E / visual unless the diff explicitly touches them. |
 | `--mode full` | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface is in scope — by the diff, or by acceptance-aware escalation (`references/surface-taxonomy.md`). User Verification Handoff is required (see below). |
-| `--mode pre-pr` | gwt-manage-pr before PR create / update | `full` matrix + release-flow tests when a release surface changed; visual / UI regression always included if any UI surface is in scope by diff or by acceptance-aware escalation. User Verification Handoff is required. |
+| `--mode pre-pr` | gwt-manage-pr before PR create / update | Use the approved CI-backed local subset when the project supports it; otherwise use the `full` matrix. Keep acceptance tests, checks absent from required CI, and all existing visual / user-verification gates. |
 | `--headed` (flag) | Manual UI / design verification | When supplied alongside any mode that runs a browser-based test runner (Playwright / Cypress / Selenium / WinAppDriver / Unity Editor headed), launch the runner in headed mode so the user can watch. Default is headless to match CI. |
 
 Additional flag:
@@ -78,6 +78,34 @@ Additional flag:
   Default is **off**; `--mode full` and `--mode pre-pr` require user
   verification unless this flag is set. The reason is recorded in the
   evidence bundle as `User Verification: skipped(--skip-user-check)`.
+
+## CI-backed pre-PR verification
+
+A project's approved delivery policy may delegate heavyweight checks to CI.
+Only checks covered by `required_status_checks.contexts` may leave the local
+matrix. A job merely running in CI is insufficient: optional failures do not
+prevent auto-merge. Preserve the existing Ready, review, freshness, integrity,
+and Agent Visual Check gates.
+
+For the gwt repository, register the explicit policy with:
+
+```json
+{"schema_version":1,"operation":"verify.plan","params":{"derive":true,"mode":"pre-pr","acceptance_commands":["cargo test -p gwt --test ci_contracts ci_pre_pr_contract_test::"],"commands":[]}}
+```
+
+Replace the example acceptance test with the tests that fix the current
+Issue's AC. `acceptance_commands` is mandatory for a nontrivial gwt change.
+`commands` adds checks that required CI does not cover, including nominated
+headed E2E for UI changes. Nothing in those explicit lists is discarded.
+Run the entire returned matrix through `verify.run`.
+
+The local subset keeps formatting, changed-crate clippy, the AC tests, and
+checks absent from required CI. Derivation reads live branch protection and
+validates the local workflow-to-required-context correspondence. Missing
+contexts, workflow jobs, or failure propagation refuse delegation with a
+specific diagnostic. Repair the CI contract, or register `mode: full` and run
+the complete local matrix. Other projects retain full derivation. A reduced
+local PASS means the pre-PR gate passed; delivery still waits for required CI.
 
 ## Launch mode (autonomous vs interactive)
 
@@ -201,6 +229,15 @@ canonical wrapper, and rerun `verify.run` for fresh headed evidence. A local
 argument-repair wrapper does not establish that the canonical defect is fixed.
 
 ## Invocation Sequence
+
+Canonical Heavy Cargo admission uses a bounded host slot pool (#5082).
+Independent worktrees and effective Cargo target directories may run
+concurrently, subject to CPU/memory capacity and disk reservations. Set
+`[verification] slots` or `disk_budget_bytes` in the global config to override
+the defaults. The same worktree or target remains serialized; unknown wrappers
+and older exclusive holders serialize against the entire pool. Children use
+isolated temporary directories. `verify.lease.status` lists capacity,
+running/available slots, every holder's ETA, and the shared FIFO queue.
 
 ```text
 agent → /gwt:gwt-verify [--mode quick|full|pre-pr] [--headed] [--skip-user-check]
@@ -481,11 +518,9 @@ lease acquisition loop.
 
 `verify.run` owns its admission and bounded wait through
 `params.max_wait_secs` (default 300, hard cap 1500). While waiting,
-`verify.lease.status` lists the run under `pending`. A deferred result from
-the first command's admission timeout writes no verification record; a timeout
-after at least one command ran writes an incomplete, non-PASS deferred record
-that retains the completed commands' results; a retry reruns the entire matrix
-(no partial resume). Inspect the
+`verify.lease.status` lists the run under `pending`. A timeout in the
+first remaining command's admission writes no replacement record and preserves
+any predecessor; a later timeout retains incomplete, non-PASS results. Inspect the
 reported holder and wait reason, then retry when contention is resolved;
 there is no fixed retry schedule. A deferral is not a spent attempt and
 there is no attempt cap: the refusal keeps your turn reserved
@@ -498,6 +533,20 @@ holder's run) and `estimated_remaining_ms`. If a holder persists without a live
 verification workload, report its run / PID and timing evidence to the
 PM. `verify.lease.release` remains available to drain a legacy holder
 without killing its process.
+
+Retry with the identical full requested matrix, never a caller-built subset.
+Automatic resume requires valid admission-deferred evidence and exact matches
+for owner, session, execution authority digest, verification plan content hash,
+source fingerprint, requested commands (including order and duplicates), and
+headed_e2e_commands. Every preceding result must have raw PASS and no termination signal.
+Failed, killed, crashed, unreadable or mismatched records start a fresh run;
+registered plan/context mismatches still require `verify.plan`.
+Resume references the immutable predecessor by record id/content hash, keeps
+the original start timestamp (`started_at`), and copies measured per-command
+headed/nextest/admission evidence. Run outstanding Light commands first,
+preserve Heavy commands' original relative order, and keep artifact restoration last.
+The full registered matrix and required headed Chromium evidence in dark/light
+must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
 
 ### gwtd bootstrap order
 

@@ -221,6 +221,7 @@ pub enum IssueCommand {
     },
     MonitorConfigSet {
         project_root: Option<std::path::PathBuf>,
+        allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
@@ -372,6 +373,11 @@ pub enum IssueCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
     Current,
+    /// Independent canonical-record/remote-head diagnostic; never admits a PR mutation.
+    HeadCheck {
+        base: String,
+        head: Option<String>,
+    },
     /// `pr.list` with the optional PM thresholds from Issue #3868 (AC-5 /
     /// AC-6); `None` keeps the crate defaults.
     List {

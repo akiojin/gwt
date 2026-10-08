@@ -17,8 +17,8 @@ mod view_model;
 use options::*;
 
 pub use options::{
-    agent_setup_affordance, build_agent_options, build_builtin_agent_options,
-    default_wizard_version_cache_path, load_agent_options, AgentSetupAffordance, AgentSetupKind,
+    agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,
+    AgentSetupAffordance, AgentSetupKind,
 };
 pub use profiles::{
     load_previous_launch_profile, load_previous_launch_profiles,
@@ -107,10 +107,7 @@ pub enum LaunchWizardStep {
     WindowsShell,
     DockerServiceSelect,
     DockerLifecycle,
-    VersionSelect,
     ExecutionMode,
-    SkipPermissions,
-    CodexFastMode,
 }
 
 /// SPEC-2014 FR-126/FR-128: progress rail クリックジャンプ（GotoStep）の対象フェーズ。
@@ -290,12 +287,21 @@ pub struct LaunchWizardHolderDecisionView {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LaunchWizardAgentSetupView {
     pub agent_id: String,
-    /// `"install"` or `"configure"`.
+    /// `"install"`, `"update"` or `"configure"`.
     pub kind: String,
     pub title: String,
     pub detail: String,
     /// Button label; absent when gwt cannot run the setup itself.
     pub action_label: Option<String>,
+    pub pending: bool,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentUpdateState {
+    agent_id: String,
+    pending: bool,
+    status: String,
 }
 
 /// Issue #4079 AC-2: what an Issue Monitor Agent Settings save will do to the
@@ -384,8 +390,6 @@ pub struct LaunchWizardView {
     pub selected_docker_service: Option<String>,
     pub docker_lifecycle_options: Vec<LaunchWizardOptionView>,
     pub selected_docker_lifecycle: String,
-    pub version_options: Vec<LaunchWizardOptionView>,
-    pub selected_version: String,
     pub execution_mode_options: Vec<LaunchWizardOptionView>,
     pub selected_execution_mode: String,
     pub skip_permissions: bool,
@@ -395,7 +399,6 @@ pub struct LaunchWizardView {
     pub show_windows_shell: bool,
     pub show_docker_service: bool,
     pub show_docker_lifecycle: bool,
-    pub show_version: bool,
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
     pub show_fast_mode: bool,
@@ -473,7 +476,6 @@ pub struct AgentOption {
     pub name: String,
     pub available: bool,
     pub installed_version: Option<String>,
-    pub versions: Vec<String>,
     pub custom_agent: Option<gwt_agent::CustomCodingAgent>,
 }
 
@@ -487,7 +489,6 @@ pub struct QuickStartEntry {
     pub tool_label: String,
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    pub version: Option<String>,
     pub resume_session_id: Option<String>,
     pub live_window_id: Option<String>,
     pub skip_permissions: bool,
@@ -502,7 +503,6 @@ pub struct LaunchWizardPreviousProfile {
     pub agent_id: String,
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    pub version: Option<String>,
     pub session_mode: gwt_agent::SessionMode,
     pub skip_permissions: bool,
     /// Issue #4228: Fast Mode for `agent_id`. The wizard restores it only onto
@@ -589,7 +589,6 @@ struct AgentLaunchDraft {
     /// restored selection (preserve/clamp on model change) rather than an
     /// untouched model default (follow the target model's default).
     reasoning_explicit: bool,
-    version: String,
     mode: String,
     resume_session_id: Option<String>,
     skip_permissions: bool,
@@ -665,13 +664,10 @@ pub struct LaunchWizardContext {
     /// `None` for Branches-window callers, preserving non-breaking behavior.
     pub linked_issue_kind: Option<LinkedIssueKind>,
     /// Whether the locally installed Claude Code can offer the opt-in
-    /// `ultracode` reasoning option. Used only when selected version is
-    /// `installed`; npm-backed `latest` and pinned versions are evaluated from
-    /// the selected version string at render time. Defaults to `false`.
+    /// `ultracode` reasoning option. Defaults to `false`.
     pub ultracode_supported: bool,
     /// Whether Claude Code dynamic workflows are enabled in the current
-    /// environment. This gate applies to installed, `latest`, and pinned
-    /// versions.
+    /// environment.
     pub claude_workflows_enabled: bool,
 }
 
@@ -975,8 +971,14 @@ mod autonomous_launch_tests {
 #[derive(Debug, Clone)]
 pub enum LaunchWizardCompletion {
     Launch(Box<LaunchWizardLaunchRequest>),
+    UpdateAgent {
+        agent_id: String,
+        config: Box<ShellLaunchConfig>,
+    },
     ResolveRuntime(Box<LaunchWizardLaunchRequest>),
-    FocusWindow { window_id: String },
+    FocusWindow {
+        window_id: String,
+    },
     Cancelled,
 }
 
@@ -1064,9 +1066,6 @@ pub enum LaunchWizardAction {
     SetDockerLifecycle {
         intent: gwt_agent::DockerLifecycleIntent,
     },
-    SetVersion {
-        version: String,
-    },
     SetExecutionMode {
         mode: String,
     },
@@ -1149,7 +1148,6 @@ pub struct LaunchWizardState {
     /// reasoning stop from an explicit user or restored selection so model
     /// changes can pick the target default vs. preserve/clamp respectively.
     reasoning_explicit: bool,
-    pub version: String,
     pub mode: String,
     pub resume_session_id: Option<String>,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
@@ -1179,6 +1177,7 @@ pub struct LaunchWizardState {
     /// (Hermes credentials, OpenCode provider auth, ...). Drives the
     /// `configure` setup affordance; never blocks launch.
     pub needs_configuration: std::collections::BTreeSet<String>,
+    agent_update: Option<AgentUpdateState>,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.
@@ -1202,6 +1201,9 @@ pub struct LaunchWizardState {
     /// setting came from. Recorded on the launch so a forced skip names the
     /// setting it overrode instead of appearing out of nowhere.
     permission_launch_source: gwt_agent::PermissionLaunchSource,
+    /// Monitor profile editing and silent launches retain their own preferences.
+    /// Ordinary wizard launches interpret legacy inputs as skip on / Fast off.
+    preserve_profile_launch_preferences: bool,
     manual_setup_initialized: bool,
     /// SPEC-2014 FR-126/FR-127: ManualSetup で Runtime ステップから Confirm へ
     /// 進んだか。Runtime(編集) と Confirm(サマリ+Launch) を区別する。QuickStart /

@@ -5,7 +5,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const { access, copyFile, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } = require('node:fs/promises');
 const { createWriteStream, realpathSync } = require('node:fs');
 const { homedir, tmpdir } = require('node:os');
-const { join, resolve } = require('node:path');
+const { delimiter, join, resolve } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const { gotoLiveGwt, openLiveLaunchWizardForBranch, sendLiveGwtEvent } = require('./_helpers/live-gwt.ts');
 
@@ -13,6 +13,8 @@ const ROOT = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd());
 const OWNER = 4964;
 const BRANCH = `work/issue-${OWNER}`;
 const OPT_IN = process.env.GWT_PLAYWRIGHT_MANUAL_SUCCESSOR_RETRY === '1';
+const WINDOWS = process.platform === 'win32';
+const EXE = WINDOWS ? '.exe' : '';
 let fixtureBinaries;
 
 async function compileFixtures() {
@@ -55,11 +57,11 @@ async function compileFixtures() {
   const linker = cargoConfig.match(/\[target\.x86_64-pc-windows-msvc\][\s\S]*?linker\s*=\s*"([^"]+)"/)?.[1];
   const result = {};
   for (const name of ['seed', 'provider']) {
-    const binary = join(output, `${name}.exe`);
+    const binary = join(output, `${name}${EXE}`);
     const args = ['--edition=2021', '--crate-name', `manual_successor_${name}`,
       join(ROOT, 'crates/gwt/playwright/fixtures', `manual-successor-${name}.rs`),
       '-L', `dependency=${deps}`, ...nativePaths, '--extern', `serde_json=${jsonLibrary}`];
-    if (linker) args.push('-C', `linker=${linker}`);
+    if (WINDOWS && linker) args.push('-C', `linker=${linker}`);
     if (name === 'seed') args.push('--extern', `gwt=${gwtLibrary}`);
     args.push('-o', binary);
     const run = spawnSync('rustc', args, { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 120000 });
@@ -70,13 +72,18 @@ async function compileFixtures() {
 }
 
 function exactProviderProcess(pid, expectedPath) {
-  const run = spawnSync('pwsh', ['-NoProfile', '-Command',
+  const run = WINDOWS ? spawnSync('pwsh', ['-NoProfile', '-Command',
     `$fixtureProcess = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; if ($fixtureProcess) { $fixtureProcess.Path }`],
-  { encoding: 'utf8', windowsHide: true });
+  { encoding: 'utf8', windowsHide: true })
+    : spawnSync('ps', ['-p', String(Number(pid)), '-o', 'comm='], { encoding: 'utf8' });
   if (!run.stdout.trim() && !run.stderr.trim()) return false;
   if (run.status !== 0) throw new Error(`Provider process inspection failed: ${run.stderr}`);
   const path = run.stdout.trim();
-  return Boolean(path && realpathSync.native(path).toLowerCase() === realpathSync.native(expectedPath).toLowerCase());
+  // macOS reports a reaped executable as <defunct> until its parent waits.
+  if (!path || (!WINDOWS && path === '<defunct>')) return false;
+  const actual = realpathSync.native(path);
+  const expected = realpathSync.native(expectedPath);
+  return WINDOWS ? actual.toLowerCase() === expected.toLowerCase() : actual === expected;
 }
 
 async function startFixture(info) {
@@ -84,18 +91,18 @@ async function startFixture(info) {
   const project = join(home, 'project');
   const bin = join(home, 'bin');
   const state = join(home, '.gwt');
-  const gwt = join(ROOT, 'target/debug/gwt.exe');
-  const gwtd = join(ROOT, 'target/debug/gwtd.exe');
+  const gwt = join(ROOT, `target/debug/gwt${EXE}`);
+  const gwtd = join(ROOT, `target/debug/gwtd${EXE}`);
   await Promise.all([mkdir(project), mkdir(bin), mkdir(state), mkdir(join(home, '.codex')), access(gwt), access(gwtd)]);
-  await Promise.all(['codex', 'gh'].map(name => copyFile(fixtureBinaries.provider, join(bin, `${name}.exe`))));
+  await Promise.all(['codex', 'gh'].map(name => copyFile(fixtureBinaries.provider, join(bin, `${name}${EXE}`))));
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (key.startsWith('GWT_') || key.startsWith('CODEX_') || key.startsWith('CLAUDE_')
       || ['GH_TOKEN', 'GITHUB_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY'].includes(key)) delete env[key];
   }
   Object.assign(env, { HOME: home, USERPROFILE: home, CODEX_HOME: join(home, '.codex'),
-    PATH: `${bin};${process.env.PATH}`, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1',
-    GWT_HOOK_BIN: 'gwtd', GWT_PROJECT_ROOT: project, GWT_TEST_GH: join(bin, 'gh.exe') });
+    PATH: `${bin}${delimiter}${process.env.PATH}`, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1',
+    GWT_HOOK_BIN: 'gwtd', GWT_PROJECT_ROOT: project, GWT_TEST_GH: join(bin, `gh${EXE}`) });
   const remote = join(home, 'origin.git');
   // This disposable fixture project does not create a branch/worktree in ROOT.
   for (const args of [['init', '-q', '-b', BRANCH],
@@ -109,7 +116,7 @@ async function startFixture(info) {
   try {
     const runtime = join(homedir(), '.gwt/runtime');
     await access(runtime);
-    await symlink(runtime, join(state, 'runtime'), 'junction');
+    await symlink(runtime, join(state, 'runtime'), WINDOWS ? 'junction' : 'dir');
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   function rpc(operation, params = {}) {
     const run = spawnSync(gwtd, [], { cwd: project, env, encoding: 'utf8', timeout: 30000, windowsHide: true,
@@ -139,14 +146,22 @@ async function startFixture(info) {
   const audits = [];
   function hooks(repair) {
     const operation = repair ? 'hook.doctor' : 'hook.health';
-    const envelope = rpc(operation, { ...(repair ? { repair: true } : {}),
+    let envelope = rpc(operation, { ...(repair ? { repair: true } : {}),
       expected_hook_bin: 'gwtd', runtime_state_path: join(state, 'missing-runtime.json') });
+    if (repair) {
+      audits.push({ operation, result: envelope.output });
+      const trust = rpc('hook.register_codex_managed_hook_trust', {
+        project_root: project, codex_config: join(home, '.codex/config.toml'), codex_hook_discovery: 'both',
+      });
+      audits.push({ operation: 'hook.register_codex_managed_hook_trust', result: trust.output });
+      envelope = rpc('hook.health', { expected_hook_bin: 'gwtd', runtime_state_path: join(state, 'missing-runtime.json') });
+    }
     const value = typeof envelope.output === 'string' ? JSON.parse(envelope.output) : envelope.output;
-    const health = repair ? value.health : value;
+    const health = value;
     const blocking = (health.issues || []).filter(issue => !(issue.startsWith('managed hook binary missing: ') && issue.endsWith(' uses gwtd'))
       && !(issue.startsWith('managed hook failure: ') && /state=fail-open(?: |$)/.test(issue)));
     if (health.status === 'inactive' || blocking.length) throw new Error(`Hook audit failed: ${JSON.stringify(health)}`);
-    audits.push({ operation, health });
+    audits.push({ operation: 'hook.health', health });
   }
   hooks(true);
   const logPath = join(home, 'gwt.log');
@@ -162,7 +177,7 @@ async function startFixture(info) {
   async function stop() {
     if (host.exitCode === null && host.signalCode === null) host.kill('SIGTERM');
     for (const entry of await launches()) {
-      if (exactProviderProcess(entry.pid, join(bin, 'codex.exe'))) {
+      if (exactProviderProcess(entry.pid, join(bin, `codex${EXE}`))) {
         try { process.kill(entry.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
       }
     }
@@ -186,7 +201,7 @@ async function startFixture(info) {
     await info.attach('isolated-fixture', { body: JSON.stringify({ home, project, url, logPath, host_pid: host.pid, checkout: ROOT }),
       contentType: 'application/json' });
     return { home, project, url, inspect, launches, stop,
-      providerAlive: pid => exactProviderProcess(pid, join(bin, 'codex.exe')),
+      providerAlive: pid => exactProviderProcess(pid, join(bin, `codex${EXE}`)),
       ready: session => writeFile(join(home, `ready-${session}`), 'ready') };
   } catch (error) { await stop(); throw error; }
 }
@@ -213,8 +228,7 @@ async function launch(page) {
   await action(page, { kind: 'set_agent', agent_id: 'codex' });
   await action(page, { kind: 'set_execution_mode', mode: 'normal' });
   await action(page, { kind: 'set_linked_issue', issue_number: OWNER });
-  await action(page, { kind: 'set_skip_permissions', enabled: true });
-  let state = await action(page, { kind: 'set_version', version: 'installed' });
+  let state = await action(page, { kind: 'set_skip_permissions', enabled: true });
   for (let step = 0; step < 12 && state.wizard; step++) {
     expect(state.wizard.error).toBeFalsy();
     if (state.wizard.selected_runtime_target !== 'host' && state.wizard.runtime_target_options?.some(option => option.value === 'host')) {
@@ -234,8 +248,8 @@ async function windows(page) {
 }
 const latestAttempt = state => state.ledger.continuation_attempts.at(-1);
 
-test.describe('Manual successor retry (isolated Windows checkout)', () => {
-  test.skip(!OPT_IN || process.platform !== 'win32', 'Set GWT_PLAYWRIGHT_MANUAL_SUCCESSOR_RETRY=1 on Windows after building gwt/gwtd');
+test.describe('Manual successor retry (isolated checkout)', () => {
+  test.skip(!OPT_IN || !['win32', 'darwin'].includes(process.platform), 'Set GWT_PLAYWRIGHT_MANUAL_SUCCESSOR_RETRY=1 on macOS/Windows after building gwt/gwtd');
   test.setTimeout(240000);
   test.beforeAll(async () => { fixtureBinaries = await compileFixtures(); });
 
@@ -299,7 +313,14 @@ test.describe('Manual successor retry (isolated Windows checkout)', () => {
       const activated = fixture.inspect();
       expect(activated.ledger.generations).toHaveLength(2);
       expect(activated.ledger.continuation_attempts.map(attempt => attempt.status)).toEqual(['prepared', 'aborted', 'prepared', 'activated']);
-      expect(JSON.parse(await readFile(join(fixture.home, `hook-${second.session_id}.json`), 'utf8')).success).toBe(true);
+      await expect.poll(async () => {
+        try {
+          return JSON.parse(await readFile(join(fixture.home, `hook-${second.session_id}.json`), 'utf8')).success;
+        } catch (error) {
+          if (error.code === 'ENOENT' || error instanceof SyntaxError) return false;
+          throw error;
+        }
+      }, { timeout: 30000 }).toBe(true);
       await info.attach(`active-${theme}`, { body: await page.screenshot(), contentType: 'image/png' });
       await info.attach('final-ledger', { body: JSON.stringify(activated), contentType: 'application/json' });
       expect(errors, 'real backend console/page errors').toEqual([]);

@@ -30,10 +30,6 @@ pub(super) fn terminal_preview_text(contents: &str) -> String {
 /// persistent window detail when an agent process errors out.
 const AGENT_ERROR_TAIL_LINES: usize = 3;
 const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
-/// Issue #3616: how many trailing screen lines are searched for a provider
-/// quota notice. Wider than the error tail because a CLI can print a prompt or
-/// blank frame after the notice, and the notice itself soft-wraps.
-const QUOTA_NOTICE_TAIL_LINES: usize = 8;
 
 /// Issue #4584: how much of a pane's screen is read for a turn-ending API
 /// error. Wider than the quota window because the CLI draws its own "done"
@@ -1152,21 +1148,18 @@ impl AppRuntime {
         // Issue #3923 AC-3: a notice left on the final screen is not a block
         // while the poller reads the account as usable — the pane exited for
         // some other reason and the text is stale.
-        let quota_notice = self
+        let quota_match = self
             .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
-            .filter(|notice| self.released_provider_quota_notices.get(&id) != Some(notice));
-        match quota_notice.as_ref() {
-            Some(notice) => {
+            .filter(|(notice, _)| self.released_provider_quota_notices.get(&id) != Some(notice));
+        let quota_notice = quota_match.as_ref().map(|(notice, _)| notice);
+        match quota_match.as_ref() {
+            Some((notice, screen_text)) => {
                 let recorded_at =
                     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                let screen_text = self
-                    .screen_tail(&id, QUOTA_NOTICE_TAIL_LINES, "\n")
-                    .or_else(|| detail.clone())
-                    .unwrap_or_default();
                 let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
                     &recorded_at,
                     &id,
-                    &screen_text,
+                    screen_text,
                 )
                 .with_poller(quota_agent_id.as_deref(), &self.provider_usage_accounts);
                 self.provider_quota_holds.insert(
@@ -1186,7 +1179,7 @@ impl AppRuntime {
         // an empty Error window gives no clue why. Capture the final screen
         // tail into the persistent detail before the state is gone; the raw
         // output stays available in logs.
-        let detail = if let Some(notice) = quota_notice.as_ref() {
+        let detail = if let Some(notice) = quota_notice {
             Some(gwt_core::usage::describe_provider_limit_notice(
                 notice,
                 Some(provider_label(notice, quota_agent_id.as_deref()).as_str()),
@@ -1498,12 +1491,14 @@ impl AppRuntime {
         ) {
             return Vec::new();
         }
-        let notice = screen.and_then(|screen| {
-            gwt_core::usage::detect_provider_limit_notice(
-                screen,
-                &now.with_timezone(&chrono::Local),
-            )
-        });
+        let notice = screen
+            .and_then(|screen| {
+                gwt_core::usage::detect_provider_limit_notice(
+                    screen,
+                    &now.with_timezone(&chrono::Local),
+                )
+            })
+            .filter(|notice| notice.provider == self.quota_provider_for_window(window_id));
         let Some(notice) = notice else {
             self.provider_quota_candidates.remove(window_id);
             self.released_provider_quota_notices.remove(window_id);
@@ -1565,6 +1560,8 @@ impl AppRuntime {
             window_id = %window_id,
             agent_id = ?agent_id,
             screen_text = ?evidence.screen_text,
+            screen_region = ?evidence.screen_region,
+            matched_pattern = ?evidence.matched_pattern,
             poller_state = ?evidence.poller_state,
             poller_limit_reached = ?evidence.poller_limit_reached,
             poller_windows = ?evidence.poller_windows,
@@ -1696,8 +1693,25 @@ impl AppRuntime {
         window_id: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<OutboundEvent> {
-        let screen = self.screen_tail(window_id, QUOTA_NOTICE_TAIL_LINES, "\n");
+        // Issue #5037: trimming a tool result's indentation or dropping a
+        // code fence above the tail erases the very evidence that it is quoted.
+        let screen = self
+            .current_approval_screen(window_id)
+            .map(|(_, screen)| screen);
         self.observe_provider_quota_notice(window_id, screen.as_deref(), now)
+    }
+
+    pub(super) fn quota_provider_for_window(
+        &self,
+        window_id: &str,
+    ) -> Option<gwt_core::usage::UsageProvider> {
+        use gwt::window_state::ApprovalPromptProvider;
+        use gwt_core::usage::UsageProvider;
+        match self.approval_prompt_provider(window_id) {
+            ApprovalPromptProvider::Codex => Some(UsageProvider::Codex),
+            ApprovalPromptProvider::ClaudeCode => Some(UsageProvider::ClaudeCode),
+            ApprovalPromptProvider::Unsupported => None,
+        }
     }
 
     /// Issue #3616: re-check every pending candidate against its pane's current
@@ -1753,7 +1767,7 @@ impl AppRuntime {
         status: WindowProcessStatus,
         exit_confirmed: bool,
         detail: &Option<String>,
-    ) -> Option<gwt_core::usage::ProviderLimitNotice> {
+    ) -> Option<(gwt_core::usage::ProviderLimitNotice, String)> {
         if !exit_confirmed
             || !matches!(
                 status,
@@ -1771,10 +1785,12 @@ impl AppRuntime {
             haystack.push_str(detail);
             haystack.push('\n');
         }
-        if let Some(tail) = self.screen_tail(id, QUOTA_NOTICE_TAIL_LINES, "\n") {
-            haystack.push_str(&tail);
+        if let Some((_, screen)) = self.current_approval_screen(id) {
+            haystack.push_str(&screen);
         }
         gwt_core::usage::detect_provider_limit_notice(&haystack, &chrono::Local::now())
+            .filter(|notice| notice.provider == self.quota_provider_for_window(id))
+            .map(|notice| (notice, haystack))
     }
 
     pub(crate) fn handle_runtime_hook_event(
@@ -1801,6 +1817,20 @@ impl AppRuntime {
         event: gwt::RuntimeHookEvent,
         publish_to_daemon: bool,
     ) -> Vec<OutboundEvent> {
+        if let Some(pending) = self
+            .pending_launch_completions
+            .values_mut()
+            .find(|pending| {
+                pending.session_id.as_deref().is_some_and(|session_id| {
+                    event.gwt_session_id.as_deref() == Some(session_id)
+                        || (event.source_event.as_deref() != Some("SessionStart")
+                            && event.agent_session_id.as_deref() == Some(session_id))
+                })
+            })
+        {
+            pending.early_hooks.push((event, publish_to_daemon));
+            return Vec::new();
+        }
         let project_scope = self
             .active_window_for_runtime_event(&event)
             .as_deref()
@@ -1890,29 +1920,6 @@ impl AppRuntime {
             });
         }
         if event.source_event.as_deref() == Some("SessionStart") {
-            let migration = stages.measure("tool_runtime_migration", || {
-                self.finalize_tool_runtime_migration_session_start(&window_id)
-            });
-            if let Err(error) = migration {
-                self.pending_tool_runtime_migrations.remove(&window_id);
-                self.stop_window_runtime_without_session_projection(&window_id);
-                if let Some(active) = self.active_agent_sessions.remove(&window_id) {
-                    let _ = gwt_agent::persist_session_status(
-                        &self.sessions_dir,
-                        &active.session_id,
-                        gwt_agent::AgentStatus::Interrupted,
-                    );
-                }
-                self.revoke_agent_capability_for_window(&window_id);
-                events.extend(self.launch_error_events_with_continue_work(
-                    window_id,
-                    format!(
-                        "authenticated SessionStart could not commit tool runtime provenance migration: {error}"
-                    ),
-                    None,
-                ));
-                return events;
-            }
             events.extend(stages.measure("fresh_execution_launch_finalization", || {
                 self.finalize_fresh_execution_launch_session_start(
                     &window_id,
@@ -2304,7 +2311,7 @@ fn publish_runtime_output_change(
         preview_text,
     });
 }
-fn publish_runtime_status_change(
+pub(super) fn publish_runtime_status_change(
     project_root: &Path,
     id: &str,
     status: WindowProcessStatus,

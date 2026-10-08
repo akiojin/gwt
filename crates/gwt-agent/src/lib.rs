@@ -18,12 +18,12 @@ pub mod prepare;
 pub mod presets;
 pub mod session;
 mod session_bridge;
+pub mod session_ledger;
 pub use session_bridge::{
     has_unresolved_host_bridge_fault, HostBridgeKind, SessionBridgeObservation,
 };
 pub mod store;
 pub mod types;
-pub mod version_cache;
 
 #[cfg(test)]
 pub(crate) mod test_capture;
@@ -48,10 +48,9 @@ pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::{CodexAuthRoot, CodexAuthRootOrigin, LaunchEnvironment};
 pub use launch::{
-    apply_host_bunx_cache_fast_path, canonical_launch_args, normalize_launch_args,
-    resolve_host_npx_fallback_executable, resolve_runner, AgentLaunchBuilder,
-    ExecutionLaunchIntent, HostBunxCacheFastPath, LaunchConfig, ManualLaunchRuntimeEvidence,
-    ManualLaunchRuntimeProof, ManualLaunchSuccessorPredecessor, ResolvedRunner,
+    canonical_launch_args, normalize_launch_args, AgentLaunchBuilder, ExecutionLaunchIntent,
+    LaunchConfig, ManualLaunchRuntimeEvidence, ManualLaunchRuntimeProof,
+    ManualLaunchSuccessorPredecessor,
 };
 pub use permission_mode::{
     decide as decide_permission_mode, provider_key, provider_skip_mapping,
@@ -60,17 +59,13 @@ pub use permission_mode::{
     ProviderSkipMapping,
 };
 pub use prepare::{
-    apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
     install_launch_gwt_bin_env_with_lookup, is_transient_launch_failure,
-    local_exact_package_cache_hit, missing_launcher_binary_detail,
-    pane_websocket_url_for_launch_runtime, prepare_agent_launch,
-    resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe_and_repair,
+    missing_launcher_binary_detail, pane_websocket_url_for_launch_runtime, prepare_agent_launch,
+    resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe,
     resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
     HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
-    HostRunnerProbeSingleFlight, PreparedAgentLaunch, PreparedProcessLaunch, ProbeShare,
-    ProbeSingleFlightKey, ResolvedHostPackagePlan, WindowsNpxCacheRepairCandidate,
-    TRANSIENT_LAUNCH_RETRY_HINT,
+    PreparedAgentLaunch, PreparedProcessLaunch, TRANSIENT_LAUNCH_RETRY_HINT,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,
@@ -80,7 +75,7 @@ pub use session::{
     active_launch_handshake_path, begin_session_active_launch_handshake_under_lease,
     begin_session_manual_handoff_under_lease, clear_session_active_launch_handshake_under_lease,
     clear_session_manual_handoff_under_lease, current_thread_holds_session_lease,
-    durable_session_launch_command, inspect_session_path, manual_handoff_path,
+    inspect_session_path, manual_handoff_path,
     mark_session_active_launch_handshake_child_spawned_under_lease, persist_agent_session_id,
     persist_session_completed_stop, persist_session_execution_binding, persist_session_exit,
     persist_session_hook_event, persist_session_hook_metadata_with_wait,
@@ -121,4 +116,3 @@ pub use types::{
     DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode, WindowsShellKind,
     WorkflowBypass,
 };
-pub use version_cache::{build_version_options, VersionCache, VersionOption};

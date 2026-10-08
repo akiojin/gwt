@@ -1872,6 +1872,7 @@ enum IssueMonitorControl {
         expected_reset_at: String,
     },
     ConfigSet {
+        allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active_agents: Option<usize>,
@@ -2246,6 +2247,7 @@ fn try_apply_issue_monitor_control(
             .set_autonomous_mode_with_effect_revocation(enabled)
             .map(|_| true),
         IssueMonitorControl::ConfigSet {
+            allowed_labels,
             enabled,
             autonomous_mode,
             max_active_agents,
@@ -2257,7 +2259,8 @@ fn try_apply_issue_monitor_control(
             if enabled == Some(true)
                 || autonomous_mode == Some(true)
                 || max_active_agents == Some(0)
-                || (enabled.is_none()
+                || (allowed_labels.is_none()
+                    && enabled.is_none()
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
                     && auto_close_merged_issues.is_none()
@@ -2268,6 +2271,9 @@ fn try_apply_issue_monitor_control(
                 return None;
             }
             let mut candidate = monitor.clone();
+            if let Some(allowed_labels) = allowed_labels {
+                candidate.set_allowed_labels(allowed_labels);
+            }
             if let Some(launch_agent) = launch_agent.as_deref() {
                 // Issue #3923 AC-5: a switch without a saved profile has
                 // nothing to switch; refuse the whole control unapplied.
@@ -2316,6 +2322,16 @@ fn try_apply_issue_monitor_control(
             *monitor = candidate;
             Some(true)
         }
+        IssueMonitorControl::WaitDeclared {
+            issue_number,
+            reason,
+            resume_condition,
+            at,
+        } => matches!(
+            monitor.declare_autonomous_wait(issue_number, &reason, &resume_condition, &at),
+            crate::AutonomousWaitOutcome::Declared { .. }
+        )
+        .then_some(false),
         control @ (IssueMonitorControl::LaunchFailed {
             failure: Some(_), ..
         }
@@ -2468,7 +2484,8 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::Enabled(_)
         | IssueMonitorControl::AutonomousMode(_)
         | IssueMonitorControl::ConfigSet { .. }
-        | IssueMonitorControl::ProfilesSet { .. } => false,
+        | IssueMonitorControl::ProfilesSet { .. }
+        | IssueMonitorControl::WaitDeclared { .. } => false,
         // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
         IssueMonitorControl::ScanNow => true,
         IssueMonitorControl::ClaimLaunchDelivery {
@@ -2538,17 +2555,6 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::QuotaHoldReverify { provider, at } => {
             // Accept messages from older GUIs without reopening quota holds.
             tracing::debug!(%provider, %at, "ignored retired quota re-verification request");
-            false
-        }
-        IssueMonitorControl::WaitDeclared {
-            issue_number,
-            reason,
-            resume_condition,
-            at,
-        } => {
-            // The driver decides whether the issue is actually launched; a
-            // declaration for anything else is dropped, not scanned.
-            let _ = monitor.declare_autonomous_wait(issue_number, &reason, &resume_condition, &at);
             false
         }
         IssueMonitorControl::WaitCleared { issue_number, at } => {
@@ -2880,6 +2886,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
     let mut applied = None;
     let mut authority_changed = false;
     let typed_failure = issue_monitor_control_has_typed_failure(&accepted.control);
+    let wait_declaration = matches!(accepted.control, IssueMonitorControl::WaitDeclared { .. });
     let failure_control = matches!(
         accepted.control,
         IssueMonitorControl::LaunchFailed { .. } | IssueMonitorControl::AgentFailed { .. }
@@ -2954,7 +2961,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 &accepted.processed_at,
             ));
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
-            if typed_failure && applied == Some(Some(false)) {
+            if (typed_failure && applied == Some(Some(false)))
+                || (wait_declaration && applied == Some(None))
+            {
+                // An unrecorded wait is refused, not ACKed and not a terminal
+                // failure of the control lane (Issue #5066).
                 rejected = true;
                 return;
             }
@@ -3052,6 +3063,10 @@ fn decode_issue_monitor_control_in_repo(
                 .get("config_set")
                 .and_then(serde_json::Value::as_object)
             {
+                let allowed_labels = match config.get("allowed_labels") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(serde_json::from_value::<Vec<String>>(value.clone()).ok()?),
+                };
                 let enabled = match config.get("enabled") {
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
@@ -3113,7 +3128,8 @@ fn decode_issue_monitor_control_in_repo(
                     });
                 if (!resident_pm && (enabled == Some(true) || autonomous_mode == Some(true)))
                     || max_active_agents == Some(0)
-                    || (enabled.is_none()
+                    || (allowed_labels.is_none()
+                        && enabled.is_none()
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
                         && auto_close_merged_issues.is_none()
@@ -3124,6 +3140,7 @@ fn decode_issue_monitor_control_in_repo(
                     return None;
                 }
                 return Some(IssueMonitorControl::ConfigSet {
+                    allowed_labels,
                     enabled,
                     autonomous_mode,
                     max_active_agents,
@@ -8616,6 +8633,9 @@ exit 0
         // Issue #3844 AC-1/AC-2: the `wait` control carries the agent's
         // declaration (reason + resume condition) into the driver, where it
         // suspends stuck detection; `clear:true` ends it.
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
@@ -8628,8 +8648,10 @@ exit 0
                 ..crate::IssueMonitorPrefs::default()
             },
         );
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
         monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
 
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
@@ -8644,14 +8666,32 @@ exit 0
             std::process::id() + 1,
         );
         let control = decode_issue_monitor_control(payload).expect("wait decodes");
-        assert!(
-            !apply_issue_monitor_control(&mut monitor, control),
-            "a wait declaration does not request a scan"
+        assert_eq!(
+            apply_control_for_test(&prefs_path, &mut monitor, control),
+            super::IssueMonitorControlCommit::Committed {
+                should_scan: false,
+                authority_changed: false,
+            }
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).expect("committed wait"),
+            monitor.prefs()
         );
         let waiting = monitor.autonomous_wait(42).expect("wait recorded");
         assert_eq!(waiting.reason, "host 排他の順番待ち");
         assert_eq!(waiting.resume_condition, "#3791 の verify が完了する");
         assert_eq!(waiting.since, "2026-06-29T00:10:00Z");
+        let status = monitor.agent_status_at("2026-06-29T02:00:00Z");
+        let projected = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .and_then(|row| row.waiting.as_ref())
+            .expect("accepted wait is projected");
+        assert_eq!(projected.reason, waiting.reason);
+        assert_eq!(projected.resume_condition, waiting.resume_condition);
+        assert_eq!(projected.since, waiting.since);
+        assert!(projected.in_force);
         assert!(
             monitor
                 .stuck_autonomous_issues("2026-06-29T02:00:00Z")
@@ -8674,6 +8714,52 @@ exit 0
             vec![42],
             "ordinary detection resumes from the clearing heartbeat"
         );
+    }
+
+    #[test]
+    fn issue_5066_wait_control_rejects_an_untracked_physical_launch_without_a_receipt() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        monitor.record_monitor_runtime_counts(
+            101,
+            1001,
+            std::collections::BTreeMap::from([(42, 1)]),
+            "2026-06-29T01:00:00Z",
+        );
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
+        let before = monitor.prefs();
+        crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
+
+        assert_eq!(
+            apply_control_for_test(
+                &prefs_path,
+                &mut monitor,
+                IssueMonitorControl::WaitDeclared {
+                    issue_number: 42,
+                    reason: "verification".to_string(),
+                    resume_condition: "lease available".to_string(),
+                    at: "2026-06-29T01:00:00Z".to_string(),
+                },
+            ),
+            super::IssueMonitorControlCommit::Rejected
+        );
+        assert_eq!(monitor.prefs(), before);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            before
+        );
+        assert!(monitor.autonomous_wait(42).is_none());
+        assert!(monitor.last_control_receipt().is_none());
     }
 
     #[test]
@@ -10532,6 +10618,54 @@ exit 0
     }
 
     #[test]
+    fn issue_monitor_config_set_allowed_labels_commits_atomically() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        for (labels, expected) in [
+            (
+                serde_json::json!(["Server", "backend"]),
+                serde_json::json!(["Server", "backend"]),
+            ),
+            (
+                serde_json::json!([" Server ", "server", "", "Tools"]),
+                serde_json::json!(["Server", "Tools"]),
+            ),
+            (serde_json::json!([]), serde_json::json!([])),
+        ] {
+            let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set": {"allowed_labels": labels}}),
+                std::process::id() + 1,
+            );
+            let control = decode_issue_monitor_control(payload).expect("allowed labels control");
+            assert!(super::apply_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                control
+            ));
+            let saved = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+            assert!(saved.enabled && saved.autonomous_mode);
+            let saved = serde_json::to_value(saved).expect("serialize prefs");
+            assert_eq!(
+                saved
+                    .get("allowed_labels")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn issue_monitor_config_set_decodes_and_commits_atomically() {
         let _prefs_budget = pin_prefs_hang_guard();
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
@@ -10549,6 +10683,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
@@ -10570,6 +10705,7 @@ exit 0
         assert_eq!(
             auto_apply_control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -10597,6 +10733,7 @@ exit 0
         assert_eq!(
             raise_control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -10668,6 +10805,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -10906,6 +11044,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
@@ -11167,6 +11306,7 @@ exit 0
             &prefs_path,
             &mut monitor,
             IssueMonitorControl::ConfigSet {
+                allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
@@ -16527,6 +16667,7 @@ exit 1
 
         let hub = BroadcastHub::new();
         let shutdown = Arc::new(DaemonShutdown::new());
+        let mut startup_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let worker = spawn_issue_monitor_worker_with_config_and_timeout(
             scope,
             hub.clone(),
@@ -16549,7 +16690,14 @@ exit 1
 
         // Subscribe after the startup publish to prove the recovery error is
         // re-projected for operators that connect later.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        recv_issue_monitor_status_matching(&mut startup_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("authority recovery is blocked"))
+        })
+        .await
+        .expect("startup recovery-blocked status was published");
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let status = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
             status
@@ -16561,7 +16709,11 @@ exit 1
         .expect("recovery-blocked status");
         assert!(!status.enabled);
         assert!(!status.autonomous_mode);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        shutdown.request();
+        tokio::time::timeout(HANG_GUARD, worker)
+            .await
+            .expect("recovery-blocked worker shutdown is bounded")
+            .expect("worker exits cleanly");
         assert!(
             !scan_started.exists(),
             "recovery-blocked worker must not enter its immediate first scan"
@@ -16579,11 +16731,6 @@ exit 1
             shutdown_marker.exists(),
             "corrupt prefs must retain the independent shutdown marker"
         );
-        shutdown.request();
-        tokio::time::timeout(HANG_GUARD, worker)
-            .await
-            .expect("recovery-blocked worker shutdown is bounded")
-            .expect("worker exits cleanly");
     }
 
     #[tokio::test]

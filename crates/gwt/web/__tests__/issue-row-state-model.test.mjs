@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 function knowledgeEntry(number, overrides = {}) {
@@ -821,7 +821,7 @@ test("Active cards show every launch tail without mounting terminals or replacin
     knowledgeEntry(42),
   ]);
   const previews = fixture.body.querySelectorAll(".issue-card-output");
-  assert.equal(previews.length, 3, "both launches for one issue must be visible");
+  assert.equal(previews.length, 4, "all launches are visible, including agents hosted by the other Issues pane");
   const first = previews[0].querySelector("pre");
   assert.equal(first.textContent, "  first\n\n<third>");
   assert.equal(first.querySelector("third"), null, "terminal text is never HTML");
@@ -830,6 +830,8 @@ test("Active cards show every launch tail without mounting terminals or replacin
   const mounts = fixture.calls.terminalMounts.length;
   fixture.surface.applyKnowledgeReceiveEvent({ kind: "terminal_preview", id: "agent-1", text: "new output" });
   assert.equal(first.textContent, "new output");
+  fixture.surface.applyKnowledgeReceiveEvent({ kind: "terminal_preview", id: "other-host", text: "other pane output" });
+  assert.equal(fixture.body.querySelector('.issue-card-output[data-window-id="other-host"] pre').textContent, "other pane output");
   assert.ok(first.isConnected, "stream updates must preserve card focus and menus");
   assert.equal(fixture.calls.terminalMounts.length, mounts);
   assert.equal(fixture.body.querySelector('[data-queue-column="backlog"] .issue-card-output'), null);

@@ -100,7 +100,29 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     // Issue #4850: the warning sink is per thread; clear whatever an earlier
     // operation on this thread left behind before this one runs.
     super::operation_warnings::take();
-    let outcome = run_collect_governed(env, parsed.command);
+    let mut pr_checks_data = None;
+    let outcome = match parsed.command {
+        CliCommand::Pr(PrCommand::Checks { number }) => env
+            .fetch_pr_checks(number)
+            .map(|report| {
+                pr_checks_data =
+                    Some(serde_json::to_value(&report).expect("PR checks must serialize"));
+                let mut output = String::new();
+                super::pr::render_pr_checks(&mut output, &report);
+                super::governance::GovernedCommandOutput {
+                    exit_code: 0,
+                    output,
+                    refusal: None,
+                }
+            })
+            .map_err(|error| {
+                Box::new(super::governance::GovernedCommandFailure {
+                    error: super::io_as_api_error(error),
+                    refusal: None,
+                })
+            }),
+        command => run_collect_governed(env, command),
+    };
     let warnings = super::operation_warnings::take();
     crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
     match outcome {
@@ -116,6 +138,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "exit_code": code,
                 "output": output,
             });
+            if let Some(data) = pr_checks_data {
+                payload["data"] = data;
+            }
             if let Some(refusal) = refusal.as_ref() {
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
@@ -721,6 +746,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            let allowed_labels = match lookup(params, "allowed_labels") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(
+                    serde_json::from_value::<Vec<String>>(value.clone()).map_err(|error| {
+                        CliParseError::InvalidJson(format!(
+                            "allowed_labels must be an array of strings: {error}"
+                        ))
+                    })?,
+                ),
+            };
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
@@ -730,7 +765,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let launch_agent = optional_string(params, "launch_agent")?;
             // Issue #4037 AC-5: the non-destructive update drain.
             let update_drain = optional_update_drain_control(params)?;
-            if enabled.is_none()
+            if allowed_labels.is_none()
+                && enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
                 && auto_close_merged_issues.is_none()
@@ -739,7 +775,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && update_drain.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
+                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -752,6 +788,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             }
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
                 project_root: optional_path(params, "project_root")?,
+                allowed_labels,
                 enabled,
                 autonomous_mode,
                 max_active,
@@ -828,6 +865,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
+        "pr.head_check" => {
+            reject_unknown_params(params, &["base", "head"], "pr.head_check")?;
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: required_string(params, "base")?,
+                head: optional_string(params, "head")?,
+            })
+        }
         "pr.list" => CliCommand::Pr(PrCommand::List {
             stale_after_hours: optional_u64(params, "stale_after_hours")?
                 .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
@@ -1041,23 +1085,42 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             let quarantines = verification_quarantine_requests(params)?;
-            if commands.is_empty() && !derive {
-                return Err(CliParseError::MissingFlag("commands"));
-            }
-            if generated_outputs.is_empty() && quarantines.is_empty() {
-                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+            let mode = optional_string(params, "mode")?.unwrap_or_else(|| "full".into());
+            let acceptance_commands = optional_string_vec(params, "acceptance_commands")?;
+            if mode == "pre-pr" {
+                if !derive {
+                    return Err(CliParseError::InvalidJson(
+                        "verify.plan mode pre-pr requires derive:true".into(),
+                    ));
+                }
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::PrePrPlan {
                     commands,
-                    derive,
+                    acceptance_commands,
+                    generated_outputs,
+                    quarantines,
                 })
             } else {
-                CliCommand::Verify(
-                    crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                if mode != "full" || !acceptance_commands.is_empty() {
+                    return Err(CliParseError::InvalidJson("verify.plan mode must be full or pre-pr; acceptance_commands requires mode pre-pr".into()));
+                }
+                if commands.is_empty() && !derive {
+                    return Err(CliParseError::MissingFlag("commands"));
+                }
+                if generated_outputs.is_empty() && quarantines.is_empty() {
+                    CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
                         commands,
                         derive,
-                        generated_outputs,
-                        quarantines,
-                    },
-                )
+                    })
+                } else {
+                    CliCommand::Verify(
+                        crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                            commands,
+                            derive,
+                            generated_outputs,
+                            quarantines,
+                        },
+                    )
+                }
             }
         }
         // SPEC #3576: host-wide verification lease.
@@ -2338,6 +2401,29 @@ mod tests {
         .to_string()
     }
 
+    #[test]
+    fn issue_5108_pr_checks_envelope_exposes_same_structured_verdict() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(repo.path().to_path_buf());
+        env.seed_pr_checks(12, serde_json::from_value(json!({
+            "summary": "PR #12 | CI: PENDING (1 unfinished) | Merge: BLOCKED | Review: APPROVED",
+            "ci_status": "PENDING", "merge_status": "BLOCKED", "review_status": "APPROVED",
+            "check_counts": {"success":1,"failure":0,"skipped":0,"in_progress":1,"total":2},
+            "checks": []
+        })).unwrap());
+        env.stdin = envelope("pr.checks", json!({"number":12}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(response["data"]["ci_status"], "PENDING");
+        assert_eq!(response["data"]["merge_status"], "BLOCKED");
+        assert_eq!(response["data"]["check_counts"]["in_progress"], 1);
+        assert!(response["output"]
+            .as_str()
+            .unwrap()
+            .contains("CI: PENDING (1 unfinished)"));
+        assert_eq!(env.pr_checks_call_log, vec![12]);
+    }
+
     fn ok(operation: &str, params: Value) -> CliCommand {
         match parse(&envelope(operation, params)) {
             Ok(parsed) => {
@@ -2683,6 +2769,7 @@ mod tests {
                 fallback_owner_closed: false,
                 auto_merge_enabled: false,
                 merge_queue: None,
+                required_status_checks_strict: None,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
@@ -2980,6 +3067,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        // Result persistence is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let _session =
             ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4217-verification");
         let repo = temp.path().join("repo");
@@ -3016,6 +3111,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        // Confirmation authority is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
         let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
@@ -3200,6 +3303,7 @@ mod tests {
         for params in [
             json!({
                 "project_root": project_root.to_string_lossy(),
+                "allowed_labels": ["Server"],
                 "enabled": true,
                 "max_active": 7,
             }),
@@ -3964,6 +4068,80 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn issue_monitor_config_set_accepts_allowed_labels_alone() {
+        for labels in [
+            json!(["Server", "backend"]),
+            json!([" Server ", "server", "", "Tools"]),
+            json!([]),
+        ] {
+            let CliCommand::Issue(IssueCommand::MonitorConfigSet { allowed_labels, .. }) = ok(
+                "issue.monitor.config.set",
+                json!({"allowed_labels": labels}),
+            ) else {
+                panic!("expected config set");
+            };
+            assert_eq!(
+                serde_json::to_value(allowed_labels).expect("serialize labels"),
+                labels
+            );
+        }
+        for labels in [json!("Server"), json!([42])] {
+            assert!(matches!(
+                err(
+                    "issue.monitor.config.set",
+                    json!({"allowed_labels": labels})
+                ),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn issue_monitor_config_set_allowed_labels_persist_without_daemon() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        for (labels, expected) in [
+            (json!(["Server", "backend"]), json!(["Server", "backend"])),
+            (
+                json!([" Server ", "server", "", "Tools"]),
+                json!(["Server", "Tools"]),
+            ),
+            (json!([]), json!([])),
+        ] {
+            let mut env = TestEnv::new(repo.clone());
+            env.stdin = envelope(
+                "issue.monitor.config.set",
+                json!({"allowed_labels": labels}),
+            );
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+            let saved = crate::load_issue_monitor_prefs(&path).expect("load prefs");
+            assert!(saved.enabled && saved.autonomous_mode);
+            let saved = serde_json::to_value(saved).expect("serialize prefs");
+            assert_eq!(
+                saved.get("allowed_labels").cloned().unwrap_or(json!([])),
+                expected
+            );
+            let reply: Value = serde_json::from_slice(&env.stdout).expect("JSON reply");
+            let output: Value = serde_json::from_str(reply["output"].as_str().expect("output"))
+                .expect("config output");
+            assert_eq!(output["allowed_labels"], expected);
+        }
+    }
+
     // Issue #3814 AC-2: semantic policy belongs to the handler so dispatch can
     // report a structured operation refusal instead of a parse-only stderr.
     #[test]
@@ -3974,6 +4152,7 @@ mod tests {
                 json!({"enabled": true, "max_active": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
                 autonomous_mode: None,
@@ -3987,6 +4166,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: Some(true),
@@ -4003,6 +4183,7 @@ mod tests {
                 json!({"auto_close_merged_issues": false})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4020,6 +4201,7 @@ mod tests {
                 json!({"auto_apply_updates": true})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4040,6 +4222,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4053,6 +4236,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": false})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4077,6 +4261,7 @@ mod tests {
                 json!({"launch_agent": "claude"})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -4090,7 +4275,7 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
+                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
             )
         ));
     }
@@ -4560,6 +4745,7 @@ mod tests {
                 json!({"enabled": false, "autonomous_mode": false, "max_active": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                allowed_labels: None,
                 project_root: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
@@ -5372,6 +5558,40 @@ mod tests {
     }
 
     #[test]
+    fn verification_pre_pr_plan_preserves_acceptance_and_non_ci_commands() {
+        let command = ok(
+            "verify.plan",
+            json!({
+                "mode": "pre-pr", "derive": true,
+                "acceptance_commands": ["cargo test -p gwt --test ci_pre_pr_contract_test"],
+                "commands": ["bash scripts/verify-local-only.sh"]
+            }),
+        );
+        let typed = format!("{command:?}");
+        assert!(
+            typed.contains("PrePrPlan"),
+            "pre-pr must not silently use full: {typed}"
+        );
+        assert!(
+            typed.contains("ci_pre_pr_contract_test"),
+            "AC tests were discarded: {typed}"
+        );
+        assert!(
+            typed.contains("verify-local-only.sh"),
+            "non-CI check was discarded: {typed}"
+        );
+    }
+
+    #[test]
+    fn verification_plan_rejects_unknown_mode() {
+        let error = err(
+            "verify.plan",
+            json!({"mode": "pretend-fast", "derive": true}),
+        );
+        assert!(error.to_string().contains("mode"));
+    }
+
+    #[test]
     fn verification_plan_generated_output_allowlist_is_typed() {
         assert!(matches!(
             ok(
@@ -5523,6 +5743,43 @@ mod tests {
             err("release.status", json!({"ensure": true})),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn pr_head_check_parses_as_a_read_only_diagnostic() {
+        assert_eq!(
+            ok("pr.head_check", json!({"base": "develop"})),
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: "develop".to_string(),
+                head: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "pr.head_check",
+                json!({"base": "develop", "head": "work/issue-5059"})
+            ),
+            CliCommand::Pr(PrCommand::HeadCheck {
+                base: "develop".to_string(),
+                head: Some("work/issue-5059".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("pr.head_check", json!({})),
+            CliParseError::MissingFlag("base")
+        ));
+        assert!(matches!(
+            err(
+                "pr.head_check",
+                json!({"base": "develop", "verified_head": "caller-sha"})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pr.head_check"
+            )
+        );
     }
 
     #[test]

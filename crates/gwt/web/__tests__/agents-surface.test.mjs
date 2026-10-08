@@ -7,13 +7,21 @@ async function fixture() {
   const { createAgentsSurface } = await import("../agents-surface.js");
   const { document, window } = parseHTML("<main></main>");
   const mounted = [], focused = [], layouts = [];
+  const previews = new Set();
   const surface = createAgentsSurface({ document,
     mountTerminal: (id, root) => { mounted.push([id, root]); if (!root.firstChild) root.appendChild(document.createElement("textarea")); },
+    mountPreview: (id, root) => {
+      const pre = document.createElement("pre");
+      pre.textContent = id;
+      root.appendChild(pre);
+      previews.add(pre);
+      return () => { previews.delete(pre); pre.remove(); };
+    },
     onFocus: id => focused.push(id),
     onLayout: () => layouts.push(true),
   });
   document.querySelector("main").appendChild(surface.element);
-  return { surface, document, window, focused, mounted, layouts };
+  return { surface, document, window, focused, mounted, layouts, previews };
 }
 
 const agents = [
@@ -37,6 +45,37 @@ test("Agents includes off-canvas agents, excludes PM and clamps the column spin 
   assert.equal(document.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(4, minmax(0, 1fr))");
   surface.sync(agents.slice(0, 1));
   assert.equal(document.querySelectorAll(".agent-tile").length, 1);
+});
+
+test("a second pane shares the agent selection as a readonly preview and cleans up subscriptions", async () => {
+  const { surface, document, window, previews } = await fixture();
+  surface.sync(agents);
+  const host = document.createElement("div");
+  document.querySelector("main").appendChild(host);
+  const textarea = surface.element.querySelector("textarea");
+  surface.setPreviewHost(host);
+  assert.equal(previews.size, 3);
+  assert.match(host.textContent, /Read-only preview/);
+  assert.equal(host.querySelectorAll("textarea, [role=tab]").length, 0);
+  document.getElementById("agents-tab-one").click();
+  assert.equal(host.querySelector('[data-agent-id="one"]').hidden, false);
+  assert.equal(host.querySelector('[data-agent-id="two"]').hidden, true);
+  surface.sync(agents.map(data => data.id === "one" ? { ...data, dynamic_title: "Updated" } : data));
+  assert.match(host.textContent, /Updated/);
+  assert.equal(previews.size, 3);
+  document.querySelector('[aria-label="Close Updated tab"]').click();
+  assert.equal(host.querySelector('[data-agent-id="two"]').hidden, false, "closing the shared selection returns both panes to All agents");
+  const columns = surface.element.querySelector("input");
+  columns.value = "3";
+  columns.dispatchEvent(new window.Event("input"));
+  assert.equal(host.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
+  surface.sync(agents.slice(0, 1));
+  assert.equal(previews.size, 1);
+  assert.equal(host.querySelectorAll(".agent-tile").length, 1);
+  surface.setPreviewHost(null);
+  assert.equal(previews.size, 0);
+  assert.equal(host.childNodes.length, 0);
+  assert.equal(surface.element.querySelector("textarea"), textarea);
 });
 
 test("tiles keep terminal input as the only input path and report unavailable sessions", async () => {
@@ -98,6 +137,45 @@ test("tab selection survives updates and falls back when the selected agent disa
   assert.equal(document.querySelector(".agents-empty").hidden, false);
 });
 
+test("closing agent tabs preserves the live grid and reopens the same terminal", async () => {
+  const { surface, document, window } = await fixture();
+  surface.sync(agents);
+  const tab = id => document.getElementById(`agents-tab-${id}`);
+  const one = document.querySelector('[data-agent-id="one"]');
+  const terminal = one.querySelector("textarea");
+  const reopen = one.querySelector('[aria-label="Open One tab"]');
+  assert.equal(reopen.textContent, "Open tab", "reopening has a visible action label");
+  assert.equal(reopen.hidden, true, "open tabs already have a selection button");
+  tab("one").click();
+  const close = document.querySelector('[aria-label="Close One tab"]');
+  assert.ok(close, "each individual tab has a named close button");
+  assert.equal(close.closest('[role="tab"]'), null, "buttons are siblings, not nested");
+  close.click();
+  assert.equal(tab("one"), null);
+  assert.equal(tab("all").getAttribute("aria-selected"), "true");
+  assert.equal(surface.contains("one"), true);
+  assert.equal(surface.isVisible("one"), true, "All agents still shows the running agent");
+  assert.equal(reopen.hidden, false);
+  surface.sync(agents);
+  assert.equal(tab("one"), null, "metadata updates do not reopen closed tabs");
+  document.querySelector('[aria-label="Open One tab"]').click();
+  assert.equal(tab("one").getAttribute("aria-selected"), "true");
+  assert.equal(one.querySelector("textarea"), terminal);
+  assert.equal(reopen.hidden, true);
+  document.querySelector('[aria-label="Close Two tab"]').click();
+  assert.equal(tab("one").getAttribute("aria-selected"), "true", "background close preserves selection");
+  const event = new window.Event("keydown", { cancelable: true });
+  Object.defineProperty(event, "key", { value: "Delete" });
+  tab("one").dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(tab("one"), null);
+  assert.equal(tab("all").getAttribute("aria-selected"), "true");
+  surface.sync(agents.filter(data => data.id !== "two"));
+  surface.sync(agents);
+  assert.ok(tab("two"), "a newly arriving agent has an open tab");
+  assert.equal(document.querySelectorAll('[aria-label="Close All agents tab"]').length, 0);
+});
+
 test("the grid uses Operator tokens and contains the terminal inside each tile", () => {
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   const surface = css.slice(css.indexOf("/* Issue 4777 T-4:"));
@@ -108,5 +186,7 @@ test("the grid uses Operator tokens and contains the terminal inside each tile",
   assert.match(surface, /\.agent-tile\[hidden\]/);
   assert.match(surface, /\.agents-grid\.is-single > \.agent-tile \{ grid-area: 1 \/ 1;/);
   assert.match(surface, /\.agent-tile\[hidden\] \{ display: flex; visibility: hidden;/);
+  assert.match(surface, /\.agents-tab-close/);
+  assert.match(surface, /\.agent-tile__open:focus-visible/);
   assert.doesNotMatch(surface.replace(/\/\*[\s\S]*?\*\//g, ""), /#[a-f0-9]{3,8}\b|rgba?\(/i);
 });

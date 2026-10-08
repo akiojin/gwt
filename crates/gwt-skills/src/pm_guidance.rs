@@ -967,7 +967,7 @@ quota:
     (25 minutes measured). Never reach for `pr.draft` / `pr.ready` as a
     nudge — Draft cancels auto-merge and no operation re-enables it.
   - `CONFLICTED`: relaunch the owner to resolve the conflict
-  - `BEHIND`: update the PR branch
+  - `BEHIND`: follow `default_action`; non-strict protection needs no sync
   - `CI-RED`: relaunch the owner to fix CI
   - `SUPERSEDED`: propose close in the digest
   - `IN-PROGRESS`: leave it unless `stale` is true
@@ -1022,8 +1022,9 @@ Draft that did not qualify, so a row never leaves you guessing why:
 
 - `checks_failing` / `checks_in_progress`: the row is `CI-RED` or still
   running; handle it as that class says.
-- `behind_base` / `not_mergeable`: run `pr.update_branch`, one PR per
-  cycle, or hand the conflict back to the owner.
+- `behind_base` / `not_mergeable`: read the base protection policy below;
+  never synchronize solely for BEHIND on a non-strict base. Hand an actual
+  conflict back to the owner.
 - `unresolved_review_threads`: the owner answers review threads, not you.
 - `review_threads_unknown` / `coderabbit_review_unknown`: the probe is
   bounded to a few PRs per read, so the rest resolve next cycle. Wait.
@@ -1087,9 +1088,21 @@ measure; never leave a column out and never guess one.
   yourself; never bypass them with `gh` mutations.
 - `default_action_operation` names the operation that performs
   `default_action` when it needs one: `pr.update_branch` for `BEHIND`,
-  `pr.ready` for a Draft `MERGE-CANDIDATE`. A row with no
+  only when the base policy requires synchronization, and `pr.ready` for
+  a Draft `MERGE-CANDIDATE`. A row with no
   `default_action_operation` is advice you act on, not a call you make.
   Never invent an operation for a row that names none.
+- The User-owned repository `akiojin/gwt` cannot use merge queue (#4937).
+  Its develop uses `strict=false` while keeping the required checks
+  (Issue #5169). Do not synchronize a BEHIND PR merely because the base
+  moved. Synchronize only for `CONFLICTED`, through the owning agent's
+  conflict resolution. Let green PRs land through auto-merge; the combined
+  develop tree is checked by post-merge CI rather than a merge queue.
+- A `BEHIND` row with `required_status_checks_strict: false` needs no base
+  synchronization. This field is measured from base branch protection,
+  not assumed from the repository name. Its `default_action` starts with
+  `leave:` and names no operation. If CI failed, follow the `CI-RED`
+  recovery instead of leaving the failure unattended.
 - A `BEHIND` row with `merge_queue.enabled: true` is not yours to update
   (Issue #4872). Its base lands through a merge queue, which re-tests the
   PR on the latest base by itself; the row names no operation and its
@@ -1097,16 +1110,23 @@ measure; never leave a column out and never guess one.
   on it: the update restarts CI for nothing, and
   pushing to a queued PR removes it from the queue
   (`merge_queue.position` is present while it is queued).
-  An absent `merge_queue` key means unknown, not "no merge queue": only
-  non-Draft rows that are, or may be held as, `BEHIND` are probed, and a
-  `BEHIND` row without the key keeps `update-branch`.
-- **Run `pr.update_branch` one PR at a time.** Every merge into the base
+  An absent `merge_queue` key means unknown, not "no merge queue". A known
+  non-strict protection policy still takes precedence over that unknown.
+- When base protection is strict or unknown, **Run `pr.update_branch` one
+  PR at a time.** Every merge into the base
   puts every other open PR back to `BEHIND`, so a fan-out re-runs CI on
   branches that are about to go stale again. Each cycle, pick the single
   PR closest to promotion — `BEHIND` with no failing check, nothing in
   progress, and no unresolved review thread — update that one, and let
   the next cycle pick the next. Do not update a second PR in the same
   cycle, and never update every `BEHIND` row at once.
+- On a develop post-merge CI failure, inspect the automatic `bug` Issue
+  from `post-merge-ci.yml` and its run URL, then promptly register a fix or
+  deliberate revert Issue (or refine the existing notification Issue).
+  Do not automatically revert unrelated changes. The user can restore
+  up-to-date status checks without changing the required contexts with
+  `gh api -X PATCH repos/akiojin/gwt/branches/develop/protection/required_status_checks -F strict=true`.
+  Repository protection changes remain user operations.
 - `pr.update_branch` refuses a PR whose base would conflict and reports
   `CONFLICTED` without pushing anything. That is the owner's work:
   relaunch the owner, and never resolve a conflict yourself.
@@ -1238,10 +1258,22 @@ Do not ask agents to acquire a manual lease for these operations.
   An agent with a `waiting` declaration is waiting, not stuck; do not stop
   it on `last_activity_at` alone.
 - `verify.run` owns admission and its bounded wait. Status reports waiting
-  runs under `pending`. A `deferred` result from the first command's admission
-  timeout writes no verification record; a timeout after at least one command
-  ran writes an incomplete, non-PASS deferred record that retains the completed
-  commands' results; a retry reruns the entire matrix (no partial resume).
+  runs under `pending`. A timeout in the first remaining command's admission
+  writes no replacement record and preserves any predecessor; a later timeout
+  writes an incomplete, non-PASS deferred record retaining completed results.
+  Retry with the identical full requested matrix, never a caller-built subset.
+  Automatic resume requires valid admission-deferred evidence and exact matches
+  for owner, session, execution authority digest, verification plan content hash,
+  source fingerprint, requested commands (including order and duplicates), and
+  headed_e2e_commands. Every preceding result must have raw PASS and no termination signal.
+  Failed, killed, crashed, unreadable or mismatched records start a fresh run;
+  registered plan/context mismatches still require `verify.plan`.
+  Resume references the immutable predecessor by record id/content hash, keeps
+  the original start timestamp (`started_at`), and copies measured per-command
+  headed/nextest/admission evidence. Run outstanding Light commands first,
+  preserve Heavy commands' original relative order, and keep artifact restoration last.
+  The full registered matrix and required headed Chromium evidence in dark/light
+  must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
   Use the reported holder and wait reason to arbitrate a
   retry. There is no manual acquire loop or fixed retry schedule.
 - A holder with no live verification workload is a lease-lifecycle fault,
@@ -2349,14 +2381,16 @@ mod tests {
         }
     }
 
-    /// Issue #4872 AC-4: on a base that lands through a merge queue, the queue
-    /// brings a `BEHIND` PR up to date. An update-branch there restarts CI for
-    /// nothing and removes a queued PR from the queue, so the PM must read the
-    /// row's `merge_queue` before acting on `BEHIND`.
+    /// Issues #4872 / #5169: neither a non-strict base nor an enabled queue
+    /// needs the PM to synchronize a BEHIND branch.
     #[test]
-    fn contract_leaves_a_behind_pr_to_an_enabled_merge_queue() {
+    fn contract_leaves_a_behind_pr_to_non_strict_protection_or_an_enabled_queue() {
         let body = body();
         for phrase in [
+            "User-owned repository `akiojin/gwt` cannot use merge queue (#4937)",
+            "develop uses `strict=false`",
+            "Synchronize only for `CONFLICTED`",
+            "`required_status_checks_strict: false` needs no base synchronization",
             "A `BEHIND` row with `merge_queue.enabled: true` is not yours to update",
             "pushing to a queued PR removes it from the queue",
             "An absent `merge_queue` key means unknown",
@@ -2531,6 +2565,7 @@ mod tests {
 
     /// Issue #3868 AC-30: the heavy-verification wait procedure is defined on
     /// the PM side too, so a waiting agent is arbitrated rather than killed.
+    /// Issue #5035: retries preserve the exact matrix and deferred provenance.
     #[test]
     fn contract_defines_the_heavy_verification_wait_and_arbitration() {
         let body = body();
@@ -2545,12 +2580,23 @@ mod tests {
             // on a busy host; a deferred agent is retrying, not stuck.
             "`deferred`",
             "`pending`",
-            "first command's admission",
+            "first remaining command's admission",
             "incomplete, non-PASS deferred record",
-            "no partial resume",
+            "identical full requested matrix",
+            "execution authority digest",
+            "verification plan content hash",
+            "headed_e2e_commands",
+            "raw PASS and no termination signal",
+            "immutable predecessor",
+            "original start timestamp",
+            "Light commands first",
+            "artifact restoration last",
+            "Overall: PASS",
+            "required headed Chromium evidence",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
+        assert!(!body.contains("no partial resume"));
     }
 
     #[test]
@@ -2837,6 +2883,15 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert!(intake.contains("If the user opts in, follow the existing `gwt-discussion` skill"));
         assert!(intake.contains("If the user says no or gives no answer"));
         assert!(claude.contains("Only canonical `verify.run` acquires the host-wide lease"));
+        for phrase in [
+            "develop uses `strict=false`",
+            "Synchronize only for `CONFLICTED`",
+            "post-merge CI failure",
+            "register a fix or deliberate revert Issue",
+            "gh api -X PATCH repos/akiojin/gwt/branches/develop/protection/required_status_checks -F strict=true",
+        ] {
+            assert!(unwrapped(&claude).contains(phrase), "missing generated `{phrase}`");
+        }
         assert!(!claude.contains("every 3 minutes"));
         assert!(!claude.contains("15 attempts"));
     }

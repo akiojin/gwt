@@ -103,6 +103,12 @@ struct Arena {
 impl Arena {
     fn new() -> Self {
         let home = tempfile::tempdir().expect("home tempdir");
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let root = tempfile::tempdir().expect("repo root tempdir");
         let repo = root.path().join("main");
         let sibling = root.path().join("sibling");
@@ -140,7 +146,11 @@ impl Arena {
     fn spawn_sibling_heavy(&self) -> Child {
         let ready = self.home.path().join("development-ready");
         let mut child = hidden_command(std::env::current_exe().expect("test binary path"))
-            .args(["--ignored", "--exact", "fake_heavy_process_parks"])
+            .args([
+                "--ignored",
+                "--exact",
+                "verification_admission_cli_test::fake_heavy_process_parks",
+            ])
             .env("ADMISSION_DEVELOPMENT_READY", &ready)
             .current_dir(&self.sibling)
             .stdout(Stdio::null())
@@ -191,7 +201,7 @@ impl CanonicalRun {
         let release = arena.home.path().join("canonical-release");
         let exe = std::env::current_exe().unwrap();
         let command = format!(
-            "\"{}\" --ignored --exact canonical_command_parks",
+            "\"{}\" --ignored --exact verification_admission_cli_test::canonical_command_parks",
             exe.display()
         );
         let child = spawn_gwtd(
@@ -430,4 +440,404 @@ fn a_separate_watchdog_cannot_interrupt_another_live_runner() {
         "unrelated companion must not change the live record: {output:?}"
     );
     assert!(ok, "{result}");
+}
+
+// Issue #5035 AC-6: real two-worktree contention retains successful Heavy
+// occurrences on an identical retry. Marker/counter files are bookkeeping,
+// so writing them must not change the source fingerprint being verified.
+fn continuation_fixture(role: &str, park: bool) {
+    let signals = PathBuf::from(std::env::var_os("ADMISSION_CONTINUATION_SIGNALS").unwrap());
+    let active = signals.join("heavy-active");
+    let guard = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&active)
+        .expect("Heavy command fixtures must never overlap");
+    let occupied = Instant::now();
+    std::fs::write(signals.join(format!("{role}.ready")), "ready").unwrap();
+    let work = Instant::now();
+    // A fixed amount of fixture work makes avoided execution measurable;
+    // ready/release and the observed queue decide ordering, never this delay.
+    std::thread::sleep(Duration::from_millis(250));
+    let work_ms = work.elapsed().as_millis();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while park && !signals.join(format!("{role}.release")).exists() {
+        assert!(Instant::now() < deadline, "{role} fixture was not released");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let measurement = serde_json::json!({
+        "role": role, "work_ms": work_ms, "occupancy_ms": occupied.elapsed().as_millis()
+    });
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(signals.join(format!("{role}.executions.jsonl")))
+            .unwrap(),
+        "{measurement}"
+    )
+    .unwrap();
+    drop(guard);
+    std::fs::remove_file(active).unwrap();
+}
+
+#[test]
+#[ignore = "spawned as the first Heavy continuation command"]
+fn admission_continuation_first_command() {
+    continuation_fixture("a-first", true);
+}
+
+#[test]
+#[ignore = "spawned as the second Heavy continuation command"]
+fn admission_continuation_second_command() {
+    continuation_fixture("a-second", false);
+}
+
+#[test]
+#[ignore = "spawned as the sibling worktree's canonical holder"]
+fn admission_continuation_blocker_command() {
+    continuation_fixture("b-heavy", true);
+}
+
+fn continuation_command(name: &str) -> String {
+    format!(
+        "\"{}\" --ignored --exact verification_admission_cli_test::{name}",
+        std::env::current_exe().unwrap().display()
+    )
+}
+
+fn continuation_run(commands: &[String], max_wait_secs: u64) -> String {
+    serde_json::json!({
+        "schema_version": 1, "operation": "verify.run",
+        "params": {"commands": commands, "max_wait_secs": max_wait_secs}
+    })
+    .to_string()
+}
+
+fn continuation_plan(arena: &Arena, commands: &[String]) -> serde_json::Value {
+    let envelope = serde_json::json!({
+        "schema_version": 1, "operation": "verify.plan", "params": {"commands": commands}
+    });
+    let (ok, output) = arena.run_in(&arena.repo, &envelope.to_string());
+    assert!(ok, "register continuation plan: {output}");
+    continuation_state(&arena.repo, "verification-plan.json")
+}
+
+fn continuation_state(worktree: &Path, file: &str) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(worktree.join(".gwt/skill-state").join(file)).unwrap())
+        .unwrap()
+}
+
+fn continuation_wait_ready(run: &mut CanonicalRun, signals: &Path, role: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !signals.join(format!("{role}.ready")).exists() {
+        if run.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+            let (_, output) = collect_gwtd(run.child.take().unwrap());
+            panic!("continuation run exited before {role}: {output}");
+        }
+        assert!(Instant::now() < deadline, "{role} did not start");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn continuation_measurements(signals: &Path, role: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(signals.join(format!("{role}.executions.jsonl")))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn continuation_queue_wait(record: &serde_json::Value) -> u64 {
+    record["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["admission"]["queue_wait_ms"].as_u64().unwrap())
+        .sum()
+}
+
+fn continuation_lease_occupancy(home: &Path) -> (usize, u64) {
+    let events = std::fs::read_to_string(
+        home.join(".gwt/runtime/verification-coordinator/lease-events.jsonl"),
+    )
+    .unwrap()
+    .lines()
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    .collect::<Vec<_>>();
+    let acquired = events
+        .iter()
+        .filter(|event| event["kind"] == "acquired")
+        .collect::<Vec<_>>();
+    let occupied_ms = acquired
+        .iter()
+        .map(|start| {
+            let end = events
+                .iter()
+                .find(|event| event["kind"] == "released" && event["lease_id"] == start["lease_id"])
+                .expect("every acquired canonical lease must be released");
+            end["at_ms"]
+                .as_u64()
+                .unwrap()
+                .saturating_sub(start["at_ms"].as_u64().unwrap())
+        })
+        .sum();
+    (acquired.len(), occupied_ms)
+}
+
+fn continuation_evidence(
+    home: &Path,
+    worktree: &Path,
+    plan: &serde_json::Value,
+    record: &serde_json::Value,
+) -> gwt::cli::verification_record::EvidenceStatus {
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home);
+    let plan = serde_json::from_value(plan.clone()).unwrap();
+    let record = serde_json::from_value(record.clone()).unwrap();
+    gwt::cli::verification_record::evaluate_evidence_snapshot(
+        worktree,
+        SESSION,
+        None,
+        Some(&plan),
+        &record,
+    )
+}
+
+fn measure_two_worktree_continuation(reregister_plan: bool) -> serde_json::Value {
+    let arena = Arena::new();
+    // Continuation requires repo-scoped trusted storage. The older lease-only
+    // Arena has no origin and therefore deliberately uses mirror-only state.
+    git(
+        &arena.repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/admission-continuation.git",
+        ],
+    );
+    assert!(gwt_core::repo_hash::detect_repo_hash(&arena.repo).is_some());
+    let signals = arena.repo.join(".gwt/admission-continuation");
+    std::fs::create_dir_all(&signals).unwrap();
+    let commands = vec![
+        continuation_command("admission_continuation_first_command"),
+        continuation_command("admission_continuation_second_command"),
+    ];
+    let plan = continuation_plan(&arena, &commands);
+    let extra_env = [("ADMISSION_CONTINUATION_SIGNALS", signals.as_path())];
+    let total = Instant::now();
+    let mut first = CanonicalRun {
+        child: Some(spawn_gwtd(
+            arena.home.path(),
+            &arena.repo,
+            &continuation_run(&commands, 0),
+            &extra_env,
+        )),
+        release: signals.join("a-first.release"),
+    };
+    continuation_wait_ready(&mut first, &signals, "a-first");
+    let mut blocker = CanonicalRun {
+        child: Some(spawn_gwtd(
+            arena.home.path(),
+            &arena.sibling,
+            &continuation_run(
+                &[continuation_command(
+                    "admission_continuation_blocker_command",
+                )],
+                30,
+            ),
+            &extra_env,
+        )),
+        release: signals.join("b-heavy.release"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (ok, status) = arena.run_in(&arena.repo, STATUS);
+        assert!(ok, "lease status: {status}");
+        if status.lines().any(|line| line.starts_with("queue[0]:")) {
+            assert!(status.starts_with("verification lease: held"), "{status}");
+            break;
+        }
+        assert!(
+            blocker
+                .child
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none(),
+            "sibling contender exited before reserving admission"
+        );
+        assert!(Instant::now() < deadline, "sibling did not queue: {status}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // B's FIFO reservation must precede A's second Heavy occurrence.
+    let (ok, deferred_output) = first.finish();
+    let first_attempt_wall_ms = total.elapsed().as_millis();
+    assert!(
+        !ok && deferred_output.contains("deferred"),
+        "{deferred_output}"
+    );
+    assert!(
+        !deferred_output.contains("verify: PASS"),
+        "{deferred_output}"
+    );
+    let predecessor = continuation_state(&arena.repo, "verification-run.json");
+    assert_eq!(predecessor["lifecycle"]["status"], "deferred");
+    assert_eq!(predecessor["all_passed"], false);
+    assert_eq!(predecessor["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(predecessor["commands"][0]["exit_code"], 0);
+    assert_eq!(predecessor["verification_plan_hash"], plan["content_hash"]);
+    assert_eq!(
+        predecessor["continuation"]["commands"],
+        serde_json::json!(commands)
+    );
+    assert_eq!(
+        predecessor["continuation"]["headed_e2e_commands"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        predecessor["continuation"]["command_indices"],
+        serde_json::json!([0])
+    );
+    assert!(predecessor["commands"][0]["admission"]["lease_id"].is_string());
+    assert_eq!(
+        continuation_evidence(arena.home.path(), &arena.repo, &plan, &predecessor),
+        gwt::cli::verification_record::EvidenceStatus::Deferred
+    );
+    assert!(!signals.join("a-second.ready").exists());
+    continuation_wait_ready(&mut blocker, &signals, "b-heavy");
+    let (ok, blocker_output) = blocker.finish();
+    assert!(
+        ok && blocker_output.contains("verify: PASS"),
+        "{blocker_output}"
+    );
+    let blocker_record = continuation_state(&arena.sibling, "verification-run.json");
+    let initial_contention_wall_ms = total.elapsed().as_millis();
+
+    let retry_plan = if reregister_plan {
+        let replacement = continuation_plan(&arena, &commands);
+        assert_ne!(replacement["content_hash"], plan["content_hash"]);
+        replacement
+    } else {
+        plan
+    };
+    let retry = Instant::now();
+    let (ok, output) = collect_gwtd(spawn_gwtd(
+        arena.home.path(),
+        &arena.repo,
+        &continuation_run(&commands, 0),
+        &extra_env,
+    ));
+    let retry_wall_ms = retry.elapsed().as_millis();
+    assert!(ok && output.contains("verify: PASS"), "{output}");
+    let record = continuation_state(&arena.repo, "verification-run.json");
+    assert_eq!(record["all_passed"], true);
+    assert_eq!(record["plan_covered"], true);
+    assert_eq!(record["verification_plan_hash"], retry_plan["content_hash"]);
+    assert_eq!(record["commands"].as_array().unwrap().len(), 2);
+    assert_ne!(record["record_id"], predecessor["record_id"]);
+    assert_eq!(
+        continuation_evidence(arena.home.path(), &arena.repo, &retry_plan, &record),
+        gwt::cli::verification_record::EvidenceStatus::Fresh
+    );
+    let first_executions = continuation_measurements(&signals, "a-first");
+    let second_executions = continuation_measurements(&signals, "a-second");
+    let blocker_executions = continuation_measurements(&signals, "b-heavy");
+    assert_eq!(second_executions.len(), 1);
+    assert_eq!(blocker_executions.len(), 1);
+    assert_eq!(
+        record["continuation"]["commands"],
+        serde_json::json!(commands)
+    );
+    assert_eq!(
+        record["continuation"]["command_indices"],
+        serde_json::json!([0, 1])
+    );
+    if reregister_plan {
+        assert_eq!(
+            first_executions.len(),
+            2,
+            "a new plan must run the entire matrix"
+        );
+        assert_ne!(record["started_at"], predecessor["started_at"]);
+        assert!(record["continuation"]["previous"].is_null(), "{record}");
+    } else {
+        assert_eq!(
+            record["worktree_fingerprint"],
+            predecessor["worktree_fingerprint"]
+        );
+        assert_eq!(
+            record["continuation"]["authority_hash"],
+            predecessor["continuation"]["authority_hash"]
+        );
+        assert_eq!(
+            first_executions.len(),
+            1,
+            "a successful Heavy occurrence ran twice"
+        );
+        assert_eq!(record["started_at"], predecessor["started_at"]);
+        assert_eq!(record["commands"][0], predecessor["commands"][0]);
+        assert_eq!(record["continuation"]["previous"]["reused_commands"], 1);
+        assert_eq!(
+            record["continuation"]["previous"]["record_id"],
+            predecessor["record_id"]
+        );
+        assert_eq!(
+            record["continuation"]["previous"]["content_hash"],
+            predecessor["content_hash"]
+        );
+        assert!(output.contains("continuation"), "{output}");
+        assert!(
+            output.contains(predecessor["record_id"].as_str().unwrap()),
+            "{output}"
+        );
+    }
+    let (_, status) = arena.run_in(&arena.repo, STATUS);
+    assert!(status.starts_with("verification lease: free"), "{status}");
+    let executions = first_executions
+        .iter()
+        .chain(&second_executions)
+        .chain(&blocker_executions)
+        .collect::<Vec<_>>();
+    let (heavy_leases, lease_occupancy_ms) = continuation_lease_occupancy(arena.home.path());
+    assert_eq!(heavy_leases, executions.len());
+    let a_queue_wait_ms = continuation_queue_wait(&record)
+        + if reregister_plan {
+            continuation_queue_wait(&predecessor)
+        } else {
+            0
+        };
+    serde_json::json!({
+        "mode": if reregister_plan { "fresh_plan" } else { "continuation" },
+        "first_command_executions": first_executions.len(),
+        "second_command_executions": second_executions.len(),
+        "heavy_executions": executions.len(),
+        "heavy_leases": heavy_leases,
+        "lease_occupancy_ms": lease_occupancy_ms,
+        "fixture_heavy_occupancy_ms": executions.iter().map(|row| row["occupancy_ms"].as_u64().unwrap()).sum::<u64>(),
+        "fixture_work_ms": executions.iter().map(|row| row["work_ms"].as_u64().unwrap()).sum::<u64>(),
+        "first_attempt_wall_ms": first_attempt_wall_ms,
+        "initial_contention_wall_ms": initial_contention_wall_ms,
+        "retry_wall_ms": retry_wall_ms,
+        "total_wall_ms": total.elapsed().as_millis(),
+        "a_queue_wait_ms": a_queue_wait_ms,
+        "b_queue_wait_ms": continuation_queue_wait(&blocker_record),
+        "predecessor_record_id": predecessor["record_id"],
+        "predecessor_content_hash": predecessor["content_hash"],
+        "retry_record_id": record["record_id"],
+        "retry_content_hash": record["content_hash"]
+    })
+}
+
+#[test]
+fn admission_deferred_two_worktree_retry_reuses_passes_and_measures_saved_execution() {
+    let resumed = measure_two_worktree_continuation(false);
+    let fresh = measure_two_worktree_continuation(true);
+    assert_eq!(resumed["heavy_executions"], 3);
+    assert_eq!(fresh["heavy_executions"], 4);
+    eprintln!(
+        "GWT_ADMISSION_CONTINUATION_MEASUREMENT={}",
+        serde_json::json!({"continuation": resumed, "fresh_plan": fresh})
+    );
 }

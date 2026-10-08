@@ -1,6 +1,402 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.112.0] - 2026-10-08
+
+### Bug Fixes
+
+- **ci:** Preserve long jobs across base synchronization
+- **pr:** WireRecord の記録 ID を clone する
+- **verify:** CI 委譲のキャンセル時ガードを許可する
+- **gui:** SessionStart の確定処理を worker に分離
+- **gui:** Close 後の queued readiness を exact rollback する
+- **gui:** Move launch preparation and monitor acknowledgements off event loop
+- **gui:** Remove remaining launch cache and stale cleanup stalls
+- **verify:** Preserve deferred FIFO across reservation sweeps
+- **gui:** Preserve readiness resend response after worker completion
+- **gui:** Join active readiness to pending finalization
+- **hook:** Measure warm prompt budget with thread CPU time
+- **agents:** CLI更新をAgent Settings内で完結させる
+- **agents:** 更新結果をcache refresh前に反映する
+- **agents:** Inline更新の説明と検証待機を整える
+- **gui:** Keep launch failure cleanup off event loop
+- **gui:** Prepare monitor failure snapshots off event loop
+- **verify:** Canonical 検証の全文ログを保持する
+- **runtime:** Preserve pending fresh launches and reclaim failed candidates
+- **issue-monitor:** Retain complete queue label observations
+- **monitor:** Preserve live unbound launches and wait receipts
+- **gui:** Evict exact failed genesis sessions from launch cache
+- **git:** Bound workspace merge verdict cache lifetime
+- **index:** Bound unchanged repairs and align cache fingerprints
+- **issue-monitor:** Stamp queue.push claims with the scan claim owner
+- **issue-monitor:** Hand off queue claims across local processes
+- **test:** Synchronize runner descendant exit observation
+- **test:** Keep runner fixture release available
+- **gui:** Prepare scheduled monitor completions on workers
+- **gui:** Coalesce terminal grids and prioritize resize
+- **gui:** Coalesce terminal grids across project clients
+- **gui:** Hand off async worker during usage consumption scans
+- **pr:** Align check summaries with current check states
+- **verify:** Windows driverをtarget外に固定して再リンク競合を防ぐ
+- **verify:** Release drivers from configured Cargo targets
+- **verify:** Read required CI before taking writer lease
+- **verify:** Derive Unix disk budgets without mount inventory
+- **session:** Share ledger cache and retain safe stopped history
+- **session:** Preserve incomplete recovery evidence during retention
+- **usage:** Authenticate provider quota refusals
+- **usage:** Keep quota corroboration outside code quotes
+- **verify:** Reuse the artifact guard during timeout recovery
+- **hook:** Commit SessionStart identity before readiness
+- **hook:** Bound durable SessionStart identity commits
+- **launch:** Persist observation before unbound child release
+- **gui:** Prepare workspace watcher patches off the event loop
+- **gui:** Preserve genesis cache cleanup across window closure
+- **workspace:** Release inherited continuation operation locks
+- **release:** リリースPRをdevelopの固定snapshotにする
+- **test:** GC fixture の共有 Git 環境を施錠する
+- **frontend:** Share Monitor and Usage state with subscribed views
+- **frontend:** Make pull-render Git comparisons deterministic
+- **frontend:** 購読境界の監査と描画失敗後の再試行を修正
+
+### Features
+
+- **settings:** Show supported agent installation versions
+
+### Miscellaneous Tasks
+
+- **work:** Preserve issue 4969 resume event
+- **work:** Preserve issue 4969 delivery handoff
+- **work:** Link issue 4969 delivery to pr 5123
+- **work:** Record issue 5042 delivery handoff
+- **work:** Record PR delivery metadata
+- **work:** #5087 調査の work shard を記録
+- **work:** Record PR 5122 for issue 5087
+- **work:** Record issue 5081 ready pr
+- **work:** Record synchronized PR metadata
+- **work:** Record issue 4959 delivery resumption
+- **work:** Record issue 4915 PR delivery
+- **work:** Record issue 4915 independent review
+- **work:** Record final fixture delivery state
+- **work:** Issue #5028 の配送監査と最終状態を記録
+- **work:** Record Issue 5028 delivery audit
+- **work:** Retain Issue 5028 pull request metadata
+- **work:** Record Issue 5028 successor pull request
+- **work:** Retain Issue 5028 independent review lifecycle
+- **work:** Preserve issue 5080 review resume events
+- **work:** Record issue 5080 ready pr
+- **work:** Record Issue 5066 pull request
+- **work:** Record merged launch worker delivery
+- **work:** Record launch fixture pull request
+- **work:** Record issue 5133 delivery
+- **work:** Deliver issue 5133 pr and resume records
+- **work:** Preserve PR 5164 delivery binding
+- **work:** Retain issue 5117 resume record
+- **work:** Bind PR 5163 and preserve launch events
+- **work:** Record issue 5120 delivery and review
+- **work:** Record issue-4970 delivery state
+- **work:** Record issue 4970 ready PR
+- **work:** Preserve issue 5082 PR preflight audit event
+- **work:** Preserve T12 and T13 pull request audit
+- **work:** Record session ledger PR handoff
+- **work:** Record quota PR delivery metadata
+- **work:** Preserve quota delivery resume records
+- **work:** Record issue 5106 ready pr
+- **work:** Retain issue 5106 review launch history
+- **work:** PR 5156 の参照記録を配送する
+- **work:** Record PR 5134 delivery metadata
+- **work:** Record Issue 5118 pull request
+- **work:** Record genesis cleanup follow-up PR
+- **work:** Link issue 5158 to pull request
+- **work:** Record issue 5113 automatic resume
+- **work:** Record issue 5113 pull request delivery
+
+### Performance
+
+- **git:** Cache merge verdicts for unchanged branch tips
+- **gui:** Cache session runtime state for work hook health
+- **ci:** Flake detectionの反復を対象別上限と600秒予算に制限
+- **ci:** Clippy と coverage を独立した必須チェックで並列化
+
+### Testing
+
+- **ci:** Resolve the guarded paired cache runner
+- **gui:** Allow complete launch load probes on busy Windows hosts
+- **gui:** Batch launch pressure events for trace recording
+- **gui:** SessionStart と launch worker の統合回帰を確認
+- **gui:** Combine launch probe browser operations
+- **gui:** Isolate launch probe project between themes
+- **gui:** Wait for fresh launch fixture migration
+- **gui:** Isolate launch probes by browser backend process
+- **agents:** Assert saved profile updates stay free of launch errors
+- **runtime:** Await asynchronous fresh execution readiness
+- **launch-wizard:** Publish executable fixtures without inherited writers
+- **fixtures:** Publish Python and Node executables in child writers
+- **issue-monitor:** Align queue coverage status fixtures
+- **gui:** Capture wizard replies before console history eviction
+- **index:** Isolate repair regression home
+- **verify:** Preserve Rustup in isolated driver fixture
+- **verify:** Acquire environment locks and admit metadata probes
+- **session:** Use a positive dead-writer PID on Unix
+- **windows:** Claude hook を実 Git Bash で起動する
+- **verify:** Isolate shard fixtures from HOME races
+- **gui:** Handle Windows replacement races in watcher fixture
+- **terminal:** Verify Windows gated pane process cleanup
+- **terminal:** Run gated lifecycle regressions in Windows CI
+- **ci:** Align the pre-pr writer fixture with required coverage
+- **usage:** Wait for the complete PTY quota refusal
+
+### Ci
+
+- **test:** Windows driver再リンク回帰を必須jobで実行
+- **test:** Use prebuilt driver regression harness on Windows
+
+## [9.112.0] - 2026-10-07
+
+### Bug Fixes
+
+- **ci:** Preserve long jobs across base synchronization
+- **pr:** WireRecord の記録 ID を clone する
+- **verify:** CI 委譲のキャンセル時ガードを許可する
+- **gui:** SessionStart の確定処理を worker に分離
+- **gui:** Close 後の queued readiness を exact rollback する
+- **gui:** Move launch preparation and monitor acknowledgements off event loop
+- **gui:** Remove remaining launch cache and stale cleanup stalls
+- **verify:** Preserve deferred FIFO across reservation sweeps
+- **gui:** Preserve readiness resend response after worker completion
+- **gui:** Join active readiness to pending finalization
+- **hook:** Measure warm prompt budget with thread CPU time
+- **agents:** CLI更新をAgent Settings内で完結させる
+- **agents:** 更新結果をcache refresh前に反映する
+- **agents:** Inline更新の説明と検証待機を整える
+- **gui:** Keep launch failure cleanup off event loop
+- **gui:** Prepare monitor failure snapshots off event loop
+- **verify:** Canonical 検証の全文ログを保持する
+- **runtime:** Preserve pending fresh launches and reclaim failed candidates
+- **issue-monitor:** Retain complete queue label observations
+- **monitor:** Preserve live unbound launches and wait receipts
+- **gui:** Evict exact failed genesis sessions from launch cache
+- **git:** Bound workspace merge verdict cache lifetime
+- **index:** Bound unchanged repairs and align cache fingerprints
+- **issue-monitor:** Stamp queue.push claims with the scan claim owner
+- **issue-monitor:** Hand off queue claims across local processes
+- **pr:** Align check summaries with current check states
+- **gui:** Prepare scheduled monitor completions on workers
+- **gui:** Coalesce terminal grids and prioritize resize
+- **gui:** Coalesce terminal grids across project clients
+- **gui:** Hand off async worker during usage consumption scans
+
+### Features
+
+- **settings:** Show supported agent installation versions
+
+### Miscellaneous Tasks
+
+- **work:** Preserve issue 4969 resume event
+- **work:** Preserve issue 4969 delivery handoff
+- **work:** Link issue 4969 delivery to pr 5123
+- **work:** Record issue 5042 delivery handoff
+- **work:** Record PR delivery metadata
+- **work:** #5087 調査の work shard を記録
+- **work:** Record PR 5122 for issue 5087
+- **work:** Record issue 5081 ready pr
+- **work:** Record synchronized PR metadata
+- **work:** Record issue 4959 delivery resumption
+- **work:** Record issue 4915 PR delivery
+- **work:** Record issue 4915 independent review
+- **work:** Record final fixture delivery state
+- **work:** Issue #5028 の配送監査と最終状態を記録
+- **work:** Record Issue 5028 delivery audit
+- **work:** Retain Issue 5028 pull request metadata
+- **work:** Record Issue 5028 successor pull request
+- **work:** Retain Issue 5028 independent review lifecycle
+- **work:** Preserve issue 5080 review resume events
+- **work:** Record issue 5080 ready pr
+- **work:** Record Issue 5066 pull request
+- **work:** Record merged launch worker delivery
+- **work:** Record launch fixture pull request
+- **work:** Record issue 5133 delivery
+- **work:** Deliver issue 5133 pr and resume records
+- **work:** Bind PR 5163 and preserve launch events
+- **work:** Retain issue 5117 resume record
+
+### Performance
+
+- **git:** Cache merge verdicts for unchanged branch tips
+
+### Testing
+
+- **ci:** Resolve the guarded paired cache runner
+- **gui:** Allow complete launch load probes on busy Windows hosts
+- **gui:** Batch launch pressure events for trace recording
+- **gui:** SessionStart と launch worker の統合回帰を確認
+- **gui:** Combine launch probe browser operations
+- **gui:** Isolate launch probe project between themes
+- **gui:** Wait for fresh launch fixture migration
+- **gui:** Isolate launch probes by browser backend process
+- **agents:** Assert saved profile updates stay free of launch errors
+- **runtime:** Await asynchronous fresh execution readiness
+- **launch-wizard:** Publish executable fixtures without inherited writers
+- **fixtures:** Publish Python and Node executables in child writers
+- **issue-monitor:** Align queue coverage status fixtures
+- **gui:** Capture wizard replies before console history eviction
+- **index:** Isolate repair regression home
+
+## [9.111.0] - 2026-10-07
+
+### Bug Fixes
+
+- **verify:** 同一 deferred 検証の成功済み項目を再利用する
+- **test:** Runner probe の fixture を終了事象で同期する
+- **test:** Make deferred continuation fixture portable
+- **ci:** Paired Windows 検証のフェーズ診断と回帰実行を追加
+- **hook:** 名乗れない lock 保持者の理由を区別し、劣化した PM refresh を errors.list に残す
+- **issue-monitor:** 解決できない intra-doc link を通常の code span にする
+- **verify:** 検証延期後に通常の gwtd 成果物を復元
+- **monitor:** Preserve rapid label edits and keyboard focus
+- **index:** Snapshot後のlive waiter登録をsweepから保護する
+- **index:** Grace期間の既存liveness判定を維持する
+- **index:** Preserve refreshed reservations during waiter sweeps
+- **launch:** Align setup guidance with installed-only execution
+- **issue-monitor:** Make priority.set/move reorder the local terminal queue (#5079)
+- **verify:** Preserve versioned verification evidence
+- **process:** Linux のプロセス識別値を btime に依存しない start_ticks にする
+- **execution:** Clarify authority-scoped recovery diagnostics
+- **test:** Isolate format-skew fixture storage
+- **monitor:** Recover label edits after rejected saves
+- **verify:** Require unconditional delegated check steps
+- **verify:** Express measured capacity bounds with clamp
+- **verify:** Guard slotless Cargo and repair CI regressions
+- **test:** Return metadata from Cargo admission fixture
+
+### Features
+
+- **monitor:** Requeue retry-held rows and name the cause behind a retry_backoff stall
+- **monitor:** Record the candidate pool's degradation to one provider when it happens
+- **issue-monitor:** Max_active 飽和時に枠の占有者と解除操作を報告する
+- **monitor:** Add project label admission allow-list
+- **gui:** Allow safe agent tab close and reopen
+- **launch-wizard:** バージョン選択を撤去し検出済みエージェントのみを一覧に出す
+- **launch:** Retire version selection and preserve saved agent settings
+- **launch:** Use installed agents without package fallback
+- **gui:** Allow the same surface in both split panes
+- **wizard:** Fix launch permission and fast mode choices
+- **verify:** Admit independent builds through bounded slots
+
+### Miscellaneous Tasks
+
+- **work:** Record tray dependency contract delivery
+- **work:** トレイ依存契約の再監査と配送を記録
+- **work:** Record fresh tray contract delivery audit
+- **work:** 検証継続PRの関連イベントを配送する
+- **work:** Record runner fixture PR delivery
+- **work:** Deliver issue 5061 work updates
+- **work:** Issue #4982 の再開記録を保存
+- **work:** Issue #4982 の PR 読み取り記録を保存
+- **work:** Issue #4982 の Ready PR 記録を保存
+- **work:** Record issue 4158 PR delivery
+- **work:** Record agent tab delivery preparation
+- **work:** Record merged pull request readback
+- **work:** Record agent tab pull request delivery
+- **work:** Record issue 5061 ready pull request
+- **work:** Record issue-1921 dependency audit
+- **work:** #1921の依存配送待ち監査を記録
+- **work:** Record issue-1921 dependency delivery audit
+- **work:** #1921の依存未配送監査を記録
+- **work:** Record issue-1921 dependency preflight
+- **work:** Record Phase L1 verification handoff
+- **work:** Record installed agent launch pull request
+- **work:** Record concurrent reopen delivery audit
+- **work:** Record resumed hook retry delivery checkpoint
+- **work:** Preserve #4740 launch checkpoints
+- **work:** Preserve #4740 dependency checkpoint
+- **work:** Preserve issue 4740 runtime resume event
+- **work:** Record issue-5089 execution events
+- **work:** #5031 の検証と配送記録を確定
+- **work:** Finalize #5031 relaunch verification handoff
+- **work:** Record #5031 ready PR handoff
+- **work:** Record split surface delivery context
+- **work:** Record PR 5099 delivery context
+- **work:** Preserve issue 1921 recovery handoff events
+- **work:** Record initial label admission merge
+- **work:** Record label-save recovery delivery
+
+### Performance
+
+- **verify:** Delegate protected pre-pr checks to ci
+
+### Testing
+
+- **startup:** トレイ契約から推移的依存のバージョン固定を除く
+- **verify:** 成果物復元の回帰プロセスに待機上限を追加
+- **launch-wizard:** 旧バージョン選択契約のテストを installed のみの契約へ更新
+- **launch:** Align resume regressions with installed agent contract
+- **ci:** Align Windows launch budget contract with installed providers
+- **launch:** Pin direct preset fixtures in the active profile
+- **issue-monitor:** Verify priority writes select the next launch (#5079)
+- **execution:** Make concurrent reopen retry writer contention
+- Hook retryの期限検証を仮想時刻で決定化する
+- Synchronize monitor fixture completion
+- **verify:** Isolate canonical benchmark temporary fixtures
+- **verify:** Compare fallback plans on the same host
+
+## [9.110.0] - 2026-10-05
+
+### Bug Fixes
+
+- **issue:** Share spec acceptance input with the monitor
+- **codex:** Collect trust for missing generated hooks
+- **agent:** Apply probe environment overrides after removals
+- **issue-monitor:** Retain pending and live launch bindings
+- **verify:** Admit before checking the predecessor snapshot
+- **verify:** 予約の一時読取失敗でもFIFO到着順を保持する
+- **verify:** 空のlibtestフィルターを重い検証として分類する
+- **verify:** Plan不一致をhost待機とコマンド実行前に拒否する
+- **codex:** Verify both hook locations and recognize portable commands
+- **discussion:** 提案の終了操作で origin session と曖昧性を検証
+- **issue-monitor:** 一覧応答と gh 子プロセスの期限を保証する
+- **runtime:** Isolate hook pins and diagnose daemon lease failures
+- **build:** Unassigned な終端 Work の完了を冪等に確認
+- **workspace:** Container 競合の復旧診断を canonical authority に合わせる
+
+### Features
+
+- **gui:** Active カードに全エージェントの最新出力を表示する
+
+### Miscellaneous Tasks
+
+- **work:** Record codex hook cleanup PR
+- **work:** 既存Windowsテストの裁定待ちを記録する
+- **work:** 検証前提のWindowsテスト失敗を再確認する
+- **work:** AC6の既存Windowsテスト失敗と裁定待ちを記録する
+- **work:** Record PR 4977 association
+- **work:** #4984 の再開監査と配送状態を記録
+- **work:** Record PR association for issue 4953
+- **work:** Deliver issue-4918 PR link events
+- **work:** PR #4990 の配送証跡を記録
+- **work:** T-5 の最終 Work 履歴を保存する
+- **work:** T-5 の PR 履歴同期を保存する
+- **work:** T-5 の Ready PR 配送履歴を保存する
+
+### Performance
+
+- **verify:** Heavyコマンド単位で検証リースを取得する
+
+### Refactor
+
+- **migration:** 旧HOME状態の取り込みを廃止し更新手順を案内
+
+### Testing
+
+- Coordinatorとdaemon fixtureの固定待機を除去
+- **app_runtime:** Assert lock-timeout outcome instead of wall-clock bound
+- **daemon:** Retain isolated home until fixture runtime shutdown
+- **gwt:** Keep fail-open scan test off the real GitHub API
+- Cleanup競合テストを旧HOME拒否契約へ更新
+
+### Ci
+
+- **test:** Windows core全件の既定並列5周を復帰
+
 ## [9.109.0] - 2026-10-03
 
 ### Bug Fixes

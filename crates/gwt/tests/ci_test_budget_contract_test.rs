@@ -44,15 +44,6 @@ const RUST_JOB: &str = "  test:\n";
 const RUN_TESTS_STEP: &str = "Run tests";
 const DEFAULT_PARALLEL_JOB: &str = "  test-windows-default-parallel:";
 const AGENT_LAUNCH_JOB: &str = "  test-windows-agent-launch-e2e:";
-/// The four provider/selector combinations the deterministic Windows launch
-/// E2E has to cover, previously one matrix shard each.
-const AGENT_LAUNCH_COMBINATIONS: [&str; 4] = [
-    "codex/latest",
-    "codex/exact",
-    "claude/latest",
-    "claude/exact",
-];
-
 /// Measured p95 of the `Run tests` step (21 green develop-bound runs on
 /// 2026-09-06) is ~660s; +50% rounds to 17 minutes, and the Issue asks for
 /// a budget that also absorbs a 2.5x-slow runner, hence 25.
@@ -69,6 +60,97 @@ fn repo_root() -> PathBuf {
 fn read(relative: &str) -> String {
     let path = repo_root().join(relative);
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+/// Issue #4135: consolidation must keep every original integration source.
+#[test]
+fn consolidated_gwt_suites_register_every_integration_source_once() {
+    use std::collections::BTreeSet;
+
+    let manifest: toml::Value =
+        toml::from_str(&read("crates/gwt/Cargo.toml")).expect("Cargo manifest");
+    assert_eq!(
+        manifest["package"]
+            .get("autotests")
+            .and_then(toml::Value::as_bool),
+        Some(false)
+    );
+    let targets = manifest["test"].as_array().expect("explicit test targets");
+    assert_eq!(
+        targets.len(),
+        10,
+        "keep link fan-out bounded to ten harnesses"
+    );
+    let modules = regex::Regex::new(r#"#\[path\s*=\s*"([^"\n]+)"\]\s*mod\s+\w+\s*;"#)
+        .expect("source-module pattern");
+    let root = repo_root().join("crates/gwt");
+    let originals: BTreeSet<_> = fs::read_dir(root.join("tests"))
+        .expect("integration sources")
+        .map(|entry| entry.expect("source entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .map(|path| path.canonicalize().expect("original source"))
+        .collect();
+    let mut registered = BTreeSet::new();
+    for target in targets {
+        let source = root.join(target["path"].as_str().expect("test path"));
+        let contents = fs::read_to_string(&source).expect("test harness source");
+        let members = std::iter::once(source.clone()).chain(modules.captures_iter(&contents).map(
+            |capture| {
+                source
+                    .parent()
+                    .expect("harness directory")
+                    .join(&capture[1])
+            },
+        ));
+        for member in members {
+            let member = member.canonicalize().expect("registered source must exist");
+            if originals.contains(&member) {
+                assert!(registered.insert(member), "source registered twice");
+            }
+        }
+    }
+    assert_eq!(
+        registered, originals,
+        "no original test source may disappear"
+    );
+
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
+    let steps = workflow["jobs"]["changes"]["steps"]
+        .as_sequence()
+        .expect("classification steps");
+    let classify = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("classify"))
+        .expect("classification step");
+    assert!(
+        steps[..classify].iter().any(|step| step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            && step.get("if").is_none()),
+        "the consolidated source mapper needs a checkout for pull requests and merge groups"
+    );
+}
+
+/// Separate integration files now share a process and must share its env lock.
+#[test]
+fn consolidated_environment_helpers_use_the_shared_core_lock() {
+    let accessor = regex::Regex::new(r"(?ms)^fn env_(?:test_)?lock\(\)[^{]*\{(.*?)^\}")
+        .expect("environment helper pattern");
+    for entry in fs::read_dir(repo_root().join("crates/gwt/tests")).expect("test sources") {
+        let path = entry.expect("source entry").path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("test source");
+        for helper in accessor.captures_iter(&source) {
+            assert!(
+                helper[1].contains("gwt_core::test_support::env_lock()"),
+                "{} retains a separate process-global environment lock",
+                path.display()
+            );
+        }
+    }
 }
 
 /// The `test:` job body: from its header up to the next top-level job.
@@ -200,7 +282,7 @@ fn startup_git_budget_is_required_on_linux_and_windows() {
         .into_iter()
         .find(|(name, _)| name == "Check startup update Git-spawn budget")
         .expect("Windows must run the existing 1500-session Git budget test");
-    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1"));
+    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1"));
     assert!(!step.contains("continue-on-error:"));
     assert!(!step.contains("if:"));
 }
@@ -225,9 +307,10 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     assert!(job.contains("shared-key: linux-workspace"));
     assert!(job.contains("cargo-nextest@"));
     assert!(job.contains("scripts/ci-apt.sh gtk-deps"));
-    assert!(!job.contains("needs:"));
+    assert!(job.contains("needs: source-sync"));
+    assert!(job.contains("if: ${{ !cancelled() }}"));
     let prepare = job
-        .find("cargo test -p gwt --all-features --lib --test gwtd_cli_test --no-run")
+        .find("cargo test -p gwt --all-features --lib --test cli_contracts --no-run")
         .expect("a fresh job must build the guarded gwtd and stress harness");
     assert!(
         prepare
@@ -248,9 +331,9 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     }
     let required = job_body(&workflow, "  test-rust-required:");
     assert!(required.contains("name: Test (Rust)\n"));
-    assert!(
-        required.contains("needs: [test, test-linux-infrastructure, test-windows-verify-timings]")
-    );
+    assert!(required.contains(
+        "needs: [test, test-linux-infrastructure, test-windows-verify-timings, source-sync]"
+    ));
     assert!(required.contains("if: ${{ !cancelled() }}"));
     assert!(required.contains("RUST_RESULT: ${{ needs.test.result }}"));
     assert!(required.contains("INFRA_RESULT: ${{ needs.test-linux-infrastructure.result }}"));
@@ -262,10 +345,11 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
 fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, "  test-windows-verify-timings:");
-    assert!(job.contains("runs-on: windows-latest"));
-    assert!(job.contains("needs: changes"));
+    assert!(job.contains("runs-on: ${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}"));
+    assert!(job.contains("needs: [changes, source-sync]"));
+    assert!(job.contains("if: ${{ !cancelled() }}"));
     // Unknown/failed classification must measure, not silently skip.
-    assert!(job.contains("!cancelled() && needs.changes.outputs.verify_timings != 'false'"));
+    assert!(job.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
     assert!(job.contains("cargo-nextest@0.9.146"));
     let (_, measure) = named_steps(job)
         .into_iter()
@@ -273,11 +357,14 @@ fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
         .expect("both schedules run in one step on the same host");
     assert!(measure.contains("python scripts/ci_verify_timings.py --output target/verify-timings"));
     assert!(!measure.contains("continue-on-error"));
+    assert!(measure.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
     let (_, upload) = named_steps(job)
         .into_iter()
         .find(|(name, _)| name == "Upload both measurements even on failure")
         .expect("preserve raw evidence when a measurement fails");
-    assert!(upload.contains("if: always()"));
+    assert!(
+        upload.contains("if: ${{ always() && needs.changes.outputs.verify_timings != 'false' }}")
+    );
     assert!(upload.contains("path: target/verify-timings/"));
     assert!(upload.contains("if-no-files-found: error"));
     let required = job_body(&workflow, "  test-rust-required:");
@@ -303,6 +390,7 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
             < job.find("ci-windows-tests.mjs run ").unwrap()
     );
     assert!(job.contains("ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget"));
+    assert!(job.contains("ci-windows-tests.mjs run gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact"));
 }
 
 /// Issue #4134 AC-1: the three-pass determinism loop is the single most
@@ -371,15 +459,15 @@ fn nightly_determinism_failures_have_an_explicit_notification_target() {
 }
 
 /// Issue #4134 AC-2: four matrix shards each paid a 279s cold build to run
-/// 137s of tests. One job builds once and runs every combination, and a
-/// failure still says which combination failed.
+/// 137s of tests. The installed-only job still builds once, runs both
+/// providers, and attributes a failure to its provider.
 #[test]
-fn windows_agent_launch_e2e_builds_once_and_runs_every_combination() {
+fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, AGENT_LAUNCH_JOB);
     assert!(
         !job.contains("matrix:"),
-        "the agent-launch combinations share one cold build now, so the job \
+        "the installed provider cases share one cold build, so the job \
          must not fan out over a matrix (Issue #4134 AC-2)"
     );
     let build_at = job
@@ -390,22 +478,20 @@ fn windows_agent_launch_e2e_builds_once_and_runs_every_combination() {
         .expect("the agent-launch job must still run the deterministic E2E");
     assert!(
         build_at < run_at,
-        "the shared build must precede the combination loop"
+        "the shared build must precede the installed provider loop"
     );
-    for combination in AGENT_LAUNCH_COMBINATIONS {
-        assert!(
-            job.contains(combination),
-            "the single agent-launch job must still cover {combination}"
-        );
-    }
+    assert!(
+        job.contains("for provider in codex claude; do"),
+        "the shared launch job must run both installed providers"
+    );
     assert!(
         job.contains("::error::"),
-        "collapsing the matrix must not cost per-combination attribution; a \
-         failing combination has to annotate itself"
+        "collapsing the matrix must not cost per-provider attribution; a \
+         failing provider has to annotate itself"
     );
     assert!(
         job.contains("status=1"),
         "the loop must keep the matrix's fail-fast: false semantics and run \
-         every combination before failing"
+         every provider before failing"
     );
 }

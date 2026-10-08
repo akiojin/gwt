@@ -273,14 +273,14 @@ pub enum SessionPathState {
     Error(io::Error),
 }
 
-/// Path-independent package runner used for one versioned tool launch.
+/// Legacy package runner identity retained for persisted Session compatibility.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRuntimeRunnerKind {
     Npx,
 }
 
-/// Why gwt resolved an exact package version for one tool launch.
+/// Legacy resolution reason retained for persisted Session compatibility.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRuntimeResolutionReason {
@@ -289,7 +289,7 @@ pub enum ToolRuntimeResolutionReason {
     LegacyMigration,
 }
 
-/// Durable, non-secret provenance for a versioned tool launch.
+/// Legacy package provenance retained for persisted Session compatibility.
 ///
 /// Absolute executable paths are intentionally excluded so a Session can be
 /// resumed after the npm installation or machine-local PATH changes.
@@ -305,41 +305,6 @@ pub struct ToolRuntimeProvenance {
 
 impl ToolRuntimeProvenance {
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-}
-
-/// Select the machine-independent command identity stored in a [`Session`].
-///
-/// Targeted Windows Host package launches execute the absolute `npx.cmd` path
-/// selected by the launch environment, but that machine-local path must not
-/// become durable Session state. All other launch configurations retain their
-/// existing command unchanged.
-#[must_use]
-pub fn durable_session_launch_command(config: &LaunchConfig) -> String {
-    if !cfg!(windows)
-        || config.runtime_target != LaunchRuntimeTarget::Host
-        || !matches!(config.agent_id, AgentId::Codex | AgentId::ClaudeCode)
-    {
-        return config.command.clone();
-    }
-
-    let Some(provenance) = config.tool_runtime_provenance.as_ref() else {
-        return config.command.clone();
-    };
-    if config.agent_id.npm_package() != Some(provenance.official_package.as_str()) {
-        return config.command.clone();
-    }
-
-    let command_name = Path::new(&config.command)
-        .file_name()
-        .and_then(|name| name.to_str());
-    match provenance.runner_kind {
-        ToolRuntimeRunnerKind::Npx
-            if command_name.is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd")) =>
-        {
-            "npx.cmd".to_string()
-        }
-        _ => config.command.clone(),
-    }
 }
 
 /// Inspect one Session path while preserving present-but-unreadable entries.
@@ -394,9 +359,10 @@ pub struct Session {
     pub session_history: Vec<AgentSessionHistoryEntry>,
     pub status: AgentStatus,
     pub tool_version: Option<String>,
-    /// User-selected launch route, separate from the observed runtime version.
+    /// Legacy selector retained for reading historical Sessions; new launches do not write it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_version_selector: Option<String>,
+    /// Legacy package identity retained only for historical Session roundtrips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_runtime_provenance: Option<ToolRuntimeProvenance>,
     pub model: Option<String>,
@@ -551,40 +517,6 @@ pub struct SessionRuntimeState {
 }
 
 impl Session {
-    /// Recover the launch selector separately from the observed runtime version.
-    /// Direct Host runs must continue using the installed executable on restore.
-    pub fn launch_tool_version(&self) -> Option<String> {
-        if self.runtime_target == LaunchRuntimeTarget::Host
-            && matches!(self.agent_id, AgentId::ClaudeCode | AgentId::Codex)
-        {
-            if let Some(selector) = &self.tool_version_selector {
-                return Some(selector.clone());
-            }
-            if let Some(provenance) = &self.tool_runtime_provenance {
-                return Some(provenance.requested_selector.clone());
-            }
-            let command = Path::new(&self.launch_command)
-                .file_stem()
-                .and_then(|name| name.to_str());
-            if command.is_some_and(|name| name.eq_ignore_ascii_case(self.agent_id.command())) {
-                return Some("installed".into());
-            }
-            if command.is_some_and(|name| {
-                name.eq_ignore_ascii_case("npx") || name.eq_ignore_ascii_case("bunx")
-            }) {
-                let prefix = format!("{}@", self.agent_id.npm_package()?);
-                if let Some(selector) = self
-                    .launch_args
-                    .iter()
-                    .find_map(|arg| arg.strip_prefix(&prefix))
-                {
-                    return Some(selector.into());
-                }
-            }
-        }
-        self.tool_version.clone()
-    }
-
     /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
     /// Bump when adding a new migration in `migrate_legacy_launch_args` and
     /// ensure the new migration is idempotent relative to this value.
@@ -665,8 +597,6 @@ impl Session {
         let mut session = Self::new(worktree_path, branch, config.agent_id.clone());
         session.display_name = config.display_name.clone();
         session.tool_version = config.tool_version.clone();
-        session.tool_version_selector = config.tool_version_selector.clone();
-        session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
         session.model = config.model.clone();
         session.reasoning_level = config.reasoning_level.clone();
         session.session_mode = config.session_mode;
@@ -678,7 +608,7 @@ impl Session {
         session.docker_lifecycle_intent = config.docker_lifecycle_intent;
         session.linked_issue_number = config.linked_issue_number;
         session.launch_route = config.launch_route;
-        session.launch_command = durable_session_launch_command(config);
+        session.launch_command = config.command.clone();
         session.launch_args = config.args.clone();
         session.codex_auth_root = config.validated_codex_auth_root_for_cwd(&session.worktree_path);
         session.windows_shell = config.windows_shell;
@@ -1059,6 +989,12 @@ impl Session {
             tracing::warn!(path = %path.display(), %error, "Cannot load session; leaving it unchanged");
             std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
         })?;
+        session.normalize_fast_mode_fields();
+        Ok(session)
+    }
+
+    pub(crate) fn from_toml_value(value: toml::Value) -> Result<Self, toml::de::Error> {
+        let mut session: Self = value.try_into()?;
         session.normalize_fast_mode_fields();
         Ok(session)
     }
@@ -2836,9 +2772,10 @@ fn apply_agent_session_id(session: &mut Session, agent_session_id: &str) {
 }
 
 /// Persist one hook event and an optional provider Session id under one
-/// bounded lease. A contended lease returns `WouldBlock` without changing the
-/// durable Session so the caller can fail open and keep action-critical hook
-/// output within its wall-clock budget.
+/// bounded lease. SessionStart with a supplied provider id uses the durable
+/// durable Session transaction: readiness cannot precede its identity commit.
+/// Other bookkeeping uses a bounded lease and returns `WouldBlock` unchanged
+/// so latency-critical hooks can fail open within their wall-clock budget.
 pub fn persist_session_hook_metadata_with_wait(
     sessions_dir: &Path,
     session_id: &str,
@@ -2850,25 +2787,29 @@ pub fn persist_session_hook_metadata_with_wait(
     let agent_session_id = agent_session_id
         .map(str::trim)
         .filter(|agent_session_id| !agent_session_id.is_empty());
-    update_session_with_wait_and_durability(
-        sessions_dir,
-        session_id,
-        wait,
-        // Issue #3777: the hook only stamps liveness here and the next hook
-        // event rewrites it, so this write must not wait for the device inside
-        // the UserPromptSubmit budget.
-        SessionDurability::RenameOnly,
-        |session| {
-            if let Some(agent_session_id) = agent_session_id {
-                apply_agent_session_id(session, agent_session_id);
-            }
-            if session.project_state_root.is_none() {
-                session.project_state_root = project_state_root.map(Path::to_path_buf);
-            }
-            session.record_hook_event(event);
-            Ok(())
-        },
-    )
+    let update = |session: &mut Session| {
+        if let Some(agent_session_id) = agent_session_id {
+            apply_agent_session_id(session, agent_session_id);
+        }
+        if session.project_state_root.is_none() {
+            session.project_state_root = project_state_root.map(Path::to_path_buf);
+        }
+        session.record_hook_event(event);
+        Ok(())
+    };
+    if event == "SessionStart" && agent_session_id.is_some() {
+        update_session_with_wait(sessions_dir, session_id, wait, update)
+    } else {
+        // Issue #3777: liveness must not wait for the device inside the
+        // UserPromptSubmit budget.
+        update_session_with_wait_and_durability(
+            sessions_dir,
+            session_id,
+            wait,
+            SessionDurability::RenameOnly,
+            update,
+        )
+    }
 }
 
 /// Persist or clear a Session's Execution generation projection under the
@@ -2962,26 +2903,6 @@ mod tests {
         assert!(!session.id.is_empty());
         // Verify it's a valid UUID
         assert!(Uuid::parse_str(&session.id).is_ok());
-    }
-
-    #[test]
-    fn launch_tool_version_keeps_observed_direct_versions_out_of_package_pins() {
-        let mut session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
-        session.tool_version = Some("2.1.156".into());
-        session.launch_command = "/opt/bin/claude".into();
-        assert_eq!(session.launch_tool_version().as_deref(), Some("installed"));
-        session.launch_command = "npx".into();
-        session.launch_args = vec!["-y".into(), "@anthropic-ai/claude-code@latest".into()];
-        assert_eq!(session.launch_tool_version().as_deref(), Some("latest"));
-        session.launch_args = vec!["-y".into(), "@anthropic-ai/claude-code@2.1.156".into()];
-        assert_eq!(session.launch_tool_version().as_deref(), Some("2.1.156"));
-        session.tool_version_selector = Some("latest".into());
-        session.launch_command = "bun".into();
-        session.launch_args = vec!["/cache/claude.js".into()];
-        assert_eq!(session.launch_tool_version().as_deref(), Some("latest"));
-        session.runtime_target = LaunchRuntimeTarget::Docker;
-        session.launch_command = "claude".into();
-        assert_eq!(session.launch_tool_version().as_deref(), Some("2.1.156"));
     }
 
     #[test]
@@ -4174,7 +4095,9 @@ display_name = "Codex"
                 std::time::Duration::from_secs(1),
                 |_| {
                     lease_acquired_tx.send(()).expect("signal Session lease");
-                    release_lease_rx.recv().expect("release Session lease");
+                    // Release obsolete blocking writers on RED; assertions
+                    // check their result rather than elapsed wall-clock time.
+                    let _ = release_lease_rx.recv_timeout(Duration::from_secs(10));
                     Ok(())
                 },
             )
@@ -4195,8 +4118,22 @@ display_name = "Codex"
         assert!(timeout.to_string().contains("retry"));
         assert!(!timeout.to_string().contains(&session_id));
 
-        release_lease_tx.send(()).expect("release Session lease");
+        let identity_commit = persist_session_hook_metadata_with_wait(
+            dir.path(),
+            &session_id,
+            "SessionStart",
+            Some("provider-bounded-start"),
+            None,
+            Duration::ZERO,
+        );
+        let _ = release_lease_tx.send(());
         lease_worker.join().expect("join Session lease holder");
+        assert_eq!(
+            identity_commit
+                .expect_err("SessionStart identity commit must respect its lease wait")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
         with_session_lease_wait(
             dir.path(),
             &session_id,
@@ -4602,6 +4539,7 @@ display_name = "Claude Code"
         let dir = tempfile::tempdir().expect("tempdir");
         let mut session = Session::new("/tmp/wt", "feature/npx-plan", AgentId::Codex);
         session.tool_version = Some("latest".to_string());
+        session.tool_version_selector = Some("latest".to_string());
         session.tool_runtime_provenance = Some(ToolRuntimeProvenance {
             schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
             official_package: "@openai/codex".to_string(),
@@ -4616,6 +4554,8 @@ display_name = "Claude Code"
         let persisted = std::fs::read_to_string(&path).expect("read Session");
         let loaded = Session::load(&path).expect("load Session");
 
+        assert_eq!(loaded.tool_version, session.tool_version);
+        assert_eq!(loaded.tool_version_selector, session.tool_version_selector);
         assert_eq!(
             loaded.tool_runtime_provenance,
             session.tool_runtime_provenance
@@ -6308,14 +6248,9 @@ display_name = "Claude Code"
         let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir("/tmp/worktree")
             .branch("feature/demo")
-            .version("0.122.0")
             .build();
-        config.command = "npx".to_string();
-        config.args = vec![
-            "--yes".to_string(),
-            "@openai/codex@0.122.0".to_string(),
-            "--no-alt-screen".to_string(),
-        ];
+        config.tool_version = Some("0.122.0".to_string());
+        config.args = vec!["--no-alt-screen".to_string()];
         config.model = Some("gpt-5.5".to_string());
         config.reasoning_level = Some("high".to_string());
         config.skip_permissions = true;
@@ -6331,15 +6266,11 @@ display_name = "Claude Code"
 
         assert_eq!(session.branch, "feature/demo");
         assert_eq!(session.agent_id, AgentId::Codex);
-        assert_eq!(session.launch_command, "npx");
-        assert_eq!(
-            session.launch_args,
-            vec![
-                "--yes".to_string(),
-                "@openai/codex@0.122.0".to_string(),
-                "--no-alt-screen".to_string(),
-            ]
-        );
+        assert_eq!(session.launch_command, "codex");
+        assert_eq!(session.launch_args, vec!["--no-alt-screen".to_string()]);
+        assert_eq!(session.tool_version.as_deref(), Some("0.122.0"));
+        assert!(session.tool_version_selector.is_none());
+        assert!(session.tool_runtime_provenance.is_none());
         assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(session.reasoning_level.as_deref(), Some("high"));
         assert!(session.skip_permissions);
@@ -6427,113 +6358,6 @@ display_name = "Claude Code"
         let decoded: Session = toml::from_str(&encoded).expect("deserialize Grok Build session");
         assert_eq!(decoded.agent_id, AgentId::GrokBuild);
         assert_eq!(decoded.launch_args, session.launch_args);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn session_from_launch_config_does_not_persist_absolute_targeted_npx_runner() {
-        for (agent_id, package) in [
-            (AgentId::Codex, "@openai/codex"),
-            (AgentId::ClaudeCode, "@anthropic-ai/claude-code"),
-        ] {
-            let mut config = crate::AgentLaunchBuilder::new(agent_id)
-                .working_dir(r"C:\worktree")
-                .branch("feature/npx-plan")
-                .version("latest")
-                .build();
-            config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
-            config.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-                schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-                official_package: package.to_string(),
-                requested_selector: "latest".to_string(),
-                resolved_exact_version: "0.122.0".to_string(),
-                runner_kind: ToolRuntimeRunnerKind::Npx,
-                resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-            });
-
-            let session = Session::from_launch_config(r"C:\worktree", "feature/npx-plan", &config);
-            let sessions_dir = tempfile::tempdir().expect("sessions dir");
-            session.save(sessions_dir.path()).expect("persist Session");
-            let persisted =
-                std::fs::read_to_string(sessions_dir.path().join(format!("{}.toml", session.id)))
-                    .expect("read persisted Session");
-
-            assert_eq!(session.launch_command, "npx.cmd");
-            assert_eq!(config.command, r"C:\Program Files\nodejs\npx.cmd");
-            assert!(persisted.contains("launch_command = \"npx.cmd\""));
-            assert!(!persisted.contains("Program Files"));
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn session_from_launch_config_preserves_absolute_runner_outside_targeted_provenance() {
-        let absolute_npx = r"C:\Program Files\nodejs\npx.cmd";
-        let mut without_provenance = crate::AgentLaunchBuilder::new(AgentId::Codex)
-            .working_dir(r"C:\worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        without_provenance.command = absolute_npx.to_string();
-
-        let mut unrelated = crate::AgentLaunchBuilder::new(AgentId::OpenCode)
-            .working_dir(r"C:\worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        unrelated.command = absolute_npx.to_string();
-        unrelated.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "opencode-ai".to_string(),
-            requested_selector: "latest".to_string(),
-            resolved_exact_version: "0.1.0".to_string(),
-            runner_kind: ToolRuntimeRunnerKind::Npx,
-            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-        });
-
-        let mut container = crate::AgentLaunchBuilder::new(AgentId::Codex)
-            .working_dir(r"C:\worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        container.command = absolute_npx.to_string();
-        container.runtime_target = LaunchRuntimeTarget::Docker;
-        container.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "@openai/codex".to_string(),
-            requested_selector: "latest".to_string(),
-            resolved_exact_version: "0.122.0".to_string(),
-            runner_kind: ToolRuntimeRunnerKind::Npx,
-            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-        });
-
-        for config in [&without_provenance, &unrelated, &container] {
-            let session = Session::from_launch_config(r"C:\worktree", "feature/npx-plan", config);
-            assert_eq!(session.launch_command, absolute_npx);
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn session_from_launch_config_preserves_non_windows_runner_path() {
-        let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
-            .working_dir("/tmp/worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        config.command = "/opt/node/bin/npx".to_string();
-        config.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "@openai/codex".to_string(),
-            requested_selector: "latest".to_string(),
-            resolved_exact_version: "0.122.0".to_string(),
-            runner_kind: ToolRuntimeRunnerKind::Npx,
-            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-        });
-
-        let session = Session::from_launch_config("/tmp/worktree", "feature/npx-plan", &config);
-
-        assert_eq!(session.launch_command, "/opt/node/bin/npx");
     }
 
     #[test]

@@ -119,9 +119,10 @@ serve the current recovery and session-specific Stop contracts. The obsolete age
 identity reset is retired; startup preserves saved purpose and focus values and
 leaves `agent_identity.migration.json` unchanged (or absent).
 
-The embedded frontend uses the current Fast mode fields and requires an operation
-ID for cleanup requests. Reload older open tabs after upgrading; saved Fast mode
-preferences are retained.
+The embedded frontend requires an operation ID for cleanup requests. Reload older
+open tabs after upgrading. Launch Wizard always skips permission prompts and
+launches with Fast mode off; it reads older saved choices without rewriting them.
+Issue Monitor profiles and direct Session resume keep their existing preferences.
 
 ## Requirements
 
@@ -151,6 +152,23 @@ preferences are retained.
 
 Linux desktop builds also require WebKitGTK-related system packages. See
 [docs/docker-usage.md](docs/docker-usage.md) for the dependency set used in CI.
+
+### Supported built-in agents
+
+gwt supports the following built-in agents. Launch Agent lists only installed
+built-in agents that gwt detects; other CLI commands remain available through
+custom agents.
+
+| Agent | CLI command |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Antigravity CLI | `agy` |
+| OpenCode | `opencode` |
+| OpenClaw | `openclaw` |
+| Hermes Agent | `hermes` |
+| GitHub Copilot | `gh copilot` |
 
 ## Usage
 
@@ -402,6 +420,15 @@ between its body and acceptance criteria and its agent's read-only output.
 **Windowize** moves the agent to Canvas. **Hide preview / Show preview** gives
 the board the full width or restores the detail pane; columns scroll horizontally
 instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
+
+**Allowed labels** controls which Issues this terminal's Monitor admits. Add or
+remove one label at a time; an Issue needs any label in the saved list. Matching
+ignores case and surrounding whitespace. An empty list allows all labels and
+preserves the existing admission rules. Changes apply on the next scan without
+cancelling running agents. The control shows the saved labels and excluded Issue
+count/numbers. Automation can set the same list with `issue.monitor.config.set`
+and `{"allowed_labels":["agent:mac"]}`; `issue.monitor.status` reports
+`allowed_labels`, `label_excluded_count`, and `label_excluded_issues`.
 
 Open GitHub Issues remain in Backlog until explicitly queued, added by enabled
 auto-refill, or admitted with an `urgent` label. Queue membership authorizes the monitor to consider an Issue; normal
@@ -1116,6 +1143,16 @@ remain with their originating project when you switch projects.
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### Session history
+
+gwt keeps recent Session history in `~/.gwt/sessions/`. Background cleanup
+runs on the first ledger view and at most once every 24 hours, removing
+stopped history with startup restore disabled after 30 days of inactivity.
+Saved windows and Sessions needed by runtime, recovery, or unfinished work
+remain protected. Old abandoned write temporaries are also removed.
+See [Issue #5025](https://github.com/akiojin/gwt/issues/5025) for the
+retention policy and unreadable-record handling.
+
 ### macOS filesystem activity and Spotlight
 
 The per-worktree index watcher excludes the root `target/` directory's
@@ -1217,16 +1254,115 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
-### Serializing heavy verification
+### CI throughput measurements
+
+With Python 3.11+, authenticated `gh`, and local Git history for the merged PRs,
+collect the latest 25 develop merges and save their input data:
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --limit 25 --save target/ci-throughput.json
+python scripts/ci_throughput.py --input target/ci-throughput.json
+```
+
+Run collection from this checkout (or specify `--root`). Fetch missing history
+before collecting; for a shallow clone, use `git fetch --unshallow origin develop`.
+`--before 2026-10-08T00:30:00Z` fixes the inclusive merge cutoff, and
+`--workflow lint.yml` measures Lint using the same collection and replay path.
+Replay needs neither GitHub access nor Git history. The saved baseline is:
+
+```bash
+python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
+```
+
+The JSON reports PR creation-to-merge time, each PR's latest successful final-head
+workflow attempt, base synchronizations per merge, runner waits, and per-job
+durations. Durations are in minutes; p50 is the median and p90 is nearest rank.
+Workflow duration is `run_started_at` to `updated_at`; job duration is `started_at`
+to `completed_at`. Runner wait is job `created_at` to `started_at`, after dependency
+scheduling. All jobs and required jobs have separate wait distributions. Missing
+samples remain unavailable; rerun jobs whose creation time follows their reused
+execution time retain their duration but have unavailable runner waits.
+
+The fixed 25-PR baseline reproduces p50 **130.27 minutes** from creation to merge
+and **32.43 minutes** per Test attempt. Base synchronizations use merges whose
+second parent belongs to the base's first-parent history: **115/25 = 4.6**.
+The report also shows the historical `Merge ... develop` subject filter's
+**110/25 = 4.4**, which omits five synchronizations with custom subjects.
+
+### Shared frontend state (SPEC-5016)
+
+Migrated frontend domains use `web/ui-state-store.js` to own immutable data. Receive
+handlers update the model; views subscribe to selectors and render the committed
+snapshot. Retain each unsubscribe function for views that can be removed. Keep
+DOM nodes and renderer functions outside the model. Notifications also run for
+unfocused windows, without a focus or animation-frame trigger. The shared
+`ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
+the content type. See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
+the migration inventory and acceptance criteria.
+
+### Capacity for heavy verification
 
 Only canonical `verify.run` acquires the host-wide verification lease.
 Register the verification matrix with `verify.plan`, then run it with
 `verify.run`; it acquires and releases the lease for each Heavy command.
-Light commands can overlap other runs. A deferred result from the first command's
-admission timeout writes no verification record; a timeout after at least one
-command ran writes an incomplete, non-PASS deferred record that retains the
-completed commands' results; a retry reruns the entire matrix (no partial resume).
-Inspect the holder before retrying:
+Light commands can overlap other runs and outstanding Light commands run before
+Heavy commands. Heavy commands retain their relative order; gwt artifact
+restoration runs last. An admission timeout before the first remaining command
+starts preserves any predecessor without writing a replacement record. Later
+timeouts retain completed results in an incomplete, non-PASS deferred record.
+
+The following short non-Cargo gates are Light and run without a Heavy lease:
+
+| Command | Resource bound |
+| --- | --- |
+| `git diff --check` (including `--cached`) | Checks whitespace in a diff |
+| `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | Reads an existing coverage JSON; does not run tests |
+| `actionlint` without custom checker options, `shellcheck`, `yamllint` | Static analysis of workflow, shell, or YAML files |
+| `taplo check`, `taplo fmt --check` | TOML validation or formatting checks |
+| `typos` | Static spelling checks |
+
+These gates have a 60-second execution timeout on both local and daemon hosts.
+A timeout records a failure (exit 124), preserves diagnostic output, and stops
+the command's process tree. Fix the reported command and rerun the full matrix.
+Existing markdownlint and scoped Cargo classification is unchanged. Unknown
+commands, script wrappers, the coverage producer `coverage-summary.mjs`, Cargo
+builds or broad tests, and headed Playwright remain Heavy.
+`actionlint -shellcheck` / `-pyflakes` overrides also remain Heavy because they
+can launch arbitrary wrappers. Bounded commands reclaim descendants on normal
+completion as well as on timeout.
+The Node reader also remains Heavy when its effective `NODE_OPTIONS` is nonempty,
+because those options can preload arbitrary modules. An explicit `NODE_OPTIONS=`
+disables inherited options and retains Light classification.
+
+Retry with the same full requested matrix and headed E2E nominations. `verify.run`
+automatically resumes only a valid admission-deferred record with identical
+owner, session, execution authority, plan content hash, source fingerprint and
+requested commands. All preceding commands must have passed without a signal.
+Other records, including failed, killed and crashed runs, start fresh; a
+registered plan mismatch still requires `verify.plan`. Resumed evidence refers
+to its immutable predecessor by id/hash and retains its original start time and
+per-command headed E2E, nextest and admission evidence. The full matrix and
+required headed Chromium results in dark/light must pass before Overall PASS
+or Ready.
+Heavy Cargo commands in independent worktrees and build directories share a
+bounded host pool. Its default capacity is the smallest of one slot per eight
+logical CPUs, one per 16 GiB of memory, and four, with a minimum of one. To override
+the capacity, set the following in `~/.gwt/config.toml`:
+
+```toml
+[verification]
+slots = 4
+```
+
+The same worktree or effective Cargo target directory stays serialized.
+Unknown command wrappers and older binaries retain exclusive admission.
+Each child gets its own temporary directory. Admission reserves disk space for
+the target and temporary volumes above the configured build-artifact GC floor;
+`verification.disk_budget_bytes` overrides the measured per-run byte budget.
+The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
+volume, based on measured target and temporary growth plus 20% headroom.
+`verify.lease.status` reports `capacity`, `running`, `available`, each holder in
+`slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 
 ```bash
 gwtd <<'JSON'
@@ -1291,6 +1427,13 @@ each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
 
 ### PR head verification
+
+Use `pr.head_check` with `params.base` (for example, `develop`) and optional
+`params.head` to compare a canonical passing verification record with the live
+remote head without creating or editing a PR. The JSON diagnostic reports the
+record ID, verified/remote/base SHAs, product commits/files, and whether local
+verification is still fresh. A base-only comparison does not refresh stale
+evidence; missing, incomplete, failed, or corrupt records are unprovable.
 
 Before creating a Ready PR, `pr.create` compares the live remote branch with
 the HEAD recorded by `verify.run`. Its response and the PR body preserve both
@@ -1358,14 +1501,15 @@ decision a periodic read would get right now.
 To cut a release, trigger the **Prepare Release** workflow from GitHub
 Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
 and bumps the version, regenerates the `CHANGELOG`, and opens a
-`develop → main` Release PR — so you can release from any branch without
+`release/vX.Y.Z → main` Release PR from that frozen develop commit. Later
+develop merges leave the release head and its CI unchanged. You can release from any branch without
 switching to `develop` locally. The `bump` input is `auto` (default),
 `patch`, `minor`, or `major`. `auto` never produces a major release:
 breaking markers in commits are only listed in the Release PR body, and a
 major bump requires choosing `major` explicitly. Review and merge the
 generated Release PR;
 merging to `main` then runs the release pipeline (tag, GitHub Release,
-cross‑platform binaries). The manual fallback procedure lives in
+cross‑platform binaries). Release recovery instructions live in
 `.claude/commands/release.md`.
 
 The Release PR body is reference-only: it lists delivered Issues as bare

@@ -49,6 +49,7 @@ mod repo_browser;
 mod runtime_health_poller;
 mod runtime_support;
 mod session_ledger_cache;
+mod session_retention;
 mod update_front_door;
 mod usage_poller;
 // Unix has no tree-wide CPU cap to lift (Issue #4405).
@@ -89,8 +90,8 @@ pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
-    mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
-    resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
+    mount_source_matches_project_root, normalize_docker_launch_action,
+    resolved_test_docker_runtime, DockerLaunchServiceAction,
 };
 pub(crate) use docker_launch::{
     detect_wizard_docker_context_and_status, docker_binary_for_launch,
@@ -108,19 +109,17 @@ pub(crate) use embedded_server::{
     AgentSessionPrincipal,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
-#[cfg(test)]
-pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback_with_probe, command_matches_runner,
-    install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    prune_orphan_intake_worktrees, resolve_ephemeral_launch_worktree,
-    resolve_launch_worktree_request,
-};
 pub(crate) use launch_runtime::{
     apply_windows_host_shell_wrapper, build_shell_process_launch,
     ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
     install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune,
     plan_orphan_intake_worktree_prune_from_inventory, resolve_launch_worktree,
     resolve_shell_launch_worktree, OrphanIntakePrunePlan,
+};
+#[cfg(test)]
+pub(crate) use launch_runtime::{
+    command_matches_runner, install_launch_gwt_bin_env_with_lookup, prune_orphan_intake_worktrees,
+    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -569,6 +568,7 @@ fn gui_event_loop_stall_warning(label: &str, elapsed_ms: u64) -> Option<String> 
 struct EventLoopDispatchTimer {
     label: DispatchLabel,
     started: std::time::Instant,
+    startup_queued: bool,
 }
 
 impl EventLoopDispatchTimer {
@@ -576,6 +576,7 @@ impl EventLoopDispatchTimer {
         Self {
             label: event_loop_dispatch_label(event),
             started: std::time::Instant::now(),
+            startup_queued: false,
         }
     }
 }
@@ -583,15 +584,30 @@ impl EventLoopDispatchTimer {
 impl Drop for EventLoopDispatchTimer {
     fn drop(&mut self) {
         let elapsed = self.started.elapsed();
+        // Parking during bootstrap has not executed this event's handler yet.
+        let label = if self.startup_queued {
+            "StartupQueued"
+        } else {
+            self.label.as_str()
+        };
         // Issue #4520 AC-2: a startup dispatch past 100 ms reaches perf.startup.
-        gwt::perf::startup::event_loop_stall(self.label.as_str(), elapsed.as_secs_f64() * 1_000.0);
+        gwt::perf::startup::event_loop_stall(label, elapsed.as_secs_f64() * 1_000.0);
         let elapsed_ms = elapsed.as_millis() as u64;
-        if let Some(message) = gui_event_loop_stall_warning(self.label.as_str(), elapsed_ms) {
+        if let Some(message) = gui_event_loop_stall_warning(label, elapsed_ms) {
             tracing::warn!(
                 target: "gwt.frontend.timing",
-                event = %self.label,
+                event = label,
                 elapsed_ms,
                 "{message}"
+            );
+        } else {
+            // #5015: retain successful samples as well as stalls, so a low
+            // percentile or an empty warning log is backed by actual dispatches.
+            tracing::debug!(
+                target: "gwt.frontend.timing",
+                event = label,
+                elapsed_ms,
+                "GUI event loop dispatch handled"
             );
         }
     }
@@ -708,7 +724,7 @@ fn request_gui_shutdown(
 
 /// Preserve evidence when the GUI loop closes before an update handoff arrives.
 fn record_update_dispatch_result(
-    result: Result<(), tao::event_loop::EventLoopClosed<UserEvent>>,
+    result: Result<(), Box<tao::event_loop::EventLoopClosed<UserEvent>>>,
     stage: &str,
 ) -> bool {
     if let Err(error) = result {
@@ -721,13 +737,26 @@ fn record_update_dispatch_result(
     true
 }
 
+/// Transfer startup parking once, including the event received when bootstrap
+/// completed. All later dispatch and early-hook replay share the proxy queue.
+fn flush_startup_events(
+    proxy: &AppEventProxy,
+    parked: &mut Vec<UserEvent>,
+    current: Option<UserEvent>,
+) {
+    if let Some(event) = current {
+        parked.push(event);
+    }
+    proxy.prepend_events(std::mem::take(parked));
+}
+
 /// Issue #4038 (AC-1 / AC-2): resolve the payload to commit for an update
 /// apply on a worker thread — the persisted manifest when there is one,
 /// otherwise a download that is then persisted — and hand the manifest back
 /// to the event loop as `ApplyUpdateGraceful`. Failures reply with
 /// `UpdateApplyError` for `stage`.
 fn spawn_update_apply_resolution(
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
     state: gwt_core::update::UpdateState,
     client_id: ClientId,
     stage: &'static str,
@@ -885,7 +914,7 @@ struct BoardProjectionWatcherRegistry {
 }
 
 impl BoardProjectionWatcherRegistry {
-    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+    fn sync(&mut self, app: &AppRuntime, proxy: AppEventProxy) {
         let mut active_roots = HashSet::new();
         for tab in &app.tabs {
             let project_root = tab.project_root.clone();
@@ -909,7 +938,7 @@ impl BoardProjectionWatcherRegistry {
 
 fn spawn_board_projection_watcher(
     project_root: PathBuf,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
 ) -> Option<BoardProjectionWatcher> {
     let name = format!(
         "gwt-board-watch-{}",
@@ -1047,7 +1076,7 @@ struct WorkspaceProjectionWatcherRegistry {
 }
 
 impl WorkspaceProjectionWatcherRegistry {
-    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+    fn sync(&mut self, app: &AppRuntime, proxy: AppEventProxy) {
         let mut active_roots = HashSet::new();
         for tab in &app.tabs {
             let Some(context) = app.project_context(&tab.id) else {
@@ -1066,7 +1095,7 @@ impl WorkspaceProjectionWatcherRegistry {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.watchers.entry(key) {
                 if let Some(watcher) = spawn_workspace_projection_watcher(
                     context.clone(),
-                    AppEventProxy::new(proxy.clone()).for_project(context),
+                    proxy.clone().for_project(context),
                 ) {
                     entry.insert(watcher);
                 }
@@ -1182,15 +1211,8 @@ fn spawn_workspace_projection_watcher(
                 "workspace projection watcher could not ensure watch dir (will retry on first write)"
             );
         }
-        let Some(projection_file_name) = projection_path
-            .file_name()
-            .map(std::borrow::ToOwned::to_owned)
-        else {
-            return;
-        };
-
-        let mut debouncer = match notify_debouncer_mini::new_debouncer(
-            Duration::from_millis(250),
+        let mut debouncer = match notify_debouncer_mini::new_debouncer_opt::<_, notify::RecommendedWatcher>(
+            workspace_projection_debounce_config(),
             move |res: notify_debouncer_mini::DebounceEventResult| {
                 if let Ok(events) = res {
                     let paths: Vec<PathBuf> = events.into_iter().map(|event| event.path).collect();
@@ -1227,17 +1249,8 @@ fn spawn_workspace_projection_watcher(
         while let Ok(message) = rx.recv() {
             match message {
                 WorkspaceProjectionWatcherMessage::Changed(paths) => {
-                    if paths
-                        .iter()
-                        .any(|path| path.file_name() == Some(projection_file_name.as_os_str()))
-                    {
-                        tracing::info!(
-                            project_root = %project_root.display(),
-                            "workspace projection watcher detected current.json change"
-                        );
-                        if let Some(event) = load_workspace_projection_user_event(&project_root) {
-                            proxy.send(event);
-                        }
+                    if let Some(event) = workspace_projection_watch_event(&project_root, &paths) {
+                        proxy.send(event);
                     }
                 }
                 WorkspaceProjectionWatcherMessage::Stop => break,
@@ -1255,6 +1268,21 @@ fn spawn_workspace_projection_watcher(
         tx: stop_tx,
         join_handle: Some(join_handle),
     })
+}
+
+fn workspace_projection_debounce_config() -> notify_debouncer_mini::Config {
+    notify_debouncer_mini::Config::default().with_timeout(Duration::from_millis(250))
+}
+
+fn workspace_projection_watch_event(project_root: &Path, paths: &[PathBuf]) -> Option<UserEvent> {
+    if !paths
+        .iter()
+        .any(|path| path.file_name().is_some_and(|name| name == "current.json"))
+    {
+        return None;
+    }
+    tracing::info!(project_root = %project_root.display(), "workspace projection watcher detected current.json change");
+    load_workspace_projection_user_event(project_root)
 }
 
 /// Issue #4406: Board refreshes run off the GUI event loop, one per project at
@@ -1333,7 +1361,7 @@ impl ActiveWorkRefreshQueue {
 
 fn spawn_active_work_projection_refresh(
     handle: &tokio::runtime::Handle,
-    proxy: &EventLoopProxy<UserEvent>,
+    proxy: &AppEventProxy,
     job: app_runtime::ActiveWorkProjectionJob,
 ) {
     let proxy = proxy.clone();
@@ -1362,7 +1390,7 @@ fn spawn_active_work_projection_refresh(
 
 fn spawn_board_projection_refresh(
     handle: &tokio::runtime::Handle,
-    proxy: &EventLoopProxy<UserEvent>,
+    proxy: &AppEventProxy,
     job: app_runtime::BoardProjectionRefreshJob,
     views: app_runtime::BoardScopedViews,
 ) {
@@ -1416,7 +1444,7 @@ struct BoardDaemonSubscriberRegistry {
 }
 
 impl BoardDaemonSubscriberRegistry {
-    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+    fn sync(&mut self, app: &AppRuntime, proxy: AppEventProxy) {
         let mut active_roots = HashSet::new();
         for tab in &app.tabs {
             let Some(context) = app.project_context(&tab.id) else {
@@ -1433,10 +1461,9 @@ impl BoardDaemonSubscriberRegistry {
                 self.subscribers.remove(&key);
             }
             if let std::collections::hash_map::Entry::Vacant(entry) = self.subscribers.entry(key) {
-                if let Some(subscriber) = spawn_board_daemon_subscriber(
-                    context.clone(),
-                    AppEventProxy::new(proxy.clone()),
-                ) {
+                if let Some(subscriber) =
+                    spawn_board_daemon_subscriber(context.clone(), proxy.clone())
+                {
                     entry.insert((context, subscriber));
                 }
             }
@@ -1722,6 +1749,7 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::UpdateBoardProviderConfig { .. }
             | FrontendEvent::UpdateBoardOauthPort { .. }
             | FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListSupportedAgents
             | FrontendEvent::ListCustomAgentPresets
             | FrontendEvent::AddCustomAgentFromPreset { .. }
             | FrontendEvent::UpdateCustomAgent { .. }
@@ -1760,6 +1788,10 @@ fn browser_project_input_allowed(
 )]
 #[derive(Debug, Clone)]
 enum UserEvent {
+    IssueMonitorLaunchDeliveryAcknowledged(
+        Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
+    ),
+    DrainAppEvents,
     StartupReady,
     StartupStopped,
     ProjectIndexRefreshRequested {
@@ -1772,6 +1804,9 @@ enum UserEvent {
     },
     Frontend {
         client_id: ClientId,
+        // Snapshot the immutable registration for queue coalescing only.
+        // Dispatch still rechecks the live connection and window ownership.
+        client_scope: Option<app_runtime::ClientScope>,
         event: FrontendEvent,
         received_at: std::time::Instant,
     },
@@ -1962,6 +1997,7 @@ enum UserEvent {
         project_root: PathBuf,
         projection: Option<Box<gwt_core::workspace_projection::WorkspaceProjection>>,
     },
+    WorkspaceProjectionPatchPrepared(Box<app_runtime::WorkspaceProjectionPatchPrepared>),
     WorkspaceStateLoadFailed {
         project_root: PathBuf,
         error: gwt_core::WorkspaceStateLoadError,
@@ -1987,6 +2023,7 @@ enum UserEvent {
         operation_id: String,
         binding: gwt_agent::SessionExecutionBinding,
     },
+    FreshExecutionFinalized(Box<app_runtime::continuation::FreshExecutionFinalization>),
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeApprovalOverlay {
@@ -2045,6 +2082,8 @@ enum UserEvent {
     /// Completion of an off-event-loop physical answer submit to an exact
     /// live pane. Durable delivery acknowledgment begins only on this event.
     IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
+    PmWakeDeliveryComplete(app_runtime::pm::PmWakeDelivery),
+    IssueMonitorScheduledScanPrepared(Box<app_runtime::PreparedScheduledIssueMonitorScan>),
     /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
     /// Issue Monitor launch the daemon already released (daemon → GUI).
     IssueMonitorIdlePaneClose {
@@ -2087,6 +2126,10 @@ enum UserEvent {
         wizard_id: String,
         result: Box<Result<gwt::LaunchWizardHydration, String>>,
     },
+    LaunchWizardAgentUpdated {
+        wizard_id: String,
+        result: Box<Result<gwt::AgentOption, String>>,
+    },
     LaunchWizardLaunchMaterializationRequested {
         wizard_id: String,
         client_id: Option<ClientId>,
@@ -2101,6 +2144,7 @@ enum UserEvent {
         window_id: String,
         result: Box<AgentLaunchResult>,
     },
+    AgentLaunchPrepared(Box<crate::app_runtime::PreparedAgentLaunch>),
     /// Issue #4375: one PM worktree preparation finished on a blocking worker.
     /// The Git work it covers (`git worktree add`, `git fetch`) used to run
     /// inside the canvas-ready restore drain and held the GUI event loop for
@@ -2251,13 +2295,110 @@ mod tests {
     include!("project_refresh_generation_tests.rs");
 
     #[test]
+    fn startup_delivery_uses_one_pending_queue_after_bootstrap() {
+        let source = include_str!("main.rs");
+        let ready_dispatch = source
+            .rsplit_once("// Park work until bootstrap finishes")
+            .expect("startup parking boundary")
+            .1
+            .split_once("let app = app.as_mut().expect(\"startup complete\");")
+            .expect("ready dispatch boundary")
+            .0;
+        assert!(
+            !ready_dispatch.contains("startup_events.pop_front()"),
+            "ready dispatch must use the common proxy queue so replayed hooks can precede later hooks"
+        );
+        assert!(
+            ready_dispatch.contains("flush_startup_events"),
+            "the parked batch and current event must transfer through the production flush helper"
+        );
+    }
+
+    #[test]
+    fn startup_delivery_flush_keeps_current_behind_parking_and_allows_replay() {
+        fn progress(message: &str) -> super::UserEvent {
+            super::UserEvent::LaunchProgress {
+                window_id: "window".into(),
+                message: message.into(),
+            }
+        }
+        let (proxy, _) = super::AppEventProxy::stub();
+        proxy.send(progress("later"));
+        let mut parked = vec![progress("first"), progress("second")];
+        super::flush_startup_events(&proxy, &mut parked, Some(progress("current")));
+        assert!(parked.is_empty());
+        assert!(
+            matches!(proxy.take_next(), Some(super::UserEvent::LaunchProgress { message, .. }) if message == "first")
+        );
+        // Applying the first prepared completion replays its early hook through
+        // the same queue, ahead of a later hook already parked at bootstrap.
+        proxy.prepend_events(vec![progress("replayed")]);
+        super::flush_startup_events(&proxy, &mut parked, None);
+        for expected in ["replayed", "second", "current", "later"] {
+            assert!(
+                matches!(proxy.take_next(), Some(super::UserEvent::LaunchProgress { message, .. }) if message == expected)
+            );
+        }
+        assert!(proxy.take_next().is_none());
+    }
+
+    #[test]
+    fn app_delivery_closes_at_actual_exit_before_runtime_shutdown() {
+        let source = include_str!("main.rs");
+        let event_loop = source
+            .rsplit_once("event_loop.run(move |event, _, control_flow| {")
+            .expect("GUI event loop")
+            .1;
+        let startup_stopped = event_loop
+            .split_once("Event::UserEvent(UserEvent::StartupStopped) => {")
+            .expect("startup cleanup exit")
+            .1
+            .split_once("return;")
+            .unwrap()
+            .0;
+        assert!(
+            startup_stopped.contains("proxy.close()"),
+            "completed startup cleanup must close delivery before Exit"
+        );
+        let accepted_quit = event_loop
+            .split_once("let app = app.as_mut().expect(\"startup complete\");")
+            .unwrap()
+            .1
+            .split_once("Event::UserEvent(UserEvent::QuitApp { reason }) => {")
+            .expect("ready quit handler")
+            .1
+            .split_once("*control_flow = ControlFlow::Exit;")
+            .unwrap()
+            .0;
+        let close = accepted_quit
+            .find("proxy.close()")
+            .expect("accepted quit closes delivery");
+        assert!(
+            close > accepted_quit.find("return;").unwrap(),
+            "deferred quit keeps delivery open"
+        );
+        assert!(
+            close < accepted_quit.find("app.stop_all_runtimes()").unwrap(),
+            "pending handoff cleanup must enqueue before runtime shutdown"
+        );
+        let destroyed = event_loop
+            .rsplit_once("Event::LoopDestroyed => {")
+            .unwrap()
+            .1;
+        assert!(
+            destroyed.find("proxy.close()").unwrap()
+                < destroyed.find("app.stop_all_runtimes()").unwrap()
+        );
+    }
+
+    #[test]
     fn update_dispatch_closed_loop_records_stage_and_reason_without_restart() {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         assert!(!super::record_update_dispatch_result(
-            Err(tao::event_loop::EventLoopClosed(
+            Err(Box::new(tao::event_loop::EventLoopClosed(
                 super::UserEvent::Dispatch(vec![])
-            )),
+            ))),
             "dispatch_update_prepared",
         ));
         let log = std::fs::read_to_string(gwt_core::update::update_log_path()).unwrap();
@@ -2402,12 +2543,12 @@ mod tests {
 
     use super::{
         app_state_view_from_parts, apply_agent_frontend_dispatch_outcome,
-        apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
-        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
-        close_window_from_workspace, combined_window_id, current_git_branch,
-        docker_bundle_mounts_for_home, docker_bundle_override_content, event_loop_dispatch_label,
-        frontend_event_kind_label, gui_event_loop_stall_warning, gui_front_door_launch_surface,
-        hook_forward_authorized, install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        apply_windows_host_shell_wrapper, broadcast_runtime_hook_event, build_frontend_sync_events,
+        build_shell_process_launch, close_window_from_workspace, combined_window_id,
+        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        event_loop_dispatch_label, frontend_event_kind_label, gui_event_loop_stall_warning,
+        gui_front_door_launch_surface, hook_forward_authorized,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
         AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
@@ -2467,6 +2608,10 @@ mod tests {
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::GetSystemSettings
         ));
+        let supported_agents: FrontendEvent =
+            serde_json::from_str(r#"{"kind":"list_supported_agents"}"#)
+                .expect("Supported Agents is a global read-only Settings request");
+        assert!(hub_frontend_event_allowed(&supported_agents));
         assert!(hub_frontend_event_allowed(&FrontendEvent::ApplyUpdateStart));
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::OpenProjectDialog
@@ -2952,6 +3097,9 @@ mod tests {
         let wire = serde_json::to_value(&events[0].event).expect("toast wire");
         assert_eq!(wire["notification_transition"], "needs_human");
         let status = gwt::IssueMonitorStatusView {
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
@@ -3297,6 +3445,74 @@ mod tests {
             *stopped.lock().expect("stopped flag"),
             "dropping a watcher must wake and join its thread"
         );
+    }
+
+    #[test]
+    fn workspace_projection_ten_notifications_trigger_one_reload() {
+        struct BurstWatcher(Box<dyn notify::EventHandler>);
+        impl notify::Watcher for BurstWatcher {
+            fn new<F: notify::EventHandler>(
+                handler: F,
+                _config: notify::Config,
+            ) -> notify::Result<Self> {
+                Ok(Self(Box::new(handler)))
+            }
+            fn watch(&mut self, path: &Path, _mode: notify::RecursiveMode) -> notify::Result<()> {
+                for _ in 0..10 {
+                    self.0
+                        .handle_event(Ok(notify::Event::new(notify::EventKind::Modify(
+                            notify::event::ModifyKind::Any,
+                        ))
+                        .add_path(path.join("current.json"))));
+                }
+                Ok(())
+            }
+            fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+            fn kind() -> notify::WatcherKind {
+                notify::WatcherKind::NullWatcher
+            }
+        }
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&root);
+        gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
+        let path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&root);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = reloads.clone();
+        let mut debouncer = notify_debouncer_mini::new_debouncer_opt::<_, BurstWatcher>(
+            super::workspace_projection_debounce_config(),
+            move |result: notify_debouncer_mini::DebounceEventResult| {
+                let paths = result
+                    .unwrap()
+                    .into_iter()
+                    .map(|event| event.path)
+                    .collect::<Vec<_>>();
+                if let Some(event) = super::workspace_projection_watch_event(&root, &paths) {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tx.send(event).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        debouncer
+            .watcher()
+            .watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive)
+            .unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            UserEvent::WorkspaceProjectionLoaded { .. }
+        ));
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -4253,8 +4469,9 @@ mod tests {
             sample_wizard_agent_options(),
         );
         let blocking_tasks = BlockingTaskSpawner::thread();
-        let persist_dispatcher =
-            crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
+        let persist_dispatcher = Arc::new(
+            crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks),
+        );
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
@@ -4290,6 +4507,8 @@ mod tests {
             launch_wizard_cache,
 
             pending_launch_feedback_contexts: HashMap::new(),
+            pending_launch_delivery_acks: HashMap::new(),
+            pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
@@ -4302,7 +4521,7 @@ mod tests {
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
-            pending_tool_runtime_migrations: HashMap::new(),
+            pending_fresh_execution_finalizations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
             project_open_started: None,
@@ -4324,6 +4543,7 @@ mod tests {
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
+            work_merge_status_cache: Default::default(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
@@ -4452,7 +4672,6 @@ mod tests {
             name: "Codex".to_string(),
             available: true,
             installed_version: Some("0.110.0".to_string()),
-            versions: vec!["0.110.0".to_string()],
             custom_agent: None,
         }]
     }
@@ -4472,7 +4691,6 @@ mod tests {
                 name: "Claude Code".to_string(),
                 available: false,
                 installed_version: None,
-                versions: Vec::new(),
                 custom_agent: None,
             },
             AgentOption {
@@ -4480,7 +4698,6 @@ mod tests {
                 name: "Echo Agent".to_string(),
                 available: true,
                 installed_version: Some("test".to_string()),
-                versions: Vec::new(),
                 custom_agent: Some(gwt_agent::CustomCodingAgent {
                     id: "echo-agent".to_string(),
                     display_name: "Echo Agent".to_string(),
@@ -4503,7 +4720,6 @@ mod tests {
             tool_label: "Codex".to_string(),
             model: Some("gpt-5.5".to_string()),
             reasoning: Some("high".to_string()),
-            version: Some("0.110.0".to_string()),
             resume_session_id: Some("resume-1".to_string()),
             live_window_id: live_window_id.map(str::to_string),
             skip_permissions: true,
@@ -5945,7 +6161,7 @@ mod tests {
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
         assert!(runtime.window_lookup.contains_key(&claude_two_id));
 
-        let failed_launch = runtime.handle_launch_complete(
+        let failed_launch = runtime.handle_launch_complete_and_drain(
             "tab-1::missing".to_string(),
             Err("launch failed".to_string()),
         );
@@ -5954,7 +6170,7 @@ mod tests {
             "late completion without a live project owner must be discarded"
         );
 
-        let missing_window_launch = runtime.handle_launch_complete(
+        let missing_window_launch = runtime.handle_launch_complete_and_drain(
             "tab-1::missing".to_string(),
             Ok((
                 ProcessLaunch {
@@ -5964,7 +6180,6 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
-                    pending_tool_runtime_migration: None,
                     resource_policy: None,
                 },
                 "session-3".to_string(),
@@ -5994,7 +6209,6 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             }),
         );
@@ -7217,7 +7431,7 @@ mod tests {
                 raw_id: "ghost".to_string(),
             },
         );
-        let project_missing = runtime.handle_launch_complete(
+        let project_missing = runtime.handle_launch_complete_and_drain(
             project_missing_id.clone(),
             Ok((
                 ProcessLaunch {
@@ -7227,7 +7441,6 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
-                    pending_tool_runtime_migration: None,
                     resource_policy: None,
                 },
                 "session-1".to_string(),
@@ -7256,7 +7469,7 @@ mod tests {
                 raw_id: "ghost".to_string(),
             },
         );
-        let raw_missing = runtime.handle_launch_complete(
+        let raw_missing = runtime.handle_launch_complete_and_drain(
             raw_missing_id.clone(),
             Ok((
                 ProcessLaunch {
@@ -7266,7 +7479,6 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
-                    pending_tool_runtime_migration: None,
                     resource_policy: None,
                 },
                 "session-2".to_string(),
@@ -7302,7 +7514,6 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             }),
         );
@@ -7320,7 +7531,6 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
-                pending_tool_runtime_migration: None,
                 resource_policy: None,
             }),
         );
@@ -7515,25 +7725,8 @@ mod tests {
         assert!(err.contains("git show-ref --verify refs/heads/feature/missing"));
         assert!(err.contains(&temp.path().display().to_string()));
     }
-    fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
+    fn sample_windows_shell_launch_config() -> gwt_agent::LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .working_dir("E:/gwt/develop")
-            .version("latest")
-            .build();
-        config.command = "bunx".to_string();
-        config.args = vec![
-            "@anthropic-ai/claude-code@latest".to_string(),
-            "--print".to_string(),
-        ];
-        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
-        config.working_dir = Some(PathBuf::from("E:/gwt/develop"));
-        config.runtime_target = LaunchRuntimeTarget::Host;
-        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
-        config
-    }
-
-    fn sample_custom_bunx_launch_config() -> gwt_agent::LaunchConfig {
-        let mut config = AgentLaunchBuilder::new(AgentId::Custom("claude-code-openai".to_string()))
             .working_dir("E:/gwt/develop")
             .build();
         config.command = "bunx".to_string();
@@ -7546,150 +7739,6 @@ mod tests {
         config.runtime_target = LaunchRuntimeTarget::Host;
         config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
         config
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
-        let mut config = sample_versioned_launch_config();
-        config.remove_env = vec!["SECRET".to_string()];
-        let mut probes = Vec::new();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |command, args, _env, remove_env, cwd| {
-                assert_eq!(remove_env, vec!["SECRET".to_string()].as_slice());
-                assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                probes.push((command.to_string(), args));
-                command == "npx"
-            },
-        );
-
-        assert!(changed, "expected bunx failure to switch to npx");
-        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
-        assert_eq!(
-            probes[0],
-            ("bunx".to_string(), vec!["--version".to_string()])
-        );
-        assert_eq!(config.command, "npx");
-        assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--print".to_string(),
-            ]
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_package_runner_fallback_keeps_bunx_when_probe_succeeds() {
-        let mut config = sample_versioned_launch_config();
-        let original_command = config.command.clone();
-        let original_args = config.args.clone();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |_command, _args, _env, _remove_env, _cwd| true,
-        );
-
-        assert!(!changed, "successful bunx probe should keep bunx");
-        assert_eq!(config.command, original_command);
-        assert_eq!(config.args, original_args);
-    }
-
-    #[test]
-    fn host_package_runner_fallback_does_not_probe_or_mutate_custom_bunx() {
-        let mut config = sample_custom_bunx_launch_config();
-        let original = format!("{config:?}");
-        let mut probes = Vec::new();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |command, args, _env, _remove_env, cwd| {
-                assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                probes.push((command.to_string(), args));
-                command == "npx"
-            },
-        );
-
-        assert!(!changed, "Custom Bunx must bypass built-in fallback policy");
-        assert!(probes.is_empty(), "Custom Bunx must not be probed");
-        assert_eq!(
-            format!("{config:?}"),
-            original,
-            "Custom Bunx launch must remain unchanged"
-        );
-    }
-
-    #[test]
-    fn host_runner_health_compatibility_preserves_healthy_direct_command() {
-        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .working_dir("E:/gwt/develop")
-            .version("installed")
-            .build();
-        #[cfg(not(windows))]
-        {
-            config.command = "/opt/gwt-test/claude".to_string();
-        }
-        #[cfg(windows)]
-        {
-            config.command = "C:/gwt-test/claude.exe".to_string();
-        }
-        let original_command = config.command.clone();
-        let original_args = config.args.clone();
-
-        let changed = apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            "npx".to_string(),
-            |command, args, _env, _remove_env, _cwd| {
-                assert_eq!(command, original_command);
-                assert_eq!(args, vec!["--version".to_string()]);
-                true
-            },
-        );
-
-        assert!(!changed);
-        assert_eq!(config.command, original_command);
-        assert_eq!(config.args, original_args);
-    }
-
-    #[test]
-    fn probe_host_package_runner_times_out_and_returns_false() {
-        #[cfg(target_os = "windows")]
-        let (command, args) = (
-            "cmd",
-            vec!["/C".to_string(), "ping -n 6 127.0.0.1 >NUL".to_string()],
-        );
-        #[cfg(not(target_os = "windows"))]
-        let (command, args) = ("sh", vec!["-c".to_string(), "sleep 5".to_string()]);
-
-        let start = Instant::now();
-        let ok = crate::probe_host_package_runner_with_timeout(
-            command,
-            args,
-            // The "runner" here is a shell fixture, not the host package
-            // runner, so the Issue #3972 guard must let it through — otherwise
-            // this asserts the refusal instead of the timeout it is about.
-            &HashMap::from([(
-                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
-                "1".to_string(),
-            )]),
-            &[],
-            None,
-            Duration::from_millis(100),
-            Duration::from_millis(10),
-        );
-
-        assert!(!ok, "hanging package-runner probe should fail closed");
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "probe timeout should return quickly"
-        );
     }
 
     #[test]
@@ -7833,7 +7882,7 @@ mod tests {
 
     #[test]
     fn command_prompt_agent_wrapper_preserves_spaced_cmd_path() {
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
         config.args = vec![
             "--yes".to_string(),
@@ -7885,7 +7934,7 @@ mod tests {
 
     #[test]
     fn powershell_agent_wrapper_quotes_spaced_path_and_single_quotes() {
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
         config.args = vec!["value's".to_string()];
         config.windows_shell = Some(gwt_agent::WindowsShellKind::PowerShell7);
@@ -8117,22 +8166,6 @@ mod tests {
         assert_eq!(branch.scope, BranchScope::Local);
         assert!(!branch.is_head);
 
-        let config = sample_versioned_launch_config();
-        assert_eq!(
-            super::package_runner_version_spec(&config),
-            Some("@anthropic-ai/claude-code@latest".to_string())
-        );
-        assert_eq!(
-            super::strip_package_runner_args(
-                &[
-                    "--yes".to_string(),
-                    "@anthropic-ai/claude-code@latest".to_string(),
-                    "--print".to_string(),
-                ],
-                "@anthropic-ai/claude-code@latest",
-            ),
-            vec!["--print".to_string()]
-        );
         assert!(super::command_matches_runner(
             "C:/Users/test/bunx.cmd",
             "bunx"
@@ -9383,32 +9416,6 @@ mod tests {
         assert!(super::command_matches_runner("C:/tools/bunx.cmd", "bunx"));
         assert!(!super::command_matches_runner("C:/tools/node.exe", "bunx"));
 
-        let version_spec = super::package_runner_version_spec(&sample_versioned_launch_config())
-            .expect("version spec");
-        assert_eq!(version_spec, "@anthropic-ai/claude-code@latest");
-        assert_eq!(
-            super::strip_package_runner_args(
-                &[
-                    "--yes".to_string(),
-                    version_spec.clone(),
-                    "--print".to_string(),
-                ],
-                &version_spec,
-            ),
-            vec!["--print".to_string()]
-        );
-        assert_eq!(
-            super::strip_package_runner_args(
-                &[version_spec.clone(), "--print".to_string()],
-                &version_spec,
-            ),
-            vec!["--print".to_string()]
-        );
-        assert_eq!(
-            super::strip_package_runner_args(&["--print".to_string()], &version_spec),
-            vec!["--print".to_string()]
-        );
-
         let old_docker_bin = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", "podman");
         assert_eq!(super::docker_binary_for_launch(), "podman");
@@ -9483,7 +9490,7 @@ mod tests {
         )
         .expect("write compose file");
 
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
@@ -9542,7 +9549,7 @@ mod tests {
         )
         .expect("write override file");
 
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
@@ -9906,7 +9913,7 @@ impl Drop for PendingApp {
 
 fn bootstrap_app(
     startup_dir: &Path,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
     pty_writers: PtyWriterRegistry,
     attachment_uploads: AttachmentUploadStore,
     blocking_tasks: BlockingTaskSpawner,
@@ -10157,7 +10164,7 @@ fn main() -> std::io::Result<()> {
         use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
         event_loop.set_activation_policy(ActivationPolicy::Prohibited);
     }
-    let proxy = event_loop.create_proxy();
+    let proxy = AppEventProxy::new(event_loop.create_proxy());
     // SPEC #2920 Phase 4: the tray menu uses `tray_icon::menu::Menu`
     // (re-exported from `muda`), and `MenuEvent::set_event_handler` is
     // the single cross-platform callback. The legacy macOS native
@@ -10186,7 +10193,7 @@ fn main() -> std::io::Result<()> {
     });
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let mut app: Option<AppRuntime> = None;
-    let mut startup_events = std::collections::VecDeque::new();
+    let mut startup_events = Vec::new();
     let mut startup_quit_requested = false;
     let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
     let mut workspace_projection_watchers = WorkspaceProjectionWatcherRegistry::default();
@@ -10194,7 +10201,7 @@ fn main() -> std::io::Result<()> {
     // component in the production topology ever runs scheduled scans, so
     // autonomous launches silently never happen.
     {
-        let tick_proxy = event_loop.create_proxy();
+        let tick_proxy = proxy.clone();
         let interval = std::time::Duration::from_secs(
             gwt::IssueMonitorConfig::default()
                 .poll_interval_secs
@@ -10224,7 +10231,7 @@ fn main() -> std::io::Result<()> {
     // lane available at launch instead of minutes later, and the cadence is
     // the worst-case gap after a daemon crash.
     {
-        let tick_proxy = event_loop.create_proxy();
+        let tick_proxy = proxy.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("runtime-daemon-ensure-tick".to_string())
             .spawn(move || loop {
@@ -10244,7 +10251,7 @@ fn main() -> std::io::Result<()> {
     // The observer needs a cadence finer than the scan poll so a settled
     // window closes within one tick after its 60-second grace.
     {
-        let tick_proxy = event_loop.create_proxy();
+        let tick_proxy = proxy.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("terminal-convergence-tick".to_string())
             .spawn(move || loop {
@@ -10307,7 +10314,7 @@ fn main() -> std::io::Result<()> {
         &runtime,
         prepared_listener.into_listener(),
         oauth_redirect_port,
-        AppEventProxy::new(proxy.clone()),
+        proxy.clone(),
         clients.clone(),
         pty_writers.clone(),
         attachment_uploads,
@@ -10380,9 +10387,7 @@ fn main() -> std::io::Result<()> {
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
     if !gwt::index_worker::automatic_background_index_disabled() {
-        crate::project_index_bootstrap::ensure_refresh_broker_drain(AppEventProxy::new(
-            proxy.clone(),
-        ));
+        crate::project_index_bootstrap::ensure_refresh_broker_drain(proxy.clone());
     }
     let mut startup_index_projects = HashSet::new();
 
@@ -10520,6 +10525,13 @@ fn main() -> std::io::Result<()> {
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
+        let event = match event {
+            Event::UserEvent(UserEvent::DrainAppEvents) => {
+                let Some(event) = proxy.take_next() else { return; };
+                Event::UserEvent(event)
+            }
+            event => event,
+        };
         let mut dispatch_timer = EventLoopDispatchTimer::start(&event);
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
         let event = match event {
@@ -10543,8 +10555,15 @@ fn main() -> std::io::Result<()> {
                     // Tao exits the process without dropping the closure on Exit.
                     return;
                 }
-                Event::LoopDestroyed => { server.shutdown(); return; }
+                Event::LoopDestroyed => {
+                    proxy.close();
+                    drop(std::mem::take(&mut startup_events));
+                    server.shutdown();
+                    return;
+                }
                 Event::UserEvent(UserEvent::StartupStopped) => {
+                    proxy.close();
+                    drop(std::mem::take(&mut startup_events));
                     *control_flow = ControlFlow::Exit;
                     return;
                 }
@@ -10597,7 +10616,7 @@ fn main() -> std::io::Result<()> {
                             spawn_project_index_status_check(
                                 &runtime,
                                 state.project_index_bootstrap.clone(),
-                                AppEventProxy::new(proxy.clone()).for_project(context.clone()),
+                                proxy.clone().for_project(context.clone()),
                                 Some(context.project_root),
                                 inventory,
                             );
@@ -10608,22 +10627,26 @@ fn main() -> std::io::Result<()> {
                     app = Some(ready);
                 }
                 Ok(Err(error)) => {
+                    proxy.close();
+                    drop(std::mem::take(&mut startup_events));
                     server.shutdown();
                     fatal_startup_exit(&mut log_handles, &format!("app bootstrap failed: {error}"), 1);
                 }
                 Err(_) => {}
             }
         }
-        // Runtime completions remain in arrival order until bootstrap finishes.
+        // Park work until bootstrap finishes, then prioritize controls over completions.
         let event = if app.is_none() {
+            dispatch_timer.startup_queued = true;
+            watchdog_guard.set_event("StartupQueued");
             match event {
                 Event::UserEvent(UserEvent::StartupReady) => {}
                 Event::UserEvent(UserEvent::MenuEvent(menu)) => {
                     tray_open.set_text("Starting… — request received");
                     tracing::info!(target: "gwt_tray", "tray request accepted during startup");
-                    startup_events.push_back(UserEvent::MenuEvent(menu));
+                    startup_events.push(UserEvent::MenuEvent(menu));
                 }
-                Event::UserEvent(event) => startup_events.push_back(event),
+                Event::UserEvent(event) => startup_events.push(event),
                 _ => {}
             }
             return;
@@ -10631,15 +10654,25 @@ fn main() -> std::io::Result<()> {
             match event {
                 Event::UserEvent(event @ UserEvent::QuitApp { .. }) => Event::UserEvent(event),
                 Event::UserEvent(event) => {
-                    if !matches!(event, UserEvent::StartupReady) { startup_events.push_back(event); }
-                    let Some(next) = startup_events.pop_front() else { return; };
-                    if !startup_events.is_empty() { let _ = proxy.send_event(UserEvent::StartupReady); }
-                    Event::UserEvent(next)
+                    if startup_events.is_empty() {
+                        if matches!(event, UserEvent::StartupReady) { return; }
+                        Event::UserEvent(event)
+                    } else {
+                        let current = if matches!(event, UserEvent::StartupReady) { None } else { Some(event) };
+                        flush_startup_events(&proxy, &mut startup_events, current);
+                        let Some(next) = proxy.take_next() else { return; };
+                        Event::UserEvent(next)
+                    }
                 }
-                event => event,
+                event => {
+                    flush_startup_events(&proxy, &mut startup_events, None);
+                    event
+                }
             }
         };
         let app = app.as_mut().expect("startup complete");
+        dispatch_timer.label = event_loop_dispatch_label(&event);
+        watchdog_guard.set_event(dispatch_timer.label.as_str());
         // Issue #3611 AC-4: every dispatch on this thread is timed, not just
         // the frontend ones. The Work/branch scan results land as `UserEvent`s,
         // so a projection stall was previously invisible in the logs.
@@ -10686,6 +10719,8 @@ fn main() -> std::io::Result<()> {
                     }
                     return;
                 }
+                proxy.close();
+                drop(std::mem::take(&mut startup_events));
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     reason,
@@ -10714,6 +10749,7 @@ fn main() -> std::io::Result<()> {
                 client_id,
                 event,
                 received_at,
+                ..
             }) => {
                 // Resolve the immutable registration again after queueing: a disconnected
                 // client cannot retain input authority through the fallback queue.
@@ -10791,7 +10827,7 @@ fn main() -> std::io::Result<()> {
                             let context = state.context.clone();
                             let log_scope = app.project_log_scope_for_tab(&context.tab_id).cloned();
                             let _log_scope = log_scope.as_ref().map(|scope| scope.enter());
-                            spawn_project_index_status_check(&runtime, state.project_index_bootstrap.clone(), AppEventProxy::new(proxy.clone()).for_project(context.clone()), Some(context.project_root), None);
+                            spawn_project_index_status_check(&runtime, state.project_index_bootstrap.clone(), proxy.clone().for_project(context.clone()), Some(context.project_root), None);
                         }
                     }
 
@@ -11014,6 +11050,12 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkspaceStateLoadFailed { project_root, error }) => {
                 clients.dispatch(app.handle_workspace_state_load_failed(&project_root, error));
             }
+            Event::UserEvent(UserEvent::WorkspaceProjectionPatchPrepared(prepared)) => {
+                if let Some(dispatch) = app.apply_workspace_projection_patch(*prepared) {
+                    clients.dispatch_prepared_active_work(
+                        dispatch.payload, DispatchTarget::Project(dispatch.context.project_key));
+                }
+            }
             Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
                 let commit = app.handle_active_work_projection_prepared(*prepared);
                 let mut dispatch_ms = 0;
@@ -11076,9 +11118,7 @@ fn main() -> std::io::Result<()> {
                 ));
             }
             Event::UserEvent(UserEvent::FreshExecutionReadyResend { grant, request, reply }) => {
-                let (result, events) = app.resend_fresh_execution_ready(&grant, &request);
-                clients.dispatch(events);
-                let _ = reply.send(result);
+                clients.dispatch(app.resend_fresh_execution_ready(&grant, &request, reply));
             }
             Event::UserEvent(UserEvent::IssueMonitorFreshLaunchRepaired {
                 window_id,
@@ -11167,6 +11207,12 @@ fn main() -> std::io::Result<()> {
                 ));
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledScanPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_scheduled_scan_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
+                app.pm_wake_delivery_complete(delivery);
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
                 project_root,
                 status,
@@ -11250,6 +11296,10 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::LaunchWizardAgentUpdated { wizard_id, result }) => {
+                let events = app.handle_launch_wizard_agent_updated(wizard_id, *result);
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::LaunchWizardLaunchMaterializationRequested {
                 wizard_id,
                 client_id,
@@ -11264,7 +11314,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ProjectIndexRefreshRequested { project_key, project_root }) => {
                 if let Some(state) = app.project_states.get(&project_key) {
                     state.project_index_bootstrap.invalidate_full_status(&project_root);
-                    state.project_index_bootstrap.spawn(AppEventProxy::new(proxy.clone()).for_project(state.context.clone()), project_root);
+                    state.project_index_bootstrap.spawn(proxy.clone().for_project(state.context.clone()), project_root);
                 }
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {
@@ -11292,6 +11342,15 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::FreshExecutionFinalized(completion)) => {
+                clients.dispatch(app.handle_fresh_execution_finalized(*completion));
+            }
+            Event::UserEvent(UserEvent::AgentLaunchPrepared(prepared)) => {
+                clients.dispatch(app.handle_agent_launch_prepared(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorLaunchDeliveryAcknowledged(acknowledged)) => {
+                clients.dispatch(app.handle_issue_monitor_launch_delivery_ack(*acknowledged));
             }
             Event::UserEvent(UserEvent::PmWorktreePrepared {
                 continuation,
@@ -11787,6 +11846,8 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                proxy.close();
+                drop(std::mem::take(&mut startup_events));
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     GuiShutdownReason::LoopDestroyed,

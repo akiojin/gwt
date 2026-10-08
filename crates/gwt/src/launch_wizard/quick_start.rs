@@ -12,17 +12,7 @@ use super::QuickStartEntry;
 /// agent starts), which the cache — loaded once at startup and only refreshed
 /// per-window at spawn — never picks up (#2995).
 pub fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
+    gwt_agent::session_ledger::load_sessions(sessions_dir).unwrap_or_default()
 }
 
 pub fn load_quick_start_entries(
@@ -76,12 +66,6 @@ pub(super) fn collect_quick_start_entries_from_sessions(
             tool_label: session.display_name.clone(),
             model: session.model.clone(),
             reasoning: session.reasoning_level.clone(),
-            version: session.launch_tool_version().or_else(|| {
-                session
-                    .agent_id
-                    .npm_package()
-                    .map(|_| "installed".to_string())
-            }),
             resume_session_id: agent_session_resume_id(&session),
             live_window_id: None,
             skip_permissions: session.skip_permissions,
@@ -470,7 +454,6 @@ mod tests {
         );
         assert_eq!(entries[0].model.as_deref(), Some("gpt-5.5"));
         assert_eq!(entries[0].reasoning.as_deref(), Some("high"));
-        assert_eq!(entries[0].version.as_deref(), Some("0.110.0"));
         assert_eq!(
             entries[0].runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker

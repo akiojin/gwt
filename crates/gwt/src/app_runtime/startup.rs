@@ -2335,9 +2335,7 @@ impl AppRuntime {
     }
 
     fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
-        gwt_agent::validate_session_id_path_component(session_id).ok()?;
-        let session =
-            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).ok()?;
+        let session = gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)?;
         // Historical stopped Sessions need no writer lease or serialization.
         // A real mutation still re-reads and checks lifecycle under the lock below.
         let needs_interruption = session.status != gwt_agent::AgentStatus::Interrupted

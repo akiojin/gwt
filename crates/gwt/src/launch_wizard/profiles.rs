@@ -86,17 +86,7 @@ pub fn previous_launch_profiles_for_repo_from_sessions(
 }
 
 pub(super) fn load_launch_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
+    gwt_agent::session_ledger::load_sessions(sessions_dir).unwrap_or_default()
 }
 
 fn launch_profile_session_cmp(left: &gwt_agent::Session, right: &gwt_agent::Session) -> Ordering {
@@ -128,17 +118,10 @@ pub fn quick_start_entries_from_sessions(
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
     let fast_mode = session.fast_mode_enabled();
     let hermes = hermes_preferences_from_session(&session);
-    let version = session.launch_tool_version();
     LaunchWizardPreviousProfile {
         agent_id: session.agent_id.command().to_string(),
         model: session.model,
         reasoning: session.reasoning_level,
-        version: version.or_else(|| {
-            session
-                .agent_id
-                .npm_package()
-                .map(|_| "installed".to_string())
-        }),
         session_mode: session.session_mode,
         skip_permissions: session.skip_permissions,
         fast_mode,
@@ -376,7 +359,6 @@ mod tests {
         assert_eq!(profile.agent_id, "codex");
         assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(profile.reasoning.as_deref(), Some("high"));
-        assert_eq!(profile.version.as_deref(), Some("0.110.0"));
         assert_eq!(profile.session_mode, gwt_agent::SessionMode::Continue);
         assert_eq!(
             profile.runtime_target,
@@ -534,25 +516,24 @@ mod tests {
         assert_eq!(view.selected_agent_id, "codex");
         assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
-        assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
-        // Issue #3462: Continue inherits the Skip Permissions preference.
+        // L2 uses fixed launch choices after restoring the saved agent profile.
         assert!(
             view.skip_permissions,
-            "a Continue launch must inherit the Skip Permissions preference"
+            "a Continue launch uses Skip Permissions"
         );
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.fast_mode);
+        assert!(!view.fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
         assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
-        assert!(config.codex_fast_mode);
+        assert!(!config.codex_fast_mode);
         assert!(
             config.skip_permissions,
-            "a Continue launch must carry the inherited Skip Permissions preference"
+            "a Continue launch uses Skip Permissions"
         );
         assert_eq!(config.working_dir.as_deref(), Some(current_repo.as_path()));
     }
@@ -600,9 +581,9 @@ mod tests {
         assert_eq!(view.selected_execution_mode, "continue");
         // Issue #3462: the restored preference is advertised on Continue.
         assert!(view.skip_permissions);
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.fast_mode);
+        assert!(!view.fast_mode);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("api"));
         assert_eq!(view.selected_docker_lifecycle, "start");
@@ -764,7 +745,7 @@ mod tests {
 
         let mut ctx = context(branch("origin/feature/gui"), "feature/gui");
         ctx.quick_start_root = worktree;
-        let state = LaunchWizardState::open(ctx, dir.path(), &dir.path().join("versions.json"));
+        let state = LaunchWizardState::open(ctx, dir.path());
 
         assert_eq!(state.step, LaunchWizardStep::QuickStart);
         assert_eq!(state.quick_start_entries.len(), 1);

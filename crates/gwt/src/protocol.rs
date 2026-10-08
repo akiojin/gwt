@@ -899,6 +899,11 @@ pub enum FrontendEvent {
     SetIssueMonitorMaxActiveAgents {
         max_active_agents: usize,
     },
+    SetIssueMonitorAllowedLabels {
+        allowed_labels: Vec<String>,
+        #[serde(default)]
+        request_id: Option<u64>,
+    },
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },
@@ -996,6 +1001,8 @@ pub enum FrontendEvent {
     /// Settings > Custom Agents: list every stored custom agent. Response is
     /// [`BackendEvent::CustomAgentList`].
     ListCustomAgents,
+    /// SPEC #1921 L3: list supported built-ins and their cached detection state.
+    ListSupportedAgents,
     /// Settings > Custom Agents > Add from preset: enumerate built-in preset
     /// definitions for the picker. Response is
     /// [`BackendEvent::CustomAgentPresetList`].
@@ -1854,6 +1861,17 @@ pub struct PmAgentOption {
     pub name: String,
 }
 
+/// SPEC #1921 L3: read-only Settings row, without executable paths or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SupportedAgentView {
+    pub id: String,
+    pub name: String,
+    pub installed: bool,
+    /// None distinguishes an unavailable version from a known one; `installed`
+    /// distinguishes a failed version probe from an agent that was not detected.
+    pub installed_version: Option<String>,
+}
+
 /// Issue #3906 AC-7 / AC-12: phases of the automatic apply announced through
 /// [`BackendEvent::UpdateAutoApply`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2071,6 +2089,11 @@ pub enum BackendEvent {
         /// Boxed: the view is by far the largest payload in this enum
         /// (clippy `large_enum_variant`), and every broadcast clones it.
         status: Box<IssueMonitorStatusView>,
+    },
+    /// Client-scoped failure for one label save; uncertain writes can still commit.
+    IssueMonitorAllowedLabelsWriteFailed {
+        request_id: u64,
+        outcome_unknown: bool,
     },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
@@ -2516,6 +2539,10 @@ pub enum BackendEvent {
     CustomAgentList {
         agents: Vec<CustomCodingAgent>,
     },
+    /// Response to [`FrontendEvent::ListSupportedAgents`].
+    SupportedAgentList {
+        agents: Vec<SupportedAgentView>,
+    },
     /// Response to [`FrontendEvent::ListCustomAgentPresets`].
     CustomAgentPresetList {
         presets: Vec<PresetDefinition>,
@@ -2935,6 +2962,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_allowed_labels_write_failed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_inbox",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3252,6 +3284,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "supported_agent_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "agent_backend_saved",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -3383,6 +3420,9 @@ impl BackendEvent {
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
+            BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
+                "issue_monitor_allowed_labels_write_failed"
+            }
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
@@ -3452,6 +3492,7 @@ impl BackendEvent {
             BackendEvent::UpdateApplyPendingPersisted { .. } => "update_apply_pending_persisted",
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
             BackendEvent::CustomAgentList { .. } => "custom_agent_list",
+            BackendEvent::SupportedAgentList { .. } => "supported_agent_list",
             BackendEvent::CustomAgentPresetList { .. } => "custom_agent_preset_list",
             BackendEvent::CustomAgentSaved { .. } => "custom_agent_saved",
             BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",

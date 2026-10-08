@@ -27,6 +27,68 @@ use gwt::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// CLI updates are maintenance commands, never launch/profile-save requests.
+/// This runs entirely on the worker, including the fresh version probe.
+fn run_wizard_agent_update(
+    agent_id: &str,
+    config: &gwt::ShellLaunchConfig,
+    config_path: Option<&Path>,
+) -> Result<gwt::AgentOption, String> {
+    let config_path = config_path
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            gwt::profile_dispatch::config_path().map_err(|error| error.to_string())
+        })?;
+    let (env, remove_env) = gwt_agent::LaunchEnvironment::from_active_profile(
+        &config_path,
+        gwt_agent::LaunchRuntimeTarget::Host,
+    )?
+    .into_parts();
+    let program = config
+        .command_override
+        .as_deref()
+        .ok_or("Update command is unavailable")?;
+    let mut command = gwt_core::process::hidden_command(program);
+    command
+        .args(config.command_args_override.as_deref().unwrap_or_default())
+        .envs(&env)
+        .stdin(std::process::Stdio::null());
+    for key in &remove_env {
+        command.env_remove(key);
+    }
+    if let Some(cwd) = &config.working_dir {
+        command.current_dir(cwd);
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let detail = if output.stderr.is_empty() {
+            &output.stdout
+        } else {
+            &output.stderr
+        };
+        return Err(format!(
+            "{agent_id} updater exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(detail).trim()
+        ));
+    }
+    let detected = gwt_agent::AgentDetector::detect_by_command_with_environment(
+        agent_id,
+        &env,
+        &remove_env,
+        config.working_dir.as_deref(),
+    )
+    .filter(|agent| agent.version.is_some())
+    .ok_or_else(|| {
+        format!("{agent_id} updated, but its installed version could not be detected")
+    })?;
+    gwt::build_builtin_agent_options(vec![detected])
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| format!("Unknown updated agent: {agent_id}"))
+}
+
 use super::continuation::{
     provider_conversation_availability, provider_conversation_availability_with_grok_home,
     session_matches_project_state, ProviderConversationAvailability,
@@ -534,10 +596,10 @@ fn agent_settings_set_summary(
         value,
     };
     let key = agent_settings_provider_key(&profile.agent_id);
-    let agent = agents
+    let detected_agent = agents
         .iter()
-        .find(|agent| agent_settings_provider_key(&agent.id) == key)
-        .map_or_else(|| profile.agent_id.clone(), |agent| agent.name.clone());
+        .find(|agent| agent_settings_provider_key(&agent.id) == key);
+    let agent = detected_agent.map_or_else(|| profile.agent_id.clone(), |agent| agent.name.clone());
     let mut rows = vec![
         row("Agent", agent),
         row(
@@ -555,8 +617,8 @@ fn agent_settings_set_summary(
                 .unwrap_or_else(|| "auto".to_string()),
         ),
     ];
-    if let Some(version) = profile.version.clone() {
-        rows.push(row("Version", version));
+    if let Some(version) = detected_agent.and_then(|agent| agent.installed_version.as_ref()) {
+        rows.push(row("Version", version.clone()));
     }
     rows.push(row(
         "Runtime",
@@ -1743,9 +1805,6 @@ impl AppRuntime {
         if let Some(model) = session.model.clone() {
             builder = builder.model(model);
         }
-        if let Some(version) = session.launch_tool_version() {
-            builder = builder.version(version);
-        }
         if let Some(level) = session.reasoning_level.clone() {
             builder = builder.reasoning_level(level);
         }
@@ -1763,10 +1822,6 @@ impl AppRuntime {
         if let Some(linked) = session.linked_issue_number {
             builder = builder.linked_issue_number(linked);
         }
-        if let Some(provenance) = session.tool_runtime_provenance.clone() {
-            builder = builder.tool_runtime_provenance(provenance);
-        }
-        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         // Resume the specific Session (conversation UUID) the user clicked when
         // one was requested; otherwise resume the Work's latest conversation.
@@ -1792,11 +1847,7 @@ impl AppRuntime {
         }
 
         let mut config = builder.build();
-        // Preserve the requested selector and display name when resuming.
-        // The observed runtime version must not become a package pin.
-        if let Some(version) = session.launch_tool_version() {
-            config.tool_version = Some(version);
-        }
+        // Preserve the display name when resuming.
         if !session.display_name.is_empty() {
             config.display_name = session.display_name.clone();
         }
@@ -2531,6 +2582,7 @@ impl AppRuntime {
         }
         let pool = self.issue_monitor_saved_pool(project_root);
         if let Some(session) = self.launch_wizard_for_mut(&context) {
+            session.wizard.use_profile_launch_preferences();
             session.issue_monitor_profile_save = Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
                 issue_number: Some(issue_number),
@@ -2674,6 +2726,7 @@ impl AppRuntime {
         project_root: PathBuf,
         previous_profiles: gwt::LaunchWizardPreviousProfiles,
     ) -> LaunchWizardState {
+        let saved_agent_id = previous_profiles.preferred_agent_id().map(str::to_string);
         let base_branch_name = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
         let mut wizard = LaunchWizardState::open_start_work_with_previous_profiles(
             LaunchWizardContext {
@@ -2694,11 +2747,17 @@ impl AppRuntime {
             Vec::new(),
             previous_profiles,
         );
+        wizard.use_profile_launch_preferences();
         Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
             method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
         });
+        // D4: an undetected saved agent must not become an implicit pool edit.
+        // Keep its identity so validation requires an explicit replacement.
+        if let Some(saved_agent_id) = saved_agent_id {
+            wizard.agent_id = saved_agent_id;
+        }
         wizard
     }
 
@@ -3732,6 +3791,7 @@ impl AppRuntime {
             linked_issue_kind,
             previous_profiles,
         );
+        session.wizard.use_profile_launch_preferences();
         let initial_prompt = review_prompt.clone().unwrap_or_else(|| {
             // Issue #4630: a launch that consumed an operator requeue carries
             // the operator's reason, read from the exact durable delivery.
@@ -4355,6 +4415,9 @@ impl AppRuntime {
         };
         match completion {
             LaunchWizardCompletion::Launch(config) => Ok(*config),
+            LaunchWizardCompletion::UpdateAgent { .. } => {
+                Err("A CLI update is not an Issue Monitor launch".to_string())
+            }
             LaunchWizardCompletion::FocusWindow { window_id } => Err(format!(
                 "Issue Monitor launch resolved to existing window {window_id}"
             )),
@@ -4813,6 +4876,12 @@ impl AppRuntime {
         let Some(mut session) = self.take_launch_wizard(context) else {
             return Vec::new();
         };
+        if session.wizard.agent_update_pending()
+            && !matches!(action, gwt::LaunchWizardAction::Cancel)
+        {
+            self.store_launch_wizard(session);
+            return vec![self.launch_wizard_state_outbound(context)];
+        }
         let action_stage = Self::launch_wizard_action_error_stage(&action);
         let action_label = Self::launch_wizard_action_label(&action);
         let requested_agent_id = match &action {
@@ -5154,6 +5223,27 @@ impl AppRuntime {
         }
 
         match session.wizard.completion.take() {
+            Some(LaunchWizardCompletion::UpdateAgent {
+                agent_id,
+                mut config,
+            }) => {
+                config
+                    .working_dir
+                    .get_or_insert(context.project_root.clone());
+                let wizard_id = session.wizard_id.clone();
+                let config_path = self.profile_config_path.clone();
+                let proxy = self.proxy.for_project(context.clone());
+                thread::spawn(move || {
+                    let result =
+                        run_wizard_agent_update(&agent_id, &config, config_path.as_deref());
+                    proxy.send(UserEvent::LaunchWizardAgentUpdated {
+                        wizard_id,
+                        result: Box::new(result),
+                    });
+                });
+                self.store_launch_wizard(session);
+                vec![self.launch_wizard_state_outbound(context)]
+            }
             Some(LaunchWizardCompletion::Cancelled) => {
                 vec![self.launch_wizard_state_broadcast(context, None)]
             }
@@ -5774,6 +5864,33 @@ impl AppRuntime {
         ];
         events.extend(self.local_issue_monitor_events_for(&context, Some(&client_id), |_| {}));
         events
+    }
+
+    pub(crate) fn handle_launch_wizard_agent_updated(
+        &mut self,
+        wizard_id: String,
+        result: Result<gwt::AgentOption, String>,
+    ) -> Vec<OutboundEvent> {
+        let refresh = result.is_ok();
+        let context = self.project_states.values().find_map(|state| {
+            state
+                .launch_wizard
+                .as_ref()
+                .filter(|session| session.wizard_id == wizard_id)
+                .map(|session| session.project_context.clone())
+        });
+        let event = context.and_then(|context| {
+            let mut session = self.take_launch_wizard(&context)?;
+            session.wizard.finish_agent_update(result);
+            self.store_launch_wizard(session);
+            Some(self.launch_wizard_state_outbound(&context))
+        });
+        // The pool view reads the cache: render before starting a Loading slot.
+        // Refresh remains Host-wide, even if the form was closed.
+        if refresh {
+            self.launch_wizard_cache.refresh_agent_options();
+        }
+        event.into_iter().collect()
     }
 
     pub(crate) fn handle_launch_wizard_runtime_resolved(

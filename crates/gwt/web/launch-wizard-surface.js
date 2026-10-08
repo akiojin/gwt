@@ -194,21 +194,29 @@ export function createLaunchWizardSurface({
 
       // SPEC-3864 FR-005..FR-007: agent-independent setup affordance. The
       // backend derives `launchWizard.agent_setup` from the selected agent's
-      // descriptor (install when no Installed / latest route exists,
-      // configure when first-time setup is missing); this renders whatever
-      // it says without any per-agent branch.
+      // descriptor (install or update for the installed CLI, configure when
+      // first-time setup is missing), or reports that no supported agent is
+      // installed; this renders whatever it says without any per-agent
+      // branch.
       function appendAgentSetupNote(parent, setup) {
         if (!setup) return null;
         const note = createNode("div", "launch-note launch-agent-setup");
         note.dataset.agentId = setup.agent_id || "";
         note.dataset.setupKind = setup.kind || "";
         note.setAttribute("role", "note");
+        note.setAttribute("aria-busy", String(Boolean(setup.pending)));
         note.appendChild(
           createNode("div", "launch-agent-setup__title", setup.title || ""),
         );
         note.appendChild(
           createNode("div", "launch-agent-setup__detail", setup.detail || ""),
         );
+        if (setup.status) {
+          const status = createNode("div", "launch-agent-setup__detail", setup.status);
+          status.setAttribute("role", "status");
+          status.setAttribute("aria-live", "polite");
+          note.appendChild(status);
+        }
         if (setup.action_label) {
           const button = createNode(
             "button",
@@ -216,6 +224,7 @@ export function createLaunchWizardSurface({
             setup.action_label,
           );
           button.type = "button";
+          button.disabled = Boolean(setup.pending);
           button.addEventListener("click", () =>
             sendWizardAction({ kind: "run_agent_setup" }),
           );
@@ -1881,65 +1890,6 @@ export function createLaunchWizardSurface({
           setupParent.appendChild(section);
         }
 
-        if (
-          showSetupForms &&
-          (
-            launchWizard.show_version ||
-            launchWizard.show_skip_permissions ||
-            launchWizard.show_fast_mode
-          )
-        ) {
-          const showFastMode = Boolean(
-            launchWizard.show_fast_mode,
-          );
-          const section = createLaunchSection(
-            "Launch settings",
-            "Version, permissions, and tool-specific launch behavior.",
-          );
-          const grid = createNode("div", "launch-form-grid");
-          if (launchWizard.show_version) {
-            appendSelectField(
-              grid,
-              "Version",
-              launchWizard.version_options || [],
-              launchWizard.selected_version,
-              (value) =>
-                sendWizardAction({
-                  kind: "set_version",
-                  version: value,
-                }),
-            );
-          }
-          if (launchWizard.show_skip_permissions) {
-            appendToggleField(
-              grid,
-              "Permissions",
-              "Skip permission prompts",
-              launchWizard.skip_permissions,
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_skip_permissions",
-                  enabled,
-                }),
-            );
-          }
-          if (showFastMode) {
-            appendToggleField(
-              grid,
-              "Fast mode",
-              "Use the agent's Fast mode",
-              Boolean(launchWizard.fast_mode),
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_fast_mode",
-                  enabled,
-                }),
-            );
-          }
-          section.appendChild(grid);
-          setupParent.appendChild(section);
-        }
-
         // SPEC-3152: Hermes-specific launch options, rendered only for the
         // Hermes agent. Provider is a curated dropdown sourced from the user's
         // config; the remaining fields are optional overrides (blank uses the
@@ -2183,7 +2133,7 @@ export function createLaunchWizardSurface({
 
         setLaunchWizardPendingDisabled(
           panel,
-          isRuntimeResolutionPending || isLaunchActionPending,
+          isRuntimeResolutionPending || isLaunchActionPending || launchWizard.agent_setup?.pending,
         );
         wizardContentPane.appendChild(panel);
         wizardMain.appendChild(wizardContentPane);

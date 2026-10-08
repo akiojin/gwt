@@ -1,13 +1,16 @@
 name: Coverage Report
 
 on:
+  workflow_call:
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
 # Issue #4119: a manual dispatch supersedes a still-running scheduled report.
 concurrency:
-  group: ${{ github.workflow }}
+  # Called workflows inherit github.workflow from the caller. A distinct
+  # prefix prevents coverage from cancelling its own Lint workflow.
+  group: coverage-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'report' || github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
 jobs:
@@ -17,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: develop
+          ref: ${{ github.event.pull_request.head.sha || (github.event_name == 'schedule' && 'develop') || github.sha }}
       # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
       # list, so a changed set is never served the previous archive.
       - name: Cache Linux GTK dependency packages
@@ -50,6 +53,8 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         continue-on-error: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -72,6 +77,7 @@ jobs:
       # Follow the summary's recorded recovery: the strict merge would refuse
       # the same truncated profile the summary already left out.
       - name: Generate lcov
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           failure_mode=()
           if [ -f target/coverage-summary.json.profiles.json ]; then
@@ -80,6 +86,7 @@ jobs:
           cargo llvm-cov report "${failure_mode[@]}" --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: codecov/codecov-action@v7
         with:
           files: lcov.info
