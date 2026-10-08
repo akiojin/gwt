@@ -626,7 +626,8 @@ use launch::{
     validate_issue_monitor_managed_codex_worktree, HostEnvKeySemantics, IssueMonitorTrustCandidate,
 };
 pub(crate) use launch::{
-    continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
+    continue_work_readiness_decision, readiness_hook_config_diagnosis, LaunchPaneDisposition,
+    ReadinessDeadlineDecision,
 };
 pub(crate) use workspace_views::{
     run_active_work_projection_refresh, ActiveWorkProjectionJob, ActiveWorkProjectionRefreshed,

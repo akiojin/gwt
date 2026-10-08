@@ -17490,6 +17490,42 @@ fn readiness_pane_evidence_separates_live_dead_and_foreign_panes() {
     );
 }
 
+/// Issue #5194 AC-2: an unready handoff is not silent. It lands in the error
+/// ledger with the hook configuration the agent should have discovered, so a
+/// missing `.codex/hooks.json` is visible from `errors.list`.
+#[test]
+fn continue_work_ready_timeout_handoff_records_the_missing_hook_config() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-handoff-ledger");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Running);
+
+    fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &readiness_watch_at_last_extension(&fixture.operation_id, 0),
+    );
+
+    let rows = gwt_core::error_ledger::list_since(None).expect("read error ledger");
+    let row = rows
+        .iter()
+        .find(|row| row.target.window_id.as_deref() == Some(fixture.window_id.as_str()))
+        .unwrap_or_else(|| panic!("the handoff must be recorded: {rows:#?}"));
+    assert_eq!(row.kind, gwt_core::error_ledger::ErrorKind::LaunchFailure);
+    assert!(row.message.contains("SessionStart"), "{}", row.message);
+    assert!(
+        row.message.contains(".codex") && row.message.contains("hooks.json missing"),
+        "the ledger row must name the undiscovered hook config: {}",
+        row.message
+    );
+}
+
 /// Issue #3482 AC-2: the readiness deadline bounds *waiting*, not the life of
 /// the agent. When the budget runs out on a pane that is still the exact live
 /// launch pane, the launch is handed to the user with its process, its window,
@@ -63519,7 +63555,7 @@ fn open_server_url_events_rejects_when_server_url_unset() {
 }
 
 #[test]
-fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
+fn codex_hook_discovery_mode_keeps_worktree_local_hooks_for_every_codex_version() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     assert_eq!(
@@ -63532,11 +63568,11 @@ fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
     );
     assert_eq!(
         super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.131.0-alpha.21")),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     assert_eq!(
         super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.131.0")),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     // Legacy selector strings are not measured version evidence.
     assert_eq!(
@@ -63584,7 +63620,7 @@ fn codex_hook_discovery_mode_extracts_installed_codex_version_output() {
 
     assert_eq!(
         super::codex_hook_discovery_mode_from_codex_version_output("codex-cli 0.133.0\n"),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     assert_eq!(
         super::codex_hook_discovery_mode_from_codex_version_output("codex 0.130.0\n"),
@@ -63621,7 +63657,7 @@ fn codex_hook_discovery_mode_reuses_canonical_health_evidence() {
     );
     assert_eq!(
         super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
-        CodexHookDiscoveryMode::WorkspaceHome,
+        CodexHookDiscoveryMode::Both,
     );
     assert_eq!(
         super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unknown)),
@@ -63644,6 +63680,38 @@ fn docker_codex_hook_discovery_mode_keeps_safe_both_fallback() {
         super::codex_hook_discovery_mode_for_launch_config(&config, None),
         CodexHookDiscoveryMode::Both,
     );
+}
+
+/// Issue #5194 AC-1: Codex 0.160 does not read the workspace-home hooks file
+/// from a linked worktree, so a fresh worktree must always receive its own
+/// `.codex/hooks.json` or SessionStart never reaches gwt.
+#[test]
+fn host_codex_launch_writes_worktree_local_hooks_into_a_new_linked_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(&temp.path().join("home"));
+    let repo = temp.path().join("repo");
+    let gitdir = repo.join("repo.git/worktrees/issue-1");
+    let worktree = repo.join("work/issue-1");
+    fs::create_dir_all(&gitdir).expect("gitdir");
+    fs::create_dir_all(&worktree).expect("worktree");
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .expect("write .git");
+
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .build();
+    let report = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("codex-cli 0.160.0".to_string()),
+    };
+    let mode = super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report));
+    gwt_skills::generate_codex_hooks_for_mode(&worktree, mode).expect("generate hooks");
+
+    let local = fs::read_to_string(worktree.join(".codex/hooks.json"))
+        .expect("new linked worktree must receive a worktree-local .codex/hooks.json");
+    assert!(local.contains("SessionStart"), "{local}");
 }
 
 #[test]
