@@ -51,6 +51,7 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
 pub mod continuation;
+pub mod driver;
 pub mod headed_e2e;
 pub mod interruption;
 pub mod nextest;
@@ -416,6 +417,10 @@ pub struct VerificationRunData {
     /// Omission preserves legacy record serialization and integrity hashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_head: Option<String>,
+    /// Windows driver image identity, including its embedded source commit.
+    /// Omitted on other hosts so existing evidence hashes remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<driver::DriverProvenance>,
     pub commands: Vec<VerificationCommandResult>,
     pub all_passed: bool,
     /// Conditional dispositions for exact failures. Raw command exits and
@@ -3146,8 +3151,8 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
 fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
-    // Windows' canonical matrix is library-only because the running gwtd.exe
-    // cannot be replaced (#4182). That matrix does not overwrite the binary.
+    // Windows' default library-only matrix does not overwrite the binary.
+    // Explicit binary matrices include their own bootstrap as the last command.
     if cfg!(windows)
         || !commands.iter().any(|command| {
             split_command_line(command).is_ok_and(|args| {
@@ -3165,29 +3170,50 @@ fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
     if cfg!(windows) {
         return None;
     }
+    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd")
+}
+
+/// Identify this repository without comparing another project's HEAD to gwt's.
+pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
     let manifest =
         |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
-    let workspace = manifest(&worktree.join("Cargo.toml"))?;
+    let Some(workspace) = manifest(&worktree.join("Cargo.toml")) else {
+        return false;
+    };
     if !workspace
-        .get("workspace")?
-        .get("members")?
-        .as_array()?
-        .iter()
-        .any(|member| member.as_str() == Some("crates/gwt"))
-    {
-        return None;
-    }
-    let package = manifest(&worktree.join("crates/gwt/Cargo.toml"))?;
-    if package.get("package")?.get("name")?.as_str()? != "gwt"
-        || package.get("features")?.get("test-gh-guard").is_none()
-        || !package.get("bin")?.as_array()?.iter().any(|binary| {
-            binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
-                && binary.get("path").and_then(toml::Value::as_str) == Some("src/bin/gwtd.rs")
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|member| member.as_str() == Some("crates/gwt"))
         })
     {
-        return None;
+        return false;
     }
-    Some("cargo build -p gwt --bin gwtd")
+    let Some(package) = manifest(&worktree.join("crates/gwt/Cargo.toml")) else {
+        return false;
+    };
+    package
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        == Some("gwt")
+        && package
+            .get("features")
+            .and_then(|features| features.get("test-gh-guard"))
+            .is_some()
+        && package
+            .get("bin")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|binaries| {
+                binaries.iter().any(|binary| {
+                    binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
+                        && binary.get("path").and_then(toml::Value::as_str)
+                            == Some("src/bin/gwtd.rs")
+                })
+            })
 }
 
 /// Keep recovery (including failures) in the deferred admission diagnostic,
@@ -3801,6 +3827,7 @@ pub fn run_verification(
 
 #[derive(Default)]
 struct RunOptions<'a> {
+    driver: Option<driver::DriverProvenance>,
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
     /// Where this run launches its commands from (Issue #4409). It belongs
@@ -3990,6 +4017,9 @@ where
             )?;
         }
         let verified_head = current_head_sha(worktree).ok();
+        if let Some(driver) = &options.driver {
+            driver::validate_for_head(worktree, verified_head.as_deref(), &driver.source_head)?;
+        }
         interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
         let predecessor = match (&preview, &request) {
             (Some(preview), Some(request)) => load(worktree)?.filter(|record| {
@@ -4078,7 +4108,19 @@ where
     // the runner's host/target locks (Command uses close-on-exec descriptors).
     let _watchdog = options
         .watch_runner
-        .then(|| interruption::Watchdog::start(worktree, &record_id, &watchdog_token))
+        .then(|| {
+            let watchdog_executable = options
+                .driver
+                .as_ref()
+                .map(|driver| Ok(driver.fixed_path.clone()))
+                .unwrap_or_else(std::env::current_exe)?;
+            interruption::Watchdog::start(
+                worktree,
+                &record_id,
+                &watchdog_token,
+                &watchdog_executable,
+            )
+        })
         .transpose()
         .map_err(|error| format!("failed to start verification watchdog: {error}"))?;
     let mut running = VerificationRunRecord::from(VerificationRunData {
@@ -4093,6 +4135,7 @@ where
         lease_id: options.lease_id.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
         verified_head: verified_head.clone(),
+        driver: options.driver.clone(),
         commands: results.clone(),
         all_passed: false,
         quarantined_failures: Vec::new(),
@@ -4482,6 +4525,7 @@ where
         lease_id: options.lease_id.take(),
         worktree_fingerprint: fingerprint_before.clone(),
         verified_head,
+        driver: options.driver.take(),
         commands: results,
         all_passed,
         quarantined_failures,
@@ -5919,6 +5963,19 @@ pub(super) fn run<E: CliEnv>(
             // subsequent timeouts preserve the preceding command evidence.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
+            let driver = driver::prepare(&worktree, &commands).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to fix verification driver: {error}"
+                )))
+            })?;
+            if let Some(driver) = &driver {
+                out.push_str(&format!(
+                    "verify: driver — {}; SHA256 {}; source HEAD {}\n",
+                    driver.fixed_path.display(),
+                    driver.sha256,
+                    driver.source_head
+                ));
+            }
             match crate::cli::verification_lease::first_heavy_command(&commands) {
                 Some(heavy) => {
                     out.push_str(&format!(
@@ -5965,6 +6022,7 @@ pub(super) fn run<E: CliEnv>(
                 &authority,
                 &prepared_quarantines,
                 RunOptions {
+                    driver,
                     // Unit CLI fixtures are in-process, not a gwtd executable.
                     // Real runner death is covered by verification_admission_cli_test.
                     watch_runner: !cfg!(test),
@@ -6088,6 +6146,7 @@ pub(crate) mod tests {
             lease_id: None,
             worktree_fingerprint: fingerprint.to_string(),
             verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
                 headed_e2e: None,
@@ -7562,6 +7621,7 @@ mod tests {
             lease_id: None,
             worktree_fingerprint: "abc".to_string(),
             verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
                 headed_e2e: None,
