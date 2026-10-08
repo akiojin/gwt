@@ -328,6 +328,29 @@ pub(crate) fn run_gc_with_pressure(
         }
         candidate.bytes = directory_size(&candidate.target);
         if !dry_run {
+            // A verification run can start after the process snapshot. Keep
+            // the legacy barrier and exact target lock through deletion.
+            let _artifacts_guard = match try_lock_gc_build_artifacts(&candidate.target) {
+                Ok(Some(guard)) => guard,
+                Ok(None) => {
+                    plan.kept.push(GcKept {
+                        worktree: candidate.worktree,
+                        branch: candidate.branch,
+                        reason: "build artifacts in use by canonical verification or GC"
+                            .to_string(),
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    failed.push(GcFailure {
+                        worktree: candidate.worktree.clone(),
+                        target: candidate.target.clone(),
+                        reason: format!("build artifact coordination unavailable: {error}"),
+                    });
+                    candidates.push(candidate);
+                    continue;
+                }
+            };
             // Only ever `<worktree>/target` of a listed worktree; the plan
             // cannot name anything else.
             debug_assert_eq!(
@@ -369,6 +392,33 @@ pub(crate) fn run_gc_with_pressure(
         reclaimed_bytes,
         disk_space,
     })
+}
+
+/// Legacy/unknown verification owns the root exclusively; pooled verification
+/// owns its exact target. Neither may overlap the target deletion interval.
+fn try_lock_gc_build_artifacts(
+    target: &Path,
+) -> std::io::Result<Option<(std::fs::File, super::verification_lease::BuildArtifactGuard)>> {
+    let root = gwt_core::index_coordinator::verification_coordinator_root();
+    std::fs::create_dir_all(&root)?;
+    let barrier = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("heavy.lock"))?;
+    match fs2::FileExt::try_lock_shared(&barrier) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(super::verification_lease::try_lock_build_artifacts(target)?
+        .map(|target_guard| (barrier, target_guard)))
 }
 
 /// The directory every `git` call in the sweep runs from (Issue #4566 AC-1).
@@ -504,7 +554,12 @@ fn live_gwt_hosts(system: &System) -> BTreeMap<u32, u64> {
                 .unwrap_or_else(|| Path::new(process.name()).to_string_lossy());
             stem.eq_ignore_ascii_case(HOST_BINARY_STEM)
         })
-        .map(|(pid, process)| (pid.as_u32(), process.start_time()))
+        .map(|(pid, process)| {
+            (
+                pid.as_u32(),
+                crate::process::snapshot_process_start_identity(pid.as_u32(), process),
+            )
+        })
         .collect()
 }
 
@@ -1093,6 +1148,19 @@ mod tests {
     /// apply run, while the calling (main) worktree keeps its own.
     #[test]
     fn gc_reports_then_removes_a_merged_sibling_worktree_target() {
+        check_gc_verification_boundary(false);
+    }
+
+    #[test]
+    fn gc_keeps_target_when_legacy_verification_starts_after_snapshot() {
+        check_gc_verification_boundary(true);
+    }
+
+    fn check_gc_verification_boundary(legacy_exclusive: bool) {
+        // ScopedGwtHome is thread-local; Git still inherits the process PATH.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -1169,6 +1237,86 @@ mod tests {
         );
         assert!(report["disk_space"]["volumes"].is_array(), "{out}");
         assert!(sibling_target.join("blob.bin").is_file());
+
+        // #5082: the pressure probe runs after the process snapshot and plan.
+        // Start canonical verification there to exercise the deletion race
+        // without sleeps or a second planning implementation.
+        git(
+            &sibling,
+            &["commit", "-q", "--allow-empty", "-m", "unmerged"],
+        );
+        let verification = std::cell::RefCell::new(None);
+        let pressure = || {
+            if verification.borrow().is_none() {
+                let guard = if legacy_exclusive {
+                    let coordinator =
+                        gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
+                            .expect("legacy coordinator");
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(coordinator.heavy_lock_path())
+                        .expect("legacy artifact barrier");
+                    fs2::FileExt::try_lock_exclusive(&file).expect("idle legacy lease");
+                    (Some(file), None)
+                } else {
+                    (
+                        None,
+                        Some(
+                            crate::cli::verification_lease::try_lock_build_artifacts(
+                                &sibling.join(BUILD_ARTIFACT_DIR),
+                            )
+                            .expect("canonical artifact lock")
+                            .expect("idle target"),
+                        ),
+                    )
+                };
+                verification.replace(Some(guard));
+            }
+            crate::disk_space::DiskSpaceStatus {
+                warning: Some("fixture disk pressure".to_string()),
+                ..crate::disk_space::evaluate(Vec::new())
+            }
+        };
+        let held = run_gc_with_pressure(
+            &repo,
+            "develop",
+            GcOptions::default(),
+            false,
+            Some(&pressure),
+        )
+        .expect("GC while canonical verification starts");
+        assert!(sibling_target.join("blob.bin").is_file(), "{held:?}");
+        assert!(held.candidates.is_empty(), "{held:?}");
+        assert!(held.removed.is_empty(), "{held:?}");
+        let canonical_sibling = dunce::canonicalize(&sibling).expect("canonical sibling");
+        assert!(
+            held.kept.iter().any(|kept| {
+                kept.worktree == canonical_sibling && kept.reason.contains("build artifacts in use")
+            }),
+            "{held:?}"
+        );
+
+        let dry = run_gc(&repo, "develop", both_opt_ins(), true).expect("held-target dry run");
+        assert_eq!(dry.candidates.len(), 1, "{dry:?}");
+        assert_eq!(dry.reclaimable_bytes, 4096, "{dry:?}");
+        assert!(dry.removed.is_empty(), "{dry:?}");
+        assert!(sibling_target.join("blob.bin").is_file());
+        // Explicit unlock also releases Unix fork/exec duplicates of this FD.
+        let guard = verification
+            .borrow_mut()
+            .take()
+            .expect("verification guard");
+        if let Some(legacy) = &guard.0 {
+            fs2::FileExt::unlock(legacy).expect("release verification lock");
+        }
+        drop(guard);
+        git(
+            &sibling,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
 
         let mut out = String::new();
         run(

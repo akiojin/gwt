@@ -103,6 +103,12 @@ struct Arena {
 impl Arena {
     fn new() -> Self {
         let home = tempfile::tempdir().expect("home tempdir");
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let root = tempfile::tempdir().expect("repo root tempdir");
         let repo = root.path().join("main");
         let sibling = root.path().join("sibling");
@@ -140,7 +146,11 @@ impl Arena {
     fn spawn_sibling_heavy(&self) -> Child {
         let ready = self.home.path().join("development-ready");
         let mut child = hidden_command(std::env::current_exe().expect("test binary path"))
-            .args(["--ignored", "--exact", "fake_heavy_process_parks"])
+            .args([
+                "--ignored",
+                "--exact",
+                "verification_admission_cli_test::fake_heavy_process_parks",
+            ])
             .env("ADMISSION_DEVELOPMENT_READY", &ready)
             .current_dir(&self.sibling)
             .stdout(Stdio::null())
@@ -191,7 +201,7 @@ impl CanonicalRun {
         let release = arena.home.path().join("canonical-release");
         let exe = std::env::current_exe().unwrap();
         let command = format!(
-            "\"{}\" --ignored --exact canonical_command_parks",
+            "\"{}\" --ignored --exact verification_admission_cli_test::canonical_command_parks",
             exe.display()
         );
         let child = spawn_gwtd(
@@ -491,7 +501,7 @@ fn admission_continuation_blocker_command() {
 
 fn continuation_command(name: &str) -> String {
     format!(
-        "\"{}\" --ignored --exact {name}",
+        "\"{}\" --ignored --exact verification_admission_cli_test::{name}",
         std::env::current_exe().unwrap().display()
     )
 }
