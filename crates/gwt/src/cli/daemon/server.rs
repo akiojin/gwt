@@ -14784,6 +14784,11 @@ exit 1
 
     #[test]
     fn worker_stays_starting_until_the_local_fallback_lease_is_released() {
+        // The worker may scan after its control ACK. Keep sibling fixtures'
+        // process-wide fake-gh configuration out until shutdown has joined it.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _prefs_budget = pin_prefs_hang_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -14792,6 +14797,7 @@ exit 1
             .expect("runtime");
         runtime.block_on(async {
             let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path().join("home"));
             let repo = temp.path().join("repo");
             fs::create_dir_all(&repo).expect("repo");
             init_git_repo(&repo);
