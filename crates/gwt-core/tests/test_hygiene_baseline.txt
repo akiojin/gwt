@@ -25,7 +25,6 @@ short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_u
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_forwards_failed_stderr_to_agent_console
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_never_exposes_nonstandard_secret_environment_names
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_sync_entrypoint_is_safe_inside_tokio_runtime
-short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_timeout_kills_pipe_holding_descendant
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_trace_and_failure_surfaces_never_expose_command_metadata_secrets
 short-wall-clock|crates/gwt-agent/src/prepare.rs|windows_runner_probe_job_kills_dead_root_pipe_descendant_before_marker
 short-wall-clock|crates/gwt-agent/src/session.rs|hook_metadata_backfills_project_state_root_without_overwriting_authority
@@ -109,9 +108,7 @@ short-wall-clock|crates/gwt/src/app_runtime/tests.rs|stop_window_runtime_records
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_prepare_completions
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_knowledge_view_dispatch
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_path
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_recorded_event_with_timeout
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_scheduled_scan_completion
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|write_fake_gh_issue_list
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_cold_remote_client_construction
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_remote_board_requests
@@ -158,16 +155,11 @@ short-wall-clock|crates/gwt/src/cli/workspace.rs|start
 short-wall-clock|crates/gwt/src/daemon_publisher.rs|bootstrap_elapsed_time_consumes_the_control_budget
 short-wall-clock|crates/gwt/src/daemon_runtime.rs|drop
 short-wall-clock|crates/gwt/src/daemon_runtime.rs|hook_live_status_retry_policy
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|ordinary_hook_does_not_retry_after_attempt_timeout
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|readiness_hook_retries_after_first_attempt_timeout_and_succeeds_within_deadline
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|readiness_hook_stops_retrying_at_overall_deadline_without_exposing_secrets
-short-wall-clock|crates/gwt/src/daemon_runtime.rs|short_hook_live_retry_policy
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_forwards_events_through_callback
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_resolver_picks_up_new_token_between_sessions
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_with_resolver_picks_up_endpoint_after_initial_failure
 short-wall-clock|crates/gwt/src/embedded_server.rs|accepted_self_close_send_timeout_still_finalizes_exactly_once
 short-wall-clock|crates/gwt/src/embedded_server.rs|handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing
-short-wall-clock|crates/gwt/src/embedded_server.rs|handle_frontend_message_forwards_non_terminal_events_to_proxy
 short-wall-clock|crates/gwt/src/index_search.rs|repair_spawn_failure_rolls_back_admission_and_notifies_waiters
 short-wall-clock|crates/gwt/src/index_worker.rs|aggregated_status_cache_recomputes_after_ttl_expires
 short-wall-clock|crates/gwt/src/index_worker.rs|project_index_git_context_does_not_fall_through_an_expired_deadline

@@ -36,6 +36,71 @@ function manualScheduler() {
   };
 }
 
+function browserScheduler(t) {
+  const frames = new Map();
+  const timers = new Map();
+  let nextId = 0;
+  for (const [key, replacement] of Object.entries({
+    requestAnimationFrame: (cb) => {
+      frames.set(++nextId, cb);
+      return nextId;
+    },
+    cancelAnimationFrame: (id) => frames.delete(id),
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value: replacement });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.mock.method(globalThis, "setTimeout", (cb, delay) => {
+    timers.set(++nextId, { cb, delay });
+    return nextId;
+  });
+  t.mock.method(globalThis, "clearTimeout", (id) => timers.delete(id));
+  return { frames, timers };
+}
+
+test("default scheduler advances state while animation frames are suspended", (t) => {
+  const received = [];
+  const { frames, timers } = browserScheduler(t);
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    now: () => 0,
+  });
+
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 1 }) });
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 2 }) });
+  const staleFrame = frames.values().next().value;
+  assert.equal(timers.size, 1, "a timer must progress the queue without a frame or focus event");
+  const timer = timers.values().next().value;
+  assert.ok(timer.delay <= 1000, "fallback must be scheduled within the AC-13 bound");
+  timer.cb();
+
+  assert.deepEqual(received, [{ kind: "workspace_state", revision: 2 }]);
+  assert.equal(frames.size, 0, "timer winner cancels the suspended frame");
+  staleFrame();
+  assert.equal(received.length, 1, "a late frame cannot repeat delivery");
+});
+
+test("animation frame winner cancels its fallback timer", (t) => {
+  const received = [];
+  const { frames, timers } = browserScheduler(t);
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    now: () => 0,
+  });
+  dispatcher.enqueue({ kind: "terminal_output", data: "a" });
+  assert.equal(timers.size, 1);
+  const staleTimer = timers.values().next().value.cb;
+  frames.values().next().value();
+
+  assert.equal(timers.size, 0, "normal frame delivery leaves no timer behind");
+  staleTimer();
+  assert.deepEqual(received, [{ kind: "terminal_output", data: "a" }]);
+});
+
 test("idempotent kinds collapse to the most recent occurrence", () => {
   const queue = [
     { kind: "workspace_state", n: 1 },
@@ -385,6 +450,12 @@ test("flushNow synchronously drains pending events without waiting for the sched
 
   assert.equal(received.length, 1);
   assert.equal(received[0].revision, 2);
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 3 });
+  scheduler.runOnce();
+  assert.equal(received.length, 1, "the old callback cannot drain a newly scheduled queue");
+  scheduler.runOnce();
+  assert.equal(received[1].revision, 3);
 });
 
 // Issue #2698 PR 3 — terminal_output (streamed) flushes ahead of

@@ -21,9 +21,6 @@ impl LaunchWizardState {
         let show_back_button = self.show_back_button();
         let show_manual_setup = self.show_manual_setup();
         let show_runtime_confirmation = self.show_runtime_confirmation();
-        let show_fast_mode = show_manual_setup
-            && self.launch_target_is_agent()
-            && self.current_agent_supports_fast_mode();
         let fast_mode = self.fast_mode_enabled_for_current_agent();
         let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
         let show_opencode_options = show_manual_setup && self.current_agent_is_opencode();
@@ -93,10 +90,8 @@ impl LaunchWizardState {
             show_docker_lifecycle: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
                 && show_runtime_confirmation,
             show_execution_mode: false,
-            // Issue #3462: the toggle stays visible for Resume / Continue so
-            // the inherited preference is both editable and honored.
-            show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
-            show_fast_mode,
+            show_skip_permissions: false,
+            show_fast_mode: false,
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
@@ -344,6 +339,12 @@ impl LaunchWizardState {
             title: affordance.title,
             detail: affordance.detail,
             action_label: affordance.action_label,
+            pending: self.agent_update_pending(),
+            status: self
+                .agent_update
+                .as_ref()
+                .filter(|update| update.agent_id == agent.id)
+                .map(|update| update.status.clone()),
         })
     }
 
@@ -606,6 +607,7 @@ impl LaunchWizardState {
         if self.is_hydrating
             || self.runtime_resolution_pending
             || self.launch_materialization_pending
+            || self.agent_update_pending()
             || self.show_start_methods()
             || self.holder_decision.is_some()
         {
@@ -828,24 +830,6 @@ impl LaunchWizardState {
             LaunchWizardStep::ExecutionMode => {
                 execution_mode_options_view(self.current_agent_supports_resume_picker())
             }
-            LaunchWizardStep::SkipPermissions => YES_NO_OPTIONS
-                .iter()
-                .map(|option| LaunchWizardOptionView {
-                    value: option.label.to_ascii_lowercase(),
-                    label: option.label.to_string(),
-                    description: Some(option.description.to_string()),
-                    color: None,
-                })
-                .collect(),
-            LaunchWizardStep::CodexFastMode => FAST_MODE_OPTIONS
-                .iter()
-                .map(|option| LaunchWizardOptionView {
-                    value: option.label.to_ascii_lowercase(),
-                    label: option.label.to_string(),
-                    description: Some(option.description.to_string()),
-                    color: None,
-                })
-                .collect(),
             LaunchWizardStep::BranchNameInput => Vec::new(),
         }
     }
@@ -1868,10 +1852,10 @@ mod tests {
         assert_eq!(view.selected_reasoning, "high");
         assert_eq!(view.selected_runtime_target, "host");
         assert!(view.show_reasoning);
-        assert!(view.show_fast_mode);
+        assert!(!view.show_fast_mode);
         let payload = serde_json::to_value(&view).expect("serialize wizard view");
-        assert_eq!(payload["show_fast_mode"], true);
-        assert_eq!(payload["fast_mode"], true);
+        assert_eq!(payload["show_fast_mode"], false);
+        assert_eq!(payload["fast_mode"], false);
         assert!(payload.get("show_codex_fast_mode").is_none());
         assert!(payload.get("codex_fast_mode").is_none());
         assert!(view
@@ -1881,7 +1865,7 @@ mod tests {
         assert!(view
             .launch_summary
             .iter()
-            .any(|item| item.label == "Fast mode" && item.value == "on"));
+            .any(|item| item.label == "Fast mode" && item.value == "off"));
     }
 
     #[test]
@@ -2057,18 +2041,8 @@ mod tests {
         state.apply_selection();
         assert_eq!(state.mode, "continue");
 
-        state.step = LaunchWizardStep::SkipPermissions;
-        state.selected = 0;
-        state.apply_selection();
-        assert!(state.skip_permissions);
-
-        state.step = LaunchWizardStep::CodexFastMode;
-        state.selected = 0;
-        state.apply_selection();
-        assert!(state.codex_fast_mode);
-
         state.completion = None;
-        state.step = LaunchWizardStep::CodexFastMode;
+        state.step = LaunchWizardStep::ExecutionMode;
         state.advance_after_current_step();
         assert!(matches!(
             state.completion.as_ref(),
@@ -2883,12 +2857,6 @@ mod tests {
             .iter()
             .any(|option| option.value == "resume"));
 
-        state.step = LaunchWizardStep::SkipPermissions;
-        assert_eq!(state.current_options()[0].value, "yes");
-
-        state.step = LaunchWizardStep::CodexFastMode;
-        assert_eq!(state.current_options()[0].value, "on");
-
         state.step = LaunchWizardStep::BranchNameInput;
         assert!(state.current_options().is_empty());
     }
@@ -2919,10 +2887,7 @@ mod tests {
             )],
         );
 
-        assert_eq!(
-            next_step(LaunchWizardStep::QuickStart, &state),
-            Some(LaunchWizardStep::SkipPermissions)
-        );
+        assert_eq!(next_step(LaunchWizardStep::QuickStart, &state), None);
         state.selected = 2;
         assert_eq!(
             next_step(LaunchWizardStep::QuickStart, &state),

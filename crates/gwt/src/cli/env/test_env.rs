@@ -301,6 +301,14 @@ impl CliEnv for TestEnv {
         )
         .map(Some)
     }
+    fn inspect_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: &str,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        self.compare_pr_head(base, head, Some(verified))
+    }
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
         let Some(pr) = self.prs.get(&number) else {
             return Ok(None);

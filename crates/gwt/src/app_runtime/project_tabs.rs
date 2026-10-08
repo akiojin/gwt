@@ -889,6 +889,16 @@ impl AppRuntime {
     }
 
     pub(crate) fn refresh_project_tab_incarnation(&mut self, tab_id: &str) {
+        let window_ids = self
+            .window_lookup
+            .iter()
+            .filter(|(_, address)| address.tab_id == tab_id)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for window_id in window_ids {
+            self.invalidate_launch_delivery_ack(&window_id);
+            self.pending_launch_completions.remove(&window_id);
+        }
         let Some(tab) = self.tab(tab_id).cloned() else {
             self.project_tab_incarnations.remove(tab_id);
             self.refresh_project_state(tab_id);

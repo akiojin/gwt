@@ -269,13 +269,28 @@ pub(super) fn save_workspace_launch_projection(
     canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
     launch_kind: WorkspaceLaunchProjectionKind,
-    live_session_ids: &std::collections::HashSet<String>,
+    live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
     gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
         project_root,
         &session.worktree_path,
         |projection, work_items, _work_items_persisted| {
+            // A worker's launch-time snapshot cannot prove another concurrent
+            // launch is dead. Keep all persisted agents until the GUI requests
+            // a projection refresh with its current live-session registry.
+            let preserved_sessions;
+            let live_session_ids = match live_session_ids {
+                Some(live) => live,
+                None => {
+                    preserved_sessions = projection
+                        .agents
+                        .iter()
+                        .map(|agent| agent.session_id.clone())
+                        .collect();
+                    &preserved_sessions
+                }
+            };
             let work_event = apply_workspace_launch_for_current_work(
                 project_root,
                 projection,
