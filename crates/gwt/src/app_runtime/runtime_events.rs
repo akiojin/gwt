@@ -1240,9 +1240,9 @@ impl AppRuntime {
                     gwt::IssueMonitorFailureClass::Unknown
                 },
             }));
-        let termination_issue_hint = self
-            .pending_launch_feedback_contexts
-            .get(&id)
+        let termination_issue_hint = issue_monitor_project_root
+            .as_deref()
+            .and_then(|root| self.issue_monitor_pending_feedback_for_window(&id, root))
             .and_then(|context| context.issue_monitor_issue_number);
         if should_auto_close {
             if !close_window_from_workspace(

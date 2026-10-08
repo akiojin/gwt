@@ -735,6 +735,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
         Some("tab-1"),
         None,
         None,
+        None,
         "2026-09-07T07:00:00Z",
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -790,6 +791,7 @@ fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
     let outcome = super::super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         None,
         "2026-09-07T07:00:00Z",
@@ -869,6 +871,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         Some("tab-1"),
         None,
         None,
+        None,
         "2026-09-07T07:00:00Z",
         &issue_client_factory,
         std::time::Duration::from_secs(60),
@@ -933,6 +936,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     let outcome = super::super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         None,
         "2026-08-12T07:00:00Z",
@@ -1018,6 +1022,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
         Some("tab-1"),
         None,
         None,
+        None,
         "2026-09-04T07:00:00Z",
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -1090,6 +1095,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
     let outcome = super::super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         None,
         "2026-09-05T07:00:00Z",

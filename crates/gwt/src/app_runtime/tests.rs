@@ -2711,6 +2711,142 @@ fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
     }
 }
 
+#[test]
+fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..Default::default()
+    });
+    monitor.complete_active_launch(42, "tab-1::agent-1");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .unwrap();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-43")
+        .build();
+    let mut feedback = issue_monitor_feedback(43);
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    let result =
+        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|reason| reason.contains("max_active")),
+        "Monitor legacy/manual dispatch must honor capacity before creating a pane: {result:?}"
+    );
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+
+    // A retained Monitor pane in a sibling local tab is still a physical slot.
+    let empty_tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut sibling = sample_project_tab(
+        "tab-2",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let raw_id = sibling.workspace.persisted().windows[0].id.clone();
+    sibling
+        .workspace
+        .set_status(&raw_id, WindowProcessStatus::Error);
+    let mut runtime = sample_runtime(temp.path(), vec![empty_tab, sibling], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut retained = issue_monitor_feedback(42);
+    retained.issue_monitor_project_root = Some(repo.clone());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(combined_window_id("tab-2", &raw_id), retained);
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-06T00:00:00Z")
+        .unwrap();
+    assert_eq!(
+        snapshot.windows.len(),
+        1,
+        "the physical snapshot covers every local project tab"
+    );
+    assert_eq!(
+        snapshot.windows[0].window_id,
+        combined_window_id("tab-2", &raw_id)
+    );
+    let monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..Default::default()
+    });
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .unwrap();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-43")
+        .build();
+    let mut feedback = issue_monitor_feedback(43);
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    let result =
+        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|reason| reason.contains("max_active")),
+        "a sibling retained pane exhausts capacity: {result:?}"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+
+    // Binding-free same-Issue panes also prevent duplication while the cap has room.
+    runtime.tabs[1]
+        .workspace
+        .set_status(&raw_id, WindowProcessStatus::Running);
+    let monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        max_active: 3,
+        ..Default::default()
+    });
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .unwrap();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-42")
+        .build();
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(repo);
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    let result =
+        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|reason| reason.contains("already")),
+        "a sibling implementation blocks the same Issue before adding a pane: {result:?}"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    assert_eq!(runtime.tabs[1].workspace.persisted().windows.len(), 1);
+}
+
 fn spawned_agent_placement(runtime: &AppRuntime, tab_id: &str) -> WindowPlacement {
     runtime
         .tab(tab_id)
