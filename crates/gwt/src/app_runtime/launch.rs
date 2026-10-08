@@ -3698,6 +3698,36 @@ pub(crate) fn continue_work_readiness_decision(
     })
 }
 
+/// Issue #5194 AC-2: name the SessionStart hook configuration the agent should
+/// have discovered, so an unready handoff tells a missing hook file apart from
+/// a hook that ran but did not reach gwt in time.
+pub(crate) fn readiness_hook_config_diagnosis(agent_id: &str, worktree: &Path) -> Option<String> {
+    let paths = if agent_id == gwt_agent::AgentId::Codex.command() {
+        gwt_skills::codex_hooks_paths_for_codex_discovery(
+            worktree,
+            gwt_skills::CodexHookDiscoveryMode::Both,
+        )
+    } else if agent_id == gwt_agent::AgentId::ClaudeCode.command() {
+        vec![worktree.join(".claude").join("settings.local.json")]
+    } else {
+        return None;
+    };
+    let states = paths
+        .iter()
+        .map(|path| {
+            let state = if path.is_file() { "present" } else { "missing" };
+            format!("{} {state}", path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let cause = if paths.first().is_some_and(|path| !path.is_file()) {
+        "the agent may not have discovered its SessionStart hook"
+    } else {
+        "the hook config exists, so the hook ran late or could not reach gwt          (check hook health and project-state lock contention)"
+    };
+    Some(format!("SessionStart hook config: {states}. {cause}"))
+}
+
 fn readiness_timeout_detail(waited_secs: u64, observation: &str) -> String {
     format!("authenticated SessionStart readiness timed out after {waited_secs}s: {observation}")
 }
@@ -3857,10 +3887,14 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
     let version = semver::Version::parse(token).ok()?;
     let boundary =
         semver::Version::parse("0.131.0-alpha.21").expect("valid Codex hook discovery boundary");
+    // Issue #5194: newer Codex releases do not reliably read the
+    // workspace-home copy from a linked worktree (0.160 never ran SessionStart
+    // when only that copy existed), so every Codex at or above the cutover
+    // also gets the worktree-local file instead of trusting the cutover alone.
     Some(if version < boundary {
         gwt_skills::CodexHookDiscoveryMode::WorktreeLocal
     } else {
-        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome
+        gwt_skills::CodexHookDiscoveryMode::Both
     })
 }
 
@@ -5731,6 +5765,64 @@ impl AppRuntime {
                 .project_root
                 .clone()
         });
+        if let Some(issue_number) = issue_monitor_issue_number {
+            let review_dispatch = launch_feedback_context
+                .as_ref()
+                .is_some_and(|context| context.issue_monitor_review_dispatch);
+            if !review_dispatch
+                && self
+                    .pending_fresh_execution_launches
+                    .iter()
+                    .any(|(window_id, pending)| {
+                        pending.owner.number == issue_number
+                            && same_worktree_path(&pending.project_root, &project_root_path)
+                            && self.tracked_window_exists(window_id)
+                            && self
+                                .issue_monitor_pending_feedback_for_window(
+                                    window_id,
+                                    &project_root_path,
+                                )
+                                .is_some_and(|feedback| {
+                                    feedback.issue_monitor_issue_number == Some(issue_number)
+                                })
+                    })
+            {
+                return Err(format!("Issue Monitor pending execution cleanup must finish before launching Issue #{issue_number} again"));
+            }
+            // Delivery admission may predate a cap change or the last census.
+            // Check the current canvas before creating any Monitor pane.
+            let prefs = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&project_root_path),
+            )
+            .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
+            let mut monitor =
+                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(snapshot) = self.issue_monitor_window_snapshot_for_tab(tab_id, &now) {
+                let tabs = self.issue_monitor_project_tab_ids(tab_id);
+                if let Some(started) = gwt::process::host_process_start_time(std::process::id()) {
+                    monitor.record_window_snapshot_from_host(
+                        snapshot,
+                        std::process::id(),
+                        started,
+                        tabs,
+                    );
+                } else {
+                    monitor.record_window_snapshot_for_tabs(snapshot, tabs);
+                }
+            }
+            if !review_dispatch && monitor.has_monitor_pane_for_issue(issue_number) {
+                return Err(format!(
+                    "Issue Monitor implementation pane already exists for Issue #{issue_number}"
+                ));
+            }
+            if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
+                let status = monitor.agent_status_at(&now);
+                return Err(format!("Issue Monitor max_active reached ({}/{}) before launching Issue #{issue_number}",
+                    status.occupied_slot_count.unwrap_or(status.active_launches.len()),
+                    status.max_active));
+            }
+        }
         let project_root = project_root_path.display().to_string();
         let title = config.display_name.clone();
         let resume_title = workspace_resume_context

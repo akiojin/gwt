@@ -411,12 +411,14 @@ pub enum PrCommand {
     },
     Edit {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         file: Option<String>,
         add_labels: Vec<String>,
     },
     EditBody {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         body: Option<String>,
         add_labels: Vec<String>,
@@ -429,6 +431,10 @@ pub enum PrCommand {
     },
     Draft {
         number: u64,
+    },
+    Close {
+        number: u64,
+        comment: Option<String>,
     },
     /// SPEC #3835 AC-15: merge the base branch into the PR head so a `BEHIND`
     /// PR can reach `MERGEABLE`. The PM's only way out of `BEHIND`; a conflict

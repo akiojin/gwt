@@ -142,7 +142,26 @@ fn publish_counts(
             for (pid, started) in dead_hosts {
                 monitor.record_monitor_runtime_counts(pid, started, BTreeMap::new(), &now);
             }
-            monitor.record_monitor_runtime_counts(host_pid, host_started_at, counts(entries), &now);
+            let windows = entries
+                .iter()
+                .filter(|entry| {
+                    !entry.registration.review_dispatch
+                        && !matches!(entry.handle.try_wait(), Ok(Some(_)))
+                })
+                .map(|entry| {
+                    (
+                        entry.registration.window_id.clone(),
+                        entry.registration.issue_number,
+                    )
+                })
+                .collect();
+            monitor.record_monitor_runtime_windows(
+                host_pid,
+                host_started_at,
+                counts(entries),
+                windows,
+                &now,
+            );
             *prefs = monitor.prefs();
             Ok(())
         },

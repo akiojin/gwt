@@ -9,9 +9,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultTargets = [
   ["gwt", "lib", "gwt"],
   ["gwt", "bin", "gwt"],
-  ...["hook_health_test", "windows_binary_subsystem_test", "pty_start_gate_console_test",
-    "issue_monitor_protocol_test", "agent_process_resolution_contract_test", "startup_tray_performance",
-    "verification_driver_cli_test"]
+  ...["hook_contracts", "ci_contracts", "runtime_tests", "coordination_tests",
+    "cli_contracts", "startup_tray_performance"]
     .map((name) => ["gwt", "test", name]),
   ["gwt-core", "lib", "gwt_core"],
   ...["process_priority_roundtrip", "windows_process_resolver", "process_adapter_parity", "windows_claude_user_agent"]
