@@ -77,7 +77,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             fs::write(path.with_file_name("pre-pr-writer-probe.json"), "written").unwrap();
-            println!(r#"["Test (Rust)","Clippy & Rustfmt"]"#);
+            println!(r#"["Test (Rust)","Clippy & Rustfmt","coverage / Rust Coverage"]"#);
             return ExitCode::SUCCESS;
         }
         [pr, list, ..] if pr == "pr" && list == "list" => {
