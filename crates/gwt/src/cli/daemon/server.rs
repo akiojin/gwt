@@ -16667,6 +16667,7 @@ exit 1
 
         let hub = BroadcastHub::new();
         let shutdown = Arc::new(DaemonShutdown::new());
+        let mut startup_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let worker = spawn_issue_monitor_worker_with_config_and_timeout(
             scope,
             hub.clone(),
@@ -16689,7 +16690,14 @@ exit 1
 
         // Subscribe after the startup publish to prove the recovery error is
         // re-projected for operators that connect later.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        recv_issue_monitor_status_matching(&mut startup_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("authority recovery is blocked"))
+        })
+        .await
+        .expect("startup recovery-blocked status was published");
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let status = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
             status
@@ -16701,7 +16709,11 @@ exit 1
         .expect("recovery-blocked status");
         assert!(!status.enabled);
         assert!(!status.autonomous_mode);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        shutdown.request();
+        tokio::time::timeout(HANG_GUARD, worker)
+            .await
+            .expect("recovery-blocked worker shutdown is bounded")
+            .expect("worker exits cleanly");
         assert!(
             !scan_started.exists(),
             "recovery-blocked worker must not enter its immediate first scan"
@@ -16719,11 +16731,6 @@ exit 1
             shutdown_marker.exists(),
             "corrupt prefs must retain the independent shutdown marker"
         );
-        shutdown.request();
-        tokio::time::timeout(HANG_GUARD, worker)
-            .await
-            .expect("recovery-blocked worker shutdown is bounded")
-            .expect("worker exits cleanly");
     }
 
     #[tokio::test]
