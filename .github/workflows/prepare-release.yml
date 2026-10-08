@@ -3,8 +3,9 @@ name: Prepare Release
 # Branch-agnostic release preparation. Trigger from the GitHub Actions
 # "Run workflow" button (workflow_dispatch) from anywhere — no local develop
 # checkout, no raw gh from an agent. The job always operates on develop and
-# opens a develop -> main Release PR, preserving the develop->main gate
-# enforced by pr-source-check.yml. The heavy build/tag/release pipeline lives
+# freezes the bumped develop commit as release/vX.Y.Z and opens its main PR,
+# preserving the develop source gate enforced by pr-source-check.yml.
+# The heavy build/tag/release pipeline lives
 # in release.yml and is intentionally left untouched.
 #
 # History note (SPEC-1932): an older prepare-release.yml was removed in #712
@@ -130,6 +131,17 @@ jobs:
             exit 1
           fi
 
+      - name: Guard against existing release snapshot
+        env:
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(git ls-remote --heads origin "refs/heads/release/${TAG_NAME}")
+          if [ -n "$EXISTING" ]; then
+            echo "::error::Snapshot release/${TAG_NAME} already exists. Recover its Release PR with release.status instead of repeating the version bump." >&2
+            exit 1
+          fi
+
       - name: Apply version bump
         run: |
           set -euo pipefail
@@ -177,6 +189,22 @@ jobs:
           git pull --rebase origin develop
           git push origin develop
 
+      - name: Freeze release snapshot
+        id: snapshot
+        env:
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          RELEASE_BRANCH="release/${TAG_NAME}"
+          # An empty expected ref makes this an atomic create-only push.
+          # Never advance a previous snapshot when develop keeps receiving PRs.
+          if ! git push --force-with-lease="refs/heads/${RELEASE_BRANCH}:" origin "HEAD:refs/heads/${RELEASE_BRANCH}"; then
+            echo "::error::Could not create ${RELEASE_BRANCH}. If its snapshot already exists, finish its Release PR instead of overwriting it." >&2
+            exit 1
+          fi
+          echo "branch=${RELEASE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "Frozen release: ${RELEASE_BRANCH} at $(git rev-parse HEAD)"
+
       - name: Render Release PR body
         id: body
         env:
@@ -216,15 +244,16 @@ jobs:
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           TAG_NAME: ${{ steps.version.outputs.tag_name }}
           BODY_FILE: ${{ steps.body.outputs.file }}
+          RELEASE_BRANCH: ${{ steps.snapshot.outputs.branch }}
         run: |
           set -euo pipefail
 
-          EXISTING=$(gh pr list --base main --head develop --state open --json number -q '.[0].number // empty')
+          EXISTING=$(gh pr list --base main --head "$RELEASE_BRANCH" --state open --json number -q '.[0].number // empty')
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --title "chore(release): ${TAG_NAME}" --add-label release --body-file "$BODY_FILE"
             PR_URL=$(gh pr view "$EXISTING" --json url -q '.url')
           else
-            PR_URL=$(gh pr create --base main --head develop --title "chore(release): ${TAG_NAME}" --label release --body-file "$BODY_FILE")
+            PR_URL=$(gh pr create --base main --head "$RELEASE_BRANCH" --title "chore(release): ${TAG_NAME}" --label release --body-file "$BODY_FILE")
           fi
           rm -f "$BODY_FILE"
 
@@ -233,6 +262,7 @@ jobs:
             echo "## Prepare Release"
             echo ""
             echo "- Version: ${TAG_NAME}"
+            echo "- Frozen head: ${RELEASE_BRANCH}"
             echo "- Release PR: ${PR_URL}"
             echo ""
             echo "Review the PR (version, CHANGELOG, diff) and merge to main to trigger the build/release pipeline."
