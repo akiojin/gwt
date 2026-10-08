@@ -109,9 +109,15 @@ elif kind == "lib":
     functions = set()
     for name in changed:
         path = pathlib.Path(name)
-        if name.startswith(f"crates/{crate}/src/") and path.suffix == ".rs" and path.is_file():
-            functions.update(re.findall(r"\bfn\s+(?:r#)?([A-Za-z_]\w*)\s*\(",
-                                        path.read_text()))
+        if name.startswith(f"crates/{crate}/src/") and path.suffix == ".rs":
+            file_functions = set(re.findall(r"\bfn\s+(?:r#)?([A-Za-z_]\w*)\s*\(",
+                                            path.read_text())) if path.is_file() else set()
+            if not any(test.rsplit("::", 1)[-1] in file_functions for test in tests):
+                # One mapped file cannot establish coverage for another
+                # changed file with unknown (or deleted) test declarations.
+                functions.clear()
+                break
+            functions.update(file_functions)
     selected = [test for test in tests if test.rsplit("::", 1)[-1] in functions]
     if not selected:
         # External test modules / cfg-specific functions can prevent a safe

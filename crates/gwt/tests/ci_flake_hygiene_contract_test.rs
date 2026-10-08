@@ -259,8 +259,25 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
         core.get("runs-on").and_then(Value::as_str),
         Some("windows-latest")
     );
-    assert!(core.get("if").is_none() && core.get("needs").is_none());
+    // #5059: wait for the cancellation decision without gating stability on
+    // classifier success. A failed/unknown source comparison still runs it.
+    assert_eq!(
+        core.get("if").and_then(Value::as_str),
+        Some("${{ !cancelled() }}")
+    );
+    assert_eq!(
+        core.get("needs").and_then(Value::as_str),
+        Some("source-sync")
+    );
     assert!(core.get("continue-on-error").is_none());
+    assert!(
+        core.get("concurrency")
+            .and_then(|value| value.get("group"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("${{ matrix.run }}"),
+        "each matrix run must have independent concurrency admission"
+    );
     let strategy = core.get("strategy").expect("five independent Windows runs");
     assert_eq!(
         strategy.get("fail-fast").and_then(Value::as_bool),
@@ -333,7 +350,14 @@ fn the_required_windows_check_requires_successful_core_stability() {
         regressions.get("name").and_then(Value::as_str),
         Some("Test (Windows regressions)")
     );
-    assert!(regressions.get("needs").is_none() && regressions.get("if").is_none());
+    assert_eq!(
+        regressions.get("needs").and_then(Value::as_str),
+        Some("source-sync")
+    );
+    assert_eq!(
+        regressions.get("if").and_then(Value::as_str),
+        Some("${{ !cancelled() }}")
+    );
     let windows = job(&doc, "test-windows-required");
     assert_eq!(
         windows.get("name").and_then(Value::as_str),
@@ -354,7 +378,10 @@ fn the_required_windows_check_requires_successful_core_stability() {
                 .expect("job dependency must be a string")
         })
         .collect();
-    assert_eq!(needs, [CORE_STABILITY_JOB, "test-windows-rust"]);
+    assert_eq!(
+        needs,
+        [CORE_STABILITY_JOB, "test-windows-rust", "source-sync"]
+    );
     assert_eq!(
         windows.get("if").and_then(Value::as_str),
         Some("${{ always() }}")
@@ -460,6 +487,18 @@ fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
     assert_eq!(
         String::from_utf8(selected.stdout).unwrap(),
         "changed::tests::relevant_test\n"
+    );
+    // A safely mapped file must not hide another changed file with external
+    // tests whose function names cannot be mapped from the source.
+    fs::write(source.join("external.rs"), "fn external_helper() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "change an unmapped source file"]);
+    let mixed = select(base.trim());
+    assert!(mixed.status.success());
+    assert_eq!(
+        mixed.stdout,
+        b"changed::tests::relevant_test\nchanged::tests::relevant_test_extra\nhelper::tests::unrelated_test\nunrelated::tests::unrelated_test\n",
+        "any unmapped changed source file must retain the full target"
     );
     fs::write(
         &test_list,

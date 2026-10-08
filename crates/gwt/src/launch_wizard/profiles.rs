@@ -86,17 +86,7 @@ pub fn previous_launch_profiles_for_repo_from_sessions(
 }
 
 pub(super) fn load_launch_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
+    gwt_agent::session_ledger::load_sessions(sessions_dir).unwrap_or_default()
 }
 
 fn launch_profile_session_cmp(left: &gwt_agent::Session, right: &gwt_agent::Session) -> Ordering {
@@ -527,23 +517,23 @@ mod tests {
         assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_execution_mode, "continue");
-        // Issue #3462: Continue inherits the Skip Permissions preference.
+        // L2 uses fixed launch choices after restoring the saved agent profile.
         assert!(
             view.skip_permissions,
-            "a Continue launch must inherit the Skip Permissions preference"
+            "a Continue launch uses Skip Permissions"
         );
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.fast_mode);
+        assert!(!view.fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
         assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
-        assert!(config.codex_fast_mode);
+        assert!(!config.codex_fast_mode);
         assert!(
             config.skip_permissions,
-            "a Continue launch must carry the inherited Skip Permissions preference"
+            "a Continue launch uses Skip Permissions"
         );
         assert_eq!(config.working_dir.as_deref(), Some(current_repo.as_path()));
     }
@@ -591,9 +581,9 @@ mod tests {
         assert_eq!(view.selected_execution_mode, "continue");
         // Issue #3462: the restored preference is advertised on Continue.
         assert!(view.skip_permissions);
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.fast_mode);
+        assert!(!view.fast_mode);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("api"));
         assert_eq!(view.selected_docker_lifecycle, "start");

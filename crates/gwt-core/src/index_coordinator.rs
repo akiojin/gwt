@@ -66,6 +66,9 @@ pub const MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS: u32 = 8;
 /// a worktree that walked away hold a place for the rest of the day.
 pub const HEAVY_QUEUE_POSITION_TTL: Duration = Duration::from_secs(10 * 60);
 const HEAVY_PROGRESS_FILE: &str = "heavy.progress.json";
+const VERIFICATION_ALLOCATOR_LOCK: &str = "allocator.lock";
+const VERIFICATION_CAPACITY_FILE: &str = "capacity.json";
+const HEAVY_DISK_FILE: &str = "heavy.disk.json";
 const INTERACTIVE_BURST_FILE: &str = "heavy.burst.json";
 const RESERVATION_PREFIX: &str = "reservation-";
 
@@ -416,6 +419,44 @@ pub struct HeavyLeaseStatus {
     pub holder_stale: bool,
 }
 
+/// One verification slot, or the legacy exclusive root holder (`slot: None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeavySlotStatus {
+    pub slot: Option<usize>,
+    pub status: HeavyLeaseStatus,
+}
+
+/// Verification capacity and all holders, with one shared FIFO queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeavyPoolStatus {
+    pub capacity: usize,
+    pub used: usize,
+    pub available: usize,
+    pub slots: Vec<HeavySlotStatus>,
+    pub queue: Vec<HeavyQueueEntry>,
+}
+
+/// Disk reservation required before admitting a verification command.
+#[derive(Debug, Clone)]
+pub struct VerificationDiskBudget {
+    pub volume: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub floor_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VerificationCapacity {
+    schema_version: u32,
+    capacity: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DiskReservation {
+    volume: String,
+    bytes: u64,
+}
+
 /// Outcome of a shared job, as observed by the owner or a joined waiter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -682,6 +723,7 @@ pub enum JobAdmission {
 /// Host-wide coordinator handle rooted at `~/.gwt/runtime/index-coordinator/`.
 pub struct IndexCoordinator {
     root: PathBuf,
+    verification_pool: bool,
 }
 
 impl IndexCoordinator {
@@ -690,7 +732,110 @@ impl IndexCoordinator {
         let root = root.into();
         fs::create_dir_all(root.join("targets"))?;
         fs::create_dir_all(root.join("heavy.pending"))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            verification_pool: false,
+        })
+    }
+
+    /// Publish verification capacity for this host. Existing handles read the
+    /// projection on every admission, so lowering capacity never admits a
+    /// new claimant using an older handle's limit.
+    pub fn open_verification(
+        root: impl Into<PathBuf>,
+        capacity: usize,
+    ) -> Result<Self, CoordinatorError> {
+        if capacity == 0 {
+            return Err(CoordinatorError::Unavailable(
+                "verification capacity must be positive".into(),
+            ));
+        }
+        let mut coordinator = Self::open(root)?;
+        fs::create_dir_all(coordinator.root.join("slots"))?;
+        let allocator = open_lock_file(&coordinator.root.join(VERIFICATION_ALLOCATOR_LOCK))?;
+        fs2::FileExt::lock_exclusive(&allocator)?;
+        write_json_atomic(
+            &coordinator.root.join(VERIFICATION_CAPACITY_FILE),
+            &VerificationCapacity {
+                schema_version: COORDINATOR_SCHEMA_VERSION,
+                capacity,
+            },
+        )?;
+        coordinator.verification_pool = true;
+        Ok(coordinator)
+    }
+
+    /// Snapshot slot holders and the shared FIFO, including a legacy binary
+    /// holding the root lock exclusively. Capacity counts physical locks;
+    /// terminal or corrupt diagnostics cannot grant an extra slot.
+    pub fn heavy_pool_status(&self) -> Result<HeavyPoolStatus, CoordinatorError> {
+        let capacity = if self.root.join(VERIFICATION_CAPACITY_FILE).exists() {
+            read_verification_capacity(&self.root)?
+        } else {
+            1
+        };
+        let queue = published_heavy_queue(&self.heavy_pending_dir())?;
+        let root_probe = open_lock_file(&self.heavy_lock_path())?;
+        let legacy_locked = match fs2::FileExt::try_lock_exclusive(&root_probe) {
+            Ok(()) => {
+                reconcile_orphaned_heavy_ticket(&self.root, &self.root);
+                let _ = fs2::FileExt::unlock(&root_probe);
+                false
+            }
+            Err(err) if is_contended(&err) => match fs2::FileExt::try_lock_shared(&root_probe) {
+                Ok(()) => {
+                    let _ = fs2::FileExt::unlock(&root_probe);
+                    false
+                }
+                Err(err) if is_contended(&err) => true,
+                Err(err) => return Err(err.into()),
+            },
+            Err(err) => return Err(err.into()),
+        };
+        let mut used = 0;
+        let mut slots = Vec::new();
+        let mut legacy_occupied = false;
+        if legacy_locked {
+            let status = self.heavy_storage_status(&self.root)?;
+            legacy_occupied = status.held || status.holder_stale;
+            used += usize::from(legacy_occupied);
+            slots.push(HeavySlotStatus { slot: None, status });
+        }
+        for (slot, storage) in verification_slot_paths(&self.root)? {
+            let status = self.heavy_storage_status(&storage)?;
+            used += usize::from(status.held || status.holder_stale);
+            slots.push(HeavySlotStatus {
+                slot: Some(slot),
+                status,
+            });
+        }
+        Ok(HeavyPoolStatus {
+            capacity,
+            used,
+            available: if legacy_occupied {
+                0
+            } else {
+                capacity.saturating_sub(used)
+            },
+            queue,
+            slots,
+        })
+    }
+
+    /// Locate a lease's ticket across the legacy root and numbered slots.
+    pub fn heavy_ticket_path_for_lease(
+        &self,
+        lease_id: &str,
+    ) -> Result<Option<PathBuf>, CoordinatorError> {
+        let mut paths = vec![self.heavy_ticket_path()];
+        paths.extend(
+            verification_slot_paths(&self.root)?
+                .into_iter()
+                .map(|(_, storage)| storage.join("heavy.ticket.json")),
+        );
+        Ok(paths.into_iter().find(|path| {
+            read_ticket(path).is_some_and(|ticket| ticket.lease_id.as_deref() == Some(lease_id))
+        }))
     }
 
     /// Open the default host-wide coordinator root.
@@ -776,6 +921,7 @@ impl IndexCoordinator {
                     )?;
                     return Ok(JobAdmission::Owner(TargetJobGuard {
                         root: self.root.clone(),
+                        verification_pool: self.verification_pool && key.is_verification(),
                         key: key.clone(),
                         priority,
                         epoch,
@@ -850,12 +996,33 @@ impl IndexCoordinator {
     /// process alive, and no terminal status published for the target it took
     /// the lease for.
     pub fn heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
+        if self.verification_pool || self.root.join("slots").is_dir() {
+            let pool = self.heavy_pool_status()?;
+            let mut status = pool
+                .slots
+                .iter()
+                .find(|slot| slot.status.held)
+                .or_else(|| pool.slots.iter().find(|slot| slot.status.holder_stale))
+                .map(|slot| slot.status.clone())
+                .unwrap_or_default();
+            status.pending = pool.queue.len();
+            status.queue = pool.queue;
+            return Ok(status);
+        }
         let queue = published_heavy_queue(&self.heavy_pending_dir())?;
+        let mut status = self.heavy_storage_status(&self.root)?;
+        status.pending = queue.len();
+        status.queue = queue;
+        Ok(status)
+    }
+
+    fn heavy_storage_status(&self, storage: &Path) -> Result<HeavyLeaseStatus, CoordinatorError> {
+        let queue = Vec::new();
         let pending = queue.len();
-        let probe = open_lock_file(&self.heavy_lock_path())?;
+        let probe = open_lock_file(&storage.join("heavy.lock"))?;
         match fs2::FileExt::try_lock_exclusive(&probe) {
             Ok(()) => {
-                reconcile_orphaned_heavy_ticket(&self.root);
+                reconcile_orphaned_heavy_ticket(storage, &self.root);
                 let _ = fs2::FileExt::unlock(&probe);
                 return Ok(HeavyLeaseStatus {
                     pending,
@@ -866,7 +1033,7 @@ impl IndexCoordinator {
             Err(err) if is_contended(&err) => {}
             Err(err) => return Err(CoordinatorError::Io(err)),
         }
-        let Some(ticket) = read_ticket(&self.heavy_ticket_path()) else {
+        let Some(ticket) = read_ticket(&storage.join("heavy.ticket.json")) else {
             return Ok(HeavyLeaseStatus {
                 held: true,
                 pending,
@@ -918,7 +1085,7 @@ impl IndexCoordinator {
         let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
         let progress = match holder_kind {
             HeavyHolderKind::Other => None,
-            _ => self.read_heavy_progress().filter(|progress| {
+            _ => self.read_heavy_progress(storage).filter(|progress| {
                 progress.target == ticket.target && progress.updated_at_ms >= ticket.acquired_at_ms
             }),
         };
@@ -989,6 +1156,8 @@ impl IndexCoordinator {
             JobPriority::InteractiveSearch,
             timeout,
             Some(INTERACTIVE_SEARCH_HEAVY_TTL),
+            false,
+            None,
         )
     }
 
@@ -1017,6 +1186,7 @@ impl IndexCoordinator {
     ) -> Result<HeavyReservation, CoordinatorError> {
         let expires_at_ms = now_ms().saturating_add(ttl.as_millis() as u64);
         let path = self.heavy_reservation_path(key);
+        let _queue_state = lock_heavy_queue_entries(&self.heavy_pending_dir())?;
         // Issue #4169: reserving is the same claimant coming back, so it keeps
         // the place its earlier attempt earned rather than rejoining at the
         // back. Reserving never opens a remembered place of its own — that is
@@ -1036,6 +1206,7 @@ impl IndexCoordinator {
 
     /// Drop the reservation for `key`. Returns whether one existed.
     pub fn clear_heavy_reservation(&self, key: &TargetKey) -> Result<bool, CoordinatorError> {
+        let _queue_state = lock_heavy_queue_entries(&self.heavy_pending_dir())?;
         match fs::remove_file(self.heavy_reservation_path(key)) {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1050,8 +1221,8 @@ impl IndexCoordinator {
         Ok(())
     }
 
-    fn read_heavy_progress(&self) -> Option<HeavyProgress> {
-        let raw = fs::read(self.root.join(HEAVY_PROGRESS_FILE)).ok()?;
+    fn read_heavy_progress(&self, storage: &Path) -> Option<HeavyProgress> {
+        let raw = fs::read(storage.join(HEAVY_PROGRESS_FILE)).ok()?;
         serde_json::from_slice(&raw).ok()
     }
 
@@ -1103,6 +1274,7 @@ impl IndexCoordinator {
 /// Exclusive owner of one target job (kernel target lock held).
 pub struct TargetJobGuard {
     root: PathBuf,
+    verification_pool: bool,
     key: TargetKey,
     priority: JobPriority,
     epoch: u64,
@@ -1138,12 +1310,73 @@ impl TargetJobGuard {
         self.acquire_heavy_inner(timeout, Some(ttl))
     }
 
+    /// Acquire a verification slot after reserving space on one volume.
+    pub fn acquire_heavy_with_disk_budget(
+        &self,
+        timeout: Duration,
+        ttl: Duration,
+        budget: &VerificationDiskBudget,
+    ) -> Result<HeavyLease, CoordinatorError> {
+        self.acquire_heavy_with_disk_budgets(timeout, ttl, std::slice::from_ref(budget))
+    }
+
+    /// Check and reserve every required volume in the same allocator grant.
+    pub fn acquire_heavy_with_disk_budgets(
+        &self,
+        timeout: Duration,
+        ttl: Duration,
+        budgets: &[VerificationDiskBudget],
+    ) -> Result<HeavyLease, CoordinatorError> {
+        if !self.verification_pool {
+            return Err(CoordinatorError::Unavailable(
+                "disk budgets require a verification pool".into(),
+            ));
+        }
+        acquire_heavy_at(
+            &self.root,
+            &self.key,
+            self.priority,
+            timeout,
+            Some(ttl),
+            true,
+            Some(budgets),
+        )
+    }
+
+    /// Exclude the whole pool when a command's shared resources are unknown.
+    /// The exclusive root lock also fences old binaries while disk floors
+    /// are checked and the command runs.
+    pub fn acquire_exclusive_heavy_with_disk_budget(
+        &self,
+        timeout: Duration,
+        ttl: Duration,
+        budgets: &[VerificationDiskBudget],
+    ) -> Result<HeavyLease, CoordinatorError> {
+        acquire_heavy_at(
+            &self.root,
+            &self.key,
+            self.priority,
+            timeout,
+            Some(ttl),
+            false,
+            Some(budgets),
+        )
+    }
+
     fn acquire_heavy_inner(
         &self,
         timeout: Duration,
         ttl: Option<Duration>,
     ) -> Result<HeavyLease, CoordinatorError> {
-        acquire_heavy_at(&self.root, &self.key, self.priority, timeout, ttl)
+        acquire_heavy_at(
+            &self.root,
+            &self.key,
+            self.priority,
+            timeout,
+            ttl,
+            self.verification_pool,
+            None,
+        )
     }
 
     /// Number of live waiters currently joined to this target job. Stale
@@ -1205,6 +1438,8 @@ fn acquire_heavy_at(
     priority: JobPriority,
     timeout: Duration,
     ttl: Option<Duration>,
+    verification_pool: bool,
+    disk_budgets: Option<&[VerificationDiskBudget]>,
 ) -> Result<HeavyLease, CoordinatorError> {
     let pending_dir = root.join("heavy.pending");
     fs::create_dir_all(&pending_dir)?;
@@ -1251,96 +1486,61 @@ fn acquire_heavy_at(
         let _ = fs::remove_file(path);
     };
 
-    let heavy_lock_path = root.join("heavy.lock");
-    let heavy_file = match open_lock_file(&heavy_lock_path) {
-        Ok(file) => file,
-        Err(err) => {
-            cleanup_pending(pending_file, &pending_path);
-            return Err(CoordinatorError::Io(err));
-        }
-    };
     loop {
-        let queued = heavy_queue(&pending_dir);
-        // Both sides apply the burst exception: the search stands aside and
-        // lower-priority work stops deferring to it. Equal-priority claimants
-        // still follow the FIFO/reservation rules from #4169.
-        let burst_spent = read_interactive_burst(root) >= MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
-        // An incomplete scan cannot establish that it is our turn. Retry it
-        // within the same admission budget instead of treating it as empty.
-        let must_defer = queued.as_ref().map_or(true, |queued| {
-            queued.iter().any(|other| {
-                if other.target == me.target {
-                    return false;
+        match try_acquire_heavy_storage(root, &me, verification_pool, disk_budgets) {
+            Ok(Some(locks)) => {
+                let acquired_at_ms = now_ms();
+                if key.is_verification() {
+                    // A reused slot starts with this command's progress even
+                    // when two acquisitions share the same clock millisecond.
+                    let _ = fs::remove_file(locks.storage.join(HEAVY_PROGRESS_FILE));
                 }
-                if burst_spent {
-                    if priority == JobPriority::InteractiveSearch
-                        && other.priority > JobPriority::InteractiveSearch
-                    {
-                        // Yield only to a waiter that can take its turn. A live
-                        // waiter blocked by an absent reservation cannot use the
-                        // free slot, and waiting for it would stall search too.
-                        return other.present
-                            && !queued.iter().any(|ahead| {
-                                ahead.target != other.target
-                                    && ahead.priority > JobPriority::InteractiveSearch
-                                    && ahead.blocks(other)
-                            });
-                    }
-                    if priority != JobPriority::InteractiveSearch
-                        && other.priority == JobPriority::InteractiveSearch
-                    {
-                        return false;
-                    }
-                }
-                other.blocks(&me)
-            })
-        });
-        if !must_defer {
-            match fs2::FileExt::try_lock_exclusive(&heavy_file) {
-                Ok(()) => {
-                    reconcile_orphaned_heavy_ticket(root);
-                    let acquired_at_ms = now_ms();
-                    let ticket = Ticket {
-                        schema_version: COORDINATOR_SCHEMA_VERSION,
-                        target: target.clone(),
-                        priority,
-                        owner: OwnerIdentity::current(),
-                        acquired_at_ms,
-                        lease_id: Some(uuid::Uuid::new_v4().to_string()),
-                        expires_at_ms: ttl
-                            .map(|ttl| acquired_at_ms.saturating_add(ttl.as_millis() as u64)),
-                        ttl_renewed: ttl.map(|_| false),
-                        holder_nice: crate::verification_priority::LauncherPriority::current().nice,
-                        // Filled in by the holder once it knows: the
-                        // coordinator has no opinion about daemons.
-                        holder_spawn_host: None,
-                    };
-                    let _ = write_json_atomic(&root.join("heavy.ticket.json"), &ticket);
-                    cleanup_pending(pending_file, &pending_path);
-                    // Consume both the reservation (#4086) and remembered
-                    // queue position (#4169) once the claimant gets its turn.
+                let ticket = Ticket {
+                    schema_version: COORDINATOR_SCHEMA_VERSION,
+                    target: target.clone(),
+                    priority,
+                    owner: OwnerIdentity::current(),
+                    acquired_at_ms,
+                    lease_id: Some(uuid::Uuid::new_v4().to_string()),
+                    expires_at_ms: ttl
+                        .map(|ttl| acquired_at_ms.saturating_add(ttl.as_millis() as u64)),
+                    ttl_renewed: ttl.map(|_| false),
+                    holder_nice: crate::verification_priority::LauncherPriority::current().nice,
+                    // Filled in by the holder once it knows: the
+                    // coordinator has no opinion about daemons.
+                    holder_spawn_host: None,
+                };
+                let _ = write_json_atomic(&locks.storage.join("heavy.ticket.json"), &ticket);
+                cleanup_pending(pending_file, &pending_path);
+                // Consume both the reservation (#4086) and remembered
+                // queue position (#4169) once the claimant gets its turn.
+                {
+                    let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
                     let _ = fs::remove_file(heavy_queue_entry_path(&pending_dir, &target));
-                    record_interactive_burst_grant(root, priority);
-                    let lease = HeavyLease {
-                        queue_wait_ms: acquired_at_ms.saturating_sub(queued_at_ms),
-                        _lock_file: heavy_file,
-                        root: root.to_path_buf(),
-                        ticket_path: root.join("heavy.ticket.json"),
-                        // Only verification leases keep a ledger: index
-                        // jobs run on the hot search path and gain
-                        // nothing from an extra append per acquisition.
-                        records_events: key.is_verification(),
-                        ticket,
-                        released: false,
-                    };
-                    lease.record_event(LeaseEventKind::Acquired, None);
-                    return Ok(lease);
                 }
-                Err(err) if is_contended(&err) => {}
-                Err(err) => {
-                    cleanup_pending(pending_file, &pending_path);
-                    return Err(CoordinatorError::Io(err));
-                }
+                record_interactive_burst_grant(root, priority);
+                let lease = HeavyLease {
+                    queue_wait_ms: acquired_at_ms.saturating_sub(queued_at_ms),
+                    _lock_file: locks.lock_file,
+                    _compatibility_file: locks.compatibility_file,
+                    root: root.to_path_buf(),
+                    ticket_path: locks.storage.join("heavy.ticket.json"),
+                    storage: locks.storage,
+                    // Only verification leases keep a ledger: index
+                    // jobs run on the hot search path and gain
+                    // nothing from an extra append per acquisition.
+                    records_events: key.is_verification(),
+                    ticket,
+                    released: false,
+                };
+                lease.record_event(LeaseEventKind::Acquired, None);
+                drop(locks.allocator_file);
+                return Ok(lease);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                cleanup_pending(pending_file, &pending_path);
+                return Err(err);
             }
         }
         if started.elapsed() >= timeout {
@@ -1350,6 +1550,7 @@ fn acquire_heavy_at(
                 // Preserve #4169's reservation before ending this poll so a
                 // later claimant cannot overtake the deferred verification.
                 let path = heavy_queue_entry_path(&pending_dir, &target);
+                let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
                 if let Ok(mut entry) = heavy_queue_entry(&pending_dir, &target, priority) {
                     entry.reserved_until_ms = Some(
                         now_ms().saturating_add(VERIFICATION_RESERVATION_TTL.as_millis() as u64),
@@ -1364,6 +1565,250 @@ fn acquire_heavy_at(
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Files owned while a grant is published. Pool grants retain the allocator
+/// until their queue entry is consumed, so the next claimant observes the
+/// predecessor's completed admission rather than racing its ticket publish.
+struct HeavyLockFiles {
+    lock_file: File,
+    compatibility_file: Option<File>,
+    allocator_file: Option<File>,
+    storage: PathBuf,
+}
+
+fn heavy_claim_must_defer(root: &Path, me: &QueueRecord) -> bool {
+    let queued = heavy_queue(&root.join("heavy.pending"));
+    let burst_spent = read_interactive_burst(root) >= MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
+    // An incomplete scan cannot establish that it is this claimant's turn.
+    queued.as_ref().map_or(true, |queued| {
+        queued.iter().any(|other| {
+            if other.target == me.target {
+                return false;
+            }
+            if burst_spent {
+                if me.priority == JobPriority::InteractiveSearch
+                    && other.priority > JobPriority::InteractiveSearch
+                {
+                    // A live waiter blocked by an absent reservation cannot use
+                    // the free slot; it must not stall interactive search too.
+                    return other.present
+                        && !queued.iter().any(|ahead| {
+                            ahead.target != other.target
+                                && ahead.priority > JobPriority::InteractiveSearch
+                                && ahead.blocks(other)
+                        });
+                }
+                if me.priority != JobPriority::InteractiveSearch
+                    && other.priority == JobPriority::InteractiveSearch
+                {
+                    return false;
+                }
+            }
+            other.blocks(me)
+        })
+    })
+}
+
+fn read_verification_capacity(root: &Path) -> Result<usize, CoordinatorError> {
+    let raw = fs::read(root.join(VERIFICATION_CAPACITY_FILE))?;
+    let projection: VerificationCapacity = serde_json::from_slice(&raw).map_err(|err| {
+        CoordinatorError::Unavailable(format!("invalid verification capacity: {err}"))
+    })?;
+    if projection.schema_version != COORDINATOR_SCHEMA_VERSION || projection.capacity == 0 {
+        return Err(CoordinatorError::Unavailable(
+            "invalid verification capacity".into(),
+        ));
+    }
+    Ok(projection.capacity)
+}
+
+fn verification_slot_paths(root: &Path) -> Result<Vec<(usize, PathBuf)>, CoordinatorError> {
+    let entries = match fs::read_dir(root.join("slots")) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if let Some(slot) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        {
+            if entry.file_type()?.is_dir() {
+                paths.push((slot, entry.path()));
+            }
+        }
+    }
+    paths.sort_by_key(|(slot, _)| *slot);
+    Ok(paths)
+}
+
+fn try_acquire_heavy_storage(
+    root: &Path,
+    me: &QueueRecord,
+    verification_pool: bool,
+    disk_budgets: Option<&[VerificationDiskBudget]>,
+) -> Result<Option<HeavyLockFiles>, CoordinatorError> {
+    let allocator_file = if verification_pool {
+        let file = open_lock_file(&root.join(VERIFICATION_ALLOCATOR_LOCK))?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Some(file),
+            Err(err) if is_contended(&err) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        }
+    } else {
+        None
+    };
+    if heavy_claim_must_defer(root, me) {
+        return Ok(None);
+    }
+    let root_file = open_lock_file(&root.join("heavy.lock"))?;
+    if !verification_pool {
+        return match fs2::FileExt::try_lock_exclusive(&root_file) {
+            Ok(()) => {
+                reconcile_orphaned_heavy_ticket(root, root);
+                if let Some(budgets) = disk_budgets {
+                    if !disk_budgets_fit(budgets, &[])? {
+                        return Ok(None);
+                    }
+                }
+                publish_disk_reservations(root, disk_budgets)?;
+                Ok(Some(HeavyLockFiles {
+                    lock_file: root_file,
+                    compatibility_file: None,
+                    allocator_file: None,
+                    storage: root.to_path_buf(),
+                }))
+            }
+            Err(err) if is_contended(&err) => Ok(None),
+            Err(err) => Err(err.into()),
+        };
+    }
+    // Only the exclusive root probe may reconcile a legacy ticket. Every
+    // admitted pool holder then keeps a shared root lock so an old binary
+    // can never overlap any of the new slots.
+    match fs2::FileExt::try_lock_exclusive(&root_file) {
+        Ok(()) => {
+            reconcile_orphaned_heavy_ticket(root, root);
+            fs2::FileExt::unlock(&root_file)?;
+        }
+        Err(err) if is_contended(&err) => {}
+        Err(err) => return Err(err.into()),
+    }
+    match fs2::FileExt::try_lock_shared(&root_file) {
+        Ok(()) => {}
+        Err(err) if is_contended(&err) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    }
+    let capacity = read_verification_capacity(root)?;
+    let mut used = 0;
+    let mut reservations = Vec::new();
+    let mut candidate = None;
+    let paths = verification_slot_paths(root)?;
+    for (slot, storage) in &paths {
+        let file = open_lock_file(&storage.join("heavy.lock"))?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => {
+                if *slot < capacity && candidate.is_none() {
+                    candidate = Some((storage.clone(), file));
+                }
+            }
+            Err(err) if is_contended(&err) => {
+                used += 1;
+                if disk_budgets.is_some() {
+                    let slot_reservations = fs::read(storage.join(HEAVY_DISK_FILE))
+                        .ok()
+                        .and_then(|raw| serde_json::from_slice::<Vec<DiskReservation>>(&raw).ok());
+                    let Some(slot_reservations) = slot_reservations else {
+                        return Ok(None);
+                    };
+                    reservations.extend(slot_reservations);
+                }
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    // Slots outside a lowered limit remain counted until their holders exit.
+    if used >= capacity {
+        return Ok(None);
+    }
+    if let Some(budgets) = disk_budgets {
+        if !disk_budgets_fit(budgets, &reservations)? {
+            return Ok(None);
+        }
+    }
+    let (storage, lock_file) = match candidate {
+        Some(candidate) => candidate,
+        None => {
+            let slot = (0..capacity)
+                .find(|slot| !paths.iter().any(|(existing, _)| existing == slot))
+                .ok_or_else(|| CoordinatorError::Unavailable("no free verification slot".into()))?;
+            let storage = root.join("slots").join(slot.to_string());
+            fs::create_dir_all(&storage)?;
+            let file = open_lock_file(&storage.join("heavy.lock"))?;
+            #[cfg(test)]
+            tests::after_new_slot_created(&storage);
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {}
+                Err(err) if is_contended(&err) => return Ok(None),
+                Err(err) => return Err(err.into()),
+            }
+            (storage, file)
+        }
+    };
+    reconcile_orphaned_heavy_ticket(&storage, root);
+    publish_disk_reservations(&storage, disk_budgets)?;
+    Ok(Some(HeavyLockFiles {
+        lock_file,
+        compatibility_file: Some(root_file),
+        allocator_file,
+        storage,
+    }))
+}
+
+fn disk_budgets_fit(
+    budgets: &[VerificationDiskBudget],
+    reservations: &[DiskReservation],
+) -> Result<bool, CoordinatorError> {
+    for budget in budgets {
+        let reserved = reservations
+            .iter()
+            .filter(|reservation| reservation.volume == budget.volume)
+            .fold(0_u64, |bytes, reservation| {
+                bytes.saturating_add(reservation.bytes)
+            });
+        let available = fs2::available_space(&budget.path)?;
+        if available
+            .checked_sub(reserved)
+            .and_then(|bytes| bytes.checked_sub(budget.bytes))
+            .is_none_or(|remaining| remaining < budget.floor_bytes)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn publish_disk_reservations(
+    storage: &Path,
+    budgets: Option<&[VerificationDiskBudget]>,
+) -> Result<(), CoordinatorError> {
+    if let Some(budgets) = budgets {
+        let reservations: Vec<_> = budgets
+            .iter()
+            .map(|budget| DiskReservation {
+                volume: budget.volume.clone(),
+                bytes: budget.bytes,
+            })
+            .collect();
+        write_json_atomic(&storage.join(HEAVY_DISK_FILE), &reservations)?;
+    } else {
+        let _ = fs::remove_file(storage.join(HEAVY_DISK_FILE));
+    }
+    Ok(())
 }
 
 /// Consecutive interactive heavy grants since the last non-interactive one.
@@ -1416,7 +1861,9 @@ impl Drop for TargetJobGuard {
 pub struct HeavyLease {
     queue_wait_ms: u64,
     _lock_file: File,
+    _compatibility_file: Option<File>,
     root: PathBuf,
+    storage: PathBuf,
     ticket_path: PathBuf,
     ticket: Ticket,
     records_events: bool,
@@ -1487,7 +1934,7 @@ impl HeavyLease {
         unit_ms: u64,
     ) -> Result<(), CoordinatorError> {
         write_json_atomic(
-            &self.root.join(HEAVY_PROGRESS_FILE),
+            &self.storage.join(HEAVY_PROGRESS_FILE),
             &HeavyProgress {
                 target: self.ticket.target.clone(),
                 done,
@@ -1574,6 +2021,7 @@ impl HeavyLease {
             self.record_event(LeaseEventKind::Released, None);
         }
         let _ = fs::remove_file(&self.ticket_path);
+        let _ = fs::remove_file(self.storage.join(HEAVY_DISK_FILE));
     }
 
     fn record_event(&self, kind: LeaseEventKind, reason: Option<&str>) {
@@ -1796,8 +2244,8 @@ fn read_ticket(path: &Path) -> Option<Ticket> {
 /// describes an unsettled former holder, regardless of PID or TTL. Keeping
 /// the lock through ledger append and removal prevents status/acquire races
 /// from deleting a successor's ticket.
-fn reconcile_orphaned_heavy_ticket(root: &Path) {
-    let path = root.join("heavy.ticket.json");
+fn reconcile_orphaned_heavy_ticket(storage: &Path, root: &Path) {
+    let path = storage.join("heavy.ticket.json");
     if let Some(ticket) = read_ticket(&path) {
         if let Some(lease_id) = ticket
             .lease_id
@@ -1834,6 +2282,7 @@ fn reconcile_orphaned_heavy_ticket(root: &Path) {
         }
     }
     let _ = fs::remove_file(path);
+    let _ = fs::remove_file(storage.join(HEAVY_DISK_FILE));
 }
 
 /// Append one lease transition to `lease-events.jsonl` under an exclusive
@@ -1967,6 +2416,7 @@ fn enroll_in_heavy_queue(
     target: &str,
     priority: JobPriority,
 ) -> Result<(u64, Option<u64>), CoordinatorError> {
+    let _queue_state = lock_heavy_queue_entries(dir)?;
     let mut entry = heavy_queue_entry(dir, target, priority)?;
     entry.position_until_ms =
         Some(now_ms().saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
@@ -2093,19 +2543,37 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(RESERVATION_PREFIX));
+        if is_reservation {
+            let snapshot = read_registration(&path)?;
+            #[cfg(test)]
+            tests::after_registration_snapshot(&path);
+            // Durable reservations have an expiry, not a process liveness
+            // lock. Keep an already-live snapshot visible through a concurrent
+            // probe, and recheck expired entries under the same metadata lock
+            // their writers hold before deleting them.
+            let registration = match snapshot {
+                Some(entry) if entry.outlives(now) => Some(entry),
+                _ => sweep_heavy_queue_entry(&path, now)?,
+            };
+            if let Some(registration) = registration {
+                live.push(LiveRegistration {
+                    registration: Some(registration),
+                    locked: false,
+                });
+            }
+            continue;
+        }
         // A claimant may remove this entry after read_dir. Never recreate it
-        // as an empty reservation that cannot establish its expiry.
+        // as an empty registration that cannot establish its expiry.
         let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(CoordinatorError::Io(err)),
         };
-        // UUID registrations stay on this inode. Read under a shared lock;
-        // another sweeper's exclusive probe keeps the waiter visible without
-        // attempting a Windows range-locked read. Reservations are refreshed
-        // by replacing their fixed path, so read them only after the probe.
+        // UUID registrations stay on this inode. Reservations replace their
+        // fixed path, so snapshot its current inode under a shared read lock.
         let registration = if is_reservation {
-            None
+            read_registration(&path)?
         } else {
             match fs2::FileExt::try_lock_shared(&file) {
                 Ok(()) => {}
@@ -2125,6 +2593,21 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
         };
         #[cfg(test)]
         tests::after_registration_snapshot(&path);
+
+        // Reservations have no liveness lock: their deadline keeps them live.
+        // Probing an active one exclusively creates unnecessary Windows read
+        // contention between concurrent status readers and admissions.
+        if is_reservation
+            && registration
+                .as_ref()
+                .is_some_and(|entry| entry.outlives(now))
+        {
+            live.push(LiveRegistration {
+                registration,
+                locked: false,
+            });
+            continue;
+        }
 
         // A waiter's snapshot does not establish current liveness. Probe
         // afterward and keep its lock through cleanup so it cannot become
@@ -2159,7 +2642,13 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
                         .or(entry.position_until_ms)
                         .is_some()
                     {
-                        let _ = fs::remove_file(&path);
+                        drop(file);
+                        if let Some(registration) = sweep_heavy_queue_entry(&path, now)? {
+                            live.push(LiveRegistration {
+                                registration: Some(registration),
+                                locked: false,
+                            });
+                        }
                         continue;
                     }
                 }
@@ -2192,12 +2681,49 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
     Ok(live)
 }
 
+/// Serialize durable-entry updates with the expiry check and physical delete.
+/// The lock file is separate from the atomically replaced JSON payload.
+fn lock_heavy_queue_entries(dir: &Path) -> Result<File, CoordinatorError> {
+    let file = open_lock_file(&dir.join("queue-state.lock"))?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+fn sweep_heavy_queue_entry(
+    path: &Path,
+    now: u64,
+) -> Result<Option<Registration>, CoordinatorError> {
+    let _queue_state = lock_heavy_queue_entries(path.parent().expect("registration directory"))?;
+    // The snapshot that chose this entry may predate a successful renewal.
+    // Re-read under the same lock every durable-entry writer takes; another
+    // renewal cannot interleave between this check and the delete.
+    if let Some(entry) = read_registration(path)? {
+        if entry.outlives(now)
+            || entry
+                .reserved_until_ms
+                .or(entry.position_until_ms)
+                .is_none()
+        {
+            // The current scan must also publish the renewed claimant, so an
+            // admission using this snapshot cannot treat its turn as absent.
+            return Ok(Some(entry));
+        }
+        let _ = fs::remove_file(path);
+    }
+    Ok(None)
+}
+
 fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorError> {
-    let raw = match fs::read(path) {
-        Ok(raw) => raw,
+    let mut file = match File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(CoordinatorError::Io(err)),
     };
+    // Preserve nonblocking admission budgets when a concurrent cleanup probe
+    // owns this inode. The caller keeps the unreadable arrival for its retry.
+    fs2::FileExt::try_lock_shared(&file)?;
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw)?;
     serde_json::from_slice(&raw)
         .map(Some)
         .map_err(|err| CoordinatorError::Io(io_invalid(err)))
@@ -2209,9 +2735,12 @@ mod tests {
     use crate::deadline_budget::HANG_GUARD;
 
     type RegistrationSnapshotHook = Box<dyn FnOnce(&Path)>;
+    type NewSlotCreatedHook = Box<dyn FnOnce(&Path)>;
 
     thread_local! {
         static REGISTRATION_SNAPSHOT_HOOK: std::cell::RefCell<Option<RegistrationSnapshotHook>> =
+            const { std::cell::RefCell::new(None) };
+        static NEW_SLOT_CREATED_HOOK: std::cell::RefCell<Option<NewSlotCreatedHook>> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -2220,6 +2749,53 @@ mod tests {
         if let Some(hook) = hook {
             hook(path);
         }
+    }
+
+    pub(super) fn after_new_slot_created(storage: &Path) {
+        let hook = NEW_SLOT_CREATED_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(storage);
+        }
+    }
+
+    #[test]
+    fn new_slot_status_probe_defers_without_changing_fifo_arrival() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let key = verification_key();
+        let guard = own(&coordinator, &key, JobPriority::ManualRebuild);
+        let arrival = enroll_in_heavy_queue(
+            &coordinator.heavy_pending_dir(),
+            &key.file_stem(),
+            JobPriority::ManualRebuild,
+        )
+        .unwrap();
+        let probe = std::rc::Rc::new(std::cell::RefCell::new(None));
+        NEW_SLOT_CREATED_HOOK.with(|hook| {
+            let probe = std::rc::Rc::clone(&probe);
+            *hook.borrow_mut() = Some(Box::new(move |storage| {
+                let file = open_lock_file(&storage.join("heavy.lock")).unwrap();
+                fs2::FileExt::try_lock_exclusive(&file).unwrap();
+                *probe.borrow_mut() = Some(file);
+            }));
+        });
+        match guard.acquire_heavy_with_ttl(Duration::ZERO, HANG_GUARD) {
+            Err(CoordinatorError::Timeout { .. }) => {}
+            Err(error) => panic!("expected deferred Timeout, got {error}"),
+            Ok(_) => panic!("the status probe must defer the new slot grant"),
+        }
+        let queued = read_registration(&coordinator.heavy_reservation_path(&key))
+            .unwrap()
+            .unwrap();
+        assert_eq!((queued.queued_at(), queued.queue_seq), arrival);
+
+        drop(probe.borrow_mut().take());
+        let lease = guard
+            .acquire_heavy_with_ttl(Duration::ZERO, HANG_GUARD)
+            .expect("releasing the probe admits the same claimant immediately");
+        assert!(!coordinator.heavy_reservation_path(&key).exists());
+        lease.release().unwrap();
+        guard.complete(JobOutcome::Completed).unwrap();
     }
 
     #[test]
@@ -2267,6 +2843,29 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert!(live[0].locked);
         assert!(path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_reservation_snapshot_survives_a_concurrent_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+        let probe = std::rc::Rc::new(std::cell::RefCell::new(None));
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            let probe = std::rc::Rc::clone(&probe);
+            *hook.borrow_mut() = Some(Box::new(move |path| {
+                let file = open_lock_file(path).unwrap();
+                fs2::FileExt::try_lock_exclusive(&file).unwrap();
+                *probe.borrow_mut() = Some(file);
+            }));
+        });
+        let queue = coordinator.heavy_lease_status().unwrap().queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
+        assert_eq!(queue[0].priority, JobPriority::ManualRebuild);
     }
 
     #[test]
@@ -2817,6 +3416,41 @@ mod tests {
         assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 0);
         drop(heavy);
         guard.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn expired_sweep_preserves_a_reservation_renewed_after_its_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, Duration::ZERO, None)
+            .unwrap();
+        let path = coordinator.heavy_reservation_path(&key);
+        let snapshot = read_registration(&path).unwrap().unwrap();
+        let swept_at = now_ms();
+        assert!(!snapshot.outlives(swept_at));
+
+        // The sweeper already chose the expired entry, but another process
+        // publishes its next reservation before the physical delete.
+        coordinator
+            .reserve_heavy(
+                &key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                Some("renewed after the sweep snapshot"),
+            )
+            .unwrap();
+        let renewed = fs::read(&path).unwrap();
+        let kept = sweep_heavy_queue_entry(&path, swept_at)
+            .unwrap()
+            .expect("the current scan must retain the renewed claimant");
+        assert!(kept.outlives(swept_at));
+        assert_eq!(
+            fs::read(&path).expect("the renewed reservation must survive stale cleanup"),
+            renewed
+        );
+        assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 1);
     }
 
     // ------------------------------------------------------------------
