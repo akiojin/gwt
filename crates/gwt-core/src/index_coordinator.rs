@@ -1584,7 +1584,12 @@ fn acquire_heavy_at(
     let (queued_at_ms, queue_seq) = loop {
         match enroll_in_heavy_queue_for_attempt(&pending_dir, &target, priority, attempt) {
             Ok(arrival) => break arrival,
-            Err(err) if attempt.is_some() => return Err(err),
+            Err(err)
+                if attempt.is_some()
+                    && !matches!(&err, CoordinatorError::Io(err) if is_contended(err)) =>
+            {
+                return Err(err);
+            }
             // A temporarily unreadable reservation is not a new arrival.
             Err(_) if started.elapsed() < timeout => std::thread::sleep(POLL_INTERVAL),
             Err(_) => {
@@ -1699,10 +1704,10 @@ fn acquire_heavy_at(
             }
             if started.elapsed() >= timeout {
                 // A deferred retry resumes its existing place in the queue.
-                if attempt.is_some() {
-                    enroll_in_heavy_queue_for_attempt(&pending_dir, &target, priority, attempt)?;
-                } else {
-                    let _ = enroll_in_heavy_queue(&pending_dir, &target, priority);
+                match enroll_in_heavy_queue_for_attempt(&pending_dir, &target, priority, attempt) {
+                    Err(CoordinatorError::Io(err)) if is_contended(&err) => {}
+                    Err(err) if attempt.is_some() => return Err(err),
+                    _ => {}
                 }
                 if key.is_verification() {
                     // Preserve #4169's reservation before ending this poll so a
@@ -2672,6 +2677,7 @@ fn heavy_queue_entry(
 /// Join the heavy queue for `target` (Issue #4169) and answer with the arrival
 /// every claimant orders by. Joining twice keeps the first arrival: the queue
 /// is per target, so a `deferred` rerun continues where it left off.
+#[cfg(test)]
 fn enroll_in_heavy_queue(
     dir: &Path,
     target: &str,
@@ -4428,31 +4434,44 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[cfg(windows)]
     #[test]
     fn transient_registration_read_failure_keeps_fifo_arrival() {
         let tmp = tempfile::tempdir().unwrap();
-        let coordinator = open(tmp.path());
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
         let first_key = TargetKey::verification("repo", "first");
         let later_key = TargetKey::verification("repo", "later");
-        for key in [&first_key, &later_key] {
-            coordinator
-                .reserve_heavy(
-                    key,
-                    JobPriority::ManualRebuild,
-                    Duration::from_secs(60),
-                    None,
-                )
-                .unwrap();
-        }
-        let arrival = coordinator.heavy_lease_status().unwrap().queue[0].queued_at_ms;
+        let first = own(&coordinator, &first_key, JobPriority::ManualRebuild);
+        let check = || Ok(false);
+        let attempt = HeavyAttempt {
+            id: "transient",
+            check_cancelled: &check,
+        };
+        coordinator
+            .reserve_heavy_for_attempt(
+                &first_key,
+                JobPriority::ManualRebuild,
+                Duration::from_secs(60),
+                None,
+                &attempt,
+            )
+            .unwrap();
+        coordinator
+            .reserve_heavy(
+                &later_key,
+                JobPriority::ManualRebuild,
+                Duration::from_secs(60),
+                None,
+            )
+            .unwrap();
+        let queued = coordinator.heavy_lease_status().unwrap().queue[0].clone();
         let path = coordinator.heavy_reservation_path(&first_key);
+        let queue_seq = read_registration(&path).unwrap().unwrap().queue_seq;
         let before = fs::read(&path).unwrap();
         let locked = open_lock_file(&path).unwrap();
         fs2::FileExt::lock_exclusive(&locked).unwrap();
         assert!(
-            fs::read(&path).is_err(),
-            "inject a Windows registration read failure"
+            matches!(read_registration(&path), Err(CoordinatorError::Io(err)) if is_contended(&err)),
+            "inject a registration read failure through a separate lock handle"
         );
 
         let later = own(&coordinator, &later_key, JobPriority::ManualRebuild);
@@ -4463,24 +4482,61 @@ mod tests {
             ),
             "an unreadable earlier reservation must not permit overtaking"
         );
-        let first = own(&coordinator, &first_key, JobPriority::ManualRebuild);
+        let result = first.acquire_heavy_with_disk_budgets_for_attempt(
+            Duration::ZERO,
+            Duration::from_secs(60),
+            &[],
+            &attempt,
+        );
         assert!(
-            matches!(
-                first.acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60)),
-                Err(CoordinatorError::Timeout { .. })
-            ),
-            "retry an unreadable arrival instead of replacing it"
+            matches!(result, Err(CoordinatorError::Timeout { .. })),
+            "retry an unreadable arrival instead of replacing it: {:?}",
+            result.err()
         );
 
         fs2::FileExt::unlock(&locked).unwrap();
         drop(locked);
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let checks = std::cell::Cell::new(0);
+        let locked_after_enrollment = std::cell::RefCell::new(None);
+        let check = || {
+            if checks.replace(checks.get() + 1) == 1 {
+                // The first check enrolled; the second precedes live publication.
+                let before = fs::read(&path).unwrap();
+                let file = open_lock_file(&path).unwrap();
+                fs2::FileExt::lock_exclusive(&file).unwrap();
+                *locked_after_enrollment.borrow_mut() = Some((file, before));
+            }
+            Ok(false)
+        };
+        assert!(matches!(
+            first.acquire_heavy_with_disk_budgets_for_attempt(
+                Duration::ZERO,
+                Duration::from_secs(60),
+                &[],
+                &HeavyAttempt {
+                    id: attempt.id,
+                    check_cancelled: &check,
+                },
+            ),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        let (file, before) = locked_after_enrollment.borrow_mut().take().unwrap();
+        fs2::FileExt::unlock(&file).unwrap();
+        drop(file);
         assert_eq!(fs::read(&path).unwrap(), before);
         let queue = coordinator.heavy_lease_status().unwrap().queue;
         assert_eq!(
             queue[0].target.as_deref(),
             Some(first_key.file_stem().as_str())
         );
-        assert_eq!(queue[0].queued_at_ms, arrival);
+        assert_eq!(queue[0].queued_at_ms, queued.queued_at_ms);
+        assert_eq!(
+            read_registration(&path).unwrap().unwrap().queue_seq,
+            queue_seq
+        );
+        assert_eq!(queue[0].attempt_id.as_deref(), Some(attempt.id));
         let lease = first
             .acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(60))
             .expect("retry after the transient lock keeps the first turn");

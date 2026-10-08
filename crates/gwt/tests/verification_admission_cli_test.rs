@@ -639,10 +639,11 @@ fn cancellation_command_tree_parks() {
         assert!(Instant::now() < deadline, "descendant did not become ready");
         std::thread::sleep(Duration::from_millis(100));
     }
-    std::fs::write(
+    gwt_core::atomic_file::write_atomic(
         &ready,
         serde_json::json!({"command": std::process::id(), "descendant": descendant.id()})
-            .to_string(),
+            .to_string()
+            .as_bytes(),
     )
     .unwrap();
     while !release.exists() {
