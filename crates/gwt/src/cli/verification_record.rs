@@ -6141,7 +6141,7 @@ pub(super) fn run<E: CliEnv>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use gwt_core::test_support::ScopedEnvVar;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
     // A deadlock must fail this regression rather than hang the test runner.
     // The deadline is only a watchdog; admission below uses Duration::ZERO.
@@ -8804,6 +8804,47 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_fixture_preserves_completed_evidence_across_home_changes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", original_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", original_home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let commands = ["git --version".to_string()];
+        plan_and_run(&fixture.repo, "sess-home", &commands);
+
+        let other_home = tempfile::tempdir().unwrap();
+        let mut changed_home = None;
+        // Force the parallel HOME writer's interleaving at the existing seam:
+        // Running is already persisted, but Completed has not been written.
+        let (record, _) = run_verification_inner(
+            &fixture.repo,
+            "sess-home",
+            &commands,
+            None,
+            &[],
+            RunOptions::default(),
+            || {
+                changed_home = Some((
+                    ScopedEnvVar::set("HOME", other_home.path()),
+                    ScopedEnvVar::set("USERPROFILE", other_home.path()),
+                ));
+            },
+        )
+        .unwrap();
+        drop(changed_home);
+
+        assert!(record.all_passed);
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-home", None),
+            EvidenceStatus::Fresh,
+            "the fixture must read Completed, not an earlier HOME's Running checkpoint"
+        );
+    }
+
+    #[test]
     fn fingerprint_preserves_base_merges_without_source_changes() {
         let fixture = WorkEventGitFixture::tracked_shards();
         fixture.git_ok(&["branch", "develop"]);
@@ -9965,6 +10006,7 @@ mod tests {
     const WORK_EVENT_SHARDS_PATH: &str = ".gwt/work/events";
 
     pub(crate) struct WorkEventGitFixture {
+        _gwt_home: Option<ScopedGwtHome>,
         _root: tempfile::TempDir,
         pub(crate) repo: PathBuf,
         remote: PathBuf,
@@ -9976,7 +10018,10 @@ mod tests {
         }
 
         fn tracked_shards() -> Self {
-            let fixture = Self::new(false);
+            let mut fixture = Self::new(false);
+            // These fixtures read trusted verification state while sibling
+            // tests change HOME. Pin the store for the fixture's whole life.
+            fixture._gwt_home = Some(ScopedGwtHome::set(fixture._root.path()));
             fixture.write_event_shard(
                 "base",
                 br#"{"id":"base"}
@@ -10020,6 +10065,7 @@ mod tests {
             );
 
             let fixture = Self {
+                _gwt_home: None,
                 _root: root,
                 repo,
                 remote,
