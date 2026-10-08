@@ -4,7 +4,7 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 test.describe("Launch Wizard states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("Intake opens the local pending wizard before backend state arrives", async ({
+  test("deprecated Intake command has no rail entry, pending wizard, or wire", async ({
     page,
   }) => {
     const pageErrors: string[] = [];
@@ -17,22 +17,28 @@ test.describe("Launch Wizard states", () => {
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
 
-    await expect(page.locator(".project-tab")).toBeVisible({
+    await expect(page.locator("#close-project-button")).toBeVisible({
       timeout: 10_000,
     });
 
-    await page.locator('.op-rail__item[data-cmd="intake-session"]').click();
+    await expect
+      .soft(page.locator('.op-rail__item[data-cmd="intake-session"]'))
+      .toHaveCount(0);
+
+    await page.evaluate(async () => {
+      document.dispatchEvent(
+        new CustomEvent("op:command", { detail: { id: "intake-session" } }),
+      );
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
 
     const wizard = page.locator("#wizard-modal");
-    await expect(wizard).toHaveClass(/open/);
-    await expect(wizard).not.toHaveAttribute("aria-hidden", "true");
-    await expect(wizard.locator("#wizard-title")).toHaveText("Intake");
-    await expect(wizard).toContainText("Preparing Intake session...");
-    await expect(wizard.locator("#wizard-submit-button")).toBeHidden();
-
-    await expect
-      .poll(() => page.evaluate(() => (window as any).__sentKinds))
-      .toContain("open_intake_session");
+    await expect.soft(wizard).not.toHaveClass(/open/);
+    await expect.soft(wizard).toHaveAttribute("aria-hidden", "true");
+    await expect.soft(wizard.locator(".launch-pending-note")).toHaveCount(0);
+    expect.soft(await page.evaluate(() => (window as any).__sentKinds)).not.toContain(
+      "open_intake_session",
+    );
     expect(pageErrors).toEqual([]);
   });
 

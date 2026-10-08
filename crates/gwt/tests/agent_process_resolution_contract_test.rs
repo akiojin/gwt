@@ -8,7 +8,9 @@ struct ProbeSite {
 const AGENT_PROBE_SITES: &[ProbeSite] = &[
     ProbeSite {
         relative_path: "crates/gwt-agent/src/claude_capabilities.rs",
-        function_name: "detect_claude_version_raw",
+        // `detect_claude_version_raw` delegates here; this is the function
+        // that spawns the probe (Issue #3895).
+        function_name: "detect_claude_version_raw_in_env",
     },
     ProbeSite {
         relative_path: "crates/gwt-core/src/usage/claude.rs",
@@ -16,7 +18,9 @@ const AGENT_PROBE_SITES: &[ProbeSite] = &[
     },
     ProbeSite {
         relative_path: "crates/gwt-agent/src/detect.rs",
-        function_name: "fetch_version",
+        // `fetch_version` delegates here so profile overrides and removals
+        // use the same resolved adapter as the default environment.
+        function_name: "fetch_version_with_environment",
     },
     ProbeSite {
         relative_path: "crates/gwt-agent/src/prepare.rs",
@@ -64,7 +68,7 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
         "codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref())"
     ));
     let profile_env = launch
-        .find(".apply_to_parts(")
+        .find(".apply_to_config(")
         .expect("profile env applied");
     let health = launch
         .find("resolve_host_runner_health_checked(")
@@ -76,7 +80,7 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
     for mutation in [
         "refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(",
         "maybe_register_codex_managed_hook_trust_for_launch(",
-        "gwt_agent::Session::new(",
+        "initialize_launch_session(",
     ] {
         assert!(
             health
@@ -86,6 +90,9 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
             "canonical health must precede launch mutation {mutation}"
         );
     }
+    let initializer = fs::read_to_string(repo_root().join("crates/gwt/src/session_launch.rs"))
+        .expect("read extracted Session initializer");
+    assert!(function_source(&initializer, "initialize_launch_session").contains("Session::new("));
 }
 
 fn function_source<'a>(source: &'a str, name: &str) -> &'a str {
@@ -121,30 +128,6 @@ fn function_source_requires_an_exact_function_name() {
         function_source(source, "probe"),
         "fn probe() { resolved_command(); }"
     );
-}
-
-fn block_source_after_marker<'a>(source: &'a str, marker: &str) -> &'a str {
-    let start = source
-        .find(marker)
-        .unwrap_or_else(|| panic!("missing block marker {marker}"));
-    let open = source[start..]
-        .find('{')
-        .map(|offset| start + offset)
-        .unwrap_or_else(|| panic!("missing block body for {marker}"));
-    let mut depth = 0_u32;
-    for (offset, ch) in source[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &source[start..=open + offset];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("unterminated block for {marker}");
 }
 
 fn production_web_sources(root: &Path) -> Vec<(PathBuf, String)> {
@@ -209,25 +192,11 @@ fn production_web_sources_excludes_test_dependency_and_build_directories() {
 }
 
 #[test]
-fn targeted_windows_official_providers_have_no_bunx_fallback_source_path() {
-    let path = repo_root().join("crates/gwt-agent/src/launch.rs");
-    let source = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let candidates = function_source(&source, "package_runner_candidates_for_agent");
-    let targeted = block_source_after_marker(
-        candidates,
-        "if matches!(agent_id, AgentId::Codex | AgentId::ClaudeCode)",
-    );
-
-    assert!(targeted.contains("npx.cmd"));
-    assert!(
-        !targeted.contains("(\"npx\", true)"),
-        "targeted Windows Host Codex/Claude must never expose the bare POSIX npx shim"
-    );
-    assert!(
-        !targeted.contains("(\"bunx"),
-        "targeted Windows Host Codex/Claude must never expose a Bunx fallback"
-    );
+fn builtin_package_runner_resolution_stays_absent() {
+    let source = fs::read_to_string(repo_root().join("crates/gwt-agent/src/launch.rs"))
+        .expect("read launch implementation");
+    assert!(!source.contains("fn package_runner_candidates_for_agent("));
+    assert!(!source.contains("fn resolve_host_npx_fallback_executable("));
 }
 
 #[test]
@@ -365,10 +334,8 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
     assert!(placement.contains("Self::spawn_agent_window_async_with_claim("));
     let asynchronous = function_source(&launch, "spawn_agent_window_async_with_claim");
     for boundary in [
-        "hydrate_tool_runtime_provenance_from_source_session(",
         "resolve_host_runner_health_checked(&mut config)",
         "apply_windows_host_shell_wrapper(&mut config)",
-        "pending_lazy_tool_runtime_provenance_migration(",
     ] {
         assert!(
             asynchronous.contains(boundary),
@@ -378,7 +345,7 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
 }
 
 #[test]
-fn agent_and_package_runner_probes_use_the_shared_resolved_process_adapter() {
+fn agent_probes_use_the_shared_resolved_process_adapter() {
     let root = repo_root();
     let forbidden = [
         "hidden_command(",
@@ -430,14 +397,15 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
 
     assert!(!workflow.contains("cargo test -p gwt-core terminal::pty"));
     for command in [
-        "cargo test -p gwt-core --test windows_process_resolver --test process_adapter_parity",
-        "cargo test -p gwt-core --lib real_bun_global_placeholder_fixture",
-        "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
-        "cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary",
-        "cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture",
-        "cargo test -p gwt --bin gwt command_prompt_agent_wrapper",
-        "cargo test -p gwt-terminal --lib pty::windows_spawn::tests",
-        "cargo test -p gwt --test agent_process_resolution_contract_test",
+        "node scripts/ci-windows-tests.mjs run gwt-core test windows_process_resolver",
+        "node scripts/ci-windows-tests.mjs run gwt-core test process_adapter_parity",
+        "node scripts/ci-windows-tests.mjs run gwt-core test windows_claude_user_agent",
+        "node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent real_bun_global_placeholder_fixture",
+        "node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary",
+        "node scripts/ci-windows-tests.mjs run gwt bin gwt real_bun_global_placeholder_fixture",
+        "node scripts/ci-windows-tests.mjs run gwt bin gwt command_prompt_agent_wrapper",
+        "node scripts/ci-windows-tests.mjs run gwt-terminal lib gwt_terminal pty::windows_spawn::tests",
+        "node scripts/ci-windows-tests.mjs run gwt test runtime_tests agent_process_resolution_contract_test::",
     ] {
         assert!(
             workflow.contains(command),
@@ -455,33 +423,27 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
     assert!(shard_job.contains(
         "cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1"
     ));
-    assert_eq!(shard_job.matches("- provider:").count(), 4);
-    assert_eq!(shard_job.matches("selector:").count(), 4);
     for secret in ["secrets.", "CODEX_API_KEY", "ANTHROPIC_API_KEY"] {
         assert!(
             !shard_job.contains(secret),
             "ordinary deterministic Windows CI must stay credential-free: {secret}"
         );
     }
-    let normalized_workflow = shard_job
-        .lines()
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("\n");
-    for shard in [
-        ("codex", "latest"),
-        ("codex", "exact"),
-        ("claude", "latest"),
-        ("claude", "exact"),
-    ] {
-        let entry = format!("- provider: {}\nselector: {}", shard.0, shard.1);
-        assert!(
-            normalized_workflow.contains(&entry),
-            "Windows deterministic E2E matrix must contain {}/{}",
-            shard.0,
-            shard.1
-        );
-    }
+    assert!(
+        shard_job.contains("cargo test -p gwt --test windows_agent_launch_e2e --no-run"),
+        "installed provider cases must share one build step"
+    );
+    assert!(shard_job.contains("for provider in codex claude"));
+    assert!(
+        shard_job.contains("GWT_WINDOWS_AGENT_PROVIDER=\"$provider\""),
+        "each iteration must select its installed provider"
+    );
+    assert!(!shard_job.contains("GWT_WINDOWS_AGENT_SELECTOR"));
+    assert!(
+        shard_job.contains("::error::") && shard_job.contains("status=1"),
+        "one job must keep the matrix's per-shard attribution and its \
+         fail-fast: false behaviour"
+    );
 }
 
 #[test]
@@ -518,15 +480,15 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
     );
     let command_lines = step.lines().map(str::trim).collect::<Vec<_>>();
     for command in [
-        "cargo test -p gwt --lib cli::issue::tests::windows_launch_now_ -- --test-threads=1",
-        "cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
-        "cargo test -p gwt --lib cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
-        "cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
-        "cargo test -p gwt --bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
-        "cargo test -p gwt --bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
-        "cargo test -p gwt --bin gwt authenticated_scan_now_ -- --test-threads=1",
-        "cargo test -p gwt --test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
-        "cargo test -p gwt --test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_scan_now_ -- --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1",
     ] {
         assert!(
             command_lines.contains(&command),
@@ -554,7 +516,7 @@ fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
             .map_or(tail, |(step, _)| step);
         assert!(
             step.contains("\n        shell: bash\n"),
-            "Windows multi-command step `{step_name}` must stop at the first failed cargo command"
+            "Windows multi-command step `{step_name}` must stop at the first failed test command"
         );
     }
 }

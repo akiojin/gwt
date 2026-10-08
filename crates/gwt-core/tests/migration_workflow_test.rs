@@ -771,6 +771,12 @@ mod store_consolidation {
     /// A Nested Bare + Worktree layout plus the orphaned, path-keyed store that
     /// a pre-#3466 build left behind for its layout root.
     struct SplitStoreFixture {
+        /// Issue #4296 AC-5: every project store these tests touch must live
+        /// under this fixture's own temp dir, never under the gwt home a live
+        /// host is writing to. The guard is declared first so it is dropped
+        /// before `_temp` removes the directories it points at.
+        _home_guard: gwt_core::test_support::ScopedGwtHome,
+        home: PathBuf,
         _temp: tempfile::TempDir,
         layout_root: PathBuf,
         worktree: PathBuf,
@@ -781,6 +787,12 @@ mod store_consolidation {
     impl SplitStoreFixture {
         fn new(origin: &str) -> Self {
             let temp = tempfile::tempdir().expect("tempdir");
+            // Redirect `gwt_home()` before the first `gwt_project_*` call below.
+            // `ScopedGwtHome` is thread-local, so it isolates this test without
+            // serializing against siblings that mutate process-global `HOME`.
+            let home = temp.path().join("home");
+            std::fs::create_dir_all(&home).expect("isolated home");
+            let _home_guard = gwt_core::test_support::ScopedGwtHome::set(&home);
             let layout_root = temp.path().join("workbench");
             let bare = layout_root.join("gwt.git");
             let bootstrap = layout_root.join(".bootstrap");
@@ -845,6 +857,8 @@ mod store_consolidation {
             );
 
             Self {
+                _home_guard,
+                home,
                 _temp: temp,
                 layout_root,
                 worktree,
@@ -952,6 +966,35 @@ mod store_consolidation {
         std::fs::write(path, content).expect("write event log");
     }
 
+    /// Issue #4296 AC-5: these tests quarantine and rebuild whole project
+    /// stores, so a fixture that resolved `gwt_home()` to the caller's real
+    /// home would be renaming directories a live gwt host is writing to. The
+    /// isolation is asserted rather than assumed: `gwt_home()` falls back to
+    /// `HOME` / `USERPROFILE` whenever its cargo-test sandbox does not apply.
+    #[test]
+    fn the_fixture_keeps_every_project_store_inside_its_own_temp_dir() {
+        let fixture = SplitStoreFixture::new("https://example.invalid/acme/consolidate-home.git");
+        let isolated_gwt_home = fixture.home.join(".gwt");
+
+        for (label, store) in [
+            ("orphan store", fixture.orphan_store.clone()),
+            ("canonical store", fixture.canonical_store()),
+            ("canonical works", fixture.canonical_works.clone()),
+        ] {
+            assert!(
+                store.starts_with(&isolated_gwt_home),
+                "{label} must stay inside the fixture's gwt home: {} is not under {}",
+                store.display(),
+                isolated_gwt_home.display()
+            );
+        }
+
+        assert!(
+            fixture.orphan_store.is_dir(),
+            "the seeded orphan store must exist under the isolated home"
+        );
+    }
+
     /// AC-8 dry run: planning names the orphan and writes nothing.
     #[test]
     fn plan_is_a_dry_run_that_names_the_orphaned_store() {
@@ -989,6 +1032,34 @@ mod store_consolidation {
     fn apply_quarantines_the_source_and_rebuilds_from_durable_events() {
         let fixture = SplitStoreFixture::new("https://example.invalid/acme/consolidate-apply.git");
         fixture.seed_canonical_event("work-canonical", "Work the canonical store already had");
+        // Issue #4703: the unchanged source event still carries a detached ref.
+        let container = serde_json::json!({"branch": "work/reused"});
+        let mut event = start_event("work-orphaned", "Previously repaired Work");
+        event.execution_container = Some(serde_json::from_value(container.clone()).unwrap());
+        write_events(
+            &fixture.orphan_store.join("project-state/work-events.jsonl"),
+            &[event],
+        );
+        // Same-path receipts with different branches have different matching sets.
+        let shared_path = fixture.layout_root.join("reused");
+        std::fs::write(
+            fixture.canonical_works.with_extension("detachments.json"),
+            serde_json::to_vec(&serde_json::json!({"work-orphaned": [{
+                "branch": "work/previous", "worktree_path": shared_path
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture
+                .orphan_store
+                .join("project-state/works.detachments.json"),
+            serde_json::to_vec(&serde_json::json!({"work-orphaned": [{
+                "branch": "work/reused", "worktree_path": shared_path
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
         let source_bytes =
             std::fs::read(fixture.orphan_store.join("project-state/works.json")).expect("source");
         let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
@@ -1035,6 +1106,68 @@ mod store_consolidation {
             "the rebuild must carry both stores' durable Work forward"
         );
         assert_eq!(work_item_count, 2);
+        let projection = gwt_core::workspace_projection::load_workspace_work_items_from_path(
+            &fixture.canonical_works,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(projection
+            .work_items
+            .iter()
+            .all(|item| item.execution_containers.is_empty()));
+        assert!(fixture
+            .canonical_works
+            .with_extension("detachments.json")
+            .exists());
+    }
+
+    #[test]
+    fn failed_consolidation_restores_detachment_receipts() {
+        let fixture = SplitStoreFixture::new("https://example.invalid/acme/receipt-rollback.git");
+        let receipt = fixture.canonical_works.with_extension("detachments.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        let before = b"{\"canonical\":[]}";
+        std::fs::write(&receipt, before).unwrap();
+        std::fs::write(
+            fixture
+                .orphan_store
+                .join("project-state/works.detachments.json"),
+            b"{\"work-orphaned\":[{\"branch\":\"work/reused\"}]}",
+        )
+        .unwrap();
+        // Missing replayable source history forces the existing readback gate.
+        std::fs::write(
+            fixture.orphan_store.join("project-state/work-events.jsonl"),
+            b"{}",
+        )
+        .unwrap();
+        let plan = plan_store_consolidation(&fixture.layout_root).unwrap();
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .unwrap_err();
+        assert_eq!(error.refusal, StoreConsolidationRefusal::ReadbackFailed);
+        assert_eq!(std::fs::read(&receipt).unwrap(), before);
+        assert!(fixture.orphan_store.exists());
+    }
+
+    #[test]
+    fn unreadable_canonical_snapshot_refuses_before_quarantine() {
+        let fixture =
+            SplitStoreFixture::new("https://example.invalid/acme/unreadable-snapshot.git");
+        // A directory fails read on Windows and Unix without modifying permissions.
+        std::fs::create_dir_all(&fixture.canonical_works).unwrap();
+        let plan = plan_store_consolidation(&fixture.layout_root).unwrap();
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .expect_err("snapshot read failure must refuse before mutation");
+        assert_eq!(error.refusal, StoreConsolidationRefusal::CorruptInput);
+        assert!(error
+            .to_string()
+            .contains(&fixture.canonical_works.display().to_string()));
+        assert!(fixture.canonical_works.is_dir());
+        assert!(fixture.orphan_store.exists());
+        assert!(
+            !fixture.canonical_store().join("quarantine").exists(),
+            "an unreadable canonical snapshot must not start quarantine or rollback"
+        );
     }
 
     /// AC-8 idempotence: re-applying an approved plan changes nothing.
@@ -1073,11 +1206,18 @@ mod store_consolidation {
         let before = std::fs::read(fixture.orphan_store.join("project-state/works.json"))
             .expect("source before");
 
-        let error = apply_store_consolidation(&fixture.layout_root, "0000deadbeef", TEST_SESSION)
+        // A receipt-only change also invalidates the reviewed plan.
+        std::fs::write(
+            fixture
+                .orphan_store
+                .join("project-state/works.detachments.json"),
+            "{}",
+        )
+        .expect("receipt changed after review");
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
             .expect_err("a stale manifest must fail closed");
 
         assert_eq!(error.refusal, StoreConsolidationRefusal::ManifestChanged);
-        assert!(plan.manifest_hash != "0000deadbeef");
         assert_eq!(
             std::fs::read(fixture.orphan_store.join("project-state/works.json"))
                 .expect("source after"),
@@ -1109,6 +1249,42 @@ mod store_consolidation {
             "a refusal must be zero-mutation"
         );
         fs2::FileExt::unlock(&held).expect("release lock");
+    }
+
+    /// Issue #4296: Windows refuses to rename a directory while any process
+    /// holds a handle to a file beneath it, and reports it as a bare
+    /// `os error 5`. A reader that merely has the split store's `works.json`
+    /// open is a busy store, not corrupt input, so the refusal must carry the
+    /// retryable `WriterBusy` code and name the cause the operator can act on.
+    #[cfg(windows)]
+    #[test]
+    fn apply_reports_an_open_handle_under_the_source_store_as_a_busy_writer() {
+        let fixture =
+            SplitStoreFixture::new("https://example.invalid/acme/consolidate-open-handle.git");
+        let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
+        let held = std::fs::File::open(fixture.orphan_store.join("project-state/works.json"))
+            .expect("hold a reader's handle inside the split store");
+
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .expect_err("an unmovable split store must fail the migration closed");
+
+        assert_eq!(
+            error.refusal,
+            StoreConsolidationRefusal::WriterBusy,
+            "an open handle under the source store is a busy store: {}",
+            error.detail
+        );
+        assert!(error.refusal.retryable(), "closing the reader clears this");
+        assert!(
+            error.detail.contains("open handle"),
+            "the refusal must name why the move failed: {}",
+            error.detail
+        );
+        assert!(
+            fixture.orphan_store.is_dir(),
+            "a refusal must be zero-mutation"
+        );
+        drop(held);
     }
 
     /// Issue #3524 (folded into #3606): contention on the canonical store must

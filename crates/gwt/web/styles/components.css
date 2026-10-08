@@ -156,9 +156,10 @@ body::after {
   z-index: 1;
   height: 100%;
   display: grid;
-  /* SPEC-3038 US-1: the Command Rail is grid-docked at 56px so it is always
-     visible and never overlays canvas windows. */
-  grid-template-columns: 56px 1fr;
+  /* SPEC-3038 US-1: the Command Rail is grid-docked so it is always visible
+     and never overlays canvas windows. Issue 4777 T-1 widens it to 64px so
+     each surface entry carries a visible label under its icon. */
+  grid-template-columns: 64px 1fr;
   grid-template-rows: 44px 1fr 28px;
   grid-template-areas:
     "projectbar projectbar"
@@ -203,21 +204,6 @@ body::after {
   margin-right: var(--space-4);
   color: var(--color-display-fg);
   text-shadow: 0 0 6px color-mix(in oklab, var(--agent-codex) 40%, transparent);
-}
-
-.project-tabs {
-  display: flex;
-  gap: var(--space-2);
-  flex: 1;
-  align-items: center;
-  overflow: hidden;
-  font-stretch: 100%;
-  letter-spacing: var(--tracking-wide);
-  text-transform: none;
-  font-weight: 500;
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  color: var(--color-text);
 }
 
 .project-actions {
@@ -313,6 +299,20 @@ body::after {
   color: var(--color-state-active, var(--color-text-primary));
 }
 
+/* Issue #3906 AC-12: staged update waiting for the host to drain. */
+.update-cta.is-draining {
+  border-color: var(--color-state-needs-input);
+  color: var(--color-state-needs-input);
+  cursor: default;
+}
+
+/* Issue #3906 AC-7: the apply is scheduled; the CTA is the cancel control. */
+.update-cta.is-scheduled {
+  border-color: var(--color-state-needs-input);
+  color: var(--color-state-needs-input);
+  cursor: pointer;
+}
+
 .update-cta:focus-visible,
 .update-cta__dismiss:focus-visible {
   outline: 2px solid var(--color-focus-ring);
@@ -329,7 +329,7 @@ body::after {
   justify-content: center;
   padding: var(--space-4);
   background: var(--color-scrim);
-  z-index: 10100;
+  z-index: var(--z-system-modal);
 }
 
 .update-modal__panel {
@@ -502,7 +502,7 @@ body::after {
   border-radius: var(--radius-md);
   background: var(--color-surface-elevated);
   box-shadow: var(--shadow-2);
-  z-index: 10000;
+  z-index: var(--z-system-context-menu);
 }
 
 .terminal-context-menu[hidden] {
@@ -593,6 +593,86 @@ body::after {
    Command Rail — left chrome (SPEC-3038 US-1)
    ============================================================ */
 
+.split-surfaces {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  gap: 1px;
+  background: var(--color-border-strong);
+}
+.split-surfaces[hidden],
+.canvas-area.is-split > :not(.split-surfaces) {
+  display: none !important;
+}
+.split-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 2px solid var(--color-border);
+  background: var(--color-surface);
+}
+.split-pane[data-active="true"] {
+  border-color: var(--color-focus-ring);
+}
+.split-pane__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-family: var(--font-body);
+}
+.split-pane__header label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.split-pane__header select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px;
+  color: var(--color-text);
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  font: inherit;
+}
+.split-pane__header select:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.split-pane__focus { visibility: hidden; }
+.split-pane[data-active="true"] .split-pane__focus { visibility: visible; }
+.split-pane__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.split-pane__body > .workspace-window {
+  position: relative !important;
+  left: auto !important;
+  top: auto !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  transform: none !important;
+  box-shadow: none;
+  border: 0;
+  border-radius: 0;
+}
+.split-pane .resize-handle { display: none !important; }
+.split-pane .titlebar { cursor: default; }
+.split-pane__empty {
+  padding: 16px;
+  color: var(--color-text-muted);
+}
+
 .op-rail {
   grid-area: rail;
   display: flex;
@@ -604,7 +684,7 @@ body::after {
   border-right: 1px solid var(--color-border);
   /* Flyout chips + popovers (window list, update CTA) extend over the canvas. */
   overflow: visible;
-  z-index: 30;
+  z-index: var(--z-rail);
 }
 
 .op-rail__group {
@@ -758,6 +838,108 @@ body::after {
   display: none;
 }
 
+/* Issue 4777 T-1 — surface entries. Unlike the 40px icon buttons below
+   them, a surface entry spans the rail and names itself under the icon; the
+   pressed entry is the surface the focused window belongs to, marked by a
+   2px accent edge so the state never rests on color alone. */
+.op-rail__group--surfaces,
+.op-rail__group[aria-label="Navigate"] {
+  align-self: stretch;
+  gap: 2px;
+}
+
+.op-rail__surface {
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  height: auto;
+  padding: var(--space-2) 2px;
+  border-radius: 0;
+  border-left: 2px solid transparent;
+}
+
+.op-rail__surface-icon {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.op-rail__surface-label {
+  font-family: var(--font-body);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+
+.op-rail__surface[aria-pressed="true"] {
+  color: var(--color-text-strong);
+  background: var(--color-surface-elevated);
+  border-left-color: var(--color-state-active);
+}
+
+/* Issue 4777 T-1 — at 860px and below the rail becomes a strip across the
+   top of the canvas. Groups wrap instead of scrolling so the popovers
+   anchored to rail items (window list, PM gear) are never clipped. */
+@media (max-width: 860px) {
+  #app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 44px auto minmax(0, 1fr) 28px;
+    grid-template-areas:
+      "projectbar"
+      "rail"
+      "canvas"
+      "strip";
+  }
+
+  .op-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding: 0 var(--space-1);
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .op-rail__group {
+    flex-direction: row;
+  }
+
+  .op-rail__group--surfaces {
+    align-self: auto;
+  }
+
+  .op-rail__divider {
+    width: 1px;
+    height: 24px;
+    margin: 0 var(--space-1);
+  }
+
+  .op-rail__surface {
+    width: 64px;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .op-rail__surface[aria-pressed="true"] {
+    border-bottom-color: var(--color-state-active);
+  }
+
+  .op-rail__flyout {
+    display: none;
+  }
+
+  /* The window list popover hangs below its trigger instead of beside it,
+     right-aligned so it stays inside the viewport. */
+  .op-rail .window-list-panel {
+    top: calc(100% + 10px);
+    bottom: auto;
+    left: auto;
+    right: 0;
+  }
+}
+
 
 @media (forced-colors: active) {
   .op-rail {
@@ -873,6 +1055,15 @@ button.op-status-strip__cell {
   color: var(--color-state-active);
 }
 
+/* Issue #3884 AC-3 — RUNNING breakdown: "N inline" names the running agents
+   that live as inline terminals in the Issue window rather than on the canvas.
+   Quieter than the value so the total still reads first. */
+.op-status-strip__sub {
+  margin-left: var(--space-1);
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--color-state-active) 72%, var(--color-status-strip-fg));
+}
+
 .op-status-strip__cell--idle .op-status-strip__value {
   color: var(--color-state-idle);
 }
@@ -955,7 +1146,7 @@ button.op-status-strip__cell {
 
 .op-runtime-health-detail {
   position: fixed;
-  z-index: 1100;
+  z-index: var(--z-popover);
   display: flex;
   flex-direction: column;
   width: min(420px, calc(100vw - 16px));
@@ -980,6 +1171,13 @@ button.op-status-strip__cell {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-2);
+}
+
+.op-runtime-health-detail__units {
+  margin: var(--space-2) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  line-height: 1.45;
 }
 
 .op-runtime-health-detail__chip {
@@ -1292,7 +1490,7 @@ button.op-runtime-health-detail__process {
 
 [data-agent-state="idle"] {
   /* SPEC-2356 — idle state tints with the agent colour at 50% chroma so
-     observers can still identify the agent (claude/codex/gemini/...) even
+     observers can still identify the agent (claude/codex/hermes/...) even
      when nothing is happening. The pulse animation is suppressed; only a
      static rim remains. */
   --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 55%, var(--color-state-idle));
@@ -1498,7 +1696,7 @@ button.op-runtime-health-detail__process {
   position: fixed;
   inset: 0;
   background: var(--color-scrim);
-  z-index: 1200;
+  z-index: var(--z-overlay);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--motion-curve);
@@ -1851,7 +2049,7 @@ kbd.op-kbd {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  z-index: 10050;
+  z-index: var(--z-system-window);
   display: flex;
   flex-direction: column;
   width: min(880px, 92vw);
@@ -3062,57 +3260,6 @@ button.workspace-board-ref:focus-visible {
 /* SPEC-2013 FR-012: close project tab confirm modal layout primitives.
    Reuses .modal-backdrop / .modal-shell base from existing modals; only
    the body / list spacing and footer alignment are scoped here. */
-.close-project-tab-modal-shell {
-  padding: 24px 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  max-width: 480px;
-}
-.close-project-tab-modal__title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-.close-project-tab-modal__subtitle {
-  margin: 4px 0 0 0;
-  font-size: 12px;
-  color: var(--color-text-muted, #888);
-}
-.close-project-tab-modal__summary {
-  margin: 0;
-  font-size: 13px;
-}
-.close-project-tab-modal__agent-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 0 0 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-}
-.close-project-tab-modal__agent-item::before {
-  content: "•";
-  margin-right: 6px;
-  color: var(--color-text-muted, #888);
-}
-.close-project-tab-modal__agent-branch {
-  color: var(--color-text-muted, #888);
-}
-.close-project-tab-modal__more {
-  margin: 0;
-  font-size: 12px;
-  color: var(--color-text-muted, #888);
-  font-style: italic;
-}
-.close-project-tab-modal__footer.modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 6px;
-}
-
 /* SPEC-3038 US-3 — Close Guard modal. Shares the project-tab confirm
    vocabulary; adds an identity row (agent + live state chip) and a
    destructive warning shown only while the agent is running. */
@@ -4632,6 +4779,27 @@ button.workspace-board-ref:focus-visible {
   display: none;
 }
 
+:root[data-theme] .settings-supported-agents {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  color: var(--color-text);
+}
+
+:root[data-theme] .settings-supported-agents th,
+:root[data-theme] .settings-supported-agents td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+:root[data-theme] .settings-supported-agents th {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  font-weight: 600;
+}
+
 :root[data-theme] .settings-section {
   display: flex;
   flex-direction: column;
@@ -4641,6 +4809,13 @@ button.workspace-board-ref:focus-visible {
   border-radius: var(--radius-md);
   background: var(--color-surface-elevated);
   max-width: 520px;
+}
+
+/* SPEC #1921 Phase 86 (#3813): the Custom-only resource controls are
+   toggled with the `hidden` attribute, which the flex display above would
+   otherwise override. */
+:root[data-theme] .settings-section[hidden] {
+  display: none;
 }
 
 :root[data-theme] .settings-section + .settings-section {
@@ -5550,6 +5725,8 @@ button.workspace-board-ref:focus-visible {
 
 .op-status-strip__cell--usage {
   display: inline-flex;
+  flex: 0 0 23ch;
+  inline-size: 23ch;
   align-items: center;
   gap: 6px;
   border: 0;
@@ -5558,27 +5735,43 @@ button.workspace-board-ref:focus-visible {
   font: inherit;
   color: inherit;
   padding: 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 /* Stable per-provider summary chips in the status strip (no rotation). */
 .op-usage-sum {
   display: inline-flex;
+  flex: 0 0 7ch;
+  inline-size: 7ch;
   align-items: baseline;
   gap: 3px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
-.op-usage-sum[data-provider="codex"] {
-  color: var(--agent-color-codex, #6fb1ff);
+.op-usage-sum[data-severity="normal"] {
+  color: var(--color-status-strip-fg);
 }
 
-.op-usage-sum[data-provider="claude_code"] {
-  color: var(--agent-color-claude, #e0a06a);
+.op-usage-sum[data-severity="warning"] {
+  color: var(--color-state-needs-input);
+}
+
+.op-usage-sum[data-severity="danger"] {
+  color: var(--color-state-blocked);
 }
 
 .op-usage-sum[data-limit="true"] {
-  color: var(--color-state-blocked, #ff6b6b);
+  color: var(--color-state-blocked);
+}
+
+.op-usage-more {
+  flex: 0 0 3ch;
+  inline-size: 3ch;
+  color: var(--color-status-strip-fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .op-status-strip__cell--usage:hover .op-usage-sum,
@@ -5590,7 +5783,7 @@ button.workspace-board-ref:focus-visible {
 /* Consolidated hover popover (everything at once, anchored above the strip). */
 .op-usage-hover {
   position: fixed;
-  z-index: 1100;
+  z-index: var(--z-popover);
   width: min(440px, 92vw);
   max-height: 70vh;
   overflow: auto;
@@ -5680,6 +5873,13 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-text-muted, #9aa0ad);
 }
 
+.op-usage-card__limit {
+  margin-left: auto;
+  color: var(--color-state-blocked);
+  font-size: var(--type-xs);
+  font-weight: 700;
+}
+
 .op-usage-card__account {
   margin: -2px 0 8px 24px;
   color: var(--color-text-muted, #9aa0ad);
@@ -5747,6 +5947,76 @@ button.workspace-board-ref:focus-visible {
   white-space: nowrap;
 }
 
+/* Per-session tokens / context (Issue #3862): bounded list inside a provider
+   card — name | model | tokens | context left. Severity reuses the Operator
+   state tokens; no raw colors. */
+.op-usage-sess {
+  display: grid;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.op-usage-sess__head {
+  margin-bottom: 2px;
+  font-size: var(--type-xs, 0.72rem);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 48px 72px;
+  gap: 8px;
+  align-items: baseline;
+  font-size: var(--type-sm, 0.85rem);
+  font-variant-numeric: tabular-nums;
+}
+
+.op-usage-sess__row[data-eligible="false"] {
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-usage-sess__model {
+  font-size: var(--type-xs, 0.72rem);
+  color: var(--color-text-muted, #9aa0ad);
+  white-space: nowrap;
+}
+
+.op-usage-sess__tokens {
+  text-align: right;
+}
+
+.op-usage-sess__ctx {
+  text-align: right;
+  white-space: nowrap;
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__ctx[data-severity="normal"] {
+  color: var(--color-text, #e7e9ee);
+}
+
+.op-usage-sess__ctx[data-severity="warning"] {
+  color: var(--color-state-needs-input);
+}
+
+.op-usage-sess__ctx[data-severity="danger"] {
+  color: var(--color-state-blocked);
+}
+
+.op-usage-sess__more {
+  font-size: var(--type-xs, 0.72rem);
+  color: var(--color-text-muted, #9aa0ad);
+}
+
 /* Consumption grid: period × in/out/cached, right-aligned numerics. */
 .op-usage-card__cons {
   margin-top: 10px;
@@ -5787,7 +6057,7 @@ button.workspace-board-ref:focus-visible {
 .op-usage-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5940,15 +6210,15 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-bar__fill {
   height: 100%;
-  background: var(--color-accent, #6fb1ff);
+  background: var(--color-state-active);
 }
 
-.op-usage-bar__fill[data-level="mid"] {
-  background: #e0b341;
+.op-usage-bar__fill[data-severity="warning"] {
+  background: var(--color-state-needs-input);
 }
 
-.op-usage-bar__fill[data-level="high"] {
-  background: var(--color-state-blocked, #ff6b6b);
+.op-usage-bar__fill[data-severity="danger"] {
+  background: var(--color-state-blocked);
 }
 
 .op-usage-window__pct {
@@ -6019,7 +6289,7 @@ button.workspace-board-ref:focus-visible {
 .connection-overlay {
   position: fixed;
   inset: 0;
-  z-index: 4000;
+  z-index: var(--z-system-connection);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6076,7 +6346,7 @@ button.workspace-board-ref:focus-visible {
   top: var(--space-3);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 3500;
+  z-index: var(--z-system-degradation);
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -6148,10 +6418,10 @@ button.workspace-board-ref:focus-visible {
 }
 
 /* SPEC-2008 camera-focus / FR-094 — Fleet Minimap.
-   The signature carrier: a permanent, always-visible map of every canvas
-   window in world position, with the live camera viewport overlaid. Docked
-   in the canvas corner, OUTSIDE the stage transform. This is the one bold
-   element — window chrome and telemetry stay restrained. */
+   The signature carrier: a collapsible map of every canvas window in world
+   position, with the live camera viewport overlaid. Docked in the canvas
+   corner, OUTSIDE the stage transform. This is the one bold element — window
+   chrome and telemetry stay restrained. */
 .fleet-minimap {
   position: absolute;
   right: var(--space-4, 16px);
@@ -6172,6 +6442,19 @@ button.workspace-board-ref:focus-visible {
    canvas, but keep it present (it is permanent). */
 .fleet-minimap[data-empty="true"] {
   opacity: 0.45;
+}
+
+/* Issue #3795 — collapsing keeps the carrier reachable as one small button.
+   Its render consumers remain mounted and continue receiving telemetry; only
+   their presentation is suppressed. */
+.fleet-minimap[data-collapsed="true"] {
+  width: 28px;
+  height: 28px;
+  opacity: 1;
+}
+
+.fleet-minimap[data-collapsed="true"] > :not(.fleet-minimap__visibility-toggle) {
+  display: none;
 }
 
 /* Centered-radar world layer: holds the window cells at absolute world*scale
@@ -6335,6 +6618,44 @@ button.workspace-board-ref:focus-visible {
   outline-offset: 1px;
 }
 
+.fleet-minimap__visibility-toggle {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fleet-minimap[data-collapsed="true"] .fleet-minimap__visibility-toggle {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: inherit;
+}
+
+.fleet-minimap__visibility-toggle:hover {
+  color: var(--color-text-strong);
+  border-color: var(--color-focus-ring);
+}
+
+.fleet-minimap__visibility-toggle:focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .fleet-minimap__cell[data-telemetry="running"]::after,
   .fleet-minimap__cell[data-telemetry="error"]::after,
@@ -6356,15 +6677,29 @@ button.workspace-board-ref:focus-visible {
    rather than a command, and review (2026-08-05) showed a plain icon does not
    read as "this is the PM". It therefore carries a persistent accent chip so
    it stands apart from the command icons at a glance, in every state. */
+/* Issue 4777: the PM sits alone above the rule, laid out like a surface
+   entry (icon over a visible label) but keeping its role color whether or not
+   it is pressed, so it never reads as one of the agents. */
 .op-rail__item--pm {
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  height: auto;
+  padding: var(--space-2) 2px;
+  border-radius: 0;
+  border-left: 2px solid transparent;
   color: var(--color-role-pm);
-  background: color-mix(in oklab, var(--color-role-pm) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-role-pm) 45%, transparent);
 }
 
 .op-rail__item--pm:hover,
 .op-rail__item--pm:focus-visible {
-  background: color-mix(in oklab, var(--color-role-pm) 26%, transparent);
+  color: var(--color-role-pm);
+  background: color-mix(in oklab, var(--color-role-pm) 14%, transparent);
+}
+
+.op-rail__item--pm[aria-pressed="true"] {
+  background: var(--color-surface-elevated);
+  border-left-color: var(--color-role-pm);
 }
 
 .op-rail__item--pm .op-rail__icon {
@@ -6376,8 +6711,8 @@ button.workspace-board-ref:focus-visible {
    "absent" carries a filled dot in an accent colour. */
 .op-rail__pm-dot {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  right: 14px;
+  top: 7px;
   width: 6px;
   height: 6px;
   border-radius: var(--radius-pill);
@@ -6471,15 +6806,12 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
-/* ---------------------------------------------------------------------------
-   SPEC-3431 FR-026 — Project Manager settings.
-
-   Anchored to the rail launcher rather than dropped into Settings: the PM is
-   configured where it is seen. The gear stays out of the way until the shell is
-   hovered or focused, so the rail keeps reading as one icon per action.
-   --------------------------------------------------------------------------- */
+/* SPEC-3431 FR-026 / FR-132 — the rail gear routes to the shared Settings
+   editor. It stays out of the way until the launcher shell is hovered or
+   focused, so the rail keeps reading as one icon per action. */
 .pm-launcher-shell {
   position: relative;
+  align-self: stretch;
 }
 
 .pm-launcher-gear {
@@ -6505,8 +6837,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 .pm-launcher-shell:hover .pm-launcher-gear,
-.pm-launcher-shell:focus-within .pm-launcher-gear,
-.pm-launcher-gear[aria-expanded="true"] {
+.pm-launcher-shell:focus-within .pm-launcher-gear {
   opacity: 1;
 }
 
@@ -6516,118 +6847,378 @@ button.workspace-board-ref:focus-visible {
   opacity: 1;
 }
 
-.pm-settings-panel {
-  position: absolute;
-  left: calc(100% + 10px);
-  top: 0;
-  z-index: 40;
-  width: 260px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2, 8px);
-  padding: var(--space-3, 12px);
-  border: 1px solid var(--color-border-strong);
-  border-left: 3px solid var(--color-role-pm);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-elevated);
-  box-shadow: var(--shadow-2);
-}
-
-.pm-settings-panel[hidden] {
-  display: none;
-}
-
-.pm-settings-panel__title {
-  margin: 0;
-  font-size: var(--type-sm);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--color-role-pm);
-}
-
-.pm-settings-panel__running {
-  margin: 0;
-  font-size: var(--type-sm);
-  color: var(--color-text-strong);
-}
-
-/* The one place the user learns that the configured agent is not the one they
-   are talking to. Form (a bordered chip) carries it as much as colour. */
-.pm-settings-panel__pending {
-  margin: 0;
-  align-self: flex-start;
-  padding: 2px var(--space-2, 8px);
-  font-size: var(--type-xs);
-  border: 1px solid var(--color-role-pm);
-  border-radius: var(--radius-pill, 999px);
-  background: color-mix(in oklab, var(--color-role-pm) 16%, transparent);
-  color: var(--color-text-strong);
-}
-
-.pm-settings-panel__pending[hidden] {
-  display: none;
-}
-
-.pm-settings-panel__field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1, 4px);
-}
-
-.pm-settings-panel__field--inline {
-  flex-direction: row;
-  align-items: center;
-  gap: var(--space-2, 8px);
-}
-
-.pm-settings-panel__label {
-  font-size: var(--type-xs);
-  color: var(--color-text-muted);
-}
-
-.pm-settings-panel__select,
-.pm-settings-panel__input {
-  width: 100%;
-  padding: var(--space-1, 4px) var(--space-2, 8px);
-  font-size: var(--type-sm);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text);
-}
-
-.pm-settings-panel__select:focus-visible,
-.pm-settings-panel__input:focus-visible,
-.pm-settings-panel__checkbox:focus-visible,
-.pm-settings-panel__restart:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-.pm-settings-panel__help {
-  margin: 0;
-  font-size: var(--type-xs);
-  color: var(--color-text-muted);
-}
-
-.pm-settings-panel__restart {
-  padding: var(--space-1, 4px) var(--space-3, 12px);
-  appearance: none;
-  cursor: pointer;
-  font-size: var(--type-sm);
-  border: 1px solid var(--color-role-pm);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-role-pm);
-}
-
-.pm-settings-panel__restart:hover {
-  background: color-mix(in oklab, var(--color-role-pm) 16%, transparent);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .pm-launcher-gear {
     transition: none;
   }
 }
+
+/* Issue 4777 T-1 — in the narrow top strip the PM marks its pressed state on
+   the bottom edge, like the surface entries next to it. */
+@media (max-width: 860px) {
+  .pm-launcher-shell {
+    align-self: auto;
+  }
+
+  .op-rail__item--pm {
+    width: 64px;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .op-rail__item--pm[aria-pressed="true"] {
+    border-bottom-color: var(--color-role-pm);
+  }
+}
+
+/* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center. */
+.recovery-center-modal__shell {
+  width: min(760px, calc(100vw - var(--space-6)));
+  max-height: min(760px, calc(100vh - var(--space-6)));
+  overflow: hidden;
+}
+
+.recovery-center-modal__header,
+.recovery-center-modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.recovery-center-modal__header h2,
+.recovery-center-modal__kicker,
+.recovery-center-row__summary,
+.recovery-center-row__meta,
+.recovery-center-empty {
+  margin: 0;
+}
+
+.recovery-center-modal__kicker {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-wide);
+}
+
+.recovery-center-modal__close {
+  min-width: var(--space-8);
+}
+
+.recovery-center-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 280px;
+  overflow: hidden;
+}
+
+.recovery-center-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.recovery-center-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.recovery-center-filters select {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.recovery-center-filters select:focus-visible,
+.recovery-center-row:focus-visible,
+.recovery-center-row__board-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.recovery-center-status,
+.recovery-center-empty {
+  padding: var(--space-6);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.recovery-center-status.is-error {
+  color: var(--color-state-blocked);
+}
+
+.recovery-center-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: auto;
+  padding: var(--space-1);
+}
+
+.recovery-center-row {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.recovery-center-row:hover,
+.recovery-center-row.is-selected {
+  border-color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 9%, var(--color-surface-elevated));
+}
+
+.recovery-center-row__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.recovery-center-row__title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--color-text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-center-row__badge {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.recovery-center-row__badge.is-pending {
+  border-color: var(--color-state-needs-input);
+  color: var(--color-state-needs-input);
+}
+
+.recovery-center-row__badge.is-acknowledged {
+  border-color: var(--color-state-success);
+  color: var(--color-state-success);
+}
+
+.recovery-center-row__badge.is-conflicted {
+  border-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
+.recovery-center-row__summary,
+.recovery-center-row__meta,
+.recovery-center-count {
+  color: var(--color-text-muted);
+}
+
+.recovery-center-row__meta,
+.recovery-center-count {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.recovery-center-row__board-action {
+  justify-self: end;
+}
+
+@media (max-width: 640px) {
+  .recovery-center-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-center-row__heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
+/* Issue 4777 T-4: an equal grid, independent of canvas coordinates. */
+.agents-surface {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.agents-surface[hidden],
+.canvas-area.is-agents > :not(.agents-surface) { display: none !important; }
+.agents-toolbar, .agent-tile__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+.agents-toolbar, .agent-tile__header { justify-content: space-between; }
+.agents-toolbar h2, .agent-tile h3 { margin: 0; font: inherit; }
+.agents-toolbar label { display: flex; align-items: center; gap: var(--space-2); }
+.agents-toolbar input { width: 4em; }
+.agents-toolbar input {
+  color: var(--color-text);
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1);
+  font: inherit;
+}
+.agents-toolbar input:focus-visible, .agents-tabs button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+}
+.agents-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: 360px;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  overflow: auto;
+  min-height: 0;
+}
+.agents-tabs {
+  display: flex;
+  flex-shrink: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--color-border);
+}
+.agents-tabs button {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.agents-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--color-state-active);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+.agents-tab { display: flex; flex-shrink: 0; }
+.agents-tabs .agents-tab-close {
+  align-self: center;
+  padding: var(--space-1);
+  border-bottom: 0;
+}
+.agent-tile__open {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.agent-tile h3 { flex: 1; }
+.agent-tile__open[hidden] { display: none; }
+.agent-tile__open:focus-visible { outline: 2px solid var(--color-focus-ring); }
+.agents-grid.is-single { flex: 1; grid-auto-rows: minmax(0, 1fr); }
+/* Stack tab panels so new background terminals can measure their initial grid
+   without painting or accepting input before their tab is selected. */
+.agents-grid.is-single > .agent-tile { grid-area: 1 / 1; }
+.agent-tile[hidden] { display: flex; visibility: hidden; }
+.agents-toolbar label[hidden] { display: none; }
+.agent-tile {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.agent-tile:focus-within { border-color: var(--color-focus-ring); }
+.agents-surface--preview .agent-tile:focus-visible { outline: 2px solid var(--color-focus-ring); }
+.agents-surface--preview .agents-toolbar span { color: var(--color-text-muted); font-size: var(--type-xs); }
+.agent-tile__header { border-bottom: 1px solid var(--color-border); }
+.issue-preview-mode { grid-column: 1 / -1; }
+.agent-tile__header span, .issue-preview-mode { color: var(--color-text-muted); font-size: var(--type-xs); }
+.agent-tile .agent-tile__terminal { position: relative; inset: auto; flex: 1; min-height: 0; overflow: hidden; background: var(--color-surface); color: var(--color-text); }
+.agents-empty { padding: var(--space-3); color: var(--color-text-muted); }
+
+/* Keep persistence diagnostics in the shell layout, above every workspace surface. */
+#app:has(> .workspace-state-notice) {
+  grid-template-rows: 44px auto 1fr 28px;
+  grid-template-areas: "projectbar projectbar" "notice notice" "rail canvas" "strip strip";
+}
+.workspace-state-notice {
+  grid-area: notice;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border-bottom: 1px solid var(--color-border-strong);
+  font-size: var(--type-sm);
+  overflow-wrap: anywhere;
+}
+.workspace-state-notice span { flex: 1; min-width: 0; }
+.workspace-state-notice button {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
+}
+.workspace-state-notice button:focus-visible { outline: 2px solid var(--color-focus-ring); }
+@media (max-width: 860px) {
+  #app:has(> .workspace-state-notice) {
+    grid-template-rows: 44px auto auto minmax(0, 1fr) 28px;
+    grid-template-areas: "projectbar" "notice" "rail" "canvas" "strip";
+  }
+}
+.terminal-text-preview { margin: 0; padding: var(--space-2); overflow: auto; height: 100%; white-space: pre; font-family: var(--font-mono); color: var(--color-text); background: var(--color-surface); }
+
+.issue-split-terminal .terminal-text-preview::before {
+  content: "Read-only preview";
+  display: block;
+  color: var(--color-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+}
+
+/* PM conversation */
+.pm-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; color: var(--color-text); background: var(--color-surface); font-family: var(--font-body); font-size: var(--type-sm); }
+.pm-chat[hidden], .pm-chat [hidden] { display: none; }
+.pm-chat--logs { flex: 0 0 auto; }
+.pm-chat__toolbar { display: flex; gap: var(--space-2); padding: var(--space-2); border-bottom: 1px solid var(--color-border); }
+.pm-chat button { padding: var(--space-1) var(--space-3); border: 1px solid var(--color-button-border); border-radius: var(--radius-sm); background: var(--color-button-bg); color: var(--color-button-fg); font: inherit; cursor: pointer; }
+.pm-chat button[aria-pressed="true"] { border-color: var(--color-focus-ring); }
+.pm-chat button:hover { background: var(--color-button-bg-hover); }
+.pm-chat button:disabled { cursor: default; color: var(--color-text-disabled); }
+.pm-chat button:focus-visible, .pm-chat textarea:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.pm-chat__body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.pm-chat__notice { padding: var(--space-3); margin: 0; color: var(--color-text-muted); }
+.pm-chat__transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); }
+.pm-chat__message { margin-bottom: var(--space-3); padding: var(--space-3); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.pm-chat__message--user { border-inline-start: 2px solid var(--color-border-strong); }
+.pm-chat__author { color: var(--color-text-muted); font-size: var(--type-xs); }
+.pm-chat__text { margin: var(--space-2) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__input { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--color-border); }
+.pm-chat__input textarea { flex: 1; min-width: 0; resize: vertical; padding: var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font: inherit; }
+.pm-chat__error { flex-basis: 100%; margin: 0; color: var(--color-state-blocked); }
+.pm-conversation-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.pm-conversation-log { position: relative; flex: 1; min-height: 0; }
+.pm-conversation-log[hidden] { display: none; }

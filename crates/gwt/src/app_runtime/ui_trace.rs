@@ -70,37 +70,7 @@ fn sanitize_ui_trace_session_id(raw: &str) -> String {
 }
 
 fn sanitize_ui_trace_entry(entry: &UiTraceEntry) -> serde_json::Value {
-    const BLOCKED_FIELDS: &[&str] = &[
-        "body",
-        "chunk",
-        "data",
-        "data_base64",
-        "input",
-        "payload",
-        "text",
-    ];
-    let Some(object) = entry.fields() else {
-        return serde_json::json!({ "kind": "invalid_entry" });
-    };
-    let mut sanitized = serde_json::Map::new();
-    for (key, value) in object {
-        let normalized_key = key.chars().fold(String::new(), |mut acc, ch| {
-            if ch.is_ascii_uppercase() {
-                acc.push('_');
-                acc.push(ch.to_ascii_lowercase());
-            } else {
-                acc.push(ch);
-            }
-            acc
-        });
-        if BLOCKED_FIELDS.contains(&normalized_key.as_str()) {
-            continue;
-        }
-        if value.is_null() || value.is_boolean() || value.is_number() || value.is_string() {
-            sanitized.insert(key.clone(), value.clone());
-        }
-    }
-    serde_json::Value::Object(sanitized)
+    gwt::perf::sanitize_ui_trace_entry(entry)
 }
 
 #[cfg(test)]

@@ -6,19 +6,14 @@
 use std::{
     fs,
     io::{self},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, OnceLock},
 };
 
 use gwt_git::PrStatus;
 use gwt_github::{
-    client::{
-        http::HttpIssueClient, ApiError, CommitComparison, CompleteCollection,
-        CreateRepositoryIssue, IssueClient, MergedPullRequest, OwnerMutationError,
-        OwnerMutationResult, OwnerRepositoryClient, RepositoryComment, RepositoryIdentity,
-        RepositoryIssue, RepositoryRelease, ResolutionDeadline,
-    },
+    client::{http::HttpIssueClient, IssueClient},
     IssueNumber, IssueSnapshot, SpecListFilter,
 };
 
@@ -28,10 +23,6 @@ use crate::cli::{LinkedPrSummary, PrChecksSummary, PrCreateCall, PrReview, PrRev
 
 pub type IssueClientFactory =
     dyn Fn(&str, &str) -> Result<HttpIssueClient, gwt_github::client::ApiError> + Send + Sync;
-pub type OwnerClientFactory = dyn Fn(&str, &str, &ResolutionDeadline) -> Result<HttpIssueClient, gwt_github::client::ApiError>
-    + Send
-    + Sync;
-
 pub struct LazyIssueClient {
     owner: String,
     repo: String,
@@ -69,6 +60,14 @@ impl LazyIssueClient {
 }
 
 impl IssueClient for LazyIssueClient {
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<gwt_github::client::LabelAssignment>, gwt_github::client::ApiError> {
+        self.resolve()?.fetch_label_assignment(number, label)
+    }
+
     fn fetch(
         &self,
         number: IssueNumber,
@@ -91,6 +90,13 @@ impl IssueClient for LazyIssueClient {
         new_title: &str,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.resolve()?.patch_title(number, new_title)
+    }
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &gwt_github::client::IssueFieldsPatch,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.patch_issue_fields(number, fields)
     }
 
     fn patch_comment(
@@ -137,8 +143,29 @@ impl IssueClient for LazyIssueClient {
         &self,
         number: IssueNumber,
         state: gwt_github::client::IssueState,
+        reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
-        self.resolve()?.set_state(number, state)
+        self.resolve()?.set_state(number, state, reason)
+    }
+
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .add_labels_mutation(number, labels)
+    }
+
+    fn remove_label_mutation(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .remove_label_mutation(number, label)
     }
 
     fn list_spec_issues(
@@ -149,148 +176,9 @@ impl IssueClient for LazyIssueClient {
     }
 }
 
-pub struct LazyOwnerClient {
-    factory: Arc<OwnerClientFactory>,
-    resolved: OnceLock<HttpIssueClient>,
-}
-
-impl LazyOwnerClient {
-    pub(super) fn new_with_factory(factory: Arc<OwnerClientFactory>) -> Self {
-        Self {
-            factory,
-            resolved: OnceLock::new(),
-        }
-    }
-
-    fn resolve(&self, deadline: &ResolutionDeadline) -> Result<&HttpIssueClient, ApiError> {
-        if let Some(client) = self.resolved.get() {
-            return Ok(client);
-        }
-        deadline.remaining("owner client factory")?;
-        let client = (self.factory)("akiojin", "gwt", deadline)?;
-        deadline.remaining("owner client factory")?;
-        let _ = self.resolved.set(client);
-        self.resolved.get().ok_or_else(|| {
-            ApiError::Unexpected("lazy owner client failed to initialize".to_string())
-        })
-    }
-
-    fn resolve_upstream(
-        &self,
-        repository: &RepositoryIdentity,
-        deadline: &ResolutionDeadline,
-    ) -> Result<&HttpIssueClient, ApiError> {
-        let upstream = RepositoryIdentity::gwt_upstream();
-        if repository != &upstream {
-            return Err(ApiError::RepositoryMismatch {
-                expected: upstream.to_string(),
-                actual: repository.to_string(),
-            });
-        }
-        self.resolve(deadline)
-    }
-}
-
-impl OwnerRepositoryClient for LazyOwnerClient {
-    fn list_issues(
-        &self,
-        repository: &RepositoryIdentity,
-        deadline: &ResolutionDeadline,
-    ) -> Result<CompleteCollection<RepositoryIssue>, ApiError> {
-        self.resolve_upstream(repository, deadline)?
-            .list_issues(repository, deadline)
-    }
-
-    fn list_comments(
-        &self,
-        repository: &RepositoryIdentity,
-        number: IssueNumber,
-        deadline: &ResolutionDeadline,
-    ) -> Result<CompleteCollection<RepositoryComment>, ApiError> {
-        self.resolve_upstream(repository, deadline)?
-            .list_comments(repository, number, deadline)
-    }
-
-    fn fetch_issue(
-        &self,
-        repository: &RepositoryIdentity,
-        number: IssueNumber,
-        deadline: &ResolutionDeadline,
-    ) -> Result<RepositoryIssue, ApiError> {
-        self.resolve_upstream(repository, deadline)?
-            .fetch_issue(repository, number, deadline)
-    }
-
-    fn create_owner_comment(
-        &self,
-        repository: &RepositoryIdentity,
-        number: IssueNumber,
-        body: &str,
-        deadline: &ResolutionDeadline,
-    ) -> OwnerMutationResult<RepositoryComment> {
-        self.resolve_upstream(repository, deadline)
-            .map_err(OwnerMutationError::PreSubmit)?
-            .create_owner_comment(repository, number, body, deadline)
-    }
-
-    fn create_owner_issue(
-        &self,
-        repository: &RepositoryIdentity,
-        input: &CreateRepositoryIssue,
-        deadline: &ResolutionDeadline,
-    ) -> OwnerMutationResult<RepositoryIssue> {
-        self.resolve_upstream(repository, deadline)
-            .map_err(OwnerMutationError::PreSubmit)?
-            .create_owner_issue(repository, input, deadline)
-    }
-
-    fn close_issue_verified(
-        &self,
-        repository: &RepositoryIdentity,
-        number: IssueNumber,
-        deadline: &ResolutionDeadline,
-    ) -> OwnerMutationResult<RepositoryIssue> {
-        self.resolve_upstream(repository, deadline)
-            .map_err(OwnerMutationError::PreSubmit)?
-            .close_issue_verified(repository, number, deadline)
-    }
-
-    fn fetch_merged_pull_request(
-        &self,
-        repository: &RepositoryIdentity,
-        number: IssueNumber,
-        deadline: &ResolutionDeadline,
-    ) -> Result<Option<MergedPullRequest>, ApiError> {
-        self.resolve_upstream(repository, deadline)?
-            .fetch_merged_pull_request(repository, number, deadline)
-    }
-
-    fn fetch_release_by_tag(
-        &self,
-        repository: &RepositoryIdentity,
-        tag: &str,
-        deadline: &ResolutionDeadline,
-    ) -> Result<Option<RepositoryRelease>, ApiError> {
-        self.resolve_upstream(repository, deadline)?
-            .fetch_release_by_tag(repository, tag, deadline)
-    }
-
-    fn compare_commits(
-        &self,
-        repository: &RepositoryIdentity,
-        base: &str,
-        head: &str,
-        deadline: &ResolutionDeadline,
-    ) -> Result<CommitComparison, ApiError> {
-        self.resolve_upstream(repository, deadline)?
-            .compare_commits(repository, base, head, deadline)
-    }
-}
-
 /// Default production [`CliEnv`] that defers GitHub auth until a command
 pub struct DefaultCliEnv {
     client: LazyIssueClient,
-    owner_client: LazyOwnerClient,
     client_factory: Arc<IssueClientFactory>,
     cache_root: PathBuf,
     repo_path: PathBuf,
@@ -306,7 +194,7 @@ impl DefaultCliEnv {
             owner,
             repo,
             repo_path,
-            Arc::new(HttpIssueClient::from_gh_auth),
+            Arc::new(HttpIssueClient::from_runtime_environment),
         )
     }
 
@@ -330,9 +218,6 @@ impl DefaultCliEnv {
     ) -> Self {
         DefaultCliEnv {
             client: LazyIssueClient::new_with_factory(owner, repo, factory.clone()),
-            owner_client: LazyOwnerClient::new_with_factory(Arc::new(
-                HttpIssueClient::from_owner_environment_with_deadline,
-            )),
             client_factory: factory,
             cache_root,
             repo_path,
@@ -346,11 +231,11 @@ impl DefaultCliEnv {
     /// Build an env for hook dispatch without eagerly resolving GitHub auth.
     ///
     /// The inner `HttpIssueClient` is constructed with an empty token
-    /// and empty owner/repo strings. Owner Resolution uses the separate lazy,
-    /// deadline-aware upstream client and is reached only by the direct
-    /// self-improvement Stop hook.
+    /// and empty owner/repo strings.
     pub fn new_for_hooks() -> Self {
-        Self::new_for_hooks_at(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project = crate::pm_registry::pm_worktree_for_runtime_dir(&cwd).unwrap_or(cwd);
+        Self::new_for_hooks_at(project)
     }
 
     /// Build a hook environment for an explicitly resolved worktree.
@@ -376,20 +261,9 @@ impl DefaultCliEnv {
 
 impl CliEnv for DefaultCliEnv {
     type Client = LazyIssueClient;
-    type OwnerClient = LazyOwnerClient;
 
     fn client(&self) -> &Self::Client {
         &self.client
-    }
-    fn improvement_owner_client(
-        &self,
-        deadline: &ResolutionDeadline,
-    ) -> Result<&Self::OwnerClient, ApiError> {
-        deadline.remaining("owner client access")?;
-        Ok(&self.owner_client)
-    }
-    fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {
-        crate::cli::improvement_store::source_scope_nonce(&self.repo_path)
     }
     fn cache_root(&self) -> PathBuf {
         self.cache_root.clone()
@@ -452,6 +326,83 @@ impl CliEnv for DefaultCliEnv {
             &request,
         )
     }
+    fn compare_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: Option<&str>,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        let verified = verified.ok_or_else(|| io::Error::other("Ready PR refused: no verified HEAD exists. Register verify.plan and execute verify.run before retrying pr.create."))?;
+        // Managed callers already hold the execution/verification dispatch
+        // guard. Legacy callers without an execution still need passing,
+        // integrity-checked evidence, not just a SHA saved by a failed run.
+        if crate::cli::execution_state::load(&self.repo_path)?.is_none() {
+            let session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+            let evidence =
+                crate::cli::verification_record::evaluate_evidence(&self.repo_path, &session, None);
+            if evidence != crate::cli::verification_record::EvidenceStatus::Fresh {
+                return Err(io::Error::other(format!("Ready PR refused: {}. Register verify.plan and execute verify.run before retrying pr.create.", evidence.describe())));
+            }
+        }
+        self.inspect_pr_head(base, head, verified)
+    }
+
+    fn inspect_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: &str,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        let current;
+        let head = match head {
+            Some(head) => head,
+            None => {
+                let output = gwt_core::process::hidden_command("git")
+                    .args(["branch", "--show-current"])
+                    .current_dir(&self.repo_path)
+                    .output()?;
+                current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                current.as_str()
+            }
+        };
+        let (owner, branch) = head.split_once(':').unwrap_or((&self.owner, head));
+        let base_remote = preferred_pr_remote_url(
+            &self.repo_path,
+            &format!("https://github.com/{}/{}.git", self.owner, self.repo),
+        )?;
+        let check = if owner == self.owner {
+            crate::cli::pr::head_check::compare(
+                &self.repo_path,
+                &base_remote,
+                branch,
+                base,
+                verified,
+            )?
+        } else {
+            let head_remote = crate::cli::pr::resolve_pr_fork_url_via_gh(
+                &format!("{}/{}", self.owner, self.repo),
+                &self.repo_path,
+                owner,
+            )?;
+            let head_remote = preferred_pr_remote_url(&self.repo_path, &head_remote)?;
+            crate::cli::pr::head_check::compare_remotes(
+                &self.repo_path,
+                &head_remote,
+                &base_remote,
+                branch,
+                base,
+                verified,
+            )?
+        };
+        Ok(Some(check))
+    }
+    fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
+        crate::cli::pr::fetch_pr_head_sha_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
     fn edit_pr(
         &mut self,
         number: u64,
@@ -473,6 +424,43 @@ impl CliEnv for DefaultCliEnv {
         gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
             .map_err(|err| io::Error::other(err.to_string()))
     }
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        crate::cli::pr::fetch_pr_quarantine_context_via_gh(
+            &self.owner,
+            &self.repo,
+            &self.repo_path,
+            number,
+        )
+    }
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        // Issue #3868: the per-PR history lives in the machine-local project
+        // dir so `unchanged_cycles` and held classes survive between resident
+        // PM cycles, whichever worktree the PM reads from. Issue #3891: the
+        // snapshot cache sits next to it for the same reason — every PM and
+        // agent on this machine shares one fetch per TTL.
+        let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path);
+        let history_path = project_dir.join(gwt_git::PR_INVENTORY_HISTORY_FILE);
+        let cache_path = project_dir.join(gwt_git::PR_INVENTORY_CACHE_FILE);
+        let settings =
+            gwt_config::Settings::load_from_path(&gwt_core::paths::gwt_home().join("config.toml"))
+                .unwrap_or_default();
+        let options = gwt_git::PrInventoryOptions {
+            cache_ttl_secs: settings.pr_inventory.cache_ttl_secs,
+            checks_refresh_secs: settings.pr_inventory.checks_refresh_secs,
+            ..options.clone()
+        };
+        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, &cache_path, &options)
+            .map_err(|err| io::Error::other(err.to_string()))
+    }
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        crate::cli::pr::probe_github_rate_limit_via_gh(&self.repo_path)
+    }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::pr::mark_pr_ready_via_gh(
@@ -484,6 +472,17 @@ impl CliEnv for DefaultCliEnv {
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::pr::convert_pr_to_draft_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
+    fn update_pr_branch(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::types::PrUpdateBranchResult> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::update_pr_branch_via_gh(
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
@@ -528,6 +527,10 @@ impl CliEnv for DefaultCliEnv {
             job_id,
         )
     }
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
+    }
     fn run_internal_command(
         &mut self,
         args: &[String],
@@ -558,4 +561,204 @@ impl CliEnv for DefaultCliEnv {
 
 fn api_to_io(err: gwt_github::client::ApiError) -> io::Error {
     io::Error::other(err.to_string())
+}
+
+fn preferred_pr_remote_url(repo_path: &Path, canonical_url: &str) -> io::Result<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["remote", "-v"])
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Failed to inspect configured PR remotes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let remotes = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let (name, url) = (parts.next()?, parts.next()?);
+            (parts.next()? == "(fetch)").then(|| (name.to_string(), url.to_string()))
+        })
+        .collect::<Vec<_>>();
+    Ok(select_pr_remote_url(canonical_url, &remotes))
+}
+
+fn select_pr_remote_url(canonical_url: &str, remotes: &[(String, String)]) -> String {
+    let Some((owner, repo)) = crate::cli::pr::parse_pr_remote_url(canonical_url) else {
+        return canonical_url.to_string();
+    };
+    let matches_target = |(_, url): &&(String, String)| {
+        crate::cli::pr::parse_pr_remote_url(url).is_some_and(|(remote_owner, remote_repo)| {
+            owner.eq_ignore_ascii_case(&remote_owner) && repo.eq_ignore_ascii_case(&remote_repo)
+        })
+    };
+    remotes
+        .iter()
+        .find(|remote| remote.0 == "origin" && matches_target(remote))
+        .or_else(|| remotes.iter().find(matches_target))
+        .map(|(_, url)| url.clone())
+        .unwrap_or_else(|| canonical_url.to_string())
+}
+
+#[cfg(test)]
+mod runtime_factory_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn pr_head_remote_selection_preserves_matching_origin_ssh_transport() {
+        let remotes = vec![
+            (
+                "mirror".to_string(),
+                "https://github.com/upstream/project.git".to_string(),
+            ),
+            (
+                "origin".to_string(),
+                "ssh://git@github.com/upstream/project.git".to_string(),
+            ),
+        ];
+        assert_eq!(
+            select_pr_remote_url("https://github.com/upstream/project.git", &remotes),
+            "ssh://git@github.com/upstream/project.git"
+        );
+    }
+
+    #[test]
+    fn pr_head_remote_selection_uses_exact_resolved_fork_identity() {
+        let remotes = vec![
+            (
+                "origin".to_string(),
+                "git@github.com:upstream/project.git".to_string(),
+            ),
+            (
+                "fork".to_string(),
+                "git@github.com:contributor/renamed-fork.git".to_string(),
+            ),
+        ];
+        assert_eq!(
+            select_pr_remote_url("https://github.com/contributor/renamed-fork.git", &remotes),
+            "git@github.com:contributor/renamed-fork.git"
+        );
+        assert_eq!(
+            select_pr_remote_url("https://github.com/contributor/project.git", &remotes),
+            "https://github.com/contributor/project.git"
+        );
+    }
+
+    #[test]
+    fn issue_4979_failed_unmanaged_verification_cannot_supply_a_ready_head() {
+        use crate::cli::verification_record as verification;
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "failed-head-session");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        let commands = vec!["git --invalid-verification-command".to_string()];
+        verification::save_plan(
+            &repo,
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
+                session_id: "failed-head-session".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                worktree_fingerprint: String::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            }),
+        )
+        .unwrap();
+        let (record, _) =
+            verification::run_verification(&repo, "failed-head-session", &commands).unwrap();
+        assert!(!record.all_passed);
+        let mut env = DefaultCliEnv::new("fixture", "repo", repo);
+        // This invalid ref also proves evidence is checked before any remote IO.
+        let error = env
+            .compare_pr_head(
+                "develop",
+                Some("invalid..branch"),
+                record.verified_head.as_deref(),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("verification") && error.to_string().contains("failing"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn runtime_factory_override_cli_rejects_partial_and_reaches_loopback() {
+        use gwt_core::test_support::ScopedEnvVar;
+        use std::io::{Read, Write};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set("GH_TOKEN", "fixture-only-token");
+        let _no_proxy = ScopedEnvVar::set("NO_PROXY", "127.0.0.1,localhost");
+        let _no_proxy_lower = ScopedEnvVar::set("no_proxy", "127.0.0.1,localhost");
+        let _mode = ScopedEnvVar::set("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
+        let _rest = ScopedEnvVar::unset("GWT_OWNER_GITHUB_REST_BASE");
+        let _graphql = ScopedEnvVar::unset("GWT_OWNER_GITHUB_GRAPHQL_URL");
+        let _owner_token = ScopedEnvVar::unset("GWT_OWNER_GITHUB_TOKEN");
+        let repo = tempfile::tempdir().expect("repo");
+        let env = DefaultCliEnv::new("fixture", "repo", repo.path().to_path_buf());
+        // Check construction first: the old factory must fail this assertion
+        // before this test is allowed to issue any HTTP request.
+        assert!(matches!(
+            (env.client_factory)("fixture", "repo"),
+            Err(gwt_github::client::ApiError::TestOverrideRejected { .. })
+        ));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let _rest = ScopedEnvVar::set("GWT_OWNER_GITHUB_REST_BASE", &base);
+        let _graphql = ScopedEnvVar::set("GWT_OWNER_GITHUB_GRAPHQL_URL", format!("{base}/graphql"));
+        let _owner_token = ScopedEnvVar::set("GWT_OWNER_GITHUB_TOKEN", "loopback-token");
+        if !cfg!(debug_assertions) {
+            assert!(matches!(
+                (env.client_factory)("fixture", "repo"),
+                Err(gwt_github::client::ApiError::TestOverrideRejected { .. })
+            ));
+            return;
+        }
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept loopback");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut bytes = [0; 1024];
+                let count = stream.read(&mut bytes).expect("request");
+                assert_ne!(count, 0, "complete request headers");
+                request.extend_from_slice(&bytes[..count]);
+            }
+            let request = String::from_utf8(request).expect("ASCII headers");
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            request
+        });
+        let env = DefaultCliEnv::new("fixture", "repo", repo.path().to_path_buf());
+        env.client()
+            .delete_comment(gwt_github::client::CommentId(42))
+            .expect("local mutation");
+        let request = server.join().expect("server");
+        assert!(request.starts_with("DELETE /repos/fixture/repo/issues/comments/42 "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer loopback-token"));
+    }
 }

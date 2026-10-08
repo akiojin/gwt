@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
-import { renderProjectCloneModal } from "../project-clone-modal.js";
+import { renderProjectCloneModal, createOpenProjectPathDialog } from "../project-clone-modal.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const indexHtml = readFileSync(resolve(here, "..", "index.html"), "utf8");
@@ -45,6 +45,43 @@ function state(overrides = {}) {
 }
 
 const noop = () => {};
+
+test("manual open retains its path on failure and closes only after open success", () => {
+  const { modalEl } = mount();
+  const document = modalEl.ownerDocument;
+  const sent = [];
+  const dialog = createOpenProjectPathDialog(document, { onChoose: noop, onOpen: (path, request_id) => sent.push({ path, request_id }) });
+  document.body.append(dialog.modal);
+  dialog.open();
+  const input = dialog.modal.querySelector('[data-open-project-path]');
+  input.value = '/missing/project';
+  input.dispatchEvent(new document.defaultView.Event('input'));
+  dialog.modal.querySelector('[data-open-project-submit]').click();
+  assert.equal(sent[0].path, '/missing/project');
+  assert.ok(sent[0].request_id, 'each submission must carry a correlation ID');
+  assert.equal(dialog.modal.classList.contains('open'), true, 'submission must keep feedback visible');
+  dialog.receive({ kind: 'project_opened', request_id: 'another-client', title: 'Other project' });
+  dialog.receive({ kind: 'project_open_error', message: 'Another client failed' });
+  assert.equal(dialog.modal.classList.contains('open'), true);
+  assert.equal(dialog.modal.querySelector('[role="status"]').textContent, 'Opening project…');
+  dialog.receive({ kind: 'project_open_error', request_id: sent[0].request_id, message: 'Folder does not exist' });
+  assert.equal(input.value, '/missing/project');
+  assert.equal(dialog.modal.querySelector('[role="status"]').textContent, 'Folder does not exist');
+  input.value = '/valid/project';
+  input.dispatchEvent(new document.defaultView.Event('input'));
+  dialog.modal.querySelector('[data-open-project-submit]').click();
+  assert.notEqual(sent[1].request_id, sent[0].request_id);
+  dialog.receive({ kind: 'project_opened', request_id: sent[0].request_id, title: 'Superseded' });
+  assert.equal(dialog.modal.classList.contains('open'), true);
+  dialog.receive({ kind: 'project_opened', request_id: sent[1].request_id, project_key: '0123456789abcdef', title: 'Project' });
+  assert.equal(dialog.modal.classList.contains('open'), false);
+  dialog.receive({ kind: 'project_open_error', message: 'Another client failed' });
+  assert.equal(dialog.modal.classList.contains('open'), false, 'unrelated results must not reopen the dialog');
+  dialog.waitForOpen('/native/project', 'picker:42');
+  dialog.hide();
+  dialog.receive({ kind: 'project_open_error', request_id: 'picker:42', message: 'Late result after dismissal' });
+  assert.equal(dialog.modal.classList.contains('open'), false, 'dismissal clears the pending request');
+});
 
 test("url mode renders URL and destination controls", () => {
   const { modalEl, dialogEl, createNode } = mount();

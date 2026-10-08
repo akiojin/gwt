@@ -136,6 +136,7 @@ impl IssueClient for PatchFaultClient {
         &self,
         _number: IssueNumber,
         _state: IssueState,
+        _reason: Option<gwt_github::IssueCloseReason>,
     ) -> Result<IssueSnapshot, ApiError> {
         unreachable!("unused by claim fault tests")
     }
@@ -217,8 +218,13 @@ impl IssueClient for OmittedClaimReadbackClient {
         self.inner.set_labels(number, labels)
     }
 
-    fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError> {
-        self.inner.set_state(number, state)
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: IssueState,
+        reason: Option<gwt_github::IssueCloseReason>,
+    ) -> Result<IssueSnapshot, ApiError> {
+        self.inner.set_state(number, state, reason)
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {
@@ -604,6 +610,33 @@ fn same_owner_with_a_different_claim_id_cannot_take_over_the_active_winner() {
             "a different logical identity must not patch the active winner"
         );
         assert_eq!(stored_claim(&client, 9), existing);
+    }
+}
+
+/// #5133 AC-1: a live queue reservation belongs to the host/user, not its PID.
+#[test]
+fn own_queue_claim_allows_acquisition_from_another_pid_on_both_paths() {
+    for path in [AcquirePath::Legacy, AcquirePath::Mutation] {
+        let client = FakeIssueClient::new();
+        let mut queued = claim(
+            "gwt-queue:42:queued",
+            "host-a:alice:10",
+            "2026-06-23T10:00:00Z",
+            "2026-06-23T10:30:00Z",
+        );
+        queued.status = ClaimStatus::Queued;
+        client.seed(snapshot(vec![comment(9, &queued)]));
+        let requested = claim(
+            "gwt-auto-improve:launch",
+            "host-a:alice:20",
+            "2026-06-23T10:01:00Z",
+            "2026-06-23T10:31:00Z",
+        );
+        assert!(matches!(
+            acquire_via(path, &client, requested, "2026-06-23T10:01:00Z"),
+            ClaimAcquireOutcome::Acquired(_)
+        ));
+        assert_eq!(stored_claim(&client, 9).status, ClaimStatus::Queued);
     }
 }
 

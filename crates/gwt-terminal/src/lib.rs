@@ -1,23 +1,26 @@
-//! gwt-terminal: PTY management, vt100 terminal emulation, and scrollback.
+//! gwt-terminal: PTY management and vt100 terminal emulation.
 //!
 //! This crate provides the terminal subsystem for gwt:
 //! - `PtyHandle` — cross-platform PTY spawn, I/O, resize, kill
-//! - `Pane` — integrates PTY + vt100 parser + scrollback
+//! - `Pane` — integrates PTY + vt100 parser (history lives in the parser's bounded scrollback)
 //! - `PaneManager` — manages multiple panes with spawn/close/resize
-//! - `ScrollbackStorage` — memory-efficient ring buffer for terminal lines
 
 pub mod manager;
 pub mod pane;
 pub mod pty;
-pub mod scrollback;
 
 #[cfg(test)]
 pub(crate) mod test_util;
 
+/// Issue #4234: the lib test binary counts live heap bytes per thread so
+/// retention regressions are measured, not inferred.
+#[cfg(test)]
+#[global_allocator]
+static COUNTING_ALLOCATOR: test_util::CountingAllocator = test_util::CountingAllocator;
+
 pub use manager::PaneManager;
-pub use pane::{Pane, PaneExit, PaneStatus, PendingPane};
+pub use pane::{Pane, PaneExit, PaneStatus, PendingPane, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT};
 pub use pty::{PendingPty, PtyHandle};
-pub use scrollback::ScrollbackStorage;
 use thiserror::Error;
 
 /// Errors from the gwt-terminal subsystem.

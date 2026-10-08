@@ -1,6 +1,6 @@
 ---
 name: gwt-search
-description: "Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. Use proactively before creating any SPEC or Issue owner or before reusing an existing one. Searches SPEC Issues, GitHub Issues, project files, and post-mortem memory via ChromaDB. Triggers: 'search', 'find related', 'check duplicates', '過去 memory を引いて'."
+description: "Mandatory preflight before gwt-discussion, gwt-register-issue, and any visible owner routing decision. Use proactively before creating any SPEC or Issue owner or before reusing an existing one. Searches SPEC Issues, GitHub Issues, project files, and post-mortem memory via ChromaDB. Triggers: 'search', 'find related', 'check duplicates', '過去 memory を引いて'."
 ---
 
 # Unified Search
@@ -35,6 +35,24 @@ resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
 then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
 command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 `gwtd not found` error.
+
+### gwtd bootstrap order
+
+The `search` operation is read-only, so it never waits for a checkout
+build or a verification lease.
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
 
 ## Quick Reference
 
@@ -134,6 +152,18 @@ JSON
 {"schema_version":1,"operation":"index.rebuild","params":{"scope":"issues"}}
 JSON
 ```
+
+## Expected latency
+
+Every `search` call starts a one-shot runner that imports and constructs the
+embedding model (SPEC-1939 FR-384), so every call is cold. Expect up to 25
+seconds per call; the warm remainder without the model load is held to 8
+seconds, and the attempt deadline is 30 seconds. Give each call at least 30
+seconds before treating it as hung, and run preflight queries one after
+another. A typed error (`INDEX_NOT_READY`, `SEARCH_UNAVAILABLE`,
+`INDEX_REPAIR_REQUIRED`) is an answer, not a hang: follow its `retryable` and
+`recovery` fields. Slow calls show up in `perf.summary` as `route:search` and
+`route:search.warm` violations.
 
 ## Empty corpus is a tooling failure, not "no results"
 

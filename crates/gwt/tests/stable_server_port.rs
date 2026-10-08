@@ -8,9 +8,46 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// These tests reserve an ephemeral port, release it, and then assert that a
+/// freshly started `gwt` binds *that* port — `occupied_saved_port_...` and
+/// `forced_secondary_...` and `explicit_ports_are_transient` all do it, and
+/// `implicit_start_...` restarts expecting the first run's port back. A
+/// concurrent test's `gwt` can take the released port in the gap, so the
+/// serialization is a correctness requirement, not a convenience (Issue #4134
+/// AC-4). It lives here rather than in the CI step's `--test-threads=1`, which
+/// is therefore belt-and-braces: this lock is what actually holds.
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Issue #4134 AC-4: this file costs 3.9s for nine spawn/stop cycles on macOS
+/// and 226s under Xvfb on the Linux CI runner — 42% of that job's test time
+/// for 0.05% of its tests. The 58x gap is not the serialization above (which
+/// costs the same on both), so it is inside a single `gwt` lifecycle. These
+/// lines attribute it: the CI step runs with `--nocapture` so a run says
+/// whether the wait is startup or shutdown, and whether shutdown ended on
+/// SIGTERM or on the hard kill after `SHUTDOWN_TIMEOUT`.
+///
+/// The first instrumented run (PR #4144, run 34190754660) answered half of it:
+/// shutdown costs 0.03s, and startup costs 25.10s on eight of the nine spawns
+/// — a number that does not vary to two decimal places, so it is a timer
+/// rather than work. `gwt` builds its `tao::EventLoop`, and with it GTK, long
+/// before the embedded server publishes a URL, and 25 seconds is GDBus's
+/// default call timeout: under bare `xvfb-run` there is a display but no
+/// session bus, so the first GTK call that needs one waits out the timeout.
+///
+/// Opting the child out of GTK's ATK bridge (`NO_AT_BRIDGE=1`,
+/// `GTK_A11Y=none`) was tried first and did **not** move the number (run
+/// 34192244659), so the bus consumer is not the accessibility bridge. The CI
+/// step now supplies a real session bus with `dbus-run-session` instead, which
+/// covers every consumer rather than one. These measurement lines stay: if a
+/// run still reports ~25s, that explanation is wrong too and the log says so.
+fn report_phase(phase: &str, detail: &str, elapsed: Duration) {
+    eprintln!(
+        "stable_server_port: {phase} {detail} in {:.2}s",
+        elapsed.as_secs_f64()
+    );
+}
 
 struct StablePortFixture {
     _temp: tempfile::TempDir,
@@ -124,7 +161,8 @@ impl RunningGwt {
             .timeout(Duration::from_millis(500))
             .build()
             .expect("health client");
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let started = Instant::now();
+        let deadline = started + STARTUP_TIMEOUT;
         loop {
             let status = running
                 .child
@@ -148,6 +186,7 @@ impl RunningGwt {
                         .is_ok_and(|response| response.status().is_success())
                 {
                     running.url = url.to_string();
+                    report_phase("startup", "served healthz", started.elapsed());
                     return running;
                 }
             }
@@ -206,6 +245,7 @@ fn terminate_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
+    let started = Instant::now();
     #[cfg(unix)]
     {
         // SAFETY: the PID comes from this live Child and SIGTERM is the
@@ -219,15 +259,21 @@ fn terminate_child(child: &mut Child) {
         let _ = child.kill();
     }
 
-    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let deadline = started + SHUTDOWN_TIMEOUT;
     while Instant::now() < deadline {
         if child.try_wait().ok().flatten().is_some() {
+            report_phase("shutdown", "exited on SIGTERM", started.elapsed());
             return;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
     let _ = child.kill();
     let _ = child.wait();
+    report_phase(
+        "shutdown",
+        "ignored SIGTERM and needed the hard kill",
+        started.elapsed(),
+    );
 }
 
 fn base_config(extra: &str) -> String {

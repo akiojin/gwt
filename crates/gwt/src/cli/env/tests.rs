@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use super::*;
@@ -18,10 +18,7 @@ use gwt_agent::session::GWT_SESSION_ID_ENV;
 use gwt_core::workspace_projection::load_or_default_workspace_projection;
 use gwt_git::PrStatus;
 use gwt_github::{
-    client::{
-        fake::FakeIssueClient, IssueClient, OwnerRepositoryClient, RepositoryIdentity,
-        ResolutionDeadline,
-    },
+    client::{fake::FakeIssueClient, IssueClient, ResolutionDeadline},
     IssueNumber, SpecListFilter,
 };
 
@@ -41,6 +38,8 @@ fn write_executable_fixture(path: &Path, contents: &str) {
 
 fn sample_pr_status() -> PrStatus {
     PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 128,
         title: "Enforce coverage".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -83,7 +82,10 @@ fn main() -> ExitCode {
 let args: Vec<String> = env::args().skip(1).collect();
 match args.as_slice() {
     [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
-        println!("{}", pr_json("12", "Current PR"));
+        let mut pr = pr_json("12", "Current PR");
+        pr.pop();
+        pr.push_str(r#", "headRefName":"feature/coverage", "headRepositoryOwner":{"login":"akiojin"}, "headRepository":{"name":"gwt"}}"#);
+        println!("{pr}");
         ExitCode::SUCCESS
     }
     [pr, view, number, repo_flag, _, json_flag, ..]
@@ -141,8 +143,39 @@ match args.as_slice() {
         println!("[]");
         ExitCode::SUCCESS
     }
-    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" => {
+    // Issue #4849 AC-1: the job log endpoint is read with
+    // `--allow-escape-sequences`; without it current `gh` refuses a response
+    // that carries colour codes, which every cargo test job does.
+    [api, allow, endpoint]
+        if api == "api"
+            && allow == "--allow-escape-sequences"
+            && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
+    {
         print!("job log 91");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/runs/90" => {
+        println!("{{\"id\":90,\"repository\":{{\"full_name\":\"akiojin/gwt\"}}}}");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91" => {
+        println!("{{\"id\":91,\"run_url\":\"https://api.github.com/repos/akiojin/gwt/actions/runs/90\"}}");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint]
+        if api == "api" && endpoint.starts_with("/repos/akiojin/gwt/actions/") =>
+    {
+        eprintln!("gh: Not Found (HTTP 404)");
+        ExitCode::FAILURE
+    }
+    [api, method_flag, method, endpoint]
+        if api == "api"
+            && method_flag == "--method"
+            && method == "POST"
+            && (endpoint == "/repos/akiojin/gwt/actions/runs/90/rerun-failed-jobs"
+                || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun") =>
+    {
+        println!("{{}}");
         ExitCode::SUCCESS
     }
     [api, graphql, ..] if api == "api" && graphql == "graphql" => {
@@ -262,14 +295,6 @@ fn failing_factory(counter: Arc<AtomicUsize>) -> Arc<IssueClientFactory> {
     })
 }
 
-fn failing_owner_factory(counter: Arc<AtomicUsize>) -> Arc<OwnerClientFactory> {
-    Arc::new(move |owner, repo, _deadline| {
-        assert_eq!((owner, repo), ("akiojin", "gwt"));
-        counter.fetch_add(1, Ordering::SeqCst);
-        Err(gwt_github::client::ApiError::Unauthorized)
-    })
-}
-
 #[test]
 fn lazy_issue_client_defers_resolution_until_first_issue_call() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -304,57 +329,6 @@ fn default_cli_env_construction_does_not_touch_issue_client_factory() {
         Err(gwt_github::client::ApiError::Unauthorized)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn lazy_owner_client_is_upstream_fixed_and_preserves_typed_auth_failure() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
-    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
-
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let error = client
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
-        .expect_err("auth failure");
-    assert_eq!(error, gwt_github::client::ApiError::Unauthorized);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn lazy_owner_client_rejects_non_upstream_repository_before_auth_or_network() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
-    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
-
-    let error = client
-        .list_issues(&RepositoryIdentity::new("example", "target"), &deadline)
-        .expect_err("non-upstream repository must be rejected");
-
-    assert!(matches!(
-        error,
-        gwt_github::client::ApiError::RepositoryMismatch { .. }
-    ));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn lazy_owner_client_rejects_an_expired_deadline_before_factory_resolution() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
-    let deadline = ResolutionDeadline::at(
-        Instant::now() - Duration::from_millis(1),
-        Duration::from_secs(1),
-    );
-
-    let error = client
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
-        .expect_err("expired owner deadline");
-
-    assert!(matches!(
-        error,
-        gwt_github::client::ApiError::Timeout { .. }
-    ));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -396,20 +370,6 @@ fn owner_runtime_override_requires_complete_explicit_loopback_environment() {
     for key in KEYS {
         env::remove_var(key);
     }
-}
-
-#[test]
-fn test_env_uses_a_distinct_owner_repository_client() {
-    let env = TestEnv::new(PathBuf::from("cache-root"));
-    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
-    assert!(!std::ptr::eq(&env.client, &env.owner_client));
-    assert!(env
-        .improvement_owner_client(&deadline)
-        .expect("owner client")
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
-        .expect("owner list")
-        .items()
-        .is_empty());
 }
 
 #[test]
@@ -561,6 +521,8 @@ fn test_env_records_io_and_pr_side_effects() {
             merge_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
             checks: Vec::new(),
+            check_counts: None,
+            required_pending_count: None,
         },
     );
     assert_eq!(env.fetch_pr_checks(7).expect("checks").summary, "All green");
@@ -710,6 +672,109 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
 }
 
 #[test]
+fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home =
+        crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
+    let stable_hook_bin = temp
+        .path()
+        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
+    write_executable_fixture(&stable_hook_bin, "test binary");
+    let _hook_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
+    gwt_skills::generate_codex_hooks(temp.path()).unwrap();
+    let hooks_path = temp.path().join(".codex/hooks.json");
+    let mut hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
+        serde_json::json!("gwtd hook event SessionStart");
+    fs::write(&hooks_path, serde_json::to_string(&hooks).unwrap()).unwrap();
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "schema_version": 1,
+        "operation": "hook.doctor",
+        "params": {}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    // Join the decoded issue strings: serializing the array would JSON-escape
+    // Windows `\` separators and hide the trust key from a substring match.
+    let issues = doctor["health"]["issues"]
+        .as_array()
+        .expect("health issues array")
+        .iter()
+        .map(|issue| issue.as_str().expect("health issue string"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        issues.contains("Codex hook trust") && issues.contains("stored_hash=<missing>"),
+        "doctor must expose persisted trust failures: {issues}"
+    );
+    assert!(issues.contains("hook.register_codex_managed_hook_trust"));
+    // The trust key uses the shared derivation (native separators), not a
+    // hand-built `/` path, so the expectation holds on Windows too.
+    let session_start_key = format!(
+        "{}:session_start:0:0",
+        gwt_skills::codex_hook_trust_key_path(&hooks_path)
+            .expect("derive Codex hook trust key")
+            .display()
+    );
+    assert!(
+        issues.contains(&session_start_key),
+        "doctor must name the mismatched trust key {session_start_key}: {issues}"
+    );
+    assert!(issues.contains("command mismatch") && issues.contains("expected_command="));
+    assert!(issues.contains("actual_command=`gwtd hook event SessionStart`"));
+    assert!(!codex_home.join("config.toml").exists());
+}
+
+#[test]
+fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("project");
+    let gitdir = repo.join("project.git/worktrees/linked");
+    let worktree = repo.join("work/linked");
+    fs::create_dir_all(&gitdir).unwrap();
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .unwrap();
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home =
+        crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
+    gwt_skills::generate_codex_hooks_for_mode(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    )
+    .unwrap();
+    assert!(repo.join(".codex/hooks.json").exists());
+    assert!(!worktree.join(".codex").exists());
+    let mut env = TestEnv::new(worktree);
+    env.stdin = serde_json::json!({
+        "schema_version": 1, "operation": "hook.doctor", "params": {}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
+    assert!(!codex_home.join("config.toml").exists());
+}
+
+#[test]
 fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
     let _env_lock = crate::env_test_lock()
         .lock()
@@ -717,6 +782,9 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
     let _runtime_path =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home =
+        crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
     let stable_hook_bin = temp
         .path()
         .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
@@ -749,7 +817,17 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
-    assert_eq!(doctor["health"]["status"].as_str(), Some("self_healed"));
+    let guarantee = doctor["repair_guarantee"].as_str().unwrap_or_default();
+    assert!(
+        guarantee.contains("managed hook configuration")
+            && guarantee.contains("launch success require separate verification"),
+        "repair must state its configuration-only guarantee: {guarantee}"
+    );
+    assert_eq!(doctor["health"]["status"].as_str(), Some("needs_attention"));
+    assert!(doctor["health"]["issues"]
+        .to_string()
+        .contains("stored_hash=<missing>"));
+    assert!(!codex_home.join("config.toml").exists());
 }
 
 #[test]
@@ -794,11 +872,25 @@ fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
 
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stderr));
     let rendered = fs::read_to_string(temp.path().join(".codex/hooks.json")).unwrap();
-    assert!(rendered.contains("GWT_BIN_PATH"), "{rendered}");
-    assert!(
-        !rendered.contains(&local_bin.display().to_string()),
-        "doctor persisted a worktree-local binary: {rendered}"
-    );
+    let hooks: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let local_bin_text = local_bin.display().to_string().replace('\\', "/");
+    let mut command_count = 0;
+    for groups in hooks["hooks"].as_object().unwrap().values() {
+        for group in groups.as_array().unwrap() {
+            for hook in group["hooks"].as_array().unwrap() {
+                command_count += 1;
+                let command = hook["command"].as_str().unwrap();
+                let payload = gwt_skills::decode_powershell_encoded_command(command)
+                    .unwrap_or_else(|| command.to_string());
+                assert!(payload.contains("GWT_BIN_PATH"), "{payload}");
+                assert!(
+                    !payload.replace('\\', "/").contains(&local_bin_text),
+                    "doctor persisted a worktree-local binary: {payload}"
+                );
+            }
+        }
+    }
+    assert!(command_count > 0, "doctor must generate managed hooks");
 }
 
 #[test]
@@ -852,6 +944,58 @@ fn dispatch_json_envelope_actions_logs_uses_json_params() {
     let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
     assert!(stdout.contains(r#""operation":"actions.logs""#), "{stdout}");
     assert!(stdout.contains("run log from JSON envelope"), "{stdout}");
+}
+
+/// Issue #3865 AC-1: `issue.edit` updates a plain Issue body and the change
+/// is readable through `issue.view` with `refresh:true`.
+#[test]
+fn dispatch_json_envelope_issue_edit_roundtrips_through_issue_view_refresh() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.client.seed(sample_issue_snapshot(7, &["bug"]));
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "issue.edit",
+        "params": {
+            "number": 7,
+            "body": "Corrected: the official curl installer exists"
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_eq!(
+        code,
+        0,
+        "issue.edit JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    assert!(stdout.contains(r#""operation":"issue.edit""#), "{stdout}");
+    assert!(stdout.contains("updated issue #7"), "{stdout}");
+
+    env.stdout.clear();
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "issue.view",
+        "params": { "number": 7, "refresh": true }
+    }"#
+    .to_string();
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&env.stderr));
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.contains("Corrected: the official curl installer exists"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Issue 7"),
+        "title must be untouched: {stdout}"
+    );
+    assert!(
+        stdout.contains("labels: bug"),
+        "labels must be untouched: {stdout}"
+    );
 }
 
 #[test]
@@ -930,6 +1074,22 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
 #[test]
 fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
     with_fake_gh(|repo_path| {
+        for args in [
+            vec!["init", "-b", "feature/coverage"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/akiojin/gwt.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("initialize current PR identity")
+                .success());
+        }
         let cache_root = repo_path.join(".cache");
         let mut env = DefaultCliEnv::new_with_client_factory_and_cache_root(
             "akiojin",
@@ -1004,6 +1164,32 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             "job log 91"
         );
 
+        // Issue #3515: `actions.rerun` reaches gh for both target shapes, and
+        // refuses a run id that the current repository does not own.
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 90,
+                failed_only: true,
+            })
+            .expect("rerun failed jobs")
+            .contains("run 90"));
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
+            .expect("rerun job")
+            .contains("job 91"));
+        let refused = env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 777,
+                failed_only: false,
+            })
+            .expect_err("a run owned by another repository must be refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("run 777 does not belong to akiojin/gwt"),
+            "unexpected error: {refused}"
+        );
+
         let note_path = repo_path.join("note.md");
         fs::write(&note_path, "hello").expect("write note");
         assert_eq!(
@@ -1052,7 +1238,7 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
         .set_labels(created.number, &["chore".to_string()])
         .expect("set labels");
     client_ref
-        .set_state(created.number, gwt_github::IssueState::Closed)
+        .set_state(created.number, gwt_github::IssueState::Closed, None)
         .expect("set state");
 
     let specs = client_ref
@@ -1092,6 +1278,29 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
 /// that needs no fixture, so this exercises the real dispatch path end to end
 /// rather than the classifier in isolation.
 #[test]
+fn dispatch_does_not_escalate_a_pm_pane_governance_refusal() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let home = tempfile::tempdir().expect("home");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&home.path().join("repo"));
+    fs::create_dir_all(&worktree).expect("PM worktree");
+    let mut env = TestEnv::new(worktree.clone());
+    env.stdin = r#"{"schema_version":1,"operation":"execution.adopt","params":{"reason":"crash recovery"}}"#
+        .to_string();
+
+    assert_ne!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    assert!(
+        gwt_core::coordination::load_open_escalations(&worktree)
+            .expect("read the escalation index")
+            .is_empty(),
+        "a PM refusal must not escalate back to the PM"
+    );
+}
+
+#[test]
 fn dispatch_escalates_a_governance_refusal_to_the_board() {
     let _env_lock = crate::env_test_lock()
         .lock()
@@ -1105,6 +1314,15 @@ fn dispatch_escalates_a_governance_refusal_to_the_board() {
     let code = dispatch(&mut env, &["gwtd".to_string()]);
     assert_ne!(code, 0, "the operation itself must still report failure");
 
+    let payload: serde_json::Value =
+        serde_json::from_slice(&env.stdout).expect("parse governed JSON response");
+    assert_eq!(
+        payload["refusal"]["reason_code"],
+        "execution_recovery_scope_unavailable"
+    );
+    assert_eq!(payload["refusal"]["recoverability"], "human_required");
+    assert_eq!(payload["refusal"]["escalation_kind"], "authority");
+
     let open = gwt_core::coordination::load_open_escalations(temp.path())
         .expect("read the escalation index");
     assert_eq!(
@@ -1115,6 +1333,11 @@ fn dispatch_escalates_a_governance_refusal_to_the_board() {
     assert!(
         open[0].body.contains("execution.adopt"),
         "the escalation must name the refused operation: {:?}",
+        open[0]
+    );
+    assert!(
+        open[0].body.contains("原因: authority"),
+        "the typed cause, not display wording, must explain the escalation: {:?}",
         open[0]
     );
 }

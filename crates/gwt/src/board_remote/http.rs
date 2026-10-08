@@ -48,6 +48,45 @@ impl ReqwestHttpClient {
             .unwrap_or_else(|_| Client::new());
         Self { client }
     }
+
+    /// Build without allowing reqwest's cold runtime/TLS initialization to
+    /// outlive an active hook deadline. Managed hooks are short-lived
+    /// processes, so a process-global lazy client cannot make prompt reads
+    /// warm across events.
+    pub fn new_with_operation_deadline() -> std::result::Result<Self, String> {
+        let client = build_client_with_operation_deadline(|| {
+            Client::builder()
+                .timeout(DEFAULT_REQUEST_TIMEOUT)
+                .build()
+                .map_err(|error| format!("build remote Board client failed: {error}"))
+        })?;
+        Ok(Self { client })
+    }
+}
+
+fn build_client_with_operation_deadline(
+    build: impl FnOnce() -> std::result::Result<Client, String> + Send + 'static,
+) -> std::result::Result<Client, String> {
+    let Some(deadline) = gwt_core::operation_deadline::current() else {
+        return build();
+    };
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err("operation deadline expired before remote Board client build".to_string());
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(build());
+    });
+    match receiver.recv_timeout(remaining) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err("operation deadline expired during remote Board client build".to_string())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("remote Board client build worker disconnected".to_string())
+        }
+    }
 }
 
 impl Default for ReqwestHttpClient {
@@ -326,5 +365,22 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_millis(250));
         server.join();
+    }
+
+    #[test]
+    fn scoped_operation_deadline_bounds_cold_remote_client_construction() {
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(30),
+        );
+
+        let error = build_client_with_operation_deadline(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            Err("late builder".to_string())
+        })
+        .expect_err("cold client construction must stop at the hook deadline");
+
+        assert!(error.contains("deadline"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(250));
     }
 }

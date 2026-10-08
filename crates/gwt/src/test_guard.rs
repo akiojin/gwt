@@ -1,4 +1,4 @@
-//! Test-binary arming of the unsandboxed-`gh` spawn guard (Issue #3675).
+//! Test-binary arming of the external-process guard (Issue #3675).
 //!
 //! Unit tests in this crate must never reach the real GitHub API: one test
 //! that does can burn shared quota, and — once the quota is exhausted — a
@@ -13,11 +13,11 @@
 // lib — bin unit tests and integration-test binaries alike. The extra
 // debug_assertions gate keeps a release build unarmed even when the feature
 // leaks in through --all-features.
-// SAFETY(pre-main): only stores a relaxed AtomicBool; no allocation, no std
+// SAFETY(pre-main): only stores relaxed AtomicBools; no allocation, no std
 // services, no other statics touched.
 #[cfg(any(test, all(feature = "test-gh-guard", debug_assertions)))]
 #[ctor::ctor(unsafe)]
-fn forbid_real_gh_in_tests() {
+fn forbid_real_external_processes_in_tests() {
     gwt_core::process_console::forbid_unsandboxed_gh_spawns_for_tests();
 }
 

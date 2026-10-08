@@ -195,6 +195,37 @@ pub fn build_review_dispatch(
     }
 }
 
+/// Issue #3984 (AC-1): marker injected into an independent-review dispatch
+/// session's environment.
+///
+/// A review window is deliberately launched with `suppress_execution_control`
+/// — it owns no Execution Control Record and no Workspace Work, because its
+/// only job is to judge someone else's diff. The identity / obligation gates
+/// are written for producing sessions and are structurally unsatisfiable
+/// there: `workspace.update` is rejected with `execution_binding_mismatch`, so
+/// the title-summary gate would deny every non-read-only command for the whole
+/// life of the window and trap the finished verdict inside it.
+///
+/// The marker lets the hooks recognize the review contract instead of guessing
+/// from the prompt, exactly as [`crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV`]
+/// marks an unattended session.
+pub const GWT_REVIEW_DISPATCH_ENV: &str = "GWT_REVIEW_DISPATCH";
+
+/// Pure reader for [`GWT_REVIEW_DISPATCH_ENV`]: only an explicit `1` marks a
+/// review dispatch session, so an empty or stale value fails closed onto the
+/// ordinary producing-session gates.
+pub fn review_dispatch_session_from_env<F>(read: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    read(GWT_REVIEW_DISPATCH_ENV).is_some_and(|value| value.trim() == "1")
+}
+
+/// [`review_dispatch_session_from_env`] against the process environment.
+pub fn review_dispatch_session_active() -> bool {
+    review_dispatch_session_from_env(|name| std::env::var(name).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +384,26 @@ mod tests {
         // reinforcing the eligibility gate that should have caught this earlier.
         let prompt = build_review_prompt(&[], "abc123", "diff");
         assert!(prompt.contains("must FAIL"));
+    }
+
+    /// Issue #3984 (AC-1): the review marker is read from the environment and
+    /// fails closed on anything but an explicit `1`.
+    #[test]
+    fn review_dispatch_marker_is_read_from_the_injected_environment() {
+        assert!(review_dispatch_session_from_env(|name| (name
+            == GWT_REVIEW_DISPATCH_ENV)
+            .then(|| "1".to_string())));
+        for value in ["", "0", "true", " "] {
+            assert!(
+                !review_dispatch_session_from_env(
+                    |name| (name == GWT_REVIEW_DISPATCH_ENV).then(|| value.to_string())
+                ),
+                "{value:?} must not mark a review session"
+            );
+        }
+        assert!(
+            !review_dispatch_session_from_env(|_| None),
+            "an ordinary producing session keeps the normal gates"
+        );
     }
 }

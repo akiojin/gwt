@@ -6,6 +6,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
+# Native Windows Ruby cannot resolve MSYS paths stored inside the manifest.
+if command -v cygpath >/dev/null 2>&1; then
+  TMP_DIR="$(cygpath -m "$TMP_DIR")"
+fi
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 MANIFEST="$TMP_DIR/frontmatter-manifest.tsv"

@@ -63,6 +63,15 @@ different classification, that wins.
    - **Scope.** Escalation applies in `--mode full` and `--mode pre-pr`
      only; `--mode quick` keeps the diff-path classification.
 
+8. **Tests of a surface are not that surface.** A change confined to test
+   files — `**/__tests__/**`, `*.spec.*`, `*.test.*`, Playwright specs under
+   `playwright/tests/**` — keeps that surface's *test matrix* (the suite must
+   run) but does not make it a UI surface: nothing newly rendered exists for a
+   human to look at, so its User Check is Recommended, not Required. A test
+   changed alongside a real UI file still takes the UI file's Required tier,
+   and rule 7's acceptance-aware escalation still applies when the test covers
+   an acceptance that manifests in a user-facing surface.
+
 ## Per-project specialization hints
 
 Concrete projects may need finer-grained mappings. The host project's

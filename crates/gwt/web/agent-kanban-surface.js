@@ -12,6 +12,15 @@ export function isAgentKanbanPlacement(windowData) {
   return windowData?.placement?.kind === "agent_kanban";
 }
 
+// SPEC-3671 FR-004: the single seam that answers "is this window drawn on the
+// canvas?". Callers that ask about Kanban *lane membership* (board_id / lane_id)
+// keep using `isAgentKanbanPlacement()`; callers that decide canvas rendering use
+// this predicate so a new off-canvas placement only has to be added here.
+export function isOffCanvasPlacement(windowData) {
+  const kind = windowData?.placement?.kind;
+  return kind === "agent_kanban" || kind === "issue_preview";
+}
+
 function isCanvasPlacement(windowData) {
   const kind = windowData?.placement?.kind;
   return !kind || kind === "canvas";

@@ -9,7 +9,7 @@ test.describe("prefers-reduced-motion", () => {
   test.use({ reducedMotion: "reduce" });
 
   test("status strip dot has no infinite animation", async ({ page }) => {
-    await gotoLiveGwt(page, BASE);
+    await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
     const dot = page.locator(".op-status-strip__live-dot");
     await expect(dot).toBeVisible();
     const animation = await dot.evaluate((el) => getComputedStyle(el).animationName);

@@ -54,6 +54,42 @@ fn seed_spec(
     snapshot
 }
 
+// Issue #4392: a body whose gwt-spec header carries an unparseable sections
+// index is surfaced by the cache with an empty SpecBody. Writing a section
+// from that empty map would rewrite the index and orphan comment-resident
+// content, so write_section must refuse before any remote mutation.
+#[test]
+fn write_section_refuses_body_with_unparseable_sections_index() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(4388),
+        title: "SPEC with a broken index".to_string(),
+        body: "<!-- gwt-spec id=4388 version=1 -->\n<!-- sections: {} -->\n\nbody\n".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("seed-4388"),
+        comments: Vec::new(),
+    };
+    client.seed(snapshot.clone());
+    cache.write_snapshot(&snapshot).unwrap();
+
+    let ops = SpecOps::new(client, cache);
+    let error = ops
+        .write_section(IssueNumber(4388), &n("spec"), "new spec")
+        .expect_err("a malformed sections index must refuse section writes");
+
+    assert!(matches!(error, SpecOpsError::Validation(_)), "{error:?}");
+    assert!(error.to_string().contains("issue.edit"), "{error}");
+    let log = ops.client().call_log();
+    assert!(
+        !log.iter()
+            .any(|entry| entry.starts_with("patch_body:") || entry.starts_with("create_comment:")),
+        "no remote mutation may happen: {log:?}"
+    );
+}
+
 // RED-60: read_section with fresh cache -> NotModified -> reads from cache
 #[test]
 fn red_60_read_section_uses_cache_on_not_modified() {
@@ -381,6 +417,12 @@ fn red_92_multipart_failure_zero_partial_overwrite() {
     let err = ops.write_section(IssueNumber(1), &n("tasks"), &huge);
     assert!(err.is_err(), "expected injected create failure to surface");
 
+    assert_eq!(
+        ops.client().comments(IssueNumber(1)).len(),
+        1,
+        "failed partial creation must clean up unreferenced new comments"
+    );
+
     // The section must still read back as the previous content.
     let got = ops.read_section(IssueNumber(1), &n("tasks")).unwrap();
     assert_eq!(got, oversized_content(20_000));
@@ -503,4 +545,41 @@ fn red_96_spec_3248_scale_roundtrip() {
     }
     let got = ops.read_section(IssueNumber(1), &n("tasks")).unwrap();
     assert_eq!(got, content);
+}
+
+#[test]
+fn missing_index_reference_is_not_reported_as_absent_section() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let mut snapshot = seed_spec(&client, &cache, 1, "old", "tasks");
+    snapshot.body = snapshot.body.replace("spec=body", "spec=comment:999");
+    snapshot.updated_at = UpdatedAt::new("missing-reference");
+    client.seed(snapshot);
+    let ops = SpecOps::new(client, cache);
+    let error = ops.read_section(IssueNumber(1), &n("spec")).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("index") && message.contains("999"),
+        "{message}"
+    );
+    assert!(!matches!(error, SpecOpsError::SectionNotFound(_)));
+}
+
+#[test]
+fn section_write_preserves_same_timestamp_remote_index_update() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let mut snapshot = seed_spec(&client, &cache, 1, "old", "tasks");
+    snapshot.body = mk_body("new remote spec", "tasks");
+    // GitHub can retain the same updatedAt for two writes in one second.
+    client.seed(snapshot);
+    let ops = SpecOps::new(client, cache);
+    ops.write_section(IssueNumber(1), &n("tasks"), "new tasks")
+        .unwrap();
+    assert_eq!(
+        ops.read_section(IssueNumber(1), &n("spec")).unwrap(),
+        "new remote spec"
+    );
 }

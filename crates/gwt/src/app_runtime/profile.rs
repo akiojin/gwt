@@ -196,6 +196,7 @@ impl AppRuntime {
 
         self.profile_selections
             .insert(id.to_string(), profile_name.to_string());
+        self.launch_wizard_cache.refresh_agent_options();
         self.profile_snapshot_events(&tab_id, id, client_id)
     }
 
@@ -249,6 +250,7 @@ impl AppRuntime {
 
         self.profile_selections
             .insert(id.to_string(), request.name.trim().to_string());
+        self.launch_wizard_cache.refresh_agent_options();
         self.profile_snapshot_events(&tab_id, id, client_id)
     }
 
@@ -293,6 +295,7 @@ impl AppRuntime {
             )];
         }
 
+        self.launch_wizard_cache.refresh_agent_options();
         self.profile_snapshot_events(&tab_id, id, client_id)
     }
 
@@ -350,6 +353,9 @@ impl AppRuntime {
         selected_window_id: &str,
         client_id: &str,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context(tab_id) else {
+            return Vec::new();
+        };
         let window_ids = self.profile_window_ids_for_tab(tab_id);
         let mut events = Vec::new();
 
@@ -371,10 +377,13 @@ impl AppRuntime {
                 Ok(snapshot) => {
                     self.profile_selections
                         .insert(window_id.clone(), snapshot.selected_profile.clone());
-                    events.push(OutboundEvent::broadcast(BackendEvent::ProfileSnapshot {
-                        id: window_id,
-                        snapshot,
-                    }));
+                    events.push(OutboundEvent::project(
+                        context.project_key.clone(),
+                        BackendEvent::ProfileSnapshot {
+                            id: window_id,
+                            snapshot,
+                        },
+                    ));
                 }
                 Err(error) => {
                     return vec![OutboundEvent::reply(

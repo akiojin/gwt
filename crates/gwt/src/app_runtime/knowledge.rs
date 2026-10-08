@@ -54,8 +54,9 @@ const KNOWLEDGE_MONITOR_SNAPSHOT_CAPACITY: usize = 8;
 
 #[derive(Clone)]
 struct KnowledgeMonitorProjection {
-    state: gwt::MonitorInboxState,
+    state: Option<gwt::MonitorInboxState>,
     queue_position: Option<usize>,
+    queued_by: Option<String>,
     exclusion_reason: Option<String>,
 }
 
@@ -89,6 +90,12 @@ fn normalized_snapshot_project_root(project_root: &Path) -> PathBuf {
 }
 
 impl KnowledgeRelatedSnapshotCache {
+    pub(crate) fn evict(&mut self, project_root: &Path) {
+        let project_root = normalized_snapshot_project_root(project_root);
+        self.entries
+            .retain(|entry| entry.project_root != project_root);
+    }
+
     fn entry_index(&self, project_root: &Path, kind: KnowledgeKind) -> Option<usize> {
         let project_root = normalized_snapshot_project_root(project_root);
         self.entries
@@ -175,6 +182,12 @@ impl KnowledgeRelatedSnapshotCache {
 }
 
 impl KnowledgeMonitorSnapshotCache {
+    pub(crate) fn evict(&mut self, project_root: &Path) {
+        let project_root = normalized_snapshot_project_root(project_root);
+        self.entries
+            .retain(|entry| entry.project_root != project_root);
+    }
+
     fn entry_index(&self, project_root: &Path) -> Option<usize> {
         let project_root = normalized_snapshot_project_root(project_root);
         self.entries
@@ -191,25 +204,40 @@ impl KnowledgeMonitorSnapshotCache {
     }
 
     fn replace(&mut self, project_root: &Path, items: &[gwt::IssueMonitorInboxItem]) {
-        let mut next_queue_position = 1;
-        let snapshot = items
+        let previous = self.get(project_root);
+        let mut snapshot = items
             .iter()
             .map(|item| {
-                let queue_position = (item.state == gwt::MonitorInboxState::Queued).then(|| {
-                    let position = next_queue_position;
-                    next_queue_position += 1;
-                    position
-                });
+                let queued = previous
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.get(&item.issue.number));
                 (
                     item.issue.number,
                     KnowledgeMonitorProjection {
-                        state: item.state,
-                        queue_position,
+                        state: Some(item.state),
+                        queue_position: queued.and_then(|item| item.queue_position),
+                        queued_by: queued.and_then(|item| item.queued_by.clone()),
                         exclusion_reason: item.exclusion_reason.clone(),
                     },
                 )
             })
             .collect::<HashMap<_, _>>();
+        // A freshly queued Issue may not have reached the scanner yet.
+        if let Some(previous) = previous {
+            for (number, item) in previous
+                .iter()
+                .filter(|(_, item)| item.queue_position.is_some())
+            {
+                snapshot
+                    .entry(*number)
+                    .or_insert_with(|| KnowledgeMonitorProjection {
+                        state: None,
+                        queue_position: item.queue_position,
+                        queued_by: item.queued_by.clone(),
+                        exclusion_reason: None,
+                    });
+            }
+        }
         let entry = KnowledgeMonitorSnapshotEntry {
             project_root: normalized_snapshot_project_root(project_root),
             snapshot: Arc::new(snapshot),
@@ -220,6 +248,35 @@ impl KnowledgeMonitorSnapshotCache {
         self.entries.push_back(entry);
         while self.entries.len() > KNOWLEDGE_MONITOR_SNAPSHOT_CAPACITY {
             self.entries.pop_front();
+        }
+    }
+    fn replace_queue(
+        &mut self,
+        project_root: &Path,
+        queue: &[gwt::issue_monitor::IssueMonitorTerminalQueueEntry],
+    ) {
+        if self.entry_index(project_root).is_none() {
+            self.replace(project_root, &[]);
+        }
+        let index = self
+            .entry_index(project_root)
+            .expect("snapshot initialized");
+        let snapshot = Arc::make_mut(&mut self.entries[index].snapshot);
+        for item in snapshot.values_mut() {
+            item.queue_position = None;
+            item.queued_by = None;
+        }
+        for (index, entry) in queue.iter().enumerate() {
+            let item = snapshot
+                .entry(entry.number)
+                .or_insert(KnowledgeMonitorProjection {
+                    state: None,
+                    queue_position: None,
+                    queued_by: None,
+                    exclusion_reason: None,
+                });
+            item.queue_position = Some(index + 1);
+            item.queued_by = Some(entry.queued_by.clone());
         }
     }
 }
@@ -237,7 +294,7 @@ mod related_snapshot_cache_tests {
             id: id.to_string(),
             title: id.to_string(),
             status_category: "active".to_string(),
-            branch: None,
+            branch: Some(format!("work/{id}")),
             worktree_path: None,
             updated_at: "2026-08-03T00:00:00Z".to_string(),
             agents: Vec::new(),
@@ -260,9 +317,12 @@ mod related_snapshot_cache_tests {
                 phase: None,
                 has_unknown_phase: false,
                 is_spec: false,
+                parent_spec: None,
                 monitor_state: None,
                 queue_position: None,
+                queued_by: None,
                 exclusion_reason: None,
+                related_work_refs: Vec::new(),
             }],
             selected_number: Some(number),
             empty_message: None,
@@ -452,6 +512,17 @@ mod related_snapshot_cache_tests {
         apply_latest_knowledge_bridge_related_works(&root, &mut partial_view, &snapshots);
 
         assert_eq!(partial_view.entries[0].related_work_count, 1);
+        // SPEC-3671 FR-012: the row carries the Issue -> Work correlation so the
+        // Issue surface can join the active Work projection it already receives.
+        assert_eq!(
+            partial_view.entries[0].related_work_refs,
+            vec![gwt::KnowledgeWorkRefView {
+                id: "work-42".to_string(),
+                branch: Some("work/work-42".to_string()),
+                worktree_path: None,
+                updated_at: "2026-08-03T00:00:00Z".to_string(),
+            }]
+        );
         assert_eq!(partial_view.detail.related_works[0].id, "work-42");
         let retained = snapshots
             .lock()
@@ -487,11 +558,27 @@ mod monitor_snapshot_cache_tests {
             claim_id: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            blocked_by_claim_id: None,
+            claim_block_issue_updated_at: None,
             launched_window_id: None,
             launch_plan: None,
             error_message: None,
             exclusion_reason: exclusion_reason.map(str::to_string),
         }
+    }
+
+    fn queue_entries(numbers: &[u64]) -> Vec<gwt::issue_monitor::IssueMonitorTerminalQueueEntry> {
+        numbers
+            .iter()
+            .map(
+                |number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: String::new(),
+                    queued_by: "operator".to_string(),
+                    ..Default::default()
+                },
+            )
+            .collect()
     }
 
     fn knowledge_entry(number: u64) -> gwt::KnowledgeListItem {
@@ -508,10 +595,28 @@ mod monitor_snapshot_cache_tests {
             phase: None,
             has_unknown_phase: false,
             is_spec: false,
+            parent_spec: None,
             monitor_state: Some(gwt::MonitorInboxState::Launched),
             queue_position: Some(99),
+            queued_by: None,
             exclusion_reason: Some("stale".to_string()),
+            related_work_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn stale_inbox_queued_state_is_not_terminal_membership() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
+        let mut cache = KnowledgeMonitorSnapshotCache::default();
+        cache.replace(
+            directory.path(),
+            &[inbox_item(42, gwt::MonitorInboxState::Queued, None)],
+        );
+        let snapshot = cache.get(directory.path()).unwrap();
+        let mut entries = vec![knowledge_entry(42)];
+        apply_knowledge_monitor_projection(&mut entries, Some(&snapshot));
+        assert_eq!(entries[0].queue_position, None);
     }
 
     #[test]
@@ -533,6 +638,9 @@ mod monitor_snapshot_cache_tests {
                 ),
             ],
         );
+        let mut queue = queue_entries(&[10, 30, 99]);
+        queue[1].queued_by = "auto-refill".to_string();
+        cache.replace_queue(&project_root, &queue);
         let snapshot = cache.get(&project_root).expect("monitor snapshot");
         let mut filtered_entries = vec![
             knowledge_entry(30),
@@ -567,9 +675,15 @@ mod monitor_snapshot_cache_tests {
                 filtered_entries[2].queue_position,
                 filtered_entries[2].exclusion_reason.as_deref(),
             ),
-            (None, None, None),
+            (None, Some(3), None),
         );
+        assert_eq!(
+            filtered_entries[0].queued_by.as_deref(),
+            Some("auto-refill")
+        );
+        assert_eq!(filtered_entries[2].queued_by.as_deref(), Some("operator"));
 
+        cache.replace_queue(&project_root, &[]);
         cache.replace(&project_root, &[]);
         let empty = cache
             .get(&project_root)
@@ -578,6 +692,7 @@ mod monitor_snapshot_cache_tests {
         assert!(filtered_entries.iter().all(|entry| {
             entry.monitor_state.is_none()
                 && entry.queue_position.is_none()
+                && entry.queued_by.is_none()
                 && entry.exclusion_reason.is_none()
         }));
     }
@@ -609,6 +724,7 @@ mod monitor_snapshot_cache_tests {
             .map(|(index, state)| inbox_item(index as u64 + 1, *state, None))
             .collect::<Vec<_>>();
         cache.replace(&first_root, &items);
+        cache.replace_queue(&first_root, &queue_entries(&[1]));
         cache.replace(
             &second_root,
             &[inbox_item(1, gwt::MonitorInboxState::Released, None)],
@@ -629,11 +745,11 @@ mod monitor_snapshot_cache_tests {
             .iter()
             .all(|entry| entry.queue_position.is_none()));
         assert_eq!(
-            first.get(&1).map(|projection| projection.state),
+            first.get(&1).and_then(|projection| projection.state),
             Some(gwt::MonitorInboxState::Queued),
         );
         assert_eq!(
-            second.get(&1).map(|projection| projection.state),
+            second.get(&1).and_then(|projection| projection.state),
             Some(gwt::MonitorInboxState::Released),
         );
     }
@@ -866,12 +982,14 @@ fn apply_knowledge_monitor_projection(
     for entry in entries {
         entry.monitor_state = None;
         entry.queue_position = None;
+        entry.queued_by = None;
         entry.exclusion_reason = None;
         let Some(projection) = snapshot.and_then(|snapshot| snapshot.get(&entry.number)) else {
             continue;
         };
-        entry.monitor_state = Some(projection.state);
+        entry.monitor_state = projection.state;
         entry.queue_position = projection.queue_position;
+        entry.queued_by.clone_from(&projection.queued_by);
         entry
             .exclusion_reason
             .clone_from(&projection.exclusion_reason);
@@ -983,6 +1101,18 @@ fn apply_knowledge_bridge_related_works(
         if let Some(works) = related_by_number.get(&entry.number) {
             entry.related_work_count = works.len();
             entry.related_session_count = related_session_count(works);
+            // SPEC-3671 FR-012: carry the correlation itself, not a copy of the
+            // Work's display state. The Issue surface joins these ids/branches
+            // against the active Work projection it already receives.
+            entry.related_work_refs = works
+                .iter()
+                .map(|work| gwt::KnowledgeWorkRefView {
+                    id: work.id.clone(),
+                    branch: work.branch.clone(),
+                    worktree_path: work.worktree_path.clone(),
+                    updated_at: work.updated_at.clone(),
+                })
+                .collect();
         }
     }
     if let Some(number) = view.detail.number {
@@ -992,7 +1122,7 @@ fn apply_knowledge_bridge_related_works(
     }
 }
 
-fn issue_number_for_work_item(
+pub(super) fn issue_number_for_work_item(
     item: &gwt_core::workspace_projection::WorkItem,
     session_index: &HashMap<&str, &gwt_agent::Session>,
     issue_by_branch: &HashMap<String, u64>,
@@ -1026,7 +1156,7 @@ fn issue_number_for_unambiguous_work_item_branch(
     issue_number_for_branch(Some(branch), issue_by_branch)
 }
 
-fn issue_number_for_session(
+pub(super) fn issue_number_for_session(
     session: &gwt_agent::Session,
     issue_by_branch: &HashMap<String, u64>,
 ) -> Option<u64> {
@@ -1035,7 +1165,7 @@ fn issue_number_for_session(
         .or_else(|| issue_number_for_branch(Some(session.branch.as_str()), issue_by_branch))
 }
 
-fn issue_number_for_branch(
+pub(crate) fn issue_number_for_branch(
     branch: Option<&str>,
     issue_by_branch: &HashMap<String, u64>,
 ) -> Option<u64> {
@@ -1049,13 +1179,16 @@ fn issue_number_for_branch(
         .or_else(|| issue_by_branch.get(&normalize_branch_name(branch)).copied())
 }
 
-fn load_issue_branch_links(
+pub(crate) fn load_issue_branch_links(
     project_root: &Path,
     issue_link_cache_dir: &Path,
 ) -> HashMap<String, u64> {
-    let Some(repo_hash) = gwt::index_worker::detect_repo_hash(project_root) else {
+    // Active Work rendering uses this cache reader too: resolve the same
+    // origin identity from disk without the index worker's Git subprocess fallback.
+    let Some(identity) = gwt_core::repo_hash::detect_repo_identity(project_root) else {
         return HashMap::new();
     };
+    let repo_hash = identity.hash;
     let path = issue_link_cache_dir
         .join("issue-links")
         .join(format!("{}.json", repo_hash.as_str()));
@@ -1386,6 +1519,17 @@ fn parse_related_time_millis(value: &str) -> i64 {
 }
 
 impl AppRuntime {
+    pub(crate) fn replace_knowledge_terminal_queue(
+        &self,
+        project_root: &Path,
+        queue: &[gwt::issue_monitor::IssueMonitorTerminalQueueEntry],
+    ) {
+        self.knowledge_monitor_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace_queue(project_root, queue);
+    }
+
     pub(crate) fn replace_knowledge_monitor_snapshot(
         &self,
         project_root: &Path,
@@ -1868,30 +2012,16 @@ impl AppRuntime {
     /// reply with an empty advisory rather than an error (FR-415).
     pub(crate) fn request_work_advisory_events(
         &self,
+        context: &super::ProjectContext,
         client_id: &str,
         id: &str,
         query: &str,
         request_id: u64,
     ) -> Vec<OutboundEvent> {
-        // The Launch Wizard is a modal bound to the client's active project
-        // tab (not a registered window), so resolve the project from the active
-        // tab the same way wizard actions do.
-        let project_root = self
-            .active_tab_id
-            .clone()
-            .and_then(|tab_id| self.tab(&tab_id))
-            .map(|tab| tab.project_root.clone());
-        let Some(project_root) = project_root else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::WorkAdvisoryResult {
-                    id: id.to_string(),
-                    query: query.to_string(),
-                    request_id,
-                    results: Vec::new(),
-                },
-            )];
-        };
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let project_root = context.project_root.clone();
         self.spawn_work_advisory(WorkAdvisoryTask {
             client_id: client_id.to_string(),
             id: id.to_string(),
@@ -2050,7 +2180,9 @@ impl AppRuntime {
                         id: id_owned,
                         request_id,
                         issue_number,
-                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok { fresh_entry },
+                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok {
+                            fresh_entry: Box::new(fresh_entry),
+                        },
                     }
                 }
                 Err(error) => BackendEvent::KnowledgeBridgePhaseUpdated {
@@ -2068,8 +2200,8 @@ impl AppRuntime {
     }
 
     /// SPEC-1939 US-5 / T-IDX-102: handle a per-cell rebuild request from the
-    /// frontend. Spawns the rebuild via the global bootstrap service so the
-    /// in-flight set is shared with the orchestrator and CLI.
+    /// frontend. The owning project incarnation shares the bootstrap in-flight
+    /// set with its status requests, and rejects results after reopening.
     pub(crate) fn rebuild_index_cell_events(
         &self,
         project_root: String,
@@ -2077,11 +2209,16 @@ impl AppRuntime {
         worktree_hash: Option<String>,
     ) -> Vec<OutboundEvent> {
         let project_root = std::path::PathBuf::from(project_root);
-        let service =
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
+        let Some(context) = self.project_context_for_root(&project_root) else {
+            return Vec::new();
+        };
+        let Some(state) = self.project_state(&context) else {
+            return Vec::new();
+        };
+        let service = state.project_index_bootstrap.clone();
         let _request = crate::project_index_bootstrap::spawn_per_cell_rebuild(
             service,
-            self.proxy.clone(),
+            self.proxy.for_project(context),
             project_root,
             scope,
             worktree_hash,
@@ -2094,9 +2231,15 @@ impl AppRuntime {
     /// spikes on repositories with many active worktrees.
     pub(crate) fn refresh_index_status_events(&self, project_root: String) -> Vec<OutboundEvent> {
         let project_root = std::path::PathBuf::from(project_root);
-        let service =
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
-        let _request = service.spawn_full_status_refresh(self.proxy.clone(), project_root);
+        let Some(context) = self.project_context_for_root(&project_root) else {
+            return Vec::new();
+        };
+        let Some(state) = self.project_state(&context) else {
+            return Vec::new();
+        };
+        let service = state.project_index_bootstrap.clone();
+        let _request =
+            service.spawn_full_status_refresh(self.proxy.for_project(context), project_root);
         Vec::new()
     }
 }

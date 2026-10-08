@@ -9,13 +9,16 @@ use std::{
 };
 
 use gwt_terminal::{
-    pty::{run_start_gate_from_env, SpawnConfig},
+    pty::{run_start_gate_from_env, ProcessPolicy, ProcessPriority, SpawnConfig},
     Pane, PaneStatus, PtyHandle,
 };
 
 const HELPER_ROLE_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_HELPER";
 const TARGET_SENTINEL_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_TARGET_SENTINEL";
 const CRASH_PARENT_READY_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_CRASH_READY";
+const PRIORITY_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_REPORT";
+const SLOW_HELLO_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_SLOW_HELLO";
+const PRIORITY_GRANDCHILD_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_GRANDCHILD";
 
 fn pty_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -225,4 +228,398 @@ fn pending_pane_materializes_only_after_release() {
     assert_eq!(pane.status(), &PaneStatus::Running);
     assert!(wait_for_path(&sentinel, Duration::from_secs(5)));
     drop(pane);
+}
+
+/// Report the scheduling priority of the current process in the platform's
+/// native unit: the Unix nice value, or the Windows priority class name.
+fn current_priority_report() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpriority has no memory-safety preconditions.
+        let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+        nice.to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!(
+            "{:?}",
+            gwt_core::process_tree::process_priority_class(std::process::id())
+                .expect("query current process priority class")
+        )
+    }
+}
+
+fn expected_priority_report(priority: ProcessPriority) -> String {
+    #[cfg(unix)]
+    {
+        priority.unix_nice().to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!("{:?}", priority.windows_priority_class())
+    }
+}
+
+/// Target role: record this process' priority, then spawn a grandchild with
+/// the same role so descendant inheritance is observable from the test.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the grandchild must be this exact integration-test binary"
+)]
+fn start_gate_priority_target_process() {
+    let Some(report) = std::env::var_os(PRIORITY_REPORT_ENV) else {
+        return;
+    };
+    fs::write(&report, current_priority_report()).expect("write priority report");
+    if let Some(grandchild_report) = std::env::var_os(PRIORITY_GRANDCHILD_REPORT_ENV) {
+        let status = Command::new(current_test_exe())
+            .args(exact_test_args("start_gate_priority_target_process"))
+            .env(PRIORITY_REPORT_ENV, grandchild_report)
+            .env_remove(PRIORITY_GRANDCHILD_REPORT_ENV)
+            .status()
+            .expect("spawn grandchild priority reporter");
+        assert!(status.success(), "grandchild priority reporter failed");
+    }
+}
+
+#[test]
+fn process_priority_maps_to_platform_scheduling_values() {
+    assert_eq!(ProcessPriority::Normal.unix_nice(), 0);
+    assert_eq!(ProcessPriority::BelowNormal.unix_nice(), 10);
+    assert_eq!(ProcessPriority::Idle.unix_nice(), 19);
+    let policy = ProcessPolicy {
+        priority: ProcessPriority::BelowNormal,
+        cpu_limit_percent: Some(50),
+    };
+    assert_eq!(policy.priority, ProcessPriority::BelowNormal);
+    assert_eq!(policy.cpu_limit_percent, Some(50));
+}
+
+#[test]
+fn start_gate_policy_lowers_target_and_grandchild_priority() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target_report = temp.path().join("target-priority");
+    let grandchild_report = temp.path().join("grandchild-priority");
+
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config.args = exact_test_args("start_gate_priority_target_process");
+    config.env.insert(
+        PRIORITY_REPORT_ENV.to_string(),
+        target_report.display().to_string(),
+    );
+    config.env.insert(
+        PRIORITY_GRANDCHILD_REPORT_ENV.to_string(),
+        grandchild_report.display().to_string(),
+    );
+
+    let pending = PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        gate_args_prefix(),
+        "policy-nonce",
+    )
+    .expect("spawn pending PTY");
+    pending
+        .apply_policy(ProcessPolicy {
+            priority: ProcessPriority::BelowNormal,
+            cpu_limit_percent: Some(50),
+        })
+        .expect("apply resource policy before release");
+    assert!(!target_report.exists(), "target ran before release");
+
+    let handle = pending.release().expect("release pending PTY");
+    assert!(wait_for_path(&target_report, Duration::from_secs(10)));
+    assert!(wait_for_path(&grandchild_report, Duration::from_secs(10)));
+    let expected = expected_priority_report(ProcessPriority::BelowNormal);
+    // The report file may be observed between create and write; poll briefly.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let target = fs::read_to_string(&target_report).unwrap_or_default();
+        let grandchild = fs::read_to_string(&grandchild_report).unwrap_or_default();
+        if target.trim() == expected && grandchild.trim() == expected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "target priority {target:?} / grandchild priority {grandchild:?}, expected {expected:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(handle);
+}
+
+/// SPEC #1921 Phase 86 T518: a target that cannot exist must surface as a
+/// pre-spawn failure from `spawn_pending`, exactly like the direct PTY route,
+/// so launch retry bookkeeping never observes a released-then-dead target.
+#[test]
+fn pending_pty_reports_a_missing_target_before_release() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config.command = temp
+        .path()
+        .join("definitely-missing-target")
+        .display()
+        .to_string();
+
+    let error = match PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        gate_args_prefix(),
+        "missing-target-nonce",
+    ) {
+        Ok(_pending) => panic!("a missing target must fail before release"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("definitely-missing-target"),
+        "error must name the missing target: {error}"
+    );
+}
+
+/// Helper role that connects to the gate, then waits before sending HELLO.
+/// On Windows an accepted socket inherits the listener's non-blocking mode,
+/// so an owner that reads before the bytes arrive sees WSAEWOULDBLOCK
+/// (os error 10035) unless it switches the stream back to blocking first.
+#[test]
+fn start_gate_slow_hello_helper_process() {
+    if std::env::var_os(SLOW_HELLO_ENV).is_none() {
+        return;
+    }
+    use std::io::{Read as _, Write as _};
+    let endpoint = std::env::var("GWT_INTERNAL_PTY_GATE_ENDPOINT").expect("gate endpoint");
+    let nonce = std::env::var("GWT_INTERNAL_PTY_GATE_NONCE").expect("gate nonce");
+    let mut gate = std::net::TcpStream::connect(&endpoint).expect("connect gate");
+    thread::sleep(Duration::from_millis(400));
+    let mut hello = vec![1_u8];
+    hello.extend_from_slice(nonce.as_bytes());
+    gate.write_all(&hello).expect("send delayed hello");
+    gate.flush().expect("flush hello");
+    let mut release = [0_u8; 1];
+    let _ = gate.read_exact(&mut release);
+    std::process::exit(0);
+}
+
+#[test]
+fn pending_pty_waits_for_a_delayed_helper_hello() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config
+        .env
+        .insert(SLOW_HELLO_ENV.to_string(), "1".to_string());
+
+    let pending = PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        exact_test_args("start_gate_slow_hello_helper_process"),
+        "slow-hello-nonce",
+    )
+    .expect("a delayed HELLO must not be mistaken for a failed handshake");
+    assert!(pending.process_id().is_some());
+    pending.abort().expect("abort pending PTY");
+}
+
+#[cfg(windows)]
+mod lifecycle {
+    use super::*;
+    use std::{io, sync::mpsc};
+    use windows::Win32::{
+        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+
+    const TREE_DIR: &str = "GWT_TERMINAL_TEST_GATE_TREE_DIR";
+
+    // Retain exact process handles so PID reuse cannot affect the assertions.
+    struct Process(HANDLE);
+
+    impl Process {
+        fn open(pid: u32) -> Self {
+            // SAFETY: OpenProcess returns an owned handle for this fixture PID.
+            Self(unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.unwrap())
+        }
+
+        fn running(&self) -> bool {
+            // SAFETY: the process handle remains owned until Drop.
+            unsafe { WaitForSingleObject(self.0, 0) == WAIT_TIMEOUT }
+        }
+
+        fn assert_exited_by(&self, deadline: Instant) {
+            let timeout_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u32;
+            // SAFETY: wait on the captured process, rather than a new PID.
+            assert_eq!(
+                unsafe { WaitForSingleObject(self.0, timeout_ms) },
+                WAIT_OBJECT_0
+            );
+        }
+    }
+
+    impl Drop for Process {
+        fn drop(&mut self) {
+            // SAFETY: this is the unique owner of the OpenProcess handle.
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    #[test]
+    fn tree_descendant() {
+        let Some(dir) = std::env::var_os(TREE_DIR).map(PathBuf::from) else {
+            return;
+        };
+        fs::write(dir.join("descendant"), std::process::id().to_string()).unwrap();
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn tree_target() {
+        let Some(dir) = std::env::var_os(TREE_DIR).map(PathBuf::from) else {
+            return;
+        };
+        // This child outlives its parent; the pane's Job must reclaim it.
+        let _child = gwt_core::process::hidden_command(current_test_exe())
+            .args(exact_test_args("lifecycle::tree_descendant"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        fs::write(dir.join("target"), std::process::id().to_string()).unwrap();
+        while !dir.join("finish").exists() {
+            thread::sleep(Duration::from_millis(100));
+        }
+        std::process::exit(7);
+    }
+
+    struct GatedPane {
+        pane: Pane,
+        processes: Vec<Process>,
+        drained: mpsc::Receiver<io::Result<u64>>,
+    }
+
+    impl GatedPane {
+        fn spawn(dir: &Path, id: &str) -> Self {
+            fs::create_dir_all(dir).unwrap();
+            let mut config = target_config(&dir.join("unused"));
+            config.args = exact_test_args("lifecycle::tree_target");
+            config
+                .env
+                .insert(TREE_DIR.to_string(), dir.display().to_string());
+            let pending = Pane::new_pending_with_spawn_config(
+                id.to_string(),
+                config,
+                current_test_exe(),
+                gate_args_prefix(),
+                id,
+            )
+            .unwrap();
+            let gate = Process::open(pending.process_id().unwrap());
+            let pane = pending.release().unwrap();
+            let mut reader = pane.pty().reader().unwrap();
+            let (done, drained) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = done.send(io::copy(&mut reader, &mut io::sink()));
+            });
+            let mut processes = vec![gate];
+            for role in ["target", "descendant"] {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let pid = loop {
+                    if let Ok(Some(pid)) =
+                        fs::read_to_string(dir.join(role)).map(|value| value.parse::<u32>().ok())
+                    {
+                        break pid;
+                    }
+                    assert!(Instant::now() < deadline, "{role} did not start");
+                    thread::sleep(Duration::from_millis(100));
+                };
+                processes.push(Process::open(pid));
+            }
+            assert!(processes.iter().all(Process::running));
+            Self {
+                pane,
+                processes,
+                drained,
+            }
+        }
+
+        fn close(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            self.pane.kill().unwrap();
+            for process in &self.processes {
+                process.assert_exited_by(deadline);
+            }
+            self.pane.pty().release_descriptors();
+            self.drained
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("PTY reader must finish within the tree cleanup deadline")
+                .expect("PTY reader must reach EOF without an I/O error");
+            assert!(
+                Instant::now() <= deadline,
+                "tree cleanup exceeded five seconds"
+            );
+        }
+    }
+
+    /// #5113 AC-1/2: re-create the same pane identity while another pane
+    /// stays live, checking gate counts and the complete captured tree.
+    /// Startup restore uses this same PendingPane lifecycle (AC-3); this
+    /// fixture covers that shared boundary, not startup admission itself.
+    #[test]
+    fn closing_recreated_gated_panes_keeps_live_pane_and_gate_counts_equal() {
+        let _guard = pty_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let survivor = GatedPane::spawn(&temp.path().join("survivor"), "survivor");
+        let first = GatedPane::spawn(&temp.path().join("first"), "restored-pane");
+        assert_eq!(
+            [&survivor, &first]
+                .iter()
+                .filter(|p| p.processes[0].running())
+                .count(),
+            2
+        );
+        first.close();
+        assert_eq!(
+            [&survivor, &first]
+                .iter()
+                .filter(|p| p.processes[0].running())
+                .count(),
+            1
+        );
+        let restored = GatedPane::spawn(&temp.path().join("restored"), "restored-pane");
+        restored.close();
+        assert_eq!(
+            [&survivor, &first, &restored]
+                .iter()
+                .filter(|p| p.processes[0].running())
+                .count(),
+            1
+        );
+        assert!(survivor.processes.iter().all(Process::running));
+        survivor.close();
+    }
+
+    /// #5113 AC-1: natural exit keeps the gate's receipt, and cleanup still
+    /// reaches a descendant whose parent has already exited.
+    #[test]
+    fn natural_gate_exit_preserves_status_and_reclaims_remaining_descendant() {
+        let _guard = pty_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let mut live = GatedPane::spawn(temp.path(), "natural-exit");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        fs::write(temp.path().join("finish"), b"finish").unwrap();
+        live.processes[0].assert_exited_by(deadline);
+        live.pane.check_status().unwrap();
+        assert_eq!(live.pane.last_exit().unwrap().exit_code, 7);
+        live.close();
+        assert!(
+            Instant::now() <= deadline,
+            "natural exit cleanup exceeded five seconds"
+        );
+    }
 }

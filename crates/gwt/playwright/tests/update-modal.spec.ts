@@ -15,9 +15,60 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 test.describe("Update modal", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
+  test("a newer release replaces the ready prompt without reopening a deferred same-version modal", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(error.message));
+    // The two releases are injected fixtures, so Later must not try to persist
+    // a nonexistent manifest on the isolated backend.
+    await page.addInitScript(() => {
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string" && JSON.parse(data).kind === "apply_update_later") return;
+        return originalSend.call(this, data);
+      };
+    });
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressProjectSurfaces: true,
+      suppressUpdateApplyStart: true,
+    });
+    const inject = (detail: Record<string, unknown>) =>
+      page.evaluate((payload) => {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+      }, detail);
+    const available = { kind: "update_state", state: "available", current: "9.25.0" };
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+
+    await inject({ ...available, latest: "9.26.0" });
+    await cta.click();
+    await inject({ kind: "update_ready", version: "9.26.0", asset_path: "/tmp/fake-9.26.0" });
+    await expect(modal).toHaveAttribute("data-version", "9.26.0");
+    await page.locator("[data-update-modal-later]").click();
+    await inject({ ...available, latest: "9.26.0" });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveAttribute("data-status", "ready");
+
+    // Reopen the staged release so supersession must remove its Restart action.
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await inject({ ...available, latest: "9.27.0" });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveText("Update available: v9.27.0 - Click to update");
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "downloading");
+    await expect(modal).toHaveAttribute("data-version", "9.27.0");
+    await expect(page.locator("[data-update-modal-restart-now]")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
   test("CTA -> downloading -> ready -> Later morphs CTA to ready", async ({ page }) => {
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
+      suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
 
@@ -80,6 +131,7 @@ test.describe("Update modal", () => {
   test("update_apply_error renders failed state with stage / reason / log", async ({ page }) => {
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
+      suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
 

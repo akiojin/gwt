@@ -446,6 +446,11 @@ impl DisconnectServer {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Windows sockets accepted from a nonblocking listener
+                        // inherit nonblocking mode; reads must block up to the timeout.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("disconnect stream blocking");
                         stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
                             .expect("disconnect stream timeout");
@@ -528,6 +533,11 @@ impl ApplyThenDisconnectServer {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Windows sockets accepted from a nonblocking listener
+                        // inherit nonblocking mode; reads must block up to the timeout.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("apply-then-disconnect stream blocking");
                         stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
                             .expect("apply-then-disconnect stream timeout");
@@ -3350,9 +3360,15 @@ fn run_layout_ws_raw(
 
 fn run_layout_ws(fixture: &LayoutFixture, json: &str) -> Value {
     let output = run_layout_ws_raw(fixture, Some(&fixture.session_id), json);
+    // Issue #4296: a refusal is a structured `needs_human` payload on *stdout*
+    // with a non-zero exit, and nothing at all on stderr. Reporting only stderr
+    // here turned every refusal into "exit non-zero, stderr empty" and sent the
+    // reader hunting for a cause the op had already printed.
     assert!(
         output.status.success(),
-        "gwtd should exit 0 for `{json}`, stderr: {}",
+        "gwtd should exit 0 for `{json}`, exit {:?}, stdout: {}, stderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("parse gwtd envelope")

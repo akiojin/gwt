@@ -1,0 +1,224 @@
+//! Fail-open bridge from gwt/gwtd error sites into the host error ledger.
+//!
+//! Issue #3778: every recorded row is also published on the daemon `errors`
+//! channel when a project root is known. Publish failure never blocks the
+//! originating operation.
+
+use std::collections::BTreeMap;
+
+use chrono::{Duration, Utc};
+use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
+
+use crate::protocol::BackendEvent;
+
+pub const ERRORS_CHANNEL: &str = "errors";
+
+/// Append one error to the host ledger and fan it out on `errors`.
+///
+/// JSON operation refusals use [`report_error`] without publish so a rejected
+/// `daemon.subscribe` cannot handshake the cwd daemon as a side effect.
+pub fn report_error(kind: ErrorKind, message: impl Into<String>, target: ErrorTarget) {
+    report_error_with_publish(kind, message, target, BTreeMap::new(), false);
+}
+
+/// Record the error and publish it on the daemon `errors` channel when a
+/// project root is known. Used by launch, hook, daemon, and toast paths.
+pub fn report_error_and_publish(kind: ErrorKind, message: impl Into<String>, target: ErrorTarget) {
+    report_error_with_publish(kind, message, target, BTreeMap::new(), true);
+}
+
+/// [`report_error_and_publish`] with structured detail (Issue #3541). Returns
+/// the appended row so the caller can point the user at it, or `None` when the
+/// row was suppressed as a recent duplicate or the append failed.
+pub fn report_error_and_publish_with_context(
+    kind: ErrorKind,
+    message: impl Into<String>,
+    target: ErrorTarget,
+    context: BTreeMap<String, String>,
+) -> Option<ErrorRecord> {
+    report_error_with_publish(kind, message, target, context, true)
+}
+
+fn report_error_with_publish(
+    kind: ErrorKind,
+    message: impl Into<String>,
+    target: ErrorTarget,
+    context: BTreeMap<String, String>,
+    publish: bool,
+) -> Option<ErrorRecord> {
+    let record = ErrorRecord::new(kind, message, target).with_context(context);
+    append_record(record, publish)
+}
+
+fn append_record(record: ErrorRecord, publish: bool) -> Option<ErrorRecord> {
+    if recently_recorded(&record) {
+        return None;
+    }
+    match gwt_core::error_ledger::record(record) {
+        Ok(recorded) => {
+            if publish {
+                publish_recorded(&recorded, recorded.target.project_root.as_deref());
+            }
+            Some(recorded)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "error ledger append failed");
+            None
+        }
+    }
+}
+
+/// Explicit provenance carried privately from a GUI error source.
+#[derive(Debug, Clone)]
+pub enum ErrorOrigin {
+    Project(String),
+    Host,
+}
+
+pub fn record_backend_event(event: &BackendEvent) {
+    record_backend_event_with_origin(event, None);
+}
+
+pub fn report_host_error(kind: ErrorKind, message: impl Into<String>) {
+    append_record(ErrorRecord::new_host(kind, message), false);
+}
+
+/// Record an error event without inferring ownership from the current process.
+pub fn record_backend_event_with_origin(event: &BackendEvent, origin: Option<&ErrorOrigin>) {
+    let (message, issue) = match event {
+        BackendEvent::IssueMonitorToast {
+            level,
+            message,
+            issue_number,
+            ..
+        } if level.eq_ignore_ascii_case("error") => (message, *issue_number),
+        BackendEvent::IssueMonitorLaunchFailed {
+            issue_number,
+            message,
+        } => (message, Some(*issue_number)),
+        _ => return,
+    };
+    let record = match origin {
+        Some(ErrorOrigin::Host) => ErrorRecord::new_host(ErrorKind::LaunchFailure, message),
+        _ => ErrorRecord::new(
+            ErrorKind::LaunchFailure,
+            message,
+            ErrorTarget {
+                issue,
+                project_root: match origin {
+                    Some(ErrorOrigin::Project(root)) => Some(root.clone()),
+                    _ => None,
+                },
+                ..ErrorTarget::default()
+            },
+        ),
+    };
+    append_record(record, true);
+}
+
+fn recently_recorded(record: &ErrorRecord) -> bool {
+    let since = Utc::now() - Duration::seconds(5);
+    gwt_core::error_ledger::list_since(Some(since))
+        .ok()
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.kind == record.kind
+                    && row.message == record.message
+                    && row.scope == record.scope
+                    && row.target.project_root == record.target.project_root
+            })
+        })
+}
+
+fn publish_recorded(record: &ErrorRecord, project_root: Option<&str>) {
+    let Some(project_root) = project_root.filter(|root| !root.trim().is_empty()) else {
+        return;
+    };
+    let Ok(payload) = serde_json::to_value(record) else {
+        return;
+    };
+    let _ = crate::daemon_publisher::publish_event(
+        std::path::Path::new(project_root),
+        ERRORS_CHANNEL,
+        payload,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gwt_core::test_support::ScopedGwtHome;
+
+    fn isolated_home() -> (tempfile::TempDir, ScopedGwtHome) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = ScopedGwtHome::set(dir.path().join("gwt-home"));
+        (dir, home)
+    }
+
+    #[test]
+    fn error_toast_backend_event_is_written_to_the_ledger() {
+        let (_dir, _home) = isolated_home();
+        record_backend_event(&BackendEvent::IssueMonitorToast {
+            notification_transition: None,
+            level: "error".into(),
+            message: "stale generation launch failed".into(),
+            issue_number: Some(3778),
+        });
+
+        let listed = gwt_core::error_ledger::list_since(None).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].kind, ErrorKind::LaunchFailure);
+        assert_eq!(listed[0].message, "stale generation launch failed");
+        assert_eq!(listed[0].target.issue, Some(3778));
+    }
+
+    #[test]
+    fn identical_errors_from_different_projects_are_not_suppressed() {
+        let (_dir, _home) = isolated_home();
+        for root in ["/project-a", "/project-b"] {
+            report_error(
+                ErrorKind::LaunchFailure,
+                "same failure",
+                ErrorTarget {
+                    project_root: Some(root.into()),
+                    ..ErrorTarget::default()
+                },
+            );
+        }
+        let rows = gwt_core::error_ledger::list_since(None).expect("list");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn info_toasts_are_not_recorded() {
+        let (_dir, _home) = isolated_home();
+        record_backend_event(&BackendEvent::IssueMonitorToast {
+            notification_transition: None,
+            level: "info".into(),
+            message: "scan complete".into(),
+            issue_number: None,
+        });
+        assert!(gwt_core::error_ledger::list_since(None)
+            .expect("list")
+            .is_empty());
+    }
+
+    #[test]
+    fn duplicate_error_toasts_within_five_seconds_are_not_repeated() {
+        let (_dir, _home) = isolated_home();
+        let event = BackendEvent::IssueMonitorToast {
+            notification_transition: None,
+            level: "error".into(),
+            message: "same failure".into(),
+            issue_number: Some(1),
+        };
+        record_backend_event(&event);
+        record_backend_event(&event);
+        assert_eq!(
+            gwt_core::error_ledger::list_since(None)
+                .expect("list")
+                .len(),
+            1
+        );
+    }
+}

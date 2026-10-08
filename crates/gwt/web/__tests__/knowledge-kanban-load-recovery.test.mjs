@@ -35,9 +35,12 @@ async function importSurfaceModule() {
   ).replace(
     'from "/focus-trap.js"',
     'from "data:text/javascript,export function createFocusTrap(){return()=>{}}"',
+  ).replace(
+    'from "./launch-pending-controller.js"',
+    'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -1374,7 +1377,7 @@ test("500-row selection keeps list node identity and updates the right pane with
     surface.renderKnowledgeBridge("win-1");
 
     const list = element.querySelector(".knowledge-list");
-    const originalRows = [...list.children];
+    const originalRows = [...list.querySelectorAll(".knowledge-row")];
     assert.equal(originalRows.length, 500);
     const samples = [];
     for (let index = 0; index < 40; index += 1) {
@@ -1395,7 +1398,7 @@ test("500-row selection keeps list node identity and updates the right pane with
     }
 
     assert.deepEqual(
-      [...list.children],
+      [...list.querySelectorAll(".knowledge-row")],
       originalRows,
       "selection must not replace or reorder any list row node",
     );

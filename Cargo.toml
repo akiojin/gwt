@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.83.4"
+version = "9.112.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -107,7 +107,7 @@ base64 = "0.23"
 sha2 = "0.10"
 
 # Home directory
-dirs = "6"
+dirs = "7"
 
 # Executable detection
 which = "8"
@@ -147,7 +147,12 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 0
-debug = true
+# Preserve workspace backtrace locations without full variable/type information.
+# Local measurements and the adoption threshold are documented in docs/build-profiles.md.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.bench]
 inherits = "release"

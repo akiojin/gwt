@@ -1,2 +1,6 @@
 [build]
 incremental = false
+
+# Measured Windows link-time improvement; see docs/build-profiles.md.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

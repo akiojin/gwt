@@ -15,9 +15,7 @@
 //! - Block hook returning `Some(..)`   → 2 (block + stdout JSON)
 
 use chrono::Utc;
-use gwt::cli::hook::{
-    event_dispatcher, runtime_state::RuntimeState, HookOutput, IntentBoundaryEvent,
-};
+use gwt::cli::hook::{event_dispatcher, runtime_state::RuntimeState, HookOutput};
 use gwt::cli::{dispatch, TestEnv};
 use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
 use gwt_core::skill_state::{self, SkillState};
@@ -26,9 +24,8 @@ fn argv(strs: &[&str]) -> Vec<String> {
     strs.iter().map(std::string::ToString::to_string).collect()
 }
 
-fn env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 use gwt_core::test_support::ScopedEnvVar;
@@ -126,7 +123,7 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
     env.stdin = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {
-            "command": "gh issue view 123"
+            "command": "gh issue edit 123 --title updated"
         }
     })
     .to_string();
@@ -153,11 +150,11 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
         "stdout must deny the tool, got: {stdout}"
     );
     assert!(
-        stdout.contains("Direct GitHub workflow CLI commands are not allowed"),
+        stdout.contains("Direct GitHub workflow mutations are not allowed"),
         "short summary must remain in the visible reason: {stdout}"
     );
     assert!(
-        stdout.contains("pr.view"),
+        stdout.contains("issue.edit"),
         "canonical gwt JSON operation alternative must be present in the visible reason: {stdout}"
     );
     assert!(
@@ -176,12 +173,13 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.stdin = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {
-            "command": "gh issue view 123"
+            "command": "gh issue edit 123 --title updated"
         }
     })
     .to_string();
@@ -209,6 +207,120 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
         stdout.lines().count() == 1,
         "event dispatcher must emit exactly one JSON line, got: {stdout}"
     );
+    let stderr = String::from_utf8(env.stderr).unwrap();
+    assert!(!stderr.contains("parked in NeedsHuman"), "{stderr}");
+    assert!(
+        !stderr.contains("Stop working on this Issue now"),
+        "{stderr}"
+    );
+    // AC-3: a denial the agent can clear itself must say so, otherwise the
+    // agent reads the bare gate reason as a park and stops (Issue #4488).
+    let visible = stderr
+        .lines()
+        .next()
+        .expect("gate reason")
+        .chars()
+        .take(256)
+        .collect::<String>();
+    assert!(visible.contains("does not park the Issue"), "{visible}");
+}
+
+/// Issue #3716: Grok treats exit 2 as a gate denial but reads the visible
+/// reason from stderr rather than Claude's hookSpecificOutput envelope.
+#[test]
+fn grok_question_denial_exposes_the_handoff_reason_on_stderr() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let worktree = home.path().join("repo");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _autonomous = ScopedEnvVar::set(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV, "1");
+    let _issue = ScopedEnvVar::set(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV, "3716");
+    let mut session = Session::new(&worktree, "work/issue-3716", AgentId::GrokBuild);
+    session.id = "grok-question-session".to_string();
+    session.linked_issue_number = Some(3716);
+    session
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("save Grok Session");
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+
+    let prefs_path = gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+    let mut prefs = gwt::IssueMonitorPrefs::default();
+    let mut other = gwt::issue_monitor::AutonomousIssueRecord::new(4474);
+    other.phase = gwt::issue_monitor::AutonomousPhase::NeedsHuman;
+    prefs.autonomous_records.push(other);
+    gwt::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+
+    let mut env = TestEnv::new(worktree);
+    env.stdin = serde_json::json!({
+        "hookEventName": "pre_tool_use",
+        "sessionId": "native-grok-session",
+        "toolName": "ask_user_question",
+        "toolInput": {
+            "questions": [{
+                "question": "Proceed with the release?",
+                "options": []
+            }]
+        }
+    })
+    .to_string();
+
+    let question_input = env.stdin.clone();
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"]));
+
+    assert_eq!(code, 2, "Grok question must be denied before its UI opens");
+    let stderr = String::from_utf8(env.stderr.clone()).expect("stderr UTF-8");
+    let reason = stderr.lines().next().expect("Grok gate reason");
+    let visible_reason = reason.chars().take(256).collect::<String>();
+    assert!(
+        visible_reason
+            .starts_with(gwt::cli::hook::autonomous_question_guard::QUESTION_HANDOFF_SUMMARY),
+        "Grok reads the first stderr line as its visible gate reason: {stderr:?}",
+    );
+    assert!(
+        !visible_reason.contains("parked in NeedsHuman"),
+        "another Issue's park and this pending handoff are not this owner's park: {visible_reason:?}",
+    );
+    let stdout = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(!stdout.contains("It is parked for a human"), "{stdout}");
+    assert!(!stdout.contains("slot has been released"), "{stdout}");
+
+    let mut prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let mut owner = gwt::issue_monitor::AutonomousIssueRecord::new(3716);
+    owner.phase = gwt::issue_monitor::AutonomousPhase::NeedsHuman;
+    owner.needs_human_kind = Some(gwt::issue_monitor::NeedsHumanKind::StrandedExecutionGeneration);
+    prefs.autonomous_records.push(owner);
+    gwt::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    env.stdout.clear();
+    env.stderr.clear();
+    env.stdin = question_input;
+    assert_eq!(
+        dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"])),
+        2
+    );
+    let stderr = String::from_utf8(env.stderr).unwrap();
+    let visible = stderr
+        .lines()
+        .next()
+        .unwrap()
+        .chars()
+        .take(256)
+        .collect::<String>();
+    assert!(
+        visible.contains("Issue #3716 is parked in NeedsHuman"),
+        "{visible}"
+    );
+    // AC-3: the park branch names the human decision instead of leaving the
+    // agent to infer it from the gate reason.
+    assert!(visible.contains("a human must decide"), "{visible}");
+    assert!(!visible.contains("does not park the Issue"), "{visible}");
+    assert!(!visible.contains("human judgment is required"), "{visible}");
 }
 
 #[test]
@@ -253,6 +365,7 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
         tmp.path(),
         "build-spec",
         &SkillState {
+            start_evidence: None,
             active: true,
             owner_spec: Some(2077),
             started_at: Utc::now(),
@@ -328,7 +441,7 @@ fn event_dispatcher_codex_tool_use_fails_open_without_hook_session_id() {
 }
 
 #[test]
-fn event_dispatcher_session_start_fails_open_when_session_toml_is_corrupt() {
+fn event_dispatcher_session_start_fails_closed_when_session_toml_is_corrupt() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -346,26 +459,18 @@ fn event_dispatcher_session_start_fails_open_when_session_toml_is_corrupt() {
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
     let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
 
-    let output = event_dispatcher::handle_with_input(
+    let error = event_dispatcher::handle_with_input(
         "SessionStart",
         r#"{"session_id":"agent-123"}"#,
         tmp.path(),
         Some("session-corrupt"),
     )
-    .expect("corrupt session TOML must not make SessionStart exit 1");
-
-    let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
-        panic!("expected SessionStart metadata diagnostic");
-    };
-    assert_eq!(event, IntentBoundaryEvent::SessionStart);
+    .expect_err("SessionStart must reject provider identity that cannot be persisted");
+    assert!(error.to_string().contains("runtime-state"), "{error}");
     assert!(
-        text.contains("provider session id from SessionStart was not persisted"),
-        "{text}"
+        !runtime_path.exists(),
+        "failed identity must not publish Idle"
     );
-    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
-    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
-    assert_eq!(runtime_state.status, "Idle");
-    assert_eq!(runtime_state.source_event, "SessionStart");
 }
 
 #[test]

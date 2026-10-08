@@ -289,13 +289,9 @@ impl AppRuntime {
     /// through the existing `ApplyUpdateStart` pipeline so the standard
     /// update modal renders downloading → ready → restart.
     ///
-    /// Codex review on PR #2917: the resolved state is also published as
-    /// `UserEvent::UpdateAvailable` so `AppRuntime.pending_update` reflects
-    /// the chosen release. Without this step, `ApplyUpdateLater` /
-    /// `ApplyUpdateRestartNow` (which both gate on `self.pending_update`)
-    /// would either no-op or fire against an unrelated latest-update state
-    /// when the user selected a downgrade while `pending_update` was
-    /// `UpToDate`.
+    /// The shared event-loop admission publishes the accepted state before
+    /// downloading, so Later / Restart now use the selected release. Manual
+    /// selection never enters the automatic discovery path.
     pub(super) fn apply_update_to_version_events(
         &self,
         client_id: &str,
@@ -308,12 +304,6 @@ impl AppRuntime {
             let current_exe = std::env::current_exe().ok();
             match manager.resolve_state_for_version(&version, current_exe.as_deref()) {
                 Ok(state) => {
-                    // Update `pending_update` first so Later / Restart now
-                    // read the selected release. The frontend update-cta
-                    // ignores the broadcast `UpdateState` here because its
-                    // local status is already `applying` (the modal was
-                    // opened by `beginUpdateDownloading` on click).
-                    proxy.send(UserEvent::UpdateAvailable(state.clone()));
                     proxy.send(UserEvent::ApplyUpdateStart {
                         state,
                         client_id: client_id_owned,
@@ -332,10 +322,15 @@ impl AppRuntime {
 
     pub(super) fn save_ui_trace_events(
         &self,
+        context: Option<&super::ProjectContext>,
         client_id: ClientId,
         trace: UiTracePayload,
     ) -> Vec<OutboundEvent> {
-        let event = match save_ui_trace_to_log_dir(&self.log_dir, trace) {
+        let log_dir = context
+            .and_then(|context| self.project_log_scope_for_tab(&context.tab_id))
+            .map(|scope| scope.log_dir())
+            .unwrap_or(&self.log_dir);
+        let event = match save_ui_trace_to_log_dir(log_dir, trace) {
             Ok(result) => BackendEvent::UiTraceSaved {
                 path: result.path.display().to_string(),
                 entries: result.entries,
@@ -567,6 +562,7 @@ impl AppRuntime {
         language: String,
         codex_trust_managed_hooks: Option<bool>,
         board_provider: Option<String>,
+        agent_resource: Option<gwt::protocol::AgentResourceSettings>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -587,6 +583,7 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                agent_resource,
             ),
         )]
     }
@@ -631,11 +628,16 @@ impl AppRuntime {
             BackendEvent::CustomAgentSaved { .. } | BackendEvent::CustomAgentDeleted { .. }
         ) {
             self.launch_wizard_cache.refresh_agent_options();
-            let had_open_wizard = self.launch_wizard.is_some();
-            self.refresh_open_launch_wizard_from_cache();
+            let contexts = self
+                .project_states
+                .values()
+                .filter(|state| state.launch_wizard.is_some())
+                .map(|state| state.context.clone())
+                .collect::<Vec<_>>();
             let mut events = vec![OutboundEvent::reply(client_id, event)];
-            if had_open_wizard {
-                events.push(self.launch_wizard_state_outbound());
+            for context in contexts {
+                self.refresh_open_launch_wizard_from_cache(&context);
+                events.push(self.launch_wizard_state_outbound(&context));
             }
             return events;
         }
@@ -651,6 +653,21 @@ impl AppRuntime {
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let event = gwt::custom_agents_dispatch::test_connection_event(&base_url, &api_key);
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+    }
+
+    pub(crate) fn spawn_supported_agent_list(&self, client_id: ClientId) {
+        let cache = self.launch_wizard_cache.clone();
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            // The first cache read may join detection; keep that wait off
+            // the GUI loop, just like the other Settings probes.
+            let event = BackendEvent::SupportedAgentList {
+                agents: cache.supported_agents(),
+            };
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                 client_id, event,
             )]));
@@ -693,12 +710,39 @@ impl AppRuntime {
         }
     }
 
-    /// SPEC-2041 Phase 19 (FR-052): user clicked the update CTA and the modal
-    /// is opening in the `downloading` state. Backend kicks off
-    /// `prepare_update` on a worker thread and emits
-    /// [`BackendEvent::UpdateReady`] (or [`BackendEvent::UpdateApplyError`])
-    /// without exiting the parent process.
-    pub(super) fn apply_update_start_events(&self, client_id: &str) -> Vec<OutboundEvent> {
+    /// Issue #4801: discovery enters the same staging path as the Update
+    /// button when an open project opted into unattended updates.
+    pub(crate) fn start_automatic_update_download(&mut self) {
+        let Some(gwt_core::update::UpdateState::Available {
+            latest,
+            asset_url: Some(_),
+            ..
+        }) = self.pending_update.as_ref()
+        else {
+            return;
+        };
+        if gwt_core::update::load_pending_update_manifest()
+            .is_some_and(|manifest| manifest.version == *latest)
+        {
+            return;
+        }
+        let enabled = self.project_contexts().iter().any(|context| {
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                &context.project_root,
+            ))
+            .is_ok_and(|prefs| prefs.autonomous_mode && prefs.auto_apply_updates.unwrap_or(true))
+        });
+        if enabled {
+            self.apply_update_start_events(super::UPDATE_AUTO_APPLY_CLIENT_ID);
+        }
+    }
+
+    /// Shared staging request for the update CTA and automatic discovery.
+    /// The worker emits `UpdateReady` or `UpdateApplyError` without exiting.
+    pub(super) fn apply_update_start_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        if self.update_download_in_flight.is_some() {
+            return Vec::new();
+        }
         match self.pending_update.clone() {
             Some(
                 state @ gwt_core::update::UpdateState::Available {
@@ -774,11 +818,11 @@ impl AppRuntime {
         }
     }
 
-    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend
-    /// commits the prepared payload via the helper subprocess and exits the
-    /// parent. Falls back to the legacy `apply_update_state_and_exit` path
-    /// when no prepared payload exists yet (e.g. user manually re-clicked CTA
-    /// before download completed).
+    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. The event
+    /// loop resolves the prepared payload (persisted manifest, or a download
+    /// when the user re-clicked the CTA before it persisted) and commits it
+    /// through the graceful `ApplyUpdateGraceful` route (Issue #4038), which
+    /// quits via `QuitApp` instead of exiting from a worker thread.
     pub(super) fn apply_update_restart_now_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         match self.pending_update.clone() {
             Some(

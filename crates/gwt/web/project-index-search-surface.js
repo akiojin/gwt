@@ -35,7 +35,6 @@ export function createProjectIndexSearchSurface({
   knowledgeKindForPreset,
   requestKnowledgeDetail,
   renderIndexPanelInAllSettingsWindows,
-  refreshProjectTabStateCues,
   requestFullIndexStatusRefresh,
 }) {
       const indexSearchStateMap = new Map();
@@ -61,7 +60,6 @@ export function createProjectIndexSearchSurface({
         });
         renderIndexPanelInAllSettingsWindows();
         renderProjectIndexWindows();
-        refreshProjectTabStateCues();
       }
 
       const INDEX_SEARCH_SCOPES = Object.freeze([

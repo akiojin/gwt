@@ -41,16 +41,10 @@ test("the Open Project split-button is fully retired", () => {
   );
 });
 
-test("the top bar keeps a single Projects switcher control", () => {
+test("the top bar exposes explicit Close Project without a switcher", () => {
   const document = dom();
-  const button = document.getElementById("project-switcher-button");
-  assert.ok(button, "expected #project-switcher-button");
-  assert.match(button.textContent, /Projects/);
-  assert.equal(button.getAttribute("aria-haspopup"), "listbox");
-  assert.ok(
-    document.getElementById("project-switcher-panel"),
-    "expected #project-switcher-panel",
-  );
+  assert.ok(document.getElementById("close-project-button"));
+  assert.equal(document.getElementById("project-switcher-button"), null);
 });
 
 test("the 0-tab picker uses the consolidated Open Folder / Clone labels", () => {

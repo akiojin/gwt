@@ -8,6 +8,9 @@ authors.workspace = true
 description = "Docker detection, container management, and DevContainer support for gwt"
 publish = false
 
+[features]
+test-support = []
+
 [dependencies]
 gwt-core.workspace = true
 serde.workspace = true
@@ -16,5 +19,7 @@ serde_yaml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+gwt-core = { workspace = true, features = ["test-support"] }
+libc.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true

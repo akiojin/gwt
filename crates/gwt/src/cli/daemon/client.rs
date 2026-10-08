@@ -2,7 +2,8 @@
 //!
 //! This module is the front-door client used by `gwt` and the in-process
 //! hook dispatcher to talk to a running `gwtd` daemon over the local
-//! Unix domain socket.
+//! IPC transport (`super::transport`: Unix domain socket or Windows
+//! named pipe).
 //!
 //! Wire format mirrors `super::server::handle_connection`:
 //!
@@ -23,35 +24,30 @@
 //! typed frame schema is already extensible via new
 //! `ClientFrame` / `DaemonFrame` variants.
 
-#![cfg(unix)]
-
 use gwt_core::daemon::{
     validate_handshake, DaemonEndpoint, IpcHandshakeRequest, IpcHandshakeResponse,
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{
-        unix::{OwnedReadHalf, OwnedWriteHalf},
-        UnixStream,
-    },
-};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use super::transport::{check_server_identity, IpcReadHalf, IpcStream, IpcWriteHalf};
 
 /// Connected, post-handshake daemon client.
 ///
 /// `DaemonClient` owns the split read/write halves of the underlying
-/// [`UnixStream`]; dropping the value closes the connection.
+/// `IpcStream`; dropping the value closes the connection.
 pub struct DaemonClient {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<IpcReadHalf>,
+    writer: IpcWriteHalf,
 }
 
 impl DaemonClient {
     /// Connect to the daemon at `endpoint.bind` and complete the
     /// handshake. The returned client is ready for [`Self::send_frame`].
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self, String> {
-        let stream = UnixStream::connect(&endpoint.bind)
+        let stream = IpcStream::connect(&endpoint.bind)
             .await
             .map_err(|err| format!("daemon connect failed ({}): {err}", endpoint.bind))?;
+        check_server_identity(&stream, endpoint.pid)?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
@@ -105,7 +101,7 @@ where
     Ok(())
 }
 
-async fn read_json_line<T>(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<T>, String>
+async fn read_json_line<T>(reader: &mut BufReader<IpcReadHalf>) -> Result<Option<T>, String>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -163,16 +159,6 @@ mod tests {
         )
     }
 
-    async fn wait_for_socket(path: &std::path::Path) {
-        for _ in 0..50 {
-            if path.exists() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("daemon socket never appeared at {}", path.display());
-    }
-
     #[tokio::test]
     async fn client_connects_to_daemon_and_round_trips_a_frame() {
         let temp = TempDir::new().expect("tempdir");
@@ -185,17 +171,18 @@ mod tests {
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
         let server_hub = BroadcastHub::new();
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint,
-                server_socket,
-                server_endpoint_path,
-                server_hub,
-            )
-            .await
-        });
+        let server_handle = server::spawn_server(
+            server_endpoint,
+            server_socket,
+            server_endpoint_path,
+            server_hub,
+        )
+        .expect("bind test server");
 
-        wait_for_socket(&socket_path).await;
+        assert!(
+            crate::cli::daemon::transport::bind_is_present(&socket_path),
+            "test server must bind before returning its task handle"
+        );
 
         let mut client = DaemonClient::connect(&endpoint)
             .await
@@ -239,17 +226,13 @@ mod tests {
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
         let server_hub = BroadcastHub::new();
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint_clone,
-                server_socket,
-                server_endpoint_path,
-                server_hub,
-            )
-            .await
-        });
-
-        wait_for_socket(&socket_path).await;
+        let server_handle = server::spawn_server(
+            server_endpoint_clone,
+            server_socket,
+            server_endpoint_path,
+            server_hub,
+        )
+        .expect("bind test server");
 
         // Client uses a different auth_token than the daemon expects.
         let mut bad_endpoint = server_endpoint.clone();
@@ -281,17 +264,13 @@ mod tests {
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
         let server_hub = BroadcastHub::new();
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint_clone,
-                server_socket,
-                server_endpoint_path,
-                server_hub,
-            )
-            .await
-        });
-
-        wait_for_socket(&socket_path).await;
+        let server_handle = server::spawn_server(
+            server_endpoint_clone,
+            server_socket,
+            server_endpoint_path,
+            server_hub,
+        )
+        .expect("bind test server");
 
         let mut bad_endpoint = server_endpoint.clone();
         bad_endpoint.protocol_version = DAEMON_PROTOCOL_VERSION + 99;
@@ -305,6 +284,9 @@ mod tests {
 
     #[tokio::test]
     async fn client_status_request_returns_daemon_snapshot() {
+        // The initial monitor load runs after spawn_server returns, on this
+        // current-thread runtime. Keep its fixture budget pinned through Status.
+        let _prefs_budget = server::pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
@@ -318,17 +300,13 @@ mod tests {
         // Pre-create one channel so the snapshot has a known nonzero
         // value to assert against.
         let _initial_rx = server_hub.subscribe("warmup");
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint,
-                server_socket,
-                server_endpoint_path,
-                server_hub,
-            )
-            .await
-        });
-
-        wait_for_socket(&socket_path).await;
+        let server_handle = server::spawn_server(
+            server_endpoint,
+            server_socket,
+            server_endpoint_path,
+            server_hub,
+        )
+        .expect("bind test server");
 
         let mut client = DaemonClient::connect(&endpoint)
             .await
@@ -384,17 +362,13 @@ mod tests {
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
         let server_hub = BroadcastHub::new();
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint,
-                server_socket,
-                server_endpoint_path,
-                server_hub,
-            )
-            .await
-        });
-
-        wait_for_socket(&socket_path).await;
+        let server_handle = server::spawn_server(
+            server_endpoint,
+            server_socket,
+            server_endpoint_path,
+            server_hub,
+        )
+        .expect("bind test server");
 
         // Client A: subscribes to "board" and waits for events.
         let mut subscriber = DaemonClient::connect(&endpoint).await.expect("subscriber");
@@ -459,17 +433,13 @@ mod tests {
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
         let server_hub = BroadcastHub::new();
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint,
-                server_socket,
-                server_endpoint_path,
-                server_hub,
-            )
-            .await
-        });
-
-        wait_for_socket(&socket_path).await;
+        let server_handle = server::spawn_server(
+            server_endpoint,
+            server_socket,
+            server_endpoint_path,
+            server_hub,
+        )
+        .expect("bind test server");
 
         // Three independent subscribers on the same "board" channel.
         let mut subscribers = Vec::with_capacity(3);
@@ -542,17 +512,13 @@ mod tests {
         // Pass a hub clone the test keeps so we can publish into it.
         let server_hub = BroadcastHub::new();
         let publisher = server_hub.clone();
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint,
-                server_socket,
-                server_endpoint_path,
-                server_hub,
-            )
-            .await
-        });
-
-        wait_for_socket(&socket_path).await;
+        let server_handle = server::spawn_server(
+            server_endpoint,
+            server_socket,
+            server_endpoint_path,
+            server_hub,
+        )
+        .expect("bind test server");
 
         let mut client = DaemonClient::connect(&endpoint)
             .await

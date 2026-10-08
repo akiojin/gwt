@@ -10,8 +10,11 @@ use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
-    session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
-    types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
+    permission_mode::{PermissionLaunchSource, PermissionModeDecision, PermissionModeInputs},
+    session::{SessionExecutionBinding, GWT_SESSION_RUNTIME_PATH_ENV},
+    types::{
+        AgentColor, AgentId, DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode,
+    },
 };
 
 /// `RUST_LOG` filter that turns on Codex's own file logging (Issue #3341).
@@ -78,28 +81,11 @@ fn materialize_claude_settings_file(
     Ok(path)
 }
 
-/// Resolve the gwt repo hash for the directory by shelling out to
-/// `git remote get-url origin`. Returns `None` when no origin is configured.
+/// Resolve the gwt repo hash without spawning Git on the launch path.
+/// Returns `None` when no origin is configured.
 fn detect_repo_hash_for_dir(dir: &Path) -> Option<String> {
-    let output = gwt_core::process::hidden_command("git")
-        .arg("remote")
-        .arg("get-url")
-        .arg("origin")
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if url.is_empty() {
-        return None;
-    }
-    Some(
-        gwt_core::repo_hash::compute_repo_hash(&url)
-            .as_str()
-            .to_string(),
-    )
+    let repo = gwt_git::Repository::discover(dir).ok()?;
+    gwt_core::repo_hash::detect_repo_hash(repo.path()).map(|hash| hash.as_str().to_owned())
 }
 
 /// Resolve the gwt worktree hash for the directory.
@@ -119,7 +105,7 @@ fn compute_worktree_hash_for_dir(dir: &Path) -> Option<String> {
 pub struct ResolvedRunner {
     /// Executable to invoke (e.g., "claude", "bunx", "npx").
     pub executable: String,
-    /// Base args inserted before agent-specific args (e.g., `["@anthropic-ai/claude-code@1.2.3"]`).
+    /// Custom package args inserted before agent-specific args.
     pub base_args: Vec<String>,
 }
 
@@ -130,23 +116,33 @@ fn command_basename(command: &str) -> &str {
         .unwrap_or(command)
 }
 
+// Legacy Session migration still accepts historical Codex package argv.
+// New built-in launches always use the installed command.
 fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
-    match command_basename(command) {
-        "codex" => Some(0),
-        "bunx" | "npx" => {
-            let mut index = 0usize;
-            if args.get(index).is_some_and(|arg| arg == "--yes") {
-                index += 1;
-            }
-            args.get(index)
-                .is_some_and(|arg| arg.contains("@openai/codex"))
-                .then_some(index + 1)
-        }
-        _ => None,
+    let command = command_basename(command);
+    if ["codex", "codex.exe", "codex.cmd"]
+        .iter()
+        .any(|candidate| command.eq_ignore_ascii_case(candidate))
+    {
+        return Some(0);
     }
+    if !["bunx", "bunx.exe", "bunx.cmd", "npx", "npx.exe", "npx.cmd"]
+        .iter()
+        .any(|candidate| command.eq_ignore_ascii_case(candidate))
+    {
+        return None;
+    }
+
+    let mut index = 0usize;
+    if args.get(index).is_some_and(|arg| arg == "--yes") {
+        index += 1;
+    }
+    args.get(index)
+        .is_some_and(|arg| arg.contains("@openai/codex"))
+        .then_some(index + 1)
 }
 
-/// Canonical source of truth for agent-neutral default launch arguments.
+/// Canonical source of truth for entrypoint-independent default launch arguments.
 ///
 /// Every agent launch entry point — wizard (`AgentLaunchBuilder::build`),
 /// preset spawn (`crates/gwt/src/preset.rs`), and persisted session migration
@@ -154,18 +150,32 @@ fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
 /// a default like `--no-alt-screen` cannot silently miss an entry point.
 /// See SPEC-1921 FR-064 / Issue #2091 for background.
 ///
-/// This returns only the *agent-neutral* positional defaults. Agent-specific
-/// env vars and conditional flags (model, session-mode, fast-mode, reasoning,
-/// etc.) remain the responsibility of the agent-specific builder methods.
+/// This returns only unconditional defaults shared by every entry point for an
+/// agent. Conditional flags (model, session-mode, fast-mode, reasoning, etc.)
+/// remain the responsibility of the agent-specific builder methods.
 pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
     match agent {
+        AgentId::Codex => vec![
+            // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
+            // scrollback instead of redraw-only fullscreen frames. Matches the
+            // CLI's documented inline mode for preserving terminal history.
+            "--no-alt-screen".to_string(),
+            // SPEC-1921 FR-181..185: expose Codex's native request_user_input
+            // overlay in Default mode across managed, preset, and restored
+            // launches. Use the tolerant config form so pre-0.106 Codex keeps
+            // starting instead of rejecting an unknown `--enable` feature.
+            "--config=features.default_mode_request_user_input=true".to_string(),
+            // Suppress startup warnings for the unstable feature enabled above,
+            // including with Backend Override's isolated CODEX_HOME. Codex only
+            // supports global suppression, so user-enabled feature warnings also disappear.
+            "--config=suppress_unstable_features_warning=true".to_string(),
+        ],
         // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
         // scrollback instead of redraw-only fullscreen frames. Matches the
         // CLI's documented inline mode for preserving terminal history.
-        AgentId::Codex | AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
+        AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
         | AgentId::Antigravity
-        | AgentId::Gemini
         | AgentId::OpenCode
         | AgentId::OpenClaw
         | AgentId::Hermes
@@ -178,24 +188,17 @@ pub fn normalize_launch_args(agent_id: &AgentId, command: &str, args: &mut Vec<S
     if !matches!(agent_id, AgentId::Codex) {
         return;
     }
-    let Some(insert_index) = codex_runner_prefix_len(command, args) else {
+    let canonical = canonical_launch_args(agent_id);
+    let mut normalized = args
+        .iter()
+        .filter(|arg| !canonical.contains(arg))
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(insert_index) = codex_runner_prefix_len(command, &normalized) else {
         return;
     };
-    for canonical in canonical_launch_args(agent_id).iter().rev() {
-        if args.iter().any(|existing| existing == canonical) {
-            continue;
-        }
-        args.insert(insert_index, canonical.clone());
-    }
-}
-
-/// Resolve the runner command based on version selection.
-///
-/// - `"installed"` → use the agent's direct command (must be in PATH).
-/// - `"latest"` or a semver string → use bunx/npx with `@package@version`.
-pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
-    let env = host_process_env();
-    resolve_runner_with_env(agent_id, version, &env)
+    normalized.splice(insert_index..insert_index, canonical);
+    *args = normalized;
 }
 
 /// Build the descriptor-defined argv used to check an installed built-in
@@ -209,77 +212,6 @@ pub fn builtin_version_probe_args(agent_id: &AgentId) -> Option<Vec<String>> {
         .collect::<Vec<_>>();
     args.push(descriptor.version_flag.to_string());
     Some(args)
-}
-
-/// Resolve the latest package runner against the launch environment rather
-/// than the gwt process environment.
-pub fn resolve_latest_runner_with_env(
-    agent_id: &AgentId,
-    env: &HashMap<String, String>,
-) -> ResolvedRunner {
-    resolve_latest_runner_with_effective_env(agent_id, env, &[], None)
-}
-
-/// Resolve the latest package runner with the exact environment and cwd that
-/// will be used for launch. Explicit environment entries are applied after
-/// `remove_env`; relative PATH entries are interpreted from `cwd`.
-pub(crate) fn resolve_latest_runner_with_effective_env(
-    agent_id: &AgentId,
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> ResolvedRunner {
-    resolve_runner_with_effective_env(agent_id, "latest", env, remove_env, cwd)
-}
-
-fn resolve_runner_with_env(
-    agent_id: &AgentId,
-    version: &str,
-    env: &HashMap<String, String>,
-) -> ResolvedRunner {
-    resolve_runner_with_effective_env(agent_id, version, env, &[], None)
-}
-
-fn resolve_runner_with_effective_env(
-    agent_id: &AgentId,
-    version: &str,
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> ResolvedRunner {
-    if version == "installed" || version.is_empty() {
-        return ResolvedRunner {
-            executable: agent_id.command().to_string(),
-            base_args: Vec::new(),
-        };
-    }
-
-    let Some(package) = agent_id.package_name() else {
-        // No npm package — fall back to direct command
-        return ResolvedRunner {
-            executable: agent_id.command().to_string(),
-            base_args: Vec::new(),
-        };
-    };
-
-    let version_spec = if version == "latest" {
-        format!("{package}@latest")
-    } else {
-        format!("{package}@{version}")
-    };
-
-    let (executable, needs_yes) =
-        find_bunx_or_npx_for_agent_with_effective_env(agent_id, env, remove_env, cwd);
-    let mut base_args = Vec::new();
-    if needs_yes {
-        base_args.push("--yes".to_string());
-    }
-    base_args.push(version_spec);
-
-    ResolvedRunner {
-        executable,
-        base_args,
-    }
 }
 
 fn resolve_custom_runner_with_effective_env(
@@ -331,45 +263,6 @@ fn package_runner_candidates() -> &'static [(&'static str, bool)] {
     }
 }
 
-fn find_bunx_or_npx_for_agent_with_effective_env(
-    agent_id: &AgentId,
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> (String, bool) {
-    find_package_runner_with_effective_env(
-        package_runner_candidates_for_agent(agent_id),
-        env,
-        remove_env,
-        cwd,
-    )
-}
-
-fn package_runner_candidates_for_agent(agent_id: &AgentId) -> &'static [(&'static str, bool)] {
-    #[cfg(windows)]
-    {
-        if matches!(agent_id, AgentId::Codex | AgentId::ClaudeCode) {
-            // Native bunx on Windows can split a whitespace-bearing final prompt
-            // when it re-spawns the package binary (SPEC-1921 Phase 75 / #3456).
-            // npx preserves the prompt as one argv entry. Targeted launches
-            // fail closed when npx is unavailable; Bunx is not a candidate.
-            &[("npx.cmd", true)]
-        } else {
-            package_runner_candidates()
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if matches!(agent_id, AgentId::ClaudeCode) {
-            // Bun can leave Claude Code's postinstall-managed native binary as a stub
-            // in one-shot package runs; npx executes the published package reliably.
-            &[("npx", true), ("bunx", false)]
-        } else {
-            package_runner_candidates()
-        }
-    }
-}
-
 fn find_package_runner_with_effective_env(
     candidates: &'static [(&'static str, bool)],
     env: &HashMap<String, String>,
@@ -401,6 +294,18 @@ fn absolute_launch_cwd(cwd: Option<&Path>) -> PathBuf {
 }
 
 fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -> Option<String> {
+    effective_launch_path_with_host(env, remove_env, host_process_path)
+}
+
+/// [`effective_launch_path`] with the inherited host `PATH` supplied by
+/// `host_path` instead of read from the process. Tests inject a fixture PATH
+/// here rather than swapping the process-global one, which would race every
+/// parallel process spawn (Issue #3895).
+fn effective_launch_path_with_host(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    host_path: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     if let Some((_, value)) = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")) {
         return Some(value.clone());
     }
@@ -410,6 +315,10 @@ fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -
     {
         return None;
     }
+    host_path()
+}
+
+fn host_process_path() -> Option<String> {
     host_process_env()
         .into_iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
@@ -479,53 +388,6 @@ pub(crate) fn resolve_direct_runner_with_effective_env(
         .map(|candidate| candidate.display().to_string())
 }
 
-/// Platform priority list of `npx` fallback executables consulted when the host
-/// `bunx` package-runner probe fails (Issue #2981). On Windows the `.cmd`
-/// variant is the only Windows candidate because the bare `npx` POSIX shim is
-/// not directly spawnable there (SPEC-1921 FR-080 / FR-167). Other platforms
-/// use the bare canonical name.
-fn npx_fallback_candidates() -> &'static [(&'static str, bool)] {
-    #[cfg(windows)]
-    {
-        &[("npx.cmd", true)]
-    }
-    #[cfg(not(windows))]
-    {
-        &[("npx", true)]
-    }
-}
-
-/// Resolve the host `npx` fallback executable used when the `bunx`
-/// package-runner probe fails during launch.
-///
-/// Resolution flows through the same Windows-aware `find_package_runner_in_path`
-/// machinery as the primary runner, so on Windows the spawnable `npx.cmd` is
-/// selected instead of the bare `npx` shim (Issue #2981). An unresolved Windows
-/// lookup retains `npx.cmd` so the health check fails closed without ever
-/// dispatching the POSIX shim; other platforms retain canonical bare `npx`.
-pub fn resolve_host_npx_fallback_executable(env: &HashMap<String, String>) -> String {
-    resolve_host_npx_fallback_executable_with_effective_env(env, &[], None)
-}
-
-pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
-    env: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<&Path>,
-) -> String {
-    let cwd = absolute_launch_cwd(cwd);
-    effective_launch_path(env, remove_env)
-        .as_deref()
-        .and_then(|path| find_package_runner_in_path(npx_fallback_candidates(), Some(path), &cwd))
-        .map(|(executable, _needs_yes)| executable)
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                "npx.cmd".to_string()
-            } else {
-                "npx".to_string()
-            }
-        })
-}
-
 /// Execution lifecycle intent is independent from provider conversation
 /// continuity. In particular, `SessionMode::Resume` can resume the same
 /// conversation while a coordinator starts a new producing generation.
@@ -591,328 +453,17 @@ pub enum ManualLaunchSuccessorPredecessor {
     ExactTerminalActive,
 }
 
-/// Reuse a fresh Bun-created package executable for a host launch.
-///
-/// `bunx <package>@latest` keeps an already-materialized package under the
-/// host temp directory, but still performs package resolution on every
-/// invocation. That repeated resolution is several seconds for Codex on some
-/// hosts. This best-effort fast path runs the validated cached entrypoint with
-/// the same Bun runtime while preserving the requested worktree as the process
-/// cwd.
-///
-/// `latest` cache entries are accepted for at most 24 hours. Missing, stale,
-/// malformed, escaping, non-Bun, non-host, and unsupported-platform entries
-/// leave the launch untouched so the existing bunx/npx path remains the
-/// authoritative fallback.
-pub fn apply_host_bunx_cache_fast_path(config: &mut LaunchConfig) -> bool {
-    #[cfg(unix)]
-    {
-        let temp_root = config
-            .env_vars
-            .get("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        apply_host_bunx_cache_fast_path_from(config, &temp_root, std::time::SystemTime::now())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = config;
-        false
-    }
-}
-
-#[cfg(unix)]
-fn apply_host_bunx_cache_fast_path_from(
-    config: &mut LaunchConfig,
-    temp_root: &Path,
-    now: std::time::SystemTime,
-) -> bool {
-    apply_host_bunx_cache_fast_path_from_uid(config, temp_root, now, current_effective_uid())
-}
-
-#[cfg(unix)]
-fn current_effective_uid() -> u32 {
-    // SAFETY: `geteuid` has no preconditions and does not dereference memory.
-    unsafe { libc::geteuid() }
-}
-
-#[cfg(unix)]
-fn apply_host_bunx_cache_fast_path_from_uid(
-    config: &mut LaunchConfig,
-    temp_root: &Path,
-    now: std::time::SystemTime,
-    effective_uid: u32,
-) -> bool {
-    if config.runtime_target != LaunchRuntimeTarget::Host
-        || command_basename(&config.command) != "bunx"
-    {
-        return false;
-    }
-
-    let Some(package) = config.agent_id.package_name() else {
-        return false;
-    };
-    let Some(version) = config.tool_version.as_deref() else {
-        return false;
-    };
-    if version.is_empty()
-        || version == "installed"
-        || version.contains('/')
-        || version.contains('\\')
-        || version == "."
-        || version == ".."
-    {
-        return false;
-    }
-
-    let version_spec = format!("{package}@{version}");
-    let Some(args) = strip_package_runner_prefix(&config.args, &version_spec) else {
-        return false;
-    };
-    let Some(executable) = find_valid_bunx_cached_executable(
-        temp_root,
-        effective_uid,
-        &config.agent_id,
-        package,
-        version,
-        now,
-    ) else {
-        return false;
-    };
-    let Some(bun_runtime) = resolve_bun_runtime_for_cache_fast_path(config) else {
-        return false;
-    };
-
-    config.command = bun_runtime.to_string_lossy().into_owned();
-    config.args = std::iter::once(executable.to_string_lossy().into_owned())
-        .chain(args)
-        .collect();
-    true
-}
-
-#[cfg(unix)]
-fn resolve_bun_runtime_for_cache_fast_path(config: &LaunchConfig) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cwd = config
-        .working_dir
-        .clone()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let command = Path::new(&config.command);
-    let resolved_bunx = if command.is_absolute() || command.components().count() > 1 {
-        command.to_path_buf()
-    } else {
-        let inherited_path = std::env::var("PATH").ok();
-        let path = config
-            .env_vars
-            .get("PATH")
-            .map(String::as_str)
-            .or(inherited_path.as_deref())?;
-        which::which_in(command, Some(path), &cwd).ok()?
-    };
-    let canonical_bunx = std::fs::canonicalize(resolved_bunx).ok()?;
-    let bun_runtime = if command_basename(canonical_bunx.to_string_lossy().as_ref()) == "bun" {
-        canonical_bunx
-    } else {
-        std::fs::canonicalize(canonical_bunx.parent()?.join("bun")).ok()?
-    };
-    let metadata = std::fs::metadata(&bun_runtime).ok()?;
-    (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).then_some(bun_runtime)
-}
-
-#[cfg(unix)]
-fn strip_package_runner_prefix(args: &[String], version_spec: &str) -> Option<Vec<String>> {
-    if args.first().is_some_and(|arg| arg == "--yes")
-        && args.get(1).is_some_and(|arg| arg == version_spec)
-    {
-        return Some(args[2..].to_vec());
-    }
-    args.first()
-        .is_some_and(|arg| arg == version_spec)
-        .then(|| args[1..].to_vec())
-}
-
-#[cfg(unix)]
-fn find_valid_bunx_cached_executable(
-    temp_root: &Path,
-    effective_uid: u32,
-    agent_id: &AgentId,
-    package: &str,
-    version: &str,
-    now: std::time::SystemTime,
-) -> Option<PathBuf> {
-    let canonical_temp_root = private_bunx_temp_root(temp_root, effective_uid)?;
-    let root = bunx_cache_root(&canonical_temp_root, package, version, effective_uid)?;
-    validate_bunx_cache_root(
-        &root,
-        &canonical_temp_root,
-        effective_uid,
-        agent_id,
-        package,
-        version,
-        now,
-    )
-}
-
-#[cfg(unix)]
-fn private_bunx_temp_root(temp_root: &Path, effective_uid: u32) -> Option<PathBuf> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let canonical = std::fs::canonicalize(temp_root).ok()?;
-    let metadata = std::fs::metadata(&canonical).ok()?;
-    (metadata.is_dir()
-        && bunx_temp_root_permissions_are_trusted(
-            metadata.uid(),
-            metadata.permissions().mode(),
-            effective_uid,
-        ))
-    .then_some(canonical)
-}
-
-#[cfg(unix)]
-fn bunx_temp_root_permissions_are_trusted(owner_uid: u32, mode: u32, effective_uid: u32) -> bool {
-    // Bun's cached JS entrypoints can be mode 0777. A sticky shared /tmp only
-    // protects entry replacement; it does not prevent another user from
-    // opening and rewriting that file. The complete cache ancestry must
-    // therefore start under an effective-user-owned, non-shared temp root.
-    owner_uid == effective_uid && mode & 0o022 == 0
-}
-
-#[cfg(unix)]
-fn bunx_cache_root(
-    temp_root: &Path,
-    package: &str,
-    version: &str,
-    effective_uid: u32,
-) -> Option<PathBuf> {
-    match package
-        .strip_prefix('@')
-        .and_then(|value| value.split_once('/'))
-    {
-        Some((scope, name)) => Some(
-            temp_root
-                .join(format!("bunx-{effective_uid}-@{scope}"))
-                .join(format!("{name}@{version}")),
-        ),
-        None if !package.is_empty() => {
-            Some(temp_root.join(format!("bunx-{effective_uid}-{package}@{version}")))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(unix)]
-fn owned_unwritable_metadata(path: &Path, effective_uid: u32) -> Option<std::fs::Metadata> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let metadata = std::fs::metadata(path).ok()?;
-    (metadata.uid() == effective_uid && metadata.permissions().mode() & 0o022 == 0)
-        .then_some(metadata)
-}
-
-#[cfg(unix)]
-fn owned_unwritable_dir(path: &Path, effective_uid: u32) -> Option<()> {
-    owned_unwritable_metadata(path, effective_uid)?
-        .is_dir()
-        .then_some(())
-}
-
-#[cfg(unix)]
-fn owned_unwritable_file(path: &Path, effective_uid: u32) -> Option<std::fs::Metadata> {
-    let metadata = owned_unwritable_metadata(path, effective_uid)?;
-    metadata.is_file().then_some(metadata)
-}
-
-#[cfg(unix)]
-fn validate_bunx_cache_root(
-    root: &Path,
-    canonical_temp_root: &Path,
-    effective_uid: u32,
-    agent_id: &AgentId,
-    package: &str,
-    version: &str,
-    now: std::time::SystemTime,
-) -> Option<PathBuf> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let canonical_root = std::fs::canonicalize(root).ok()?;
-    if !canonical_root.starts_with(canonical_temp_root) {
-        return None;
-    }
-    owned_unwritable_dir(&canonical_root, effective_uid)?;
-
-    let root_package_path = canonical_root.join("package.json");
-    let root_package_metadata = owned_unwritable_file(&root_package_path, effective_uid)?;
-    if version == "latest" {
-        let age = now
-            .duration_since(root_package_metadata.modified().ok()?)
-            .ok()?;
-        if age > std::time::Duration::from_secs(24 * 60 * 60) {
-            return None;
-        }
-    }
-
-    let root_package: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&root_package_path).ok()?).ok()?;
-    let dependency = root_package
-        .get("dependencies")?
-        .get(package)?
-        .as_str()?
-        .trim();
-    if dependency.is_empty() {
-        return None;
-    }
-
-    let node_modules = canonical_root.join("node_modules");
-    owned_unwritable_dir(&node_modules, effective_uid)?;
-    let bin_dir = node_modules.join(".bin");
-    owned_unwritable_dir(&bin_dir, effective_uid)?;
-
-    let mut installed_package_dir = node_modules.clone();
-    for component in package.split('/') {
-        installed_package_dir.push(component);
-        owned_unwritable_dir(&installed_package_dir, effective_uid)?;
-    }
-    let installed_package_path = installed_package_dir.join("package.json");
-    owned_unwritable_file(&installed_package_path, effective_uid)?;
-    let installed_package: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&installed_package_path).ok()?).ok()?;
-    if installed_package.get("name")?.as_str()? != package {
-        return None;
-    }
-    if version != "latest" && installed_package.get("version")?.as_str()? != version {
-        return None;
-    }
-
-    let binary_name = Path::new(agent_id.command()).file_name()?.to_str()?;
-    let executable = bin_dir.join(binary_name);
-    if std::fs::symlink_metadata(&executable).ok()?.uid() != effective_uid {
-        return None;
-    }
-    let executable_metadata = std::fs::metadata(&executable).ok()?;
-    if executable_metadata.uid() != effective_uid
-        || !executable_metadata.is_file()
-        || executable_metadata.permissions().mode() & 0o111 == 0
-    {
-        return None;
-    }
-
-    let canonical_executable = std::fs::canonicalize(&executable).ok()?;
-    if !canonical_executable.starts_with(canonical_root.join("node_modules")) {
-        return None;
-    }
-    Some(canonical_executable)
-}
-
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
     pub agent_id: AgentId,
     pub command: String,
     pub args: Vec<String>,
+    /// Long initial task materialized as a file after worktree resolution.
+    /// Retained separately from argv so launch provenance still sees its skill.
+    pub pending_initial_prompt: Option<String>,
     pub env_vars: HashMap<String, String>,
+    pub codex_auth_root: Option<crate::CodexAuthRoot>,
     pub remove_env: Vec<String>,
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
@@ -920,13 +471,8 @@ pub struct LaunchConfig {
     pub display_name: String,
     pub color: AgentColor,
     pub model: Option<String>,
+    /// Version observed by the final installed-tool probe.
     pub tool_version: Option<String>,
-    /// Path-independent identity of the exact official package selected for a
-    /// targeted Windows Host launch. Absolute runner paths remain runtime-only.
-    pub tool_runtime_provenance: Option<ToolRuntimeProvenance>,
-    /// Durable Session whose legacy tool provenance may be atomically upgraded
-    /// after the exact package probe succeeds. This is not execution lineage.
-    pub tool_runtime_source_session_id: Option<String>,
     pub reasoning_level: Option<String>,
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
@@ -960,7 +506,59 @@ pub struct LaunchConfig {
     /// feedback wiring but must not take over (or be gated by) the
     /// implementing session's execution lifecycle.
     pub suppress_execution_control: bool,
+    /// SPEC-3248 FR-240: this launch explicitly asks to start follow-up work
+    /// on its linked owner.
+    ///
+    /// It is the only thing that creates a fresh producing generation for a
+    /// *delivered* owner — one that is closed and whose source state the
+    /// configured base already contains. Without it such an owner opens for
+    /// Inspection: readable, but materializing no execution, Work, or
+    /// obligation, so an already shipped Issue cannot become terminally
+    /// Blocked merely because it has no new PR to show. It never reopens the
+    /// GitHub Issue; materially different scope belongs to a new owner.
+    pub explicit_follow_up: bool,
     pub execution_intent: ExecutionLaunchIntent,
+    /// Issue #4217 FR-002: who started this launch. Only the launcher knows,
+    /// so it is stamped here and persisted onto the Session rather than being
+    /// re-derived later from the agent's environment.
+    pub launch_route: LaunchRoute,
+    /// Issue #4783 AC-2: this Resume launch is an automatic restore (startup
+    /// auto-resume / Open Project sweep), not an operator's restart or a
+    /// launch the operator chose. Only the restore spawn boundary sets it.
+    ///
+    /// The durable `Session.launch_origin` cannot carry this: it is written
+    /// after `AgentStarted`, so the first automatic restore of a Session has
+    /// no origin on disk yet. The launch worker reads it before recovering
+    /// producing authority, where a restore must never reactivate a terminal
+    /// execution generation.
+    pub automatic_restore: bool,
+    /// Issue #4543: the Permission Mode Decision this launch was materialized
+    /// under, already checked against the argv and environment above.
+    ///
+    /// Every launch entry point reaches `build()`, so this is the one place
+    /// the forced-skip contract is decided and the one place the per-provider
+    /// mapping is verified to have survived materialization.
+    pub permission_decision: PermissionModeDecision,
+}
+
+impl LaunchConfig {
+    /// Revalidate captured provenance against the final child environment and cwd.
+    pub fn validated_codex_auth_root_for_cwd(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Option<crate::CodexAuthRoot> {
+        let proof = self.codex_auth_root.as_ref()?;
+        let (path, _) = crate::environment::codex_auth_root_path(self, cwd)?;
+        (proof.path == path).then(|| proof.clone())
+    }
+
+    /// Original task arguments for provenance, before file/shell transport.
+    pub fn entrypoint_args(&self) -> &[String] {
+        self.pending_initial_prompt
+            .as_ref()
+            .map(std::slice::from_ref)
+            .unwrap_or(&self.args)
+    }
 }
 
 /// Permission mode for agent launch.
@@ -982,11 +580,15 @@ pub struct AgentLaunchBuilder {
     branch: Option<String>,
     base_branch: Option<String>,
     model: Option<String>,
-    version: Option<String>,
-    tool_runtime_provenance: Option<ToolRuntimeProvenance>,
-    tool_runtime_source_session_id: Option<String>,
     fast_mode: bool,
     skip_permissions: bool,
+    /// Issue #4543: the permission preference the launch *source* carried, as
+    /// a tri-state. `None` means the source stored nothing at all, which the
+    /// bare `skip_permissions` bool above cannot distinguish from an explicit
+    /// "interactive, please".
+    requested_skip_permissions: Option<bool>,
+    /// Issue #4543 AC-3: which launch surface supplied that preference.
+    permission_launch_source: PermissionLaunchSource,
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
@@ -1023,7 +625,9 @@ pub struct AgentLaunchBuilder {
     is_ephemeral: bool,
     ephemeral_base_ref: Option<String>,
     suppress_execution_control: bool,
+    explicit_follow_up: bool,
     execution_intent: ExecutionLaunchIntent,
+    launch_route: LaunchRoute,
 }
 
 impl AgentLaunchBuilder {
@@ -1035,11 +639,10 @@ impl AgentLaunchBuilder {
             branch: None,
             base_branch: None,
             model: None,
-            version: None,
-            tool_runtime_provenance: None,
-            tool_runtime_source_session_id: None,
             fast_mode: false,
             skip_permissions: false,
+            requested_skip_permissions: None,
+            permission_launch_source: PermissionLaunchSource::Unspecified,
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
@@ -1063,7 +666,9 @@ impl AgentLaunchBuilder {
             is_ephemeral: false,
             ephemeral_base_ref: None,
             suppress_execution_control: false,
+            explicit_follow_up: false,
             execution_intent: ExecutionLaunchIntent::Automatic,
+            launch_route: LaunchRoute::Manual,
         }
     }
 
@@ -1080,6 +685,22 @@ impl AgentLaunchBuilder {
     /// Execution Control Record is materialized for it.
     pub fn suppress_execution_control(mut self) -> Self {
         self.suppress_execution_control = true;
+        self
+    }
+
+    /// SPEC-3248 FR-240: ask this launch to start follow-up work on its linked
+    /// owner even when that owner is already delivered.
+    pub fn explicit_follow_up(mut self) -> Self {
+        self.explicit_follow_up = true;
+        self
+    }
+
+    /// Issue #4217 FR-002: stamp the route this launch came in through.
+    ///
+    /// Only the launcher can know it, and every consumer downstream reads it
+    /// from the durable Session instead of sniffing the environment.
+    pub fn launch_route(mut self, route: LaunchRoute) -> Self {
+        self.launch_route = route;
         self
     }
 
@@ -1116,27 +737,6 @@ impl AgentLaunchBuilder {
         self
     }
 
-    /// Set the version selection ("installed", "latest", or a semver string).
-    pub fn version(mut self, version: impl Into<String>) -> Self {
-        self.version = Some(version.into());
-        self
-    }
-
-    /// Reuse the exact, path-independent package identity persisted by a
-    /// previous Session. New explicit launches leave this unset and resolve
-    /// their requested selector afresh.
-    pub fn tool_runtime_provenance(mut self, provenance: ToolRuntimeProvenance) -> Self {
-        self.tool_runtime_provenance = Some(provenance);
-        self
-    }
-
-    /// Identify the durable Session eligible for a post-probe provenance
-    /// migration without coupling tool resolution to execution continuity.
-    pub fn tool_runtime_source_session_id(mut self, id: impl Into<String>) -> Self {
-        self.tool_runtime_source_session_id = Some(id.into());
-        self
-    }
-
     pub fn fast_mode(mut self, enabled: bool) -> Self {
         self.fast_mode = enabled;
         self
@@ -1144,6 +744,17 @@ impl AgentLaunchBuilder {
 
     pub fn skip_permissions(mut self, enabled: bool) -> Self {
         self.skip_permissions = enabled;
+        // Issue #4543: setting the toggle at all is itself the signal that the
+        // source carried a preference. An unset source stays `None` so the
+        // recorded decision can say which one the forced skip overrode.
+        self.requested_skip_permissions = Some(enabled);
+        self
+    }
+
+    /// Issue #4543 AC-3: tag which launch surface supplied the permission
+    /// preference, so the recorded decision names the setting it overrode.
+    pub fn permission_launch_source(mut self, source: PermissionLaunchSource) -> Self {
+        self.permission_launch_source = source;
         self
     }
 
@@ -1291,11 +902,44 @@ impl AgentLaunchBuilder {
             .as_ref()
             .map(|dir| gwt_core::paths::normalize_windows_child_process_path(dir));
         let mut env_vars = HashMap::new();
-        let skip_permissions = self.skip_permissions
-            || matches!(
-                self.permission_mode,
-                Some(PermissionMode::BypassPermissions)
-            );
+        // Issue #4543: every launch entry point reaches this builder, so the
+        // forced-skip contract is decided here once instead of being
+        // re-derived (and forgotten) per surface.
+        //
+        // A launch produces work when it carries a linked owner whose
+        // execution it owns. That is exactly the case where an agent is
+        // expected to land a change and therefore cannot stop at a permission
+        // prompt, whatever a saved profile / last settings / resumed session
+        // stored. `suppress_execution_control` launches are subordinate to
+        // another session's execution and keep their own preference.
+        let producing_work = self.linked_issue_number.is_some() && !self.suppress_execution_control;
+        let requested_skip_permissions = if matches!(
+            self.permission_mode,
+            Some(PermissionMode::BypassPermissions)
+        ) {
+            Some(true)
+        } else {
+            self.requested_skip_permissions
+        };
+        let entrypoint = crate::permission_mode::entrypoint_from_launch_args(
+            &self.extra_args,
+            self.session_mode == SessionMode::Resume,
+        );
+        let permission_decision = crate::permission_mode::decide(&PermissionModeInputs {
+            agent_id: &self.agent_id,
+            custom_agent: self.custom_agent.as_ref(),
+            source: self.permission_launch_source,
+            entrypoint: &entrypoint,
+            launch_route: self.launch_route,
+            requested_skip_permissions,
+            producing_work,
+        });
+        let skip_permissions = permission_decision.skip_permissions_requested();
+        // The per-provider argument builders below read `self.skip_permissions`
+        // directly, so the decision has to land on the builder — not just on
+        // the resulting config — or a forced skip would be recorded without
+        // ever reaching the CLI flag it stands for.
+        self.skip_permissions = skip_permissions;
 
         // Common env vars
         env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
@@ -1313,7 +957,8 @@ impl AgentLaunchBuilder {
             }
         }
 
-        // Resolve runner (installed binary vs bunx/npx)
+        // Built-in agents use their installed command; custom Bunx definitions
+        // retain their explicitly configured package runner.
         let mut runner_env = self
             .custom_agent
             .as_ref()
@@ -1322,14 +967,9 @@ impl AgentLaunchBuilder {
         runner_env.extend(self.custom_agent_env.clone());
         runner_env.extend(self.env_overrides.clone());
         let runner = self.custom_agent.as_ref().map_or_else(
-            || {
-                resolve_runner_with_effective_env(
-                    &self.agent_id,
-                    self.version.as_deref().unwrap_or("installed"),
-                    &runner_env,
-                    &[],
-                    self.working_dir.as_deref(),
-                )
+            || ResolvedRunner {
+                executable: self.agent_id.command().to_string(),
+                base_args: Vec::new(),
             },
             |agent| {
                 resolve_custom_runner_with_effective_env(
@@ -1361,9 +1001,6 @@ impl AgentLaunchBuilder {
             }
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
-            }
-            AgentId::Gemini => {
-                self.build_gemini_args(&mut args);
             }
             AgentId::OpenCode => {
                 self.build_opencode_args(&mut args, &mut env_vars);
@@ -1406,23 +1043,28 @@ impl AgentLaunchBuilder {
             .unwrap_or_else(|| self.agent_id.display_name().to_string());
         let color = self.agent_id.default_color();
         let model = self.model.clone();
-        let tool_version = self
-            .version
-            .clone()
-            .filter(|version| version != "installed");
-        let tool_runtime_provenance = self.tool_runtime_provenance.clone();
-        let tool_runtime_source_session_id = self.tool_runtime_source_session_id.clone();
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
         let predecessor_session_id = self.predecessor_session_id.clone();
         let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
+        // Issue #4543 AC-6: the shared validator runs on the materialized argv
+        // and environment, so a provider builder that silently stopped
+        // emitting its skip flag is caught here rather than at a prompt nobody
+        // is watching.
+        let permission_decision = crate::permission_mode::validate_materialized_launch(
+            permission_decision,
+            &args,
+            &env_vars,
+        );
 
         LaunchConfig {
             agent_id,
             command: runner.executable,
             args,
+            pending_initial_prompt: None,
+            codex_auth_root: None,
             env_vars,
             remove_env: Vec::new(),
             working_dir: self.working_dir,
@@ -1431,9 +1073,7 @@ impl AgentLaunchBuilder {
             display_name,
             color,
             model,
-            tool_version,
-            tool_runtime_provenance,
-            tool_runtime_source_session_id,
+            tool_version: None,
             reasoning_level,
             session_mode,
             resume_session_id,
@@ -1449,7 +1089,11 @@ impl AgentLaunchBuilder {
             is_ephemeral: self.is_ephemeral,
             ephemeral_base_ref: self.ephemeral_base_ref,
             suppress_execution_control: self.suppress_execution_control,
+            explicit_follow_up: self.explicit_follow_up,
             execution_intent: self.execution_intent,
+            launch_route: self.launch_route,
+            automatic_restore: false,
+            permission_decision,
         }
     }
 
@@ -1498,10 +1142,8 @@ impl AgentLaunchBuilder {
             // does not see unrelated telemetry POSTs (SPEC-1921 Phase 52
             // preset legacy invariant).
             env_vars.insert("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into());
-            env_vars.insert(
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
-                "1".into(),
-            );
+            // The umbrella NONESSENTIAL_TRAFFIC flag also disables native
+            // auto-updates. The individual telemetry flags above suffice.
         }
 
         // Permission mode
@@ -1633,7 +1275,6 @@ impl AgentLaunchBuilder {
             env_vars.insert(cfg.effective_env_key(), profile.api_key.clone());
         }
 
-        args.extend(canonical_launch_args(&AgentId::Codex));
         // SPEC-2014 2026-05-18 amendment FR-B:
         // - Continue        → `codex resume --last`  (resume the most recent session)
         // - Resume + id     → `codex resume <id>`    (Quick Start: replay specific session)
@@ -1669,35 +1310,8 @@ impl AgentLaunchBuilder {
             }
         }
 
-        // Version-dependent flags
-        let version_str = self.version.as_deref().unwrap_or("");
-        let parsed_version = semver::Version::parse(version_str).ok();
-
-        if self.fast_mode
-            && parsed_version
-                .as_ref()
-                .is_some_and(|ver| *ver >= semver::Version::new(0, 110, 0))
-        {
-            args.push("-c".to_string());
-            args.push("service_tier=fast".to_string());
-        }
-
         if self.skip_permissions {
             args.push("--yolo".to_string());
-        }
-
-        args.push("--enable".to_string());
-        args.push("goals".to_string());
-
-        // Web search args
-        if let Some(ref ver) = parsed_version {
-            if *ver >= semver::Version::new(0, 90, 0) {
-                args.push("--enable".to_string());
-                args.push("web_search".to_string());
-            } else {
-                args.push("--enable".to_string());
-                args.push("web_search_request".to_string());
-            }
         }
 
         // Sandbox & shell env policies
@@ -1725,17 +1339,6 @@ impl AgentLaunchBuilder {
             .map(PathBuf::from)
             .and_then(|runtime_path| runtime_path.parent().map(std::path::Path::to_path_buf))
             .map(|dir| dir.to_string_lossy().into_owned())
-    }
-
-    fn build_gemini_args(&self, args: &mut Vec<String>) {
-        if let Some(ref model) = self.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-
-        if self.skip_permissions {
-            args.push("--yolo".to_string());
-        }
     }
 
     fn build_grok_build_args(&self, args: &mut Vec<String>) {
@@ -1934,8 +1537,63 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn repo_hash_from_subdirectory_does_not_require_git_on_path() {
+        const CHILD_REPO: &str = "GWT_TEST_REPO_HASH_NO_GIT_DIR";
+        let origin = "https://github.com/example/monitor-launch.git";
+        if let Some(nested) = std::env::var_os(CHILD_REPO) {
+            assert!(
+                gwt_core::process::hidden_command("git")
+                    .arg("--version")
+                    .output()
+                    .is_err(),
+                "the isolated child must not be able to execute Git"
+            );
+            assert_eq!(
+                detect_repo_hash_for_dir(std::path::Path::new(&nested)),
+                Some(
+                    gwt_core::repo_hash::compute_repo_hash(origin)
+                        .as_str()
+                        .to_owned()
+                )
+            );
+            return;
+        }
+        let repo = tempfile::tempdir().unwrap();
+        let output = gwt_core::process::hidden_command("git")
+            .arg("init")
+            .arg(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+        std::fs::write(
+            repo.path().join(".git/config"),
+            format!("[remote \"origin\"]\n\turl = {origin}\n"),
+        )
+        .unwrap();
+        let nested = repo.path().join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        // Isolate PATH in a child so parallel agent tests retain their runners.
+        let output = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::tests::repo_hash_from_subdirectory_does_not_require_git_on_path",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("PATH", repo.path().join("missing-bin"))
+            .env(CHILD_REPO, &nested)
+            .current_dir(&nested)
+            .output()
+            .expect("run isolated repository hash check");
+        assert!(
+            output.status.success(),
+            "isolated repository hash check failed: {output:?}"
+        );
+    }
+
     // SPEC-1921 Phase 53 / Issue #2091: canonical_launch_args is the single
-    // source of truth for agent-neutral default args across all launch entry
+    // source of truth for entrypoint-independent default args across all launch entry
     // points (wizard, preset, session-load migration). Regression guard for
     // the preset-path gap that caused Codex Plan-mode scroll to die.
 
@@ -1963,11 +1621,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_launch_args_for_codex_contains_no_alt_screen() {
+    fn canonical_launch_args_for_codex_contains_common_defaults() {
         let args = canonical_launch_args(&AgentId::Codex);
-        assert!(
-            args.iter().any(|arg| arg == "--no-alt-screen"),
-            "Codex canonical args must include --no-alt-screen (FR-064, Issue #2091)"
+        assert_eq!(
+            args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
+            ],
+            "Codex canonical args must cover inline scrollback and Default-mode questions"
         );
     }
 
@@ -1981,12 +1644,11 @@ mod tests {
 
     #[test]
     fn canonical_launch_args_for_agents_without_defaults_is_empty() {
-        // Claude/Gemini/OpenCode/Copilot/Custom have no agent-neutral positional
+        // Claude/OpenCode/Copilot/Custom have no agent-neutral positional
         // defaults today. Agent-specific env vars and conditional args belong in
         // the agent-specific builder, not the canonical default list.
         assert!(canonical_launch_args(&AgentId::ClaudeCode).is_empty());
         assert!(canonical_launch_args(&AgentId::Antigravity).is_empty());
-        assert!(canonical_launch_args(&AgentId::Gemini).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenCode).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenClaw).is_empty());
         assert!(canonical_launch_args(&AgentId::Hermes).is_empty());
@@ -2107,11 +1769,11 @@ mod tests {
     #[test]
     fn build_claude_with_model() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .model("claude-opus-4-8")
+            .model("opus")
             .build();
 
         assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"claude-opus-4-8".to_string()));
+        assert!(config.args.contains(&"opus".to_string()));
     }
 
     #[test]
@@ -2379,10 +2041,9 @@ mod tests {
     fn build_codex_fast_mode() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .fast_mode(true)
-            .version("0.113.0")
             .build();
 
-        assert!(config
+        assert!(!config
             .args
             .windows(2)
             .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
@@ -2454,16 +2115,6 @@ mod tests {
     }
 
     #[test]
-    fn build_gemini_skip_permissions_adds_yolo() {
-        let config = AgentLaunchBuilder::new(AgentId::Gemini)
-            .skip_permissions(true)
-            .build();
-
-        assert!(config.args.contains(&"--yolo".to_string()));
-        assert!(config.skip_permissions);
-    }
-
-    #[test]
     fn build_antigravity_maps_model_skip_permissions_and_resume_id() {
         let agent_id = crate::types::resolve_agent_id("agy").expect("Antigravity must resolve");
         let config = AgentLaunchBuilder::new(agent_id)
@@ -2511,19 +2162,6 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_fast_mode_omits_service_tier_for_older_versions() {
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .fast_mode(true)
-            .version("0.109.0")
-            .build();
-
-        assert!(!config
-            .args
-            .windows(2)
-            .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
-    }
-
-    #[test]
     fn build_codex_with_reasoning_level() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .model("gpt-5.3-codex")
@@ -2538,24 +2176,6 @@ mod tests {
         assert!(config
             .args
             .contains(&"model_reasoning_summaries=detailed".to_string()));
-    }
-
-    #[test]
-    fn build_codex_version_specific_web_search_new() {
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("0.91.0")
-            .build();
-
-        assert!(config.args.contains(&"web_search".to_string()));
-    }
-
-    #[test]
-    fn build_codex_version_specific_web_search_old() {
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("0.80.0")
-            .build();
-
-        assert!(config.args.contains(&"web_search_request".to_string()));
     }
 
     #[test]
@@ -2580,18 +2200,22 @@ mod tests {
         );
     }
 
+    /// The removed Codex goals feature must never be emitted.
     #[test]
-    fn build_codex_enables_goal_feature_by_default() {
+    fn build_codex_never_enables_goals_feature_flag() {
         let config = AgentLaunchBuilder::new(AgentId::Codex).build();
-
-        assert!(config
+        assert!(!config
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+        assert!(!config
+            .args
+            .iter()
+            .any(|arg| normalize_config_override_for_test(arg) == "features.goals=true"));
     }
 
     #[test]
-    fn build_codex_resume_and_continue_keep_goal_feature_enabled() {
+    fn build_codex_resume_and_continue_do_not_enable_goals_feature_flag() {
         let resume = AgentLaunchBuilder::new(AgentId::Codex)
             .session_mode(SessionMode::Resume)
             .resume_session_id("sess-123")
@@ -2600,7 +2224,7 @@ mod tests {
             .session_mode(SessionMode::Continue)
             .build();
 
-        assert!(resume
+        assert!(!resume
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
@@ -2608,7 +2232,7 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "resume" && pair[1] == "sess-123"));
-        assert!(continue_last
+        assert!(!continue_last
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
@@ -2618,12 +2242,47 @@ mod tests {
             .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
     }
 
+    fn normalize_config_override_for_test(value: &str) -> String {
+        value.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn build_codex_all_session_modes_enable_default_mode_questions_once() {
+        let configs = [
+            AgentLaunchBuilder::new(AgentId::Codex).build(),
+            AgentLaunchBuilder::new(AgentId::Codex)
+                .session_mode(SessionMode::Resume)
+                .resume_session_id("sess-123")
+                .build(),
+            AgentLaunchBuilder::new(AgentId::Codex)
+                .session_mode(SessionMode::Continue)
+                .build(),
+        ];
+
+        for config in configs {
+            assert!(config
+                .args
+                .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
+            assert_eq!(
+                config
+                    .args
+                    .iter()
+                    .filter(|arg| {
+                        arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                    })
+                    .count(),
+                1,
+                "Default-mode question override must appear exactly once: {:?}",
+                config.args
+            );
+        }
+    }
+
     #[test]
     fn build_non_codex_agents_do_not_enable_goal_feature() {
         for agent in [
             AgentId::ClaudeCode,
             AgentId::GrokBuild,
-            AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,
@@ -2636,6 +2295,10 @@ mod tests {
                 .args
                 .windows(2)
                 .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+            assert!(!config
+                .args
+                .iter()
+                .any(|arg| { arg == "--config=features.default_mode_request_user_input=true" }));
         }
     }
 
@@ -2643,7 +2306,14 @@ mod tests {
     fn canonical_codex_args_do_not_include_goal_feature_flag() {
         let args = canonical_launch_args(&AgentId::Codex);
 
-        assert_eq!(args, vec!["--no-alt-screen".to_string()]);
+        assert_eq!(
+            args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
+            ]
+        );
         assert!(!args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
@@ -2677,9 +2347,58 @@ mod tests {
                 "--yes".to_string(),
                 "@openai/codex@latest".to_string(),
                 "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
                 "resume".to_string(),
                 "sess-123".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn normalize_launch_args_deduplicates_and_orders_defaults_beside_other_config() {
+        let mut args = vec![
+            "--yes".to_string(),
+            "@openai/codex@latest".to_string(),
+            "--config=features.default_mode_request_user_input=true".to_string(),
+            "--config=model_reasoning_effort=high".to_string(),
+            "--no-alt-screen".to_string(),
+            "--config=features.default_mode_request_user_input=true".to_string(),
+            "resume".to_string(),
+            "sess-123".to_string(),
+        ];
+
+        normalize_launch_args(&AgentId::Codex, "C:/Users/example/bin/npx.cmd", &mut args);
+        let first_pass = args.clone();
+        normalize_launch_args(&AgentId::Codex, "C:/Users/example/bin/npx.cmd", &mut args);
+
+        assert_eq!(
+            args, first_pass,
+            "canonical normalization must be idempotent"
+        );
+        assert_eq!(
+            &args[..5],
+            [
+                "--yes",
+                "@openai/codex@latest",
+                "--no-alt-screen",
+                "--config=features.default_mode_request_user_input=true",
+                "--config=suppress_unstable_features_warning=true",
+            ],
+            "canonical defaults must follow the package runner in stable order"
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--config=model_reasoning_effort=high"),
+            "unrelated config overrides must survive normalization"
         );
     }
 
@@ -2735,17 +2454,6 @@ mod tests {
         let config = AgentLaunchBuilder::new(AgentId::Copilot).build();
         assert_eq!(config.command, "gh");
         assert_eq!(config.args.first(), Some(&"copilot".to_string()));
-    }
-
-    #[test]
-    fn build_gemini_with_model() {
-        let config = AgentLaunchBuilder::new(AgentId::Gemini)
-            .model("gemini-3-flash-preview")
-            .build();
-
-        assert_eq!(config.command, "gemini");
-        assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"gemini-3-flash-preview".to_string()));
     }
 
     #[test]
@@ -2846,49 +2554,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runner_installed_returns_direct_command() {
-        let runner = resolve_runner(&AgentId::ClaudeCode, "installed");
-        assert_eq!(runner.executable, "claude");
-        assert!(runner.base_args.is_empty());
+    fn host_claude_and_codex_use_installed_runner() {
+        for agent in [AgentId::ClaudeCode, AgentId::Codex] {
+            let config = AgentLaunchBuilder::new(agent.clone()).build();
+            assert_eq!(config.command, agent.command());
+            assert!(config.tool_version.is_none());
+        }
     }
 
     #[test]
-    fn resolve_runner_empty_version_returns_direct_command() {
-        let runner = resolve_runner(&AgentId::Codex, "");
-        assert_eq!(runner.executable, "codex");
-        assert!(runner.base_args.is_empty());
-    }
-
-    #[test]
-    fn resolve_runner_latest_uses_bunx_or_npx() {
-        let runner = resolve_runner(&AgentId::ClaudeCode, "latest");
-        assert!(!runner.executable.is_empty());
-        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
-        assert!(spec_arg.is_some(), "should have @package@latest arg");
-        assert!(spec_arg
-            .unwrap()
-            .contains("@anthropic-ai/claude-code@latest"));
-    }
-
-    #[test]
-    fn resolve_runner_latest_uses_official_gemini_package() {
-        let runner = resolve_runner(&AgentId::Gemini, "latest");
-        assert!(!runner.executable.is_empty());
-        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
-        assert_eq!(
-            spec_arg.map(String::as_str),
-            Some("@google/gemini-cli@latest")
-        );
-    }
-
-    #[test]
-    fn resolve_runner_latest_uses_official_grok_build_package() {
-        let runner = resolve_runner(&AgentId::GrokBuild, "latest");
-        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
-        assert_eq!(
-            spec_arg.map(String::as_str),
-            Some("@xai-official/grok@latest")
-        );
+    fn installed_claude_backend_keeps_native_auto_updates_enabled() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .backend_profile(sample_claude_backend())
+            .build();
+        for key in [
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "DISABLE_AUTOUPDATER",
+        ] {
+            assert!(
+                !config.env_vars.contains_key(key),
+                "gwt must not inject {key}"
+            );
+        }
     }
 
     #[test]
@@ -2996,23 +2683,6 @@ mod tests {
             .build();
         assert_eq!(provider_defined.model.as_deref(), Some("DefaultXL"));
         assert_single_option_pair(&provider_defined.args, "--model", "DefaultXL");
-    }
-
-    #[test]
-    fn resolve_runner_specific_version_uses_bunx_or_npx() {
-        let runner = resolve_runner(&AgentId::Codex, "1.5.0");
-        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
-        assert!(spec_arg.is_some());
-        assert!(spec_arg.unwrap().contains("@openai/codex@1.5.0"));
-    }
-
-    #[test]
-    fn resolve_runner_no_npm_package_falls_back_to_direct() {
-        // OpenClaw still has no npm package, so a versioned request must fall
-        // back to the direct command rather than a package runner.
-        let runner = resolve_runner(&AgentId::OpenClaw, "latest");
-        assert_eq!(runner.executable, "openclaw");
-        assert!(runner.base_args.is_empty());
     }
 
     #[test]
@@ -3223,76 +2893,9 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_targeted_official_provider_candidates_are_npx_only() {
-        // SPEC-1921 Phase 75 / Issue #3456: native bunx on Windows can split a
-        // whitespace-bearing final prompt into multiple argv entries. Official
-        // providers must use only npx so the prompt remains one optional argument.
-        for agent_id in [AgentId::Codex, AgentId::ClaudeCode] {
-            let candidates = package_runner_candidates_for_agent(&agent_id);
-            let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
-            let needs_yes: Vec<bool> = candidates.iter().map(|(_, yes)| *yes).collect();
-
-            assert_eq!(names, vec!["npx.cmd"]);
-            assert_eq!(needs_yes, vec![true]);
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_targeted_runner_resolution_never_returns_bunx_when_npx_is_missing() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("bunx.cmd"), "@echo off\r\n").expect("write bunx.cmd");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        for agent_id in [AgentId::Codex, AgentId::ClaudeCode] {
-            let runner = resolve_runner_with_env(&agent_id, "latest", &env);
-            let executable = command_basename(&runner.executable).to_ascii_lowercase();
-            assert_eq!(
-                executable, "npx.cmd",
-                "targeted runner must fail through the spawnable npx.cmd health check instead of selecting Bunx or a bare shim"
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_opencode_candidates_keep_bunx_first() {
-        let candidates = package_runner_candidates_for_agent(&AgentId::OpenCode);
-        let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
-
-        assert_eq!(names, vec!["bunx.cmd", "bunx", "npx.cmd", "npx"]);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_codex_latest_resolves_npx_cmd_before_bunx_cmd() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("npx.cmd"), "@echo off\r\n").expect("write npx.cmd");
-        std::fs::write(temp.path().join("bunx.cmd"), "@echo off\r\n").expect("write bunx.cmd");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::Codex, "latest", &env);
-
-        assert!(
-            Path::new(&runner.executable)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd")),
-            "expected npx.cmd, got {}",
-            runner.executable
-        );
-        assert_eq!(
-            runner.base_args,
-            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
     fn windows_targeted_codex_issue_prompt_remains_one_argument() {
         let prompt = "$gwt-execute #3152";
         let config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
             .extra_arg(prompt)
             .build();
 
@@ -3367,556 +2970,52 @@ mod tests {
     }
 
     #[cfg(all(not(windows), unix))]
-    fn write_test_bun_runtime(temp_root: &Path) -> (PathBuf, PathBuf) {
-        let bin_dir = temp_root.join("test-bun/bin");
-        std::fs::create_dir_all(&bin_dir).expect("create test Bun bin");
-        let bun = bin_dir.join("bun");
-        let bunx = bin_dir.join("bunx");
-        write_test_runner(&bun);
-        std::os::unix::fs::symlink("bun", &bunx).expect("create bunx symlink");
-        (bun, bunx)
-    }
-
-    #[cfg(all(not(windows), unix))]
-    fn write_test_bunx_cache(
-        temp_root: &Path,
-        version: &str,
-        dependency_name: &str,
-        installed_name: &str,
-    ) -> (PathBuf, std::time::SystemTime) {
-        let cache_root = temp_root
-            .join(format!("bunx-{}-@openai", current_effective_uid()))
-            .join(format!("codex@{version}"));
-        let executable = cache_root.join("node_modules/.bin/codex");
-        std::fs::create_dir_all(executable.parent().expect("bin parent")).expect("create bin dir");
-        let installed_package_dir = cache_root.join("node_modules/@openai/codex");
-        std::fs::create_dir_all(&installed_package_dir).expect("create installed package dir");
-        std::fs::write(
-            cache_root.join("package.json"),
-            format!(r#"{{"dependencies":{{"{dependency_name}":"^0.145.0"}}}}"#),
-        )
-        .expect("write cache package");
-        std::fs::write(
-            installed_package_dir.join("package.json"),
-            format!(r#"{{"name":"{installed_name}","version":"0.145.0"}}"#),
-        )
-        .expect("write installed package");
-        let executable_target = installed_package_dir.join("bin/codex.js");
-        std::fs::create_dir_all(
-            executable_target
-                .parent()
-                .expect("executable target parent"),
-        )
-        .expect("create executable target parent");
-        write_test_runner(&executable_target);
-        let mut target_permissions = std::fs::metadata(&executable_target)
-            .expect("target metadata")
-            .permissions();
-        use std::os::unix::fs::PermissionsExt;
-        target_permissions.set_mode(0o777);
-        std::fs::set_permissions(&executable_target, target_permissions)
-            .expect("mirror Bun executable target mode");
-        std::os::unix::fs::symlink("../@openai/codex/bin/codex.js", &executable)
-            .expect("create Bun-style executable symlink");
-        let modified = std::fs::metadata(cache_root.join("package.json"))
-            .expect("cache metadata")
-            .modified()
-            .expect("cache modified time");
-        (executable, modified)
-    }
-
-    #[cfg(all(not(windows), unix))]
     #[test]
-    fn fresh_bunx_latest_cache_runs_entrypoint_with_bun_and_preserves_agent_args() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
-            .working_dir("/tmp/project")
-            .build();
-        let (bun, bunx) = write_test_bun_runtime(temp.path());
-        config.command = bunx.to_string_lossy().into_owned();
-        config.env_vars.insert(
-            "PATH".to_string(),
-            bun.parent()
-                .expect("Bun bin")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        let original_working_dir = config.working_dir.clone();
-
-        let changed = apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(60),
-        );
-
-        assert!(changed);
-        assert_eq!(
-            std::fs::canonicalize(&config.command).expect("canonical Bun runtime"),
-            std::fs::canonicalize(bun).expect("canonical expected Bun runtime")
-        );
-        assert_eq!(config.working_dir, original_working_dir);
-        assert_eq!(
-            PathBuf::from(config.args.first().expect("cached entrypoint arg")),
-            std::fs::canonicalize(executable).expect("canonical cached executable")
-        );
-        assert!(!config.args.iter().any(|arg| arg == "@openai/codex@latest"));
-        assert!(config.args.iter().any(|arg| arg == "--no-alt-screen"));
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_falls_back_for_stale_missing_or_wrong_package_cache() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let mut stale = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
-            .build();
-        let original_command = stale.command.clone();
-        let original_args = stale.args.clone();
-
-        assert!(!apply_host_bunx_cache_fast_path_from(
-            &mut stale,
-            temp.path(),
-            modified + std::time::Duration::from_secs(24 * 60 * 60 + 1),
-        ));
-        assert_eq!(stale.command, original_command);
-        assert_eq!(stale.args, original_args);
-
-        let missing = tempfile::tempdir().expect("missing tempdir");
-        assert!(!apply_host_bunx_cache_fast_path_from(
-            &mut stale,
-            missing.path(),
-            modified + std::time::Duration::from_secs(60),
-        ));
-
-        let wrong = tempfile::tempdir().expect("wrong tempdir");
-        let (_executable, wrong_modified) =
-            write_test_bunx_cache(wrong.path(), "latest", "other", "other");
-        assert!(!apply_host_bunx_cache_fast_path_from(
-            &mut stale,
-            wrong.path(),
-            wrong_modified + std::time::Duration::from_secs(60),
-        ));
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_rejects_a_shared_writable_temp_root() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let original_permissions = std::fs::metadata(temp.path())
-            .expect("temp root metadata")
-            .permissions();
-        let mut shared_permissions = original_permissions.clone();
-        shared_permissions.set_mode(0o777);
-        std::fs::set_permissions(temp.path(), shared_permissions).expect("make temp root shared");
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
-            .build();
-
-        let changed = apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(60),
-        );
-        std::fs::set_permissions(temp.path(), original_permissions)
-            .expect("restore temp root permissions");
-
-        assert!(
-            !changed,
-            "a shared writable temp root must fall back to bunx instead of executing a discovered cache binary"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_temp_root_policy_requires_a_private_effective_user_root() {
-        let current_uid = current_effective_uid();
-
-        assert!(bunx_temp_root_permissions_are_trusted(
-            current_uid,
-            0o700,
-            current_uid
-        ));
-        assert!(
-            !bunx_temp_root_permissions_are_trusted(0, 0o1777, current_uid),
-            "sticky /tmp cannot protect Bun's world-writable cached JS target"
-        );
-        assert!(
-            !bunx_temp_root_permissions_are_trusted(current_uid, 0o777, current_uid),
-            "a user-owned shared directory without sticky-root isolation is untrusted"
-        );
-        assert!(
-            !bunx_temp_root_permissions_are_trusted(42, 0o1777, current_uid),
-            "a sticky temp root owned by an unrelated user is untrusted"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_rejects_a_foreign_effective_uid() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let current_uid = current_effective_uid();
-        let foreign_uid = if current_uid == 0 { 1 } else { 0 };
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
-            .build();
-
-        assert!(
-            !apply_host_bunx_cache_fast_path_from_uid(
-                &mut config,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-                foreign_uid,
-            ),
-            "a cache temp root not owned by the effective user must be ignored"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_rejects_a_world_writable_cache_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let bin_dir = executable.parent().expect("bin dir");
-        let mut permissions = std::fs::metadata(bin_dir)
-            .expect("bin dir metadata")
-            .permissions();
-        permissions.set_mode(0o777);
-        std::fs::set_permissions(bin_dir, permissions).expect("make bin dir writable");
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
-            .build();
-
-        assert!(
-            !apply_host_bunx_cache_fast_path_from(
-                &mut config,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-            ),
-            "a replaceable .bin entry must fall back to the package runner"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn bunx_cache_fast_path_ignores_a_misleading_cache_root_name() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_executable, modified) =
-            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
-        let correct_root = temp
-            .path()
-            .join(format!("bunx-{}-@openai", current_effective_uid()));
-        let misleading_root = temp.path().join("bunx-evil-@openai");
-        std::fs::rename(correct_root, misleading_root).expect("rename cache root");
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("latest")
-            .build();
-
-        assert!(
-            !apply_host_bunx_cache_fast_path_from(
-                &mut config,
-                temp.path(),
-                modified + std::time::Duration::from_secs(60),
-            ),
-            "cache lookup must use the exact effective-uid Bun root name"
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn pinned_bunx_cache_remains_reusable_after_latest_ttl() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (executable, modified) =
-            write_test_bunx_cache(temp.path(), "0.145.0", "@openai/codex", "@openai/codex");
-        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
-            .version("0.145.0")
-            .build();
-        let (bun, bunx) = write_test_bun_runtime(temp.path());
-        config.command = bunx.to_string_lossy().into_owned();
-
-        assert!(apply_host_bunx_cache_fast_path_from(
-            &mut config,
-            temp.path(),
-            modified + std::time::Duration::from_secs(30 * 24 * 60 * 60),
-        ));
-        assert_eq!(
-            std::fs::canonicalize(&config.command).expect("canonical Bun runtime"),
-            std::fs::canonicalize(bun).expect("canonical expected Bun runtime")
-        );
-        assert_eq!(
-            PathBuf::from(config.args.first().expect("cached entrypoint arg")),
-            std::fs::canonicalize(executable).expect("canonical cached executable")
-        );
-        assert!(!config.args.iter().any(|arg| arg == "@openai/codex@0.145.0"));
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn claude_latest_prefers_npx_over_bunx_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        let npx = temp.path().join("npx");
-        write_test_runner(&bunx);
-        write_test_runner(&npx);
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::ClaudeCode, "latest", &env);
-
-        assert_eq!(PathBuf::from(runner.executable), npx);
-        assert_eq!(
-            runner.base_args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-            ],
-        );
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn claude_latest_falls_back_to_bunx_when_npx_is_missing_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        write_test_runner(&bunx);
-        let path = temp.path().display().to_string();
-        let cwd = std::env::current_dir().expect("cwd");
-
-        let (executable, needs_yes) = find_package_runner_in_path(
-            package_runner_candidates_for_agent(&AgentId::ClaudeCode),
-            Some(path.as_str()),
-            &cwd,
-        )
-        .expect("runner");
-
-        assert_eq!(PathBuf::from(executable), bunx);
-        assert!(!needs_yes);
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn codex_latest_keeps_bunx_first_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        let npx = temp.path().join("npx");
-        write_test_runner(&bunx);
-        write_test_runner(&npx);
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::Codex, "latest", &env);
-
-        assert_eq!(PathBuf::from(runner.executable), bunx);
-        assert_eq!(runner.base_args, vec!["@openai/codex@latest".to_string()]);
-    }
-
-    // SPEC-3151 FR-001/FR-002: OpenCode launches through the `opencode-ai` npm
-    // package runner just like Codex/Claude Code. Per the SPEC decision the
-    // runner keeps bunx-first ordering (OpenCode is not on the npx-preference
-    // list), so a versioned launch resolves bunx + `opencode-ai@<version>`.
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn opencode_latest_keeps_bunx_first_on_nonwindows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bunx = temp.path().join("bunx");
-        let npx = temp.path().join("npx");
-        write_test_runner(&bunx);
-        write_test_runner(&npx);
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let runner = resolve_runner_with_env(&AgentId::OpenCode, "latest", &env);
-
-        assert_eq!(PathBuf::from(runner.executable), bunx);
-        assert_eq!(runner.base_args, vec!["opencode-ai@latest".to_string()]);
-    }
-
-    // Issue #2981: the host `bunx`→`npx` fallback must resolve a Windows-spawnable
-    // executable. `find_package_runner_in_path` is the shared resolver, so given
-    // an npx-only candidate list it must prefer the `.cmd` variant ahead of the
-    // bare POSIX shim when both are present on PATH (SPEC-1921 FR-080).
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn npx_fallback_resolution_prefers_cmd_variant_when_both_present() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        write_test_runner(&temp.path().join("npx.cmd"));
-        write_test_runner(&temp.path().join("npx"));
-        let path = temp.path().display().to_string();
-        let cwd = std::env::current_dir().expect("cwd");
-        let candidates: &'static [(&'static str, bool)] = &[("npx.cmd", true), ("npx", true)];
-
-        let (executable, needs_yes) =
-            find_package_runner_in_path(candidates, Some(path.as_str()), &cwd).expect("npx runner");
-
-        assert_eq!(PathBuf::from(&executable), temp.path().join("npx.cmd"));
-        assert!(needs_yes);
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn resolve_host_npx_fallback_executable_resolves_npx_on_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        write_test_runner(&temp.path().join("npx"));
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert_eq!(PathBuf::from(resolved), temp.path().join("npx"));
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn latest_runner_resolves_relative_path_against_launch_cwd() {
+    fn direct_runner_uses_explicit_path_and_launch_cwd() {
         let temp = tempfile::tempdir().expect("tempdir");
         let launch_cwd = temp.path().join("project");
         let bin = launch_cwd.join("tools");
         std::fs::create_dir_all(&bin).expect("create launch PATH directory");
-        let npx = bin.join("npx");
-        write_test_runner(&npx);
+        let claude = bin.join("claude");
+        write_test_runner(&claude);
         let env = HashMap::from([("PATH".to_string(), "tools".to_string())]);
-
-        let runner = resolve_latest_runner_with_effective_env(
-            &AgentId::ClaudeCode,
-            &env,
-            &[],
-            Some(&launch_cwd),
-        );
-
-        assert_eq!(PathBuf::from(runner.executable), npx);
-        assert_eq!(runner.base_args[0], "--yes");
+        let executable =
+            resolve_direct_runner_with_effective_env("claude", &env, &[], Some(&launch_cwd));
+        assert_eq!(executable.map(PathBuf::from), Some(claude));
     }
 
-    #[cfg(all(not(windows), unix))]
     #[test]
-    fn builder_latest_selection_uses_explicit_path_and_launch_cwd() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let launch_cwd = temp.path().join("project");
-        let bin = launch_cwd.join("tools");
-        std::fs::create_dir_all(&bin).expect("create launch PATH directory");
-        let npx = bin.join("npx");
-        write_test_runner(&npx);
-
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .working_dir(&launch_cwd)
-            .version("latest")
-            .env("PATH", "tools")
-            .build();
-
-        assert_eq!(PathBuf::from(config.command), npx);
-    }
-
-    #[cfg(all(not(windows), unix))]
-    #[test]
-    fn package_runner_effective_path_applies_remove_before_explicit_override() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let inherited_bin = temp.path().join("inherited");
-        let explicit_bin = temp.path().join("explicit");
-        std::fs::create_dir_all(&inherited_bin).expect("create inherited bin");
-        std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
-        write_test_runner(&inherited_bin.join("npx"));
-        write_test_runner(&explicit_bin.join("npx"));
-        let _lock = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &inherited_bin);
-
-        let removed = resolve_host_npx_fallback_executable_with_effective_env(
-            &HashMap::new(),
+    fn launch_effective_path_applies_remove_before_explicit_override() {
+        let inherited_consulted = std::cell::Cell::new(false);
+        let inherited = effective_launch_path_with_host(&HashMap::new(), &[], || {
+            inherited_consulted.set(true);
+            Some("inherited".to_string())
+        });
+        assert!(inherited_consulted.replace(false));
+        let removed =
+            effective_launch_path_with_host(&HashMap::new(), &["PATH".to_string()], || {
+                inherited_consulted.set(true);
+                Some("inherited".to_string())
+            });
+        let overridden = effective_launch_path_with_host(
+            &HashMap::from([("PATH".to_string(), "explicit".to_string())]),
             &["PATH".to_string()],
-            Some(temp.path()),
+            || {
+                inherited_consulted.set(true);
+                Some("inherited".to_string())
+            },
         );
-        let overridden = resolve_host_npx_fallback_executable_with_effective_env(
-            &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
-            &["PATH".to_string()],
-            Some(temp.path()),
-        );
-
-        assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
-        assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn resolve_host_npx_fallback_executable_defaults_to_bare_npx_when_absent() {
-        // Empty PATH dir: no npx anywhere → canonical bare name is preserved so
-        // the launch PTY can still resolve it at spawn time (prior behavior).
-        let temp = tempfile::tempdir().expect("tempdir");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert_eq!(resolved, "npx");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn resolve_host_npx_fallback_executable_prefers_cmd_on_windows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("npx.cmd"), "@echo off\r\n").expect("write npx.cmd");
-        std::fs::write(temp.path().join("npx"), "#!/bin/sh\n").expect("write npx shim");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert!(
-            Path::new(&resolved)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.eq_ignore_ascii_case("npx.cmd"))
-                .unwrap_or(false),
-            "expected npx.cmd, got {resolved}"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn resolve_host_npx_fallback_executable_never_defaults_to_bare_shim_on_windows() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("npx"), "#!/bin/sh\n").expect("write bare shim");
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-
-        let resolved = resolve_host_npx_fallback_executable(&env);
-
-        assert_eq!(resolved, "npx.cmd");
+        assert_eq!(inherited.as_deref(), Some("inherited"));
+        assert_eq!(removed, None);
+        assert_eq!(overridden.as_deref(), Some("explicit"));
+        assert!(!inherited_consulted.get());
     }
 
     #[test]
-    fn build_with_version_latest() {
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .version("latest")
-            .build();
-        assert!(
-            config.command.contains("bunx") || config.command.contains("npx"),
-            "expected bunx/npx but got: {}",
-            config.command
-        );
-        let has_package_spec = config
-            .args
-            .iter()
-            .any(|a| a.contains("@anthropic-ai/claude-code@latest"));
-        assert!(
-            has_package_spec,
-            "args should contain package@latest: {:?}",
-            config.args
-        );
-    }
-
-    #[test]
-    fn build_with_version_installed() {
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .version("installed")
-            .build();
+    fn built_in_launch_uses_direct_command() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
         assert_eq!(config.command, "claude");
+        assert!(config.tool_version.is_none());
     }
 
     #[test]
@@ -4172,13 +3271,9 @@ mod tests {
                 .map(String::as_str),
             Some("0")
         );
-        assert_eq!(
-            config
-                .env_vars
-                .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-                .map(String::as_str),
-            Some("1")
-        );
+        assert!(!config
+            .env_vars
+            .contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
     }
 
     #[test]
@@ -4301,11 +3396,26 @@ mod tests {
             Some("sk-codex")
         );
 
+        assert!(config
+            .args
+            .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
+
         // Generated config.toml exists and contains the expected provider id.
         let body =
             std::fs::read_to_string(Path::new(codex_home).join("config.toml")).expect("read");
         assert!(body.contains("model_provider = \"gwt-llmlb\""));
         assert!(body.contains("base_url = \"http://127.0.0.1:8080\""));
+        assert_eq!(
+            config
+                .args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1,
+            "CLI override must survive worktree-local CODEX_HOME replacement"
+        );
     }
 
     #[test]

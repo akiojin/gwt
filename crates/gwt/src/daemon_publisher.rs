@@ -23,8 +23,6 @@
 //! authority, connection/send/receipt uncertainty never authorizes a local
 //! fallback writer.
 
-#![cfg(unix)]
-
 use std::{path::Path, time::Duration};
 
 use gwt_core::{
@@ -43,7 +41,7 @@ use crate::runtime_daemon_events::{
 };
 
 /// Default per-stage timeout for the GUI / CLI hot path. 200 ms is
-/// generous for a local Unix-socket round-trip (typical is < 5 ms) but
+/// generous for a local IPC round-trip (typical is < 5 ms) but
 /// short enough that a hung daemon cannot freeze the caller for more
 /// than 600 ms total (connect + send + ack — three independent
 /// stages, see [`publish_event_with_timeout`]). Phase H1 GREEN handler
@@ -91,23 +89,6 @@ enum EndpointAbsenceEvidence {
     Missing,
     DefinitelyDead,
     Uncertain(String),
-}
-
-fn authority_fence_allows_fallback(project_root: &Path) -> Result<(), String> {
-    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    match crate::load_issue_monitor_authority_fence(&prefs_path) {
-        Ok(crate::IssueMonitorAuthorityFenceState::Missing) => Ok(()),
-        Ok(crate::IssueMonitorAuthorityFenceState::LegacyShutdownRevoke) => {
-            Err("Issue Monitor authority fence retains pending crash recovery".to_string())
-        }
-        Ok(crate::IssueMonitorAuthorityFenceState::Active(fence)) => Err(format!(
-            "Issue Monitor authority fence is owned by daemon pid {}",
-            fence.pid
-        )),
-        Err(error) => Err(format!(
-            "Issue Monitor authority fence is malformed or unreadable: {error}"
-        )),
-    }
 }
 
 fn authority_owned_endpoint(
@@ -172,17 +153,188 @@ fn authority_owned_endpoint(
     }
     match matches.len() {
         1 => Ok(matches.pop().expect("one authority endpoint")),
-        0 => Err(format!(
-            "Issue Monitor authority fence pid {} has no usable endpoint in {}",
-            fence.pid,
-            daemon_dir.display()
-        )),
+        // #3766 AC-3: diagnose the incident shape (fence held, descriptor
+        // gone) instead of a bare permanent-looking failure. A live fence
+        // holder self-heals its descriptor within seconds, so this state is
+        // transient unless the fence pid is dead or the socket is gone.
+        0 => {
+            let descriptor_path = requested_scope.endpoint_path(gwt_home);
+            let socket_present = gwt_core::daemon::resolve_daemon_socket_path(&descriptor_path)
+                .map(|socket| crate::cli::daemon::transport::bind_is_present(&socket.path))
+                .unwrap_or(false);
+            Err(format!(
+                "Issue Monitor authority fence pid {} has no usable endpoint in {} \
+                 (diagnosis: fence pid alive={}, descriptor json present={}, \
+                 socket present={}; a live fence-holding daemon rewrites its missing \
+                 descriptor within seconds — retry, and restart the GWT app if this \
+                 persists)",
+                fence.pid,
+                daemon_dir.display(),
+                is_process_alive(fence.pid),
+                descriptor_path.exists(),
+                socket_present,
+            ))
+        }
         count => Err(format!(
             "Issue Monitor authority fence pid {} matched {count} endpoints in {}",
             fence.pid,
             daemon_dir.display()
         )),
     }
+}
+
+#[derive(Clone, Copy)]
+enum AuthorityResolutionPurpose {
+    Route,
+    RecoverUnderLease,
+}
+
+enum ProjectAuthorityResolution {
+    Missing,
+    Live(DaemonEndpoint),
+    Recover,
+}
+
+pub(crate) fn resolve_live_project_authority(
+    gwt_home: &Path,
+    scope: &RuntimeScope,
+    is_process_alive: &dyn Fn(u32) -> bool,
+) -> Result<Option<DaemonEndpoint>, String> {
+    match resolve_project_authority(
+        gwt_home,
+        scope,
+        is_process_alive,
+        AuthorityResolutionPurpose::Route,
+    )? {
+        ProjectAuthorityResolution::Live(endpoint) => Ok(Some(endpoint)),
+        ProjectAuthorityResolution::Missing => Ok(None),
+        ProjectAuthorityResolution::Recover => {
+            Err("Issue Monitor authority fence retains pending crash recovery".to_string())
+        }
+    }
+}
+
+fn resolve_project_authority(
+    gwt_home: &Path,
+    scope: &RuntimeScope,
+    is_process_alive: &dyn Fn(u32) -> bool,
+    purpose: AuthorityResolutionPurpose,
+) -> Result<ProjectAuthorityResolution, String> {
+    let prefs_path = gwt_home
+        .join("projects")
+        .join(&scope.repo_hash)
+        .join("project-state/issue-monitor.json");
+    let fence = crate::load_issue_monitor_authority_fence(&prefs_path)
+        .map_err(|error| format!("project daemon authority is malformed or unreadable: {error}"))?;
+    if let (
+        AuthorityResolutionPurpose::RecoverUnderLease,
+        crate::IssueMonitorAuthorityFenceState::Active(fence),
+    ) = (purpose, &fence)
+    {
+        // v2 identity is the process-lifetime kernel lease, not a reusable PID.
+        if fence.version == 2 {
+            // This probe also takes prefs.lock. Bound contention while the
+            // supervisor owns its child table; an outer deadline stays shorter.
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now() + Duration::from_secs(1),
+            );
+            match crate::issue_monitor::acquire_issue_monitor_daemon_lease(&prefs_path) {
+                Ok(lease) => {
+                    drop(lease);
+                    return Ok(ProjectAuthorityResolution::Recover);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return authority_owned_endpoint(gwt_home, scope, fence, &|pid| {
+                        is_process_alive(pid)
+                    })
+                    .map(ProjectAuthorityResolution::Live);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "project daemon authority lease probe failed: {error}"
+                    ))
+                }
+            }
+        }
+    }
+    match fence {
+        crate::IssueMonitorAuthorityFenceState::Missing => Ok(ProjectAuthorityResolution::Missing),
+        crate::IssueMonitorAuthorityFenceState::Active(fence) if is_process_alive(fence.pid) => {
+            authority_owned_endpoint(gwt_home, scope, &fence, &|pid| is_process_alive(pid))
+                .map(ProjectAuthorityResolution::Live)
+        }
+        crate::IssueMonitorAuthorityFenceState::Active(_)
+        | crate::IssueMonitorAuthorityFenceState::LegacyShutdownRevoke => {
+            match purpose {
+                // The server must acquire the existing authority lease before
+                // binding; selecting recovery here does not grant ownership.
+                AuthorityResolutionPurpose::RecoverUnderLease => {
+                    Ok(ProjectAuthorityResolution::Missing)
+                }
+                AuthorityResolutionPurpose::Route => {
+                    Err("Issue Monitor authority fence retains pending crash recovery".to_string())
+                }
+            }
+        }
+    }
+}
+
+/// Resolve bootstrap through the project's existing authority before inspecting
+/// the caller's endpoint slot. Dead-owner and legacy recovery still require
+/// the server's existing authority lease before it can bind.
+pub(crate) fn resolve_project_daemon_bootstrap(
+    gwt_home: &Path,
+    scope: &RuntimeScope,
+    expected_version: Option<&str>,
+    is_process_alive: &dyn Fn(u32) -> bool,
+) -> Result<DaemonBootstrapAction, String> {
+    match resolve_project_authority(
+        gwt_home,
+        scope,
+        is_process_alive,
+        AuthorityResolutionPurpose::RecoverUnderLease,
+    )? {
+        ProjectAuthorityResolution::Live(endpoint) => {
+            return Ok(
+                if expected_version.is_some_and(|version| endpoint.daemon_version != version) {
+                    DaemonBootstrapAction::RetireStaleVersion { endpoint }
+                } else {
+                    DaemonBootstrapAction::Reuse(endpoint)
+                },
+            );
+        }
+        ProjectAuthorityResolution::Recover => {
+            // Do not reselect the stale exact descriptor: its PID may now name
+            // an unrelated process. The new server re-acquires the lease.
+            return Ok(DaemonBootstrapAction::Spawn {
+                endpoint_path: scope.endpoint_path(gwt_home),
+            });
+        }
+        ProjectAuthorityResolution::Missing => {}
+    }
+    match expected_version {
+        Some(version) => gwt_core::daemon::resolve_bootstrap_action_for_version(
+            gwt_home,
+            scope,
+            DAEMON_PROTOCOL_VERSION,
+            version,
+            is_process_alive,
+        ),
+        None => {
+            resolve_bootstrap_action(gwt_home, scope, DAEMON_PROTOCOL_VERSION, is_process_alive)
+        }
+    }
+    .map_err(|error| format!("daemon bootstrap resolution failed: {error}"))
+}
+
+/// Resolve the single project daemon using its existing Monitor authority.
+/// The returned scope belongs to the owner, which may be another worktree.
+/// Uncertain ownership is an error, never permission to choose another owner.
+pub fn resolve_project_daemon_endpoint(
+    project_root: &Path,
+) -> Result<Option<DaemonEndpoint>, String> {
+    resolve_issue_monitor_endpoint_with_liveness(project_root, &is_alive)
+        .map_err(|error| error.to_string())
 }
 
 fn resolve_issue_monitor_endpoint_with_liveness(
@@ -194,31 +346,27 @@ fn resolve_issue_monitor_endpoint_with_liveness(
     let scope = RuntimeScope::from_project_root(project_root, RuntimeTarget::Host)
         .map_err(|error| OutcomeUnknown(format!("scope resolution failed: {error}")))?;
     let gwt_home = paths::gwt_home();
-    let authority_fence = crate::load_issue_monitor_authority_fence(
-        &crate::issue_monitor_prefs_path_for_repo_path(project_root),
-    );
-    if let Ok(crate::IssueMonitorAuthorityFenceState::Active(fence)) = &authority_fence {
-        return authority_owned_endpoint(&gwt_home, &scope, fence, is_process_alive)
-            .map(Some)
-            .map_err(OutcomeUnknown);
+    if let Some(endpoint) = resolve_live_project_authority(&gwt_home, &scope, is_process_alive)
+        .map_err(OutcomeUnknown)?
+    {
+        return Ok(Some(endpoint));
     }
 
     let endpoint_path = scope.endpoint_path(&gwt_home);
     let absence_evidence = endpoint_absence_evidence(&endpoint_path, is_process_alive);
-    let fence_evidence = authority_fence_allows_fallback(project_root);
     let action = resolve_bootstrap_action(&gwt_home, &scope, DAEMON_PROTOCOL_VERSION, |pid| {
         is_process_alive(pid)
     })
     .map_err(|error| OutcomeUnknown(format!("bootstrap resolve failed: {error}")))?;
     match action {
         DaemonBootstrapAction::Reuse(endpoint) => Ok(Some(endpoint)),
+        // Issue #4038: version-agnostic resolution never yields this arm; a
+        // stale-version daemon is only ever named by the GUI supervisor.
+        DaemonBootstrapAction::RetireStaleVersion { .. } => Err(OutcomeUnknown(
+            "daemon endpoint belongs to another gwt version".to_string(),
+        )),
         DaemonBootstrapAction::Spawn { .. } => match absence_evidence {
-            EndpointAbsenceEvidence::Missing | EndpointAbsenceEvidence::DefinitelyDead => {
-                match fence_evidence {
-                    Ok(()) => Ok(None),
-                    Err(reason) => Err(OutcomeUnknown(reason)),
-                }
-            }
+            EndpointAbsenceEvidence::Missing | EndpointAbsenceEvidence::DefinitelyDead => Ok(None),
             EndpointAbsenceEvidence::Uncertain(reason) => Err(OutcomeUnknown(reason)),
         },
     }
@@ -272,6 +420,32 @@ fn publish_issue_monitor_control_with_timeout_and_liveness(
             None => return Err(TransportUnavailable("daemon not running".to_string())),
         };
     publish_issue_monitor_control_to_endpoint(endpoint, payload, timeout, started)
+}
+
+/// Hand one agent-window canvas snapshot to the daemon that owns the Issue
+/// Monitor scan (Issue #4084 AC-1).
+///
+/// Absence from the snapshot is what makes a launch binding dead, so a daemon
+/// that never receives one can never release the slot of a pane that died.
+///
+/// Issue #4131: this publish used to be `#[cfg(unix)]`. The daemon runs on
+/// Windows too — over a named pipe rather than a Unix socket — and it is the
+/// scan driver there, so the Windows daemon never saw a canvas at all:
+/// `classify_idle_windows` found no fresh snapshot on every scan, and every
+/// launch whose pane an auto-update restart killed held its slot until a PM
+/// issued `issue.monitor.stop` by hand.
+pub fn publish_issue_monitor_window_snapshot(
+    project_root: &Path,
+    snapshot: &crate::IssueMonitorWindowSnapshot,
+) -> Result<(), IssueMonitorControlPublishError> {
+    publish_issue_monitor_control(
+        project_root,
+        crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "window_snapshot": snapshot }),
+            std::process::id(),
+        ),
+    )
 }
 
 /// Read the daemon-owned atomic Issue Monitor projection. `Ok(None)` means no
@@ -355,7 +529,7 @@ fn publish_issue_monitor_control_to_endpoint(
     timeout: Duration,
     started: std::time::Instant,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    use IssueMonitorControlPublishError::{Busy, OutcomeUnknown, RecoveryBlocked, Rejected};
+    use IssueMonitorControlPublishError::{OutcomeUnknown, RecoveryBlocked, Rejected};
 
     let remaining_budget = || -> Result<Duration, IssueMonitorControlPublishError> {
         timeout
@@ -413,17 +587,7 @@ fn publish_issue_monitor_control_to_endpoint(
                     return Err(RecoveryBlocked);
                 }
                 DaemonFrame::Error { message } if message == ISSUE_MONITOR_CONTROL_BUSY_ERROR => {
-                    let now = tokio::time::Instant::now();
-                    let Some(remaining) = deadline.checked_duration_since(now) else {
-                        return Err(Busy(message));
-                    };
-                    if remaining.is_zero() {
-                        return Err(Busy(message));
-                    }
-                    tokio::time::sleep(remaining.min(busy_backoff)).await;
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(Busy(message));
-                    }
+                    wait_for_control_retry(deadline, busy_backoff, message).await?;
                     busy_backoff = busy_backoff
                         .saturating_mul(2)
                         .min(Duration::from_millis(50));
@@ -437,6 +601,30 @@ fn publish_issue_monitor_control_to_endpoint(
     })
 }
 
+/// Wait only within the remaining control budget. Kept separate from IPC so
+/// budget exhaustion can be observed with a stopped clock, without racing a
+/// final socket exchange against the deadline (Issue #4599).
+async fn wait_for_control_retry(
+    deadline: tokio::time::Instant,
+    backoff: Duration,
+    message: String,
+) -> Result<(), IssueMonitorControlPublishError> {
+    use IssueMonitorControlPublishError::Busy;
+
+    let now = tokio::time::Instant::now();
+    let Some(remaining) = deadline.checked_duration_since(now) else {
+        return Err(Busy(message));
+    };
+    if remaining.is_zero() {
+        return Err(Busy(message));
+    }
+    tokio::time::sleep(remaining.min(backoff)).await;
+    if tokio::time::Instant::now() >= deadline {
+        return Err(Busy(message));
+    }
+    Ok(())
+}
+
 /// Same as [`publish_event`] but lets the caller override the
 /// connect / read / ack timeout budget. Each individual stage is
 /// bounded by `timeout` so a stuck daemon cannot pin the calling
@@ -447,15 +635,8 @@ pub fn publish_event_with_timeout(
     payload: Value,
     timeout: Duration,
 ) -> Result<(), String> {
-    let scope = RuntimeScope::from_project_root(project_root, RuntimeTarget::Host)
-        .map_err(|err| format!("scope resolution failed: {err}"))?;
-    let gwt_home = paths::gwt_home();
-    let action = resolve_bootstrap_action(&gwt_home, &scope, DAEMON_PROTOCOL_VERSION, is_alive)
-        .map_err(|err| format!("bootstrap resolve failed: {err}"))?;
-    let endpoint = match action {
-        DaemonBootstrapAction::Reuse(ep) => ep,
-        DaemonBootstrapAction::Spawn { .. } => return Err("daemon not running".to_string()),
-    };
+    let endpoint = resolve_project_daemon_endpoint(project_root)?
+        .ok_or_else(|| "daemon not running".to_string())?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -493,7 +674,61 @@ pub fn publish_event_with_timeout(
 // `crate::process::is_process_alive`.
 use crate::process::is_process_alive as is_alive;
 
+/// Issue #4131: the canvas publish must reach the transport on every host the
+/// daemon runs on, Windows included. Kept out of the `unix`-only module below
+/// on purpose — that is exactly the gate this regression is about.
 #[cfg(test)]
+mod window_snapshot_publish_tests {
+    use gwt_core::test_support::ScopedEnvVar;
+    use tempfile::TempDir;
+
+    use crate::runtime_daemon_events::IssueMonitorControlPublishError;
+
+    /// Without a daemon the publish must report a real transport outcome. A
+    /// platform where it silently does nothing leaves the Issue Monitor's idle
+    /// classifier blind and its slots leaked (Issue #4131 AC-1).
+    #[test]
+    fn window_snapshot_publish_reaches_the_transport_on_every_platform() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().expect("project tempdir");
+        let home = TempDir::new().expect("home tempdir");
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: "2026-09-08T01:11:27Z".to_string(),
+            windows: vec![crate::IssueMonitorWindowObservation {
+                monitor_owned: false,
+                window_id: "tab-1::agent-149".to_string(),
+                issue_number: Some(4009),
+                status: crate::WindowState::Stopped,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+            }],
+        };
+
+        let error = super::publish_issue_monitor_window_snapshot(project.path(), &snapshot)
+            .expect_err("no daemon is running for this project root");
+
+        assert!(
+            matches!(
+                &error,
+                IssueMonitorControlPublishError::TransportUnavailable(message)
+                    if message.contains("daemon not running")
+            ),
+            "the publish must be attempted, not skipped: {error:?}"
+        );
+    }
+}
+
+// The fixtures below stand up a fake daemon on a raw `std` Unix listener;
+// the transport-neutral publisher path is exercised end-to-end through
+// `cli::daemon::client` and `daemon_subscriber` tests on every host.
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         io::{BufRead, Write},
@@ -517,6 +752,10 @@ mod tests {
         publish_issue_monitor_control_with_timeout,
         publish_issue_monitor_control_with_timeout_and_liveness,
     };
+
+    /// Safety ceiling for the real-IPC retry-to-ACK test, not a budget that
+    /// successful tests must exhaust. Exhaustion uses a stopped clock below.
+    const PUBLISH_HANG_GUARD: Duration = Duration::from_secs(5);
 
     #[test]
     fn publish_returns_error_when_no_daemon_registered() {
@@ -834,8 +1073,84 @@ mod tests {
         ));
     }
 
+    /// Issue #3766 AC-3: when a fence is active but no descriptor matches it,
+    /// the error must carry a diagnosis (fence pid liveness, descriptor and
+    /// socket presence) instead of the bare permanent-looking failure.
+    #[test]
+    fn fence_without_descriptor_reports_endpoint_diagnosis() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().expect("project tempdir");
+        let home = TempDir::new().expect("home tempdir");
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        crate::persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+        )
+        .expect("persist active authority fence");
+        // The #3766 incident shape: the daemon dir exists (socket bound by the
+        // fence holder) but the descriptor json is gone.
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
+            .expect("runtime scope");
+        let descriptor_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        std::fs::create_dir_all(descriptor_path.parent().expect("daemon dir parent"))
+            .expect("create daemon dir");
+
+        let error = publish_issue_monitor_control_with_timeout_and_liveness(
+            project.path(),
+            json!({"enabled": false}),
+            Duration::from_millis(100),
+            |_| true,
+        )
+        .expect_err("fence without descriptor cannot resolve an endpoint");
+
+        let message = match error {
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                message,
+            ) => message,
+            other => panic!("expected OutcomeUnknown, got {other:?}"),
+        };
+        assert!(
+            message.contains("has no usable endpoint"),
+            "diagnosis keeps the stable failure prefix: {message}"
+        );
+        assert!(
+            message.contains("fence pid alive=true"),
+            "diagnosis must report fence pid liveness: {message}"
+        );
+        assert!(
+            message.contains("descriptor json present=false"),
+            "diagnosis must report descriptor presence: {message}"
+        );
+        assert!(
+            message.contains("socket present="),
+            "diagnosis must report socket presence: {message}"
+        );
+    }
+
     #[test]
     fn active_authority_fence_routes_control_to_sibling_worktree_endpoint() {
+        assert_publish_routes_to_sibling(|root, payload, timeout| {
+            publish_issue_monitor_control_with_timeout(root, payload, timeout)
+                .map_err(|error| format!("{error:?}"))
+        });
+    }
+
+    #[test]
+    fn active_authority_fence_routes_events_to_sibling_worktree_endpoint() {
+        assert_publish_routes_to_sibling(|root, payload, timeout| {
+            publish_event_with_timeout(root, "board", payload, timeout)
+        });
+    }
+
+    fn assert_publish_routes_to_sibling(
+        publish: impl FnOnce(&std::path::Path, serde_json::Value, Duration) -> Result<(), String>,
+    ) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -882,12 +1197,12 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = Arc::clone(&stop);
         let server = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while !server_stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
                 let (stream, _) = match listener.accept() {
                     Ok(accepted) => accepted,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1));
+                        std::thread::sleep(Duration::from_millis(100));
                         continue;
                     }
                     Err(error) => panic!("accept sibling publisher: {error}"),
@@ -932,15 +1247,15 @@ mod tests {
             }
         });
 
-        let result = publish_issue_monitor_control_with_timeout(
+        let result = publish(
             project.path(),
             json!({"enabled": false}),
-            Duration::from_millis(500),
+            Duration::from_secs(5),
         );
         stop.store(true, Ordering::Release);
         server.join().expect("sibling daemon joins");
 
-        result.expect("control routes to authority-owning sibling daemon");
+        result.expect("publish routes to authority-owning sibling daemon");
     }
 
     #[test]
@@ -1013,6 +1328,46 @@ mod tests {
             std::fs::read(fence_path).expect("reload malformed fence"),
             malformed
         );
+    }
+
+    #[test]
+    fn routing_rejects_uncertain_fence_even_with_live_exact_endpoint() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            home.path().join("live.sock").display().to_string(),
+            "token".into(),
+            "test".into(),
+        );
+        persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .unwrap();
+        let prefs = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        crate::save_issue_monitor_prefs(&prefs, &crate::IssueMonitorPrefs::default()).unwrap();
+        crate::persist_legacy_issue_monitor_shutdown_revoke_fence(&prefs).unwrap();
+        let fence_path = crate::issue_monitor_authority_fence_path(&prefs);
+        for malformed in [false, true] {
+            if malformed {
+                std::fs::write(&fence_path, b"not-json").unwrap();
+            }
+            let before = std::fs::read(&fence_path).unwrap();
+            assert!(
+                super::resolve_issue_monitor_endpoint_with_liveness(project.path(), &|_| true)
+                    .is_err(),
+                "uncertain fence must not route to a live local endpoint (malformed={malformed})"
+            );
+            assert_eq!(std::fs::read(&fence_path).unwrap(), before);
+        }
     }
 
     #[test]
@@ -1141,7 +1496,7 @@ mod tests {
         publish_issue_monitor_control_with_timeout(
             project.path(),
             payload.clone(),
-            Duration::from_millis(500),
+            PUBLISH_HANG_GUARD,
         )
         .expect("explicit Busy is safely retried");
         server.join().expect("test daemon joins");
@@ -1154,99 +1509,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn busy_control_budget_exhaustion_is_a_non_fallback_busy_error() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let project = TempDir::new().expect("project tempdir");
-        let home = TempDir::new().expect("home tempdir");
-        let _home_guard = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
-        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
-            .expect("runtime scope");
-        let socket_path = home.path().join("busy-exhausted.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind test daemon");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking test listener");
-        let endpoint = DaemonEndpoint::new(
-            scope.clone(),
-            std::process::id(),
-            socket_path.to_string_lossy().to_string(),
-            "busy-exhausted-token".to_string(),
-            "test-daemon".to_string(),
+    #[tokio::test(start_paused = true)]
+    async fn busy_control_budget_exhaustion_is_a_non_fallback_busy_error() {
+        use crate::runtime_daemon_events::{
+            IssueMonitorControlPublishError, ISSUE_MONITOR_CONTROL_BUSY_ERROR,
+        };
+
+        let budget = Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        let retry = super::wait_for_control_retry(
+            started + budget,
+            budget,
+            ISSUE_MONITOR_CONTROL_BUSY_ERROR.to_string(),
         );
-        persist_endpoint(
-            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
-            &endpoint,
-        )
-        .expect("persist live endpoint");
-        let stop = Arc::new(AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            while !server_stop.load(Ordering::Acquire) {
-                let (stream, _) = match listener.accept() {
-                    Ok(accepted) => accepted,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    Err(error) => panic!("accept publisher: {error}"),
-                };
-                stream
-                    .set_nonblocking(false)
-                    .expect("blocking publisher stream");
-                let mut reader =
-                    std::io::BufReader::new(stream.try_clone().expect("clone publisher stream"));
-                let mut writer = stream;
-                let mut line = String::new();
-                reader.read_line(&mut line).expect("read handshake");
-                let request: IpcHandshakeRequest =
-                    serde_json::from_str(line.trim_end()).expect("parse handshake");
-                assert_eq!(request.scope, scope);
-                let handshake = IpcHandshakeResponse {
-                    protocol_version: DAEMON_PROTOCOL_VERSION,
-                    daemon_version: "test-daemon".to_string(),
-                    accepted: true,
-                    rejection_reason: None,
-                };
-                writeln!(
-                    writer,
-                    "{}",
-                    serde_json::to_string(&handshake).expect("serialize handshake")
-                )
-                .expect("write handshake");
-                line.clear();
-                reader.read_line(&mut line).expect("read publish");
-                let _: ClientFrame = serde_json::from_str(line.trim_end()).expect("parse publish");
-                let response = DaemonFrame::Error {
-                    message: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR
-                        .to_string(),
-                };
-                writeln!(
-                    writer,
-                    "{}",
-                    serde_json::to_string(&response).expect("serialize response")
-                )
-                .expect("write response");
-            }
-        });
+        tokio::pin!(retry);
+        assert!(futures_util::poll!(&mut retry).is_pending());
 
-        let error = publish_issue_monitor_control_with_timeout(
-            project.path(),
-            json!({"enabled": false}),
-            Duration::from_millis(40),
-        )
-        .expect_err("Busy must remain explicit when its retry budget expires");
-        stop.store(true, Ordering::Release);
-        server.join().expect("test daemon joins");
+        // Simulate a descheduled publisher. Real scheduler delay must not
+        // consume the stopped clock's budget or select a different outcome.
+        std::thread::sleep(budget);
+        assert_eq!(tokio::time::Instant::now(), started);
+        assert!(futures_util::poll!(&mut retry).is_pending());
 
+        tokio::time::advance(budget).await;
+        assert_eq!(tokio::time::Instant::now(), started + budget);
+        let error = retry
+            .await
+            .expect_err("observed budget exhaustion returns Busy");
         assert!(!error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::Busy(message)
-                if message == crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR
+            IssueMonitorControlPublishError::Busy(message)
+                if message == ISSUE_MONITOR_CONTROL_BUSY_ERROR
         ));
     }
 

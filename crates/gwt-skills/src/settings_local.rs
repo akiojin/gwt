@@ -1,13 +1,34 @@
 //! Generate `.claude/settings.local.json` with gwt-managed Claude hooks.
 
 use std::{
+    cell::RefCell,
     fs, io,
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
+
+pub(crate) const POWERSHELL_ENCODED_COMMAND_PREFIX: &str = "powershell -NoProfile -EncodedCommand ";
+
+/// Decode only the exact wrapper generated for managed Windows hooks.
+/// Decoding is for inspection; it does not establish command trust.
+pub fn decode_powershell_encoded_command(command: &str) -> Option<String> {
+    let encoded = command.strip_prefix(POWERSHELL_ENCODED_COMMAND_PREFIX)?;
+    let bytes = STANDARD.decode(encoded).ok()?;
+    if bytes.is_empty() || bytes.len() % 2 != 0 || STANDARD.encode(&bytes) != encoded {
+        return None;
+    }
+    let units = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&units).ok()
+}
 
 const GWT_MANAGED_RUNTIME_MARKER: &str = "GWT_MANAGED_HOOK";
 const GWT_HOOK_CLI_PREFIX: &str = "gwtd hook ";
@@ -43,7 +64,8 @@ const MANAGED_EVENT_ORDER: &[&str] = &[
     "PostToolUse",
     "Stop",
 ];
-const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
+pub const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
+pub const CLAUDE_SETTINGS_PATH: &str = ".claude/settings.local.json";
 static ATOMIC_WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +109,7 @@ enum ManagedHookTarget {
 impl ManagedHookTarget {
     fn config_path(self, worktree: &Path) -> PathBuf {
         match self {
-            Self::Claude => worktree.join(".claude/settings.local.json"),
+            Self::Claude => worktree.join(CLAUDE_SETTINGS_PATH),
             Self::Codex => worktree.join(CODEX_HOOKS_PATH),
         }
     }
@@ -113,20 +135,28 @@ pub fn generate_codex_hooks_for_mode(
     worktree: &Path,
     mode: CodexHookDiscoveryMode,
 ) -> io::Result<()> {
-    for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
-        generate_hook_config_at_path(&hooks_path)?;
+    let mut paths = codex_hooks_paths_for_codex_discovery(worktree, mode);
+    // Launch trust inspects both discovery locations. Refresh an older copy
+    // that is already present so it cannot retain a previous generated command.
+    for path in codex_hooks_paths_for_codex_discovery(worktree, CodexHookDiscoveryMode::Both) {
+        if path.exists() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    for hooks_path in paths {
+        generate_hook_config_at_path(&hooks_path, ManagedHookTarget::Codex)?;
     }
     Ok(())
 }
 
 fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Result<()> {
     let settings_path = target.config_path(worktree);
-    generate_hook_config_at_path(&settings_path)
+    generate_hook_config_at_path(&settings_path, target)
 }
 
-fn generate_hook_config_at_path(settings_path: &Path) -> io::Result<()> {
+fn generate_hook_config_at_path(settings_path: &Path, target: ManagedHookTarget) -> io::Result<()> {
     if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::asset_io::create_dir_all(parent)?;
     }
 
     let mut root = read_existing_settings(settings_path)?;
@@ -138,7 +168,8 @@ fn generate_hook_config_at_path(settings_path: &Path) -> io::Result<()> {
         "hooks".to_string(),
         Value::Object(merge_managed_and_user_hooks(
             user_hooks,
-            managed_hook_shell(),
+            managed_hook_shell(target),
+            &managed_hook_bin_for_config_path(settings_path),
         )),
     );
 
@@ -260,7 +291,7 @@ fn read_existing_settings(path: &Path) -> io::Result<Map<String, Value>> {
         return Ok(Map::new());
     }
 
-    let content = fs::read_to_string(path)?;
+    let content = crate::asset_io::read_to_string(path)?;
     if content.trim().is_empty() {
         return Ok(Map::new());
     }
@@ -272,40 +303,44 @@ fn read_existing_settings(path: &Path) -> io::Result<Map<String, Value>> {
 }
 
 pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
-    let tmp_path = atomic_staging_path(path, "settings.local.json")?;
     let json = serde_json::to_string_pretty(value)
         .map_err(|err| io::Error::other(format!("settings.local.json serialize failed: {err}")))?;
-
-    {
-        let mut tmp = fs::File::create(&tmp_path)?;
-        tmp.write_all(json.as_bytes())?;
-        tmp.write_all(b"\n")?;
-        tmp.sync_all()?;
-    }
-
-    commit_staged_file(&tmp_path, path)?;
-    Ok(())
+    write_text_atomically(path, &json)
 }
 
 pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()> {
     let tmp_path = atomic_staging_path(path, "gwt-managed")?;
-
-    {
-        let mut tmp = fs::File::create(&tmp_path)?;
+    // Only clean up a staging file this invocation successfully created.
+    let staging_write = |source| {
+        crate::asset_io::AssetIoError::new(crate::asset_io::AssetRoute::Write, &tmp_path, source)
+    };
+    let mut tmp = fs::File::create(&tmp_path).map_err(staging_write)?;
+    let result = (|| {
         tmp.write_all(content.as_bytes())?;
         if !content.ends_with('\n') {
             tmp.write_all(b"\n")?;
         }
-        tmp.sync_all()?;
+        tmp.sync_all()
+    })()
+    .map_err(staging_write);
+    drop(tmp);
+    let result: io::Result<()> = result
+        .map_err(io::Error::from)
+        .and_then(|()| commit_staged_file(&tmp_path, path));
+    if let Err(error) = result {
+        if let Err(cleanup) = crate::asset_io::remove_file(&tmp_path) {
+            if cleanup.kind() != io::ErrorKind::NotFound {
+                return Err(io::Error::other(format!("{error}; {cleanup}")));
+            }
+        }
+        return Err(error);
     }
-
-    commit_staged_file(&tmp_path, path)?;
     Ok(())
 }
 
 fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir)?;
+    crate::asset_io::create_dir_all(dir)?;
     let nonce = ATOMIC_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
     Ok(dir.join(format!(
         ".{}.tmp-{}-{nonce}",
@@ -316,20 +351,16 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
     )))
 }
 
+/// Publish a fully written staging file as `destination` in one step.
+///
+/// `fs::rename` replaces an existing destination atomically on every
+/// supported platform (Windows uses `MOVEFILE_REPLACE_EXISTING` /
+/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`), so the destination is never
+/// missing between two writes. A former Windows-only remove-then-rename left
+/// exactly that window, and the in-process lock that guarded it could not see
+/// writers in other processes (PR #3520 review).
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    let _replace_guard = {
-        static WINDOWS_REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = WINDOWS_REPLACE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if destination.exists() {
-            fs::remove_file(destination)?;
-        }
-        guard
-    };
-
-    fs::rename(staging_path, destination)
+    Ok(crate::asset_io::rename(staging_path, destination)?)
 }
 
 pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
@@ -351,8 +382,9 @@ pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
 fn merge_managed_and_user_hooks(
     user_hooks: Map<String, Value>,
     shell: HookShell,
+    bin: &str,
 ) -> Map<String, Value> {
-    let managed_hooks = managed_hooks(shell);
+    let managed_hooks = managed_hooks(shell, bin);
     let mut merged = Map::new();
 
     for event in MANAGED_EVENT_ORDER {
@@ -428,6 +460,8 @@ fn existing_user_hooks(existing: Option<&Value>) -> Map<String, Value> {
 }
 
 fn is_gwt_managed_command(command: &str) -> bool {
+    let decoded = decode_powershell_encoded_command(command);
+    let command = decoded.as_deref().unwrap_or(command);
     command.contains(LEGACY_GWT_HOOK_SCRIPT_SEGMENT)
         || command.contains(GWT_MANAGED_RUNTIME_MARKER)
         || command.contains(GWT_HOOK_CLI_PREFIX)
@@ -455,23 +489,23 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
         .any(|suffix| command.contains(suffix))
 }
 
-fn managed_hooks(shell: HookShell) -> Map<String, Value> {
+fn managed_hooks(shell: HookShell, bin: &str) -> Map<String, Value> {
     let mut hooks = Map::new();
     for event in MANAGED_EVENT_ORDER {
         hooks.insert(
             event.to_string(),
-            Value::Array(vec![event_hook(event, shell)]),
+            Value::Array(vec![event_hook(event, shell, bin)]),
         );
     }
     hooks
 }
 
-fn event_hook(event: &str, shell: HookShell) -> Value {
+fn event_hook(event: &str, shell: HookShell, bin: &str) -> Value {
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": event_hook_command(event, shell),
+                "command": event_hook_command_with_bin(bin, event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -486,14 +520,181 @@ fn event_hook(event: &str, shell: HookShell) -> Value {
 /// regenerator.
 const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
 
+/// The portable fallback every generated runtime selector uses when the
+/// hook config it is written into is shared through git.
+///
+/// #3567: a hook config that git tracks is byte-compared against a commit, so
+/// any absolute path baked into it — a worktree-local `target/debug/gwtd`, an
+/// installed `/Applications/GWT.app/Contents/MacOS/gwtd`, a
+/// `C:\Users\<name>\AppData\...` — leaves the file permanently dirty on the
+/// machine that materialized it, and resolves to nothing at all on every other
+/// machine if someone commits it. The bare name defers resolution to run time,
+/// where `GWT_BIN_PATH` (injected by every gwt launch, with its directory
+/// prepended to `PATH`) already answers it.
+pub const CANONICAL_HOOK_BIN: &str = "gwtd";
+
+/// Which binary a generated hook config at `path` should fall back to.
+///
+/// #3567: git-tracked configs get [`CANONICAL_HOOK_BIN`] so materialization
+/// converges on the committed bytes; untracked, machine-local configs keep the
+/// absolute pin resolved for this install (#3810), which is what makes hooks
+/// work for a Codex started outside gwt with no `gwtd` on `PATH`.
+pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
+    sanitize_hook_bin_for_config_path(path, &gwt_hook_bin_path())
+}
+
+/// Reduce `bin` to what may actually be written into a hook config at `path`.
+///
+/// Generation and Codex trust pre-registration both call this, so the value a
+/// launch vouches for is always the value materialization wrote. Divergence
+/// here is not a cosmetic mismatch: Codex refuses to run a hook it was not
+/// given the exact command hash for, and stops the launch on
+/// `Hooks need review`.
+pub fn sanitize_hook_bin_for_config_path(path: &Path, bin: &str) -> String {
+    if managed_hook_config_is_git_tracked(path) {
+        return CANONICAL_HOOK_BIN.to_string();
+    }
+    // #3567 (PM ruling): a process-global `GWT_HOOK_BIN` is authority only for
+    // the worktree it was set for. A developer running `target/debug/gwtd` may
+    // pin that build inside their own worktree, but repairing a *different*
+    // worktree must never hand it a build output that a `cargo clean` or a
+    // worktree removal silently deletes — the hook then fails open and every
+    // event goes missing without a word.
+    match build_output_owner_root(Path::new(bin)) {
+        Some(owner_root) if !path_is_inside(path, &owner_root) => CANONICAL_HOOK_BIN.to_string(),
+        _ => bin.to_string(),
+    }
+}
+
+/// The checkout root that owns `bin` when `bin` is a gwt build output
+/// (`<root>/target/[<triple>/]{debug,release}/gwt[d][.exe]`), else `None`.
+///
+/// Returned in the normalized forward-slash form both platforms can compare;
+/// see the private `path_is_inside` helper.
+pub fn build_output_owner_root(bin: &Path) -> Option<String> {
+    let normalized = normalize_path_text(bin);
+    let segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let file_name = segments.last()?.to_ascii_lowercase();
+    let binary_name = file_name.strip_suffix(".exe").unwrap_or(file_name.as_str());
+    if binary_name != "gwt" && binary_name != "gwtd" {
+        return None;
+    }
+    let target_index = segments
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, segment)| {
+            (segment.eq_ignore_ascii_case("target")
+                && segments[index + 1..segments.len().saturating_sub(1)]
+                    .iter()
+                    .any(|segment| {
+                        segment.eq_ignore_ascii_case("debug")
+                            || segment.eq_ignore_ascii_case("release")
+                    }))
+            .then_some(index)
+        })?;
+    let mut root = String::new();
+    if normalized.starts_with('/') {
+        root.push('/');
+    }
+    root.push_str(&segments[..target_index].join("/"));
+    Some(root)
+}
+
+fn normalize_path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Whether `path` lives at or below `owner_root` (both in normalized
+/// forward-slash form). Component-boundary aware, so `/repo/work/issue-1` never
+/// swallows `/repo/work/issue-10`, and case-insensitive on Windows.
+fn path_is_inside(path: &Path, owner_root: &str) -> bool {
+    let path = normalize_path_text(path);
+    let owner_root = owner_root.trim_end_matches('/');
+    if owner_root.is_empty() {
+        return true;
+    }
+    let (path, owner_root) = if cfg!(windows) {
+        (path.to_ascii_lowercase(), owner_root.to_ascii_lowercase())
+    } else {
+        (path, owner_root.to_string())
+    };
+    path == owner_root || path.starts_with(&format!("{owner_root}/"))
+}
+
+/// Whether git tracks `path`. A path outside a repository, or one git reports
+/// as untracked, answers `false` — those files are machine-local by definition,
+/// so pinning an absolute binary into them harms nobody.
+pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    gwt_core::process::hidden_command("git")
+        .arg("-C")
+        .arg(parent)
+        .args(["ls-files", "--error-unmatch", "-z", "--"])
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+thread_local! {
+    static HOOK_BIN_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The hook binary pinned for the current thread by [`ScopedHookBin`], if any.
+///
+/// Public materialization and in-process tests use this per-thread seam to
+/// choose the binary generated hook commands embed without changing the
+/// process-global `GWT_HOOK_BIN` (#4057, #3839).
+pub fn hook_bin_override() -> Option<String> {
+    HOOK_BIN_OVERRIDE.with(|value| value.borrow().clone())
+}
+
+/// RAII guard that pins the hook binary for the current thread only.
+///
+/// Prefer this over setting `GWT_HOOK_BIN` in in-process tests. Environment
+/// variables are process-global, so one parallel test's pin leaks into every
+/// materialization running at the same time — and outlives the tempdir it
+/// pointed at (#4057). Mirrors `gwt_core::test_support::ScopedGwtHome`.
+/// Public materialization also holds this guard across its synchronous
+/// provider generators so they share one selected fallback (#3839).
+pub struct ScopedHookBin {
+    previous: Option<String>,
+}
+
+impl ScopedHookBin {
+    pub fn set(bin: impl AsRef<std::ffi::OsStr>) -> Self {
+        let next = bin.as_ref().to_string_lossy().into_owned();
+        let previous = HOOK_BIN_OVERRIDE.with(|value| value.replace(Some(next)));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedHookBin {
+    fn drop(&mut self) {
+        HOOK_BIN_OVERRIDE.with(|value| {
+            value.replace(self.previous.take());
+        });
+    }
+}
+
 /// Return the stable fallback used by every generated runtime selector.
 /// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
 /// the launch did not provide an explicit runtime binary.
 ///
-/// Public materialization sets `GWT_HOOK_BIN` from the stable managed-assets
-/// resolver. The `current_exe` / PATH fallback remains for direct library use
-/// and tests that do not enter through that materialization boundary.
+/// Resolution order: the thread-local [`ScopedHookBin`] override, then an
+/// explicit `GWT_HOOK_BIN`. Public materialization pins its stable
+/// managed-assets resolution to the thread. The `current_exe` / PATH fallback
+/// remains for direct library use and tests that do not enter through that
+/// materialization boundary.
 pub(crate) fn gwt_hook_bin_path() -> String {
+    if let Some(bin) = hook_bin_override() {
+        return bin;
+    }
     if let Ok(v) = std::env::var(GWT_HOOK_BIN_ENV) {
         if !v.is_empty() {
             return v;
@@ -565,16 +766,30 @@ fn powershell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-fn managed_hook_shell() -> HookShell {
-    if cfg!(windows) {
-        HookShell::PowerShell
-    } else {
-        HookShell::Posix
+/// The shell that will interpret a generated hook `command` string.
+///
+/// This is decided by the *agent CLI that runs the hook*, not by the host
+/// platform (Issue #3966). Claude Code runs every managed hook command through
+/// a POSIX shell — Git Bash on Windows — so a Windows-only PowerShell wrapper
+/// had its `$gwtBin` / `$env:GWT_BIN_PATH` / `$LASTEXITCODE` expanded away by
+/// the outer shell before PowerShell ever parsed the script. The resulting
+/// `CommandNotFoundException` happens inside the script block, so the process
+/// still exits 0: Claude Code recorded `hook_success`, `gwtd` never ran, and
+/// every managed hook was silently dead on Windows.
+///
+/// Codex keeps the host-native selection: its own hook runner is not a POSIX
+/// shell on Windows, which is the mirror-image failure tracked by Issue #3810.
+fn managed_hook_shell(target: ManagedHookTarget) -> HookShell {
+    match target {
+        ManagedHookTarget::Claude => HookShell::Posix,
+        ManagedHookTarget::Codex => {
+            if cfg!(windows) {
+                HookShell::PowerShell
+            } else {
+                HookShell::Posix
+            }
+        }
     }
-}
-
-fn event_hook_command(event: &str, shell: HookShell) -> String {
-    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell)
 }
 
 fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> String {
@@ -586,6 +801,23 @@ fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> Stri
 
 pub(crate) fn codex_event_hook_commands(event: &str) -> Vec<String> {
     codex_event_hook_commands_with_bin(&gwt_hook_bin_path(), event)
+}
+
+/// The repo-owned `gwt-self-improvement-stop` Stop hook, verbatim as this
+/// repository used to commit it in `.codex/hooks.json`.
+///
+/// The self-improvement CLI has since been removed, so a freshly cloned repo no
+/// longer carries this hook. Worktrees materialized before that removal still
+/// do, and `existing_user_hooks` preserves it untouched — which is why it lands
+/// at Stop group index 1 and why its fallback stays the machine independent
+/// literal `gwtd` instead of an absolute install path. It is still a gwt hook
+/// transport, so gwt keeps pre-trusting it rather than making those worktrees
+/// stop on Codex's `Hooks need review` prompt (Issue #3967).
+pub(crate) fn codex_self_improvement_stop_hook_commands() -> Vec<String> {
+    vec![
+        "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true"
+            .to_string(),
+    ]
 }
 
 pub(crate) fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
@@ -666,14 +898,25 @@ fn posix_coordination_hook_command(event: &str) -> String {
     format!("{bin} hook coordination-event {event}")
 }
 
-/// Emit the PowerShell form of the runtime-state hook. Windows Claude
-/// Code runs the hook through `powershell -NoProfile -Command`, so we
-/// keep that wrapper, then invoke the gwtd binary via `& '...'` call
-/// operator.
+/// Emit the PowerShell form of the event hook. This is the Codex form only:
+/// Codex's own hook runner is host-native, so on Windows the command must be
+/// a PowerShell wrapper that invokes the gwtd binary via the `& '...'` call
+/// operator. Claude Code takes the POSIX form on every platform — see
+/// `managed_hook_shell` (Issue #3966).
 fn powershell_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
     let bin = powershell_quote(bin);
+    // Codex may itself use PowerShell to interpret this command. Encoding the
+    // inner script prevents that outer shell from expanding its variables.
+    let script = format!(
+        "& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ {bin} }}; try {{ & $gwtBin hook event {event}; exit $LASTEXITCODE }} catch {{ exit 0 }} }}"
+    );
+    let bytes = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
     format!(
-        "powershell -NoProfile -Command \"& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ {bin} }}; try {{ & $gwtBin hook event {event}; exit $LASTEXITCODE }} catch {{ exit 0 }} }}\""
+        "{POWERSHELL_ENCODED_COMMAND_PREFIX}{}",
+        STANDARD.encode(bytes)
     )
 }
 
@@ -703,6 +946,19 @@ fn powershell_coordination_hook_command(event: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn atomic_writers_remove_their_staging_file_on_publish_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("blocked.json");
+        std::fs::create_dir(&destination).unwrap();
+        let unrelated = temp.path().join(".blocked.json.tmp-existing");
+        std::fs::write(&unrelated, "keep").unwrap();
+        assert!(super::write_settings_atomically(&destination, &serde_json::json!({})).is_err());
+        assert!(super::write_text_atomically(&destination, "text").is_err());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep");
+    }
+
     use std::sync::{Arc, Barrier};
 
     use gwt_core::process::hidden_command;
@@ -712,6 +968,39 @@ mod tests {
     };
 
     use super::*;
+
+    /// #3567: the owner-root containment check is what decides whether a build
+    /// output may be pinned, so it has to hold at a component boundary. Sibling
+    /// worktrees whose names share a prefix (`issue-1` / `issue-10`) are the
+    /// shape this repository actually produces.
+    #[test]
+    fn build_output_owner_root_matches_only_whole_path_components() {
+        let owner_root = build_output_owner_root(Path::new(
+            "/repo/work/issue-1/target/x86_64-apple-darwin/release/gwtd",
+        ))
+        .expect("a build output has an owner root");
+        assert_eq!(owner_root, "/repo/work/issue-1");
+
+        assert!(path_is_inside(
+            Path::new("/repo/work/issue-1/.claude/settings.local.json"),
+            &owner_root
+        ));
+        assert!(!path_is_inside(
+            Path::new("/repo/work/issue-10/.claude/settings.local.json"),
+            &owner_root
+        ));
+        assert!(!path_is_inside(
+            Path::new("/repo/work/other/.claude/settings.local.json"),
+            &owner_root
+        ));
+
+        assert_eq!(
+            build_output_owner_root(Path::new(r"C:\repo\target\debug\gwt.exe")).as_deref(),
+            Some("C:/repo")
+        );
+        assert!(build_output_owner_root(Path::new("/usr/local/bin/gwtd")).is_none());
+        assert!(build_output_owner_root(Path::new("/repo/target/debug/other")).is_none());
+    }
 
     #[test]
     fn concurrent_codex_hook_regeneration_uses_distinct_atomic_temp_files() {
@@ -745,6 +1034,93 @@ mod tests {
         let hooks_path = worktree.join(CODEX_HOOKS_PATH);
         let rendered = fs::read_to_string(&hooks_path).expect("final hooks");
         serde_json::from_str::<Value>(&rendered).expect("valid final hooks JSON");
+        let staging_files = fs::read_dir(hooks_path.parent().expect("hooks parent"))
+            .expect("hooks directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hooks.json.tmp-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(
+            staging_files.is_empty(),
+            "atomic staging files leaked: {staging_files:?}"
+        );
+    }
+
+    /// PR #3520 review (PRRT_kwDOPLof2M6YcffP): the in-process mutex cannot
+    /// protect writers running in independent processes, and a Windows-only
+    /// remove-then-rename left a window in which the destination did not
+    /// exist. `fs::rename` replaces an existing destination atomically on
+    /// every supported platform, so concurrent processes must never observe a
+    /// missing or partially written file.
+    #[test]
+    fn concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination() {
+        const CHILD_ENV: &str = "GWT_SETTINGS_LOCAL_CHILD_WORKTREE";
+        const TEST_NAME: &str = "settings_local::tests::concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination";
+        const CHILDREN: usize = 6;
+        const WRITES_PER_CHILD: usize = 24;
+
+        if let Some(worktree) = std::env::var_os(CHILD_ENV) {
+            let worktree = PathBuf::from(worktree);
+            for _ in 0..WRITES_PER_CHILD {
+                generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal)
+                    .expect("child hook write");
+            }
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("worktree");
+        let hooks_path = dir.path().join(CODEX_HOOKS_PATH);
+        generate_codex_hooks_for_mode(dir.path(), CodexHookDiscoveryMode::WorktreeLocal)
+            .expect("seed hooks");
+        let test_binary = std::env::current_exe().expect("current test binary");
+        let mut children = (0..CHILDREN)
+            .map(|_| {
+                hidden_command(&test_binary)
+                    .args(["--exact", TEST_NAME])
+                    .env(CHILD_ENV, dir.path())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("spawn independent writer process")
+            })
+            .collect::<Vec<_>>();
+
+        let mut observations = 0usize;
+        loop {
+            let all_done = children
+                .iter_mut()
+                .all(|child| child.try_wait().expect("poll child").is_some());
+            match fs::read_to_string(&hooks_path) {
+                Ok(rendered) => {
+                    serde_json::from_str::<Value>(&rendered)
+                        .expect("destination must always hold a complete hooks.json");
+                    observations += 1;
+                }
+                Err(err) => panic!(
+                    "destination vanished while independent processes regenerated it \
+                     (after {observations} good reads): {err}"
+                ),
+            }
+            if all_done {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        for mut child in children {
+            let status = child.wait().expect("wait child");
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                std::io::Read::read_to_string(&mut pipe, &mut stderr).ok();
+            }
+            assert!(status.success(), "child writer failed: {status}\n{stderr}");
+        }
+
         let staging_files = fs::read_dir(hooks_path.parent().expect("hooks parent"))
             .expect("hooks directory")
             .filter_map(Result::ok)
@@ -823,13 +1199,27 @@ mod tests {
         );
     }
 
-    fn commands_for_event<'a>(value: &'a Value, event: &str) -> Vec<&'a str> {
+    fn inspected_command(command: &str) -> String {
+        decode_powershell_encoded_command(command).unwrap_or_else(|| command.to_string())
+    }
+
+    fn inspected_config(content: &str) -> String {
+        let value: Value = serde_json::from_str(content).unwrap();
+        MANAGED_EVENT_ORDER
+            .iter()
+            .flat_map(|event| commands_for_event(&value, event))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn commands_for_event(value: &Value, event: &str) -> Vec<String> {
         value["hooks"][event]
             .as_array()
             .unwrap_or_else(|| panic!("hooks missing for event {event}"))
             .iter()
             .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
             .filter_map(|hook| hook["command"].as_str())
+            .map(inspected_command)
             .collect()
     }
 
@@ -914,6 +1304,7 @@ mod tests {
                 "SessionStart",
                 shell,
             );
+            let command = inspected_command(&command);
             assert!(
                 command.contains("GWT_BIN_PATH"),
                 "managed hooks must resolve the runtime override first: {command}"
@@ -1010,10 +1401,79 @@ mod tests {
             "SessionStart",
             HookShell::PowerShell,
         );
+        let command = inspected_command(&command);
 
         assert!(command.contains("try {"), "{command}");
         assert!(command.contains("catch { exit 0 }"), "{command}");
         assert!(command.contains("exit $LASTEXITCODE"), "{command}");
+    }
+
+    #[test]
+    fn encoded_hook_inspection_rejects_noncanonical_wrappers() {
+        let command = powershell_codex_event_hook_command_with_bin("gwtd", "SessionStart");
+        assert!(decode_powershell_encoded_command(&command)
+            .unwrap()
+            .contains("hook event SessionStart"));
+        for invalid in [
+            format!("{command} ; echo injected"),
+            format!("{command} "),
+            format!("{POWERSHELL_ENCODED_COMMAND_PREFIX}YQ=="),
+            format!("{POWERSHELL_ENCODED_COMMAND_PREFIX}ANg="),
+        ] {
+            assert!(decode_powershell_encoded_command(&invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn encoded_managed_hook_regeneration_replaces_instead_of_duplicating() {
+        let command = powershell_codex_event_hook_command_with_bin("gwtd", "SessionStart");
+        let existing = json!({"SessionStart": [{"hooks": [
+            {"type": "command", "command": command},
+            {"type": "command", "command": "echo user-hook"}
+        ]}]});
+        let merged = merge_managed_and_user_hooks(
+            existing_user_hooks(Some(&existing)),
+            HookShell::PowerShell,
+            "gwtd",
+        );
+        let hooks = merged["SessionStart"].as_array().unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0]["hooks"][0]["command"], command);
+        assert_eq!(hooks[1]["hooks"][0]["command"], "echo user-hook");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_hook_runs_through_outer_powershell_with_launch_identity() {
+        use std::process::Stdio;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mock = dir.path().join("mock gwtd.cmd");
+        let receipt = dir.path().join("hook receipt.txt");
+        fs::write(
+            &mock,
+            "@echo off\r\n(echo %*& echo %GWT_CONTINUE_WORK_READY_TOKEN%) > \"%GWT_TEST_HOOK_RECEIPT%\"\r\nexit /b 0\r\n",
+        )
+        .unwrap();
+        let command = powershell_codex_event_hook_command_with_bin(
+            r"C:\missing fallback\gwtd.exe",
+            "SessionStart",
+        );
+        let output = gwt_core::process::hidden_command("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+            .env("GWT_BIN_PATH", &mock)
+            .env("GWT_CONTINUE_WORK_READY_TOKEN", "test-launch-readiness")
+            .env("GWT_TEST_HOOK_RECEIPT", &receipt)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run the generated hook through Codex's outer PowerShell");
+        assert!(output.status.success(), "{output:?}");
+        let actual = fs::read_to_string(&receipt).unwrap_or_default();
+        assert_eq!(
+            actual.lines().map(str::trim).collect::<Vec<_>>(),
+            ["hook event SessionStart", "test-launch-readiness"],
+            "a successful shell exit must actually dispatch the authenticated hook: {output:?}"
+        );
     }
 
     #[test]
@@ -1111,56 +1571,35 @@ mod tests {
         assert!(plugin.contains("prependContext"));
     }
 
+    // AC-R5: the self-improvement Stop hook is retired, so no provider bridge
+    // may emit it — not even in the `akiojin/gwt` repository, which used to be
+    // the one origin that received it.
     #[test]
-    fn provider_hooks_add_self_improvement_stop_only_for_gwt_repo() {
-        let gwt_repo = tempfile::tempdir().unwrap();
-        init_repo_with_origin(gwt_repo.path(), "https://github.com/akiojin/gwt.git");
-        generate_opencode_hooks(gwt_repo.path()).unwrap();
-        generate_openclaw_hooks(gwt_repo.path()).unwrap();
-        generate_hermes_hooks_with_source(gwt_repo.path(), None).unwrap();
-
-        let opencode =
-            fs::read_to_string(gwt_repo.path().join(".gwt/opencode/plugins/gwt-hooks.js")).unwrap();
-        let openclaw = fs::read_to_string(
-            gwt_repo
-                .path()
-                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
-        )
-        .unwrap();
-        let hermes =
-            fs::read_to_string(gwt_repo.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh"))
-                .unwrap();
-        assert!(opencode.contains("gwt-self-improvement-stop"));
-        assert!(openclaw.contains("gwt-self-improvement-stop"));
-        assert!(hermes.contains("gwt-self-improvement-stop"));
-
-        let target_repo = tempfile::tempdir().unwrap();
-        init_repo_with_origin(
-            target_repo.path(),
+    fn provider_hooks_never_emit_the_retired_self_improvement_stop() {
+        for origin in [
+            "https://github.com/akiojin/gwt.git",
             "https://github.com/example/target-project.git",
-        );
-        generate_opencode_hooks(target_repo.path()).unwrap();
-        generate_openclaw_hooks(target_repo.path()).unwrap();
-        generate_hermes_hooks_with_source(target_repo.path(), None).unwrap();
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            init_repo_with_origin(repo.path(), origin);
+            generate_opencode_hooks(repo.path()).unwrap();
+            generate_openclaw_hooks(repo.path()).unwrap();
+            generate_hermes_hooks_with_source(repo.path(), None).unwrap();
 
-        let generated = [
-            target_repo
-                .path()
-                .join(".gwt/opencode/plugins/gwt-hooks.js"),
-            target_repo
-                .path()
-                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
-            target_repo
-                .path()
-                .join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
-        ];
-        for path in generated {
-            let content = fs::read_to_string(&path).unwrap();
-            assert!(
-                !content.contains("gwt-self-improvement-stop"),
-                "non-gwt repo must not receive direct self-improvement hook: {}",
-                path.display()
-            );
+            let generated = [
+                repo.path().join(".gwt/opencode/plugins/gwt-hooks.js"),
+                repo.path()
+                    .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
+                repo.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
+            ];
+            for path in generated {
+                let content = fs::read_to_string(&path).unwrap();
+                assert!(
+                    !content.contains("gwt-self-improvement-stop"),
+                    "origin {origin} must not receive the retired self-improvement hook: {}",
+                    path.display()
+                );
+            }
         }
     }
 
@@ -1391,7 +1830,7 @@ mod tests {
                 1,
                 "managed event {event} must collapse to one command, got: {commands:?}"
             );
-            let cmd = commands[0];
+            let cmd = &commands[0];
             assert!(
                 cmd.contains(&format!(" hook event {event}")),
                 "managed hook for {event} must dispatch to `hook event {event}`, got: {cmd}"
@@ -1464,6 +1903,7 @@ mod tests {
                     .into_iter()
                     .flatten()
                     .filter_map(|hook| hook["command"].as_str())
+                    .map(inspected_command)
                     .any(|command| command.contains(" hook event PreToolUse"))
             })
             .collect();
@@ -1526,7 +1966,7 @@ mod tests {
             "tracked legacy node bash blocker must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook event PreToolUse"),
+            inspected_config(&content).contains("hook event PreToolUse"),
             "tracked file must be migrated to the consolidated event dispatcher form, got: {content}"
         );
     }
@@ -1580,7 +2020,7 @@ mod tests {
             "tracked block-bash-policy hook must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook event PreToolUse"),
+            inspected_config(&content).contains("hook event PreToolUse"),
             "tracked file must dispatch to the event dispatcher after migration, got: {content}"
         );
     }
@@ -1634,7 +2074,7 @@ mod tests {
             "tracked legacy inline shell runtime hook must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook event PreToolUse"),
+            inspected_config(&content).contains("hook event PreToolUse"),
             "tracked file must carry the event dispatcher CLI form, got: {content}"
         );
         assert!(
@@ -1692,16 +2132,17 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
         let pre_tool = value["hooks"]["PreToolUse"].as_array().unwrap();
-        let commands: Vec<&str> = pre_tool
+        let commands: Vec<String> = pre_tool
             .iter()
             .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
             .filter_map(|hook| hook["command"].as_str())
+            .map(inspected_command)
             .collect();
 
         assert!(commands
             .iter()
             .any(|command| command.contains(" hook event PreToolUse")));
-        assert!(commands.contains(&"my-custom-hook"));
+        assert!(commands.contains(&"my-custom-hook".to_string()));
         assert_eq!(
             value["hooks"]["CustomEvent"][0]["hooks"][0]["command"],
             Value::String("my-custom-event-hook".to_string())
@@ -1776,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_codex_hooks_preserves_direct_gwt_self_improvement_hook() {
+    fn generate_codex_hooks_preserves_repo_owned_stop_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1787,7 +2228,7 @@ mod tests {
                     "Stop": [{
                         "matcher": "*",
                         "hooks": [{
-                            "command": "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop",
+                            "command": "./scripts/repo-owned-stop-check.sh",
                             "type": "command"
                         }]
                     }]
@@ -1811,8 +2252,8 @@ mod tests {
         assert!(
             stop_commands
                 .iter()
-                .any(|command| command.contains(" hook gwt-self-improvement-stop")),
-            "direct gwt self-improvement hook must be preserved as a repo-owned hook: {stop_commands:?}"
+                .any(|command| command.contains("repo-owned-stop-check.sh")),
+            "an unmanaged repo-owned Stop hook must be preserved: {stop_commands:?}"
         );
     }
 
@@ -1847,7 +2288,7 @@ mod tests {
         );
         let content = fs::read_to_string(root_hooks).unwrap();
         assert!(
-            content.contains("hook event SessionStart"),
+            inspected_config(&content).contains("hook event SessionStart"),
             "root checkout hooks must contain generated gwt hooks, got: {content}"
         );
     }
@@ -1879,6 +2320,42 @@ mod tests {
             !root_checkout.join(".codex/hooks.json").exists(),
             "old Codex mode must not create the workspace-home hook path"
         );
+    }
+
+    #[test]
+    fn generate_codex_hooks_refreshes_existing_local_copy_before_workspace_home_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        let gitdir = repo.join("project.git/worktrees/linked");
+        let worktree = repo.join("work/linked");
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        {
+            let _old_bin = ScopedHookBin::set(CANONICAL_HOOK_BIN);
+            generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal)
+                .unwrap();
+        }
+
+        let current_bin = dir.path().join("bin/gwtd").display().to_string();
+        let _current_bin = ScopedHookBin::set(&current_bin);
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorkspaceHome).unwrap();
+        let report = crate::register_codex_managed_hook_trust_for_mode_with_expected_bin(
+            &worktree,
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            Some(&current_bin),
+        )
+        .unwrap();
+        assert!(
+            report.untrusted_gwt_hooks.is_empty(),
+            "an existing local copy must migrate before launch trust: {report:?}"
+        );
+        assert_eq!(report.trusted_entries.len(), 10);
     }
 
     #[test]
@@ -1938,18 +2415,19 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
-        let commands: Vec<&str> = value["hooks"]["SessionStart"]
+        let commands: Vec<String> = value["hooks"]["SessionStart"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
             .filter_map(|hook| hook["command"].as_str())
+            .map(inspected_command)
             .collect();
 
         assert!(commands
             .iter()
             .any(|command| command.contains(" hook event SessionStart")));
-        assert!(commands.contains(&"my-custom-hook"));
+        assert!(commands.contains(&"my-custom-hook".to_string()));
     }
 
     #[test]
@@ -1998,22 +2476,24 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
-        let session_start_commands: Vec<&str> = value["hooks"]["SessionStart"]
+        let session_start_commands: Vec<String> = value["hooks"]["SessionStart"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
             .filter_map(|hook| hook["command"].as_str())
+            .map(inspected_command)
             .collect();
-        let pre_tool_commands: Vec<&str> = value["hooks"]["PreToolUse"]
+        let pre_tool_commands: Vec<String> = value["hooks"]["PreToolUse"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
             .filter_map(|hook| hook["command"].as_str())
+            .map(inspected_command)
             .collect();
 
-        assert!(session_start_commands.contains(&"tracked-command"));
+        assert!(session_start_commands.contains(&"tracked-command".to_string()));
         assert!(session_start_commands
             .iter()
             .any(|command| command.contains(" hook event SessionStart")));
@@ -2102,10 +2582,70 @@ mod tests {
         assert!(session_start_commands
             .iter()
             .all(|command| !command.contains("node")));
-        assert!(pre_tool_commands.contains(&"my-custom-hook"));
+        assert!(pre_tool_commands.contains(&"my-custom-hook".to_string()));
         assert!(pre_tool_commands
             .iter()
             .any(|command| command.contains(" hook event PreToolUse")));
+    }
+
+    /// Issue #3966: Claude Code runs every managed hook command through a POSIX
+    /// shell on every platform, Windows included. Emitting the PowerShell
+    /// wrapper there let the outer shell eat `$gwtBin` / `$env:GWT_BIN_PATH` /
+    /// `$LASTEXITCODE`, so PowerShell failed inside the script block, the
+    /// process still exited 0, and `gwtd` never ran.
+    #[test]
+    fn generate_settings_local_emits_posix_hook_commands_on_every_platform() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_settings_local(dir.path()).unwrap();
+
+        let path = dir.path().join(".claude/settings.local.json");
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let bin = managed_hook_bin_for_config_path(&path);
+        for event in MANAGED_EVENT_ORDER {
+            let command = value["hooks"][*event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} managed command"));
+            assert_eq!(
+                command,
+                event_hook_command_with_bin(&bin, event, HookShell::Posix),
+                "{event} must use the POSIX form Claude Code actually executes"
+            );
+            assert!(
+                !command.contains("powershell"),
+                "{event} must not wrap the dispatch in PowerShell: {command}"
+            );
+        }
+    }
+
+    /// The mirror-image constraint (Issue #3810): Codex's own hook runner is
+    /// not a POSIX shell on Windows, so its generated commands stay
+    /// host-native.
+    #[test]
+    fn generate_codex_hooks_keeps_the_host_native_shell() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let path = dir.path().join(".codex/hooks.json");
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let expected_shell = if cfg!(windows) {
+            HookShell::PowerShell
+        } else {
+            HookShell::Posix
+        };
+        let bin = managed_hook_bin_for_config_path(&path);
+        for event in MANAGED_EVENT_ORDER {
+            let command = value["hooks"][*event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} managed command"));
+            assert_eq!(
+                command,
+                event_hook_command_with_bin(&bin, event, expected_shell)
+            );
+        }
     }
 
     #[test]
@@ -2113,7 +2653,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let foreign_managed_command = match managed_hook_shell() {
+        let foreign_managed_command = match managed_hook_shell(ManagedHookTarget::Codex) {
             HookShell::Posix => powershell_runtime_hook_command("SessionStart"),
             HookShell::PowerShell => posix_runtime_hook_command("SessionStart"),
         };
@@ -2160,7 +2700,13 @@ mod tests {
         let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("session start command");
-        let expected = event_hook_command("SessionStart", managed_hook_shell());
+        // #3567: the file is git-tracked here, so the migrated command keeps the
+        // canonical portable fallback instead of this machine's absolute path.
+        let expected = event_hook_command_with_bin(
+            CANONICAL_HOOK_BIN,
+            "SessionStart",
+            managed_hook_shell(ManagedHookTarget::Codex),
+        );
         assert_eq!(session_start_command, expected);
     }
 
@@ -2178,7 +2724,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("SessionStart", managed_hook_shell()),
+                                    "command": runtime_hook_command("SessionStart", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2189,7 +2735,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell()),
+                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2200,7 +2746,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2209,7 +2755,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": workflow_policy_hook_command(managed_hook_shell()),
+                                    "command": workflow_policy_hook_command(managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2220,7 +2766,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2231,7 +2777,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("Stop", managed_hook_shell()),
+                                    "command": runtime_hook_command("Stop", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
@@ -2266,19 +2812,21 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
-        let session_start_commands: Vec<&str> = value["hooks"]["SessionStart"]
+        let session_start_commands: Vec<String> = value["hooks"]["SessionStart"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
             .filter_map(|hook| hook["command"].as_str())
+            .map(inspected_command)
             .collect();
-        let stop_commands: Vec<&str> = value["hooks"]["Stop"]
+        let stop_commands: Vec<String> = value["hooks"]["Stop"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
             .filter_map(|hook| hook["command"].as_str())
+            .map(inspected_command)
             .collect();
 
         assert!(session_start_commands
@@ -2287,7 +2835,7 @@ mod tests {
         assert!(stop_commands
             .iter()
             .any(|command| command.contains(" hook event Stop")));
-        assert!(stop_commands.contains(&"my-custom-hook"));
+        assert!(stop_commands.contains(&"my-custom-hook".to_string()));
     }
 
     #[test]
@@ -2304,11 +2852,11 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("SessionStart", managed_hook_shell()),
+                                    "command": runtime_hook_command("SessionStart", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
-                                    "command": coordination_hook_command("SessionStart", managed_hook_shell()),
+                                    "command": coordination_hook_command("SessionStart", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2319,7 +2867,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell()),
+                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2330,7 +2878,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2339,7 +2887,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": workflow_policy_hook_command(managed_hook_shell()),
+                                    "command": workflow_policy_hook_command(managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
@@ -2354,7 +2902,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2365,11 +2913,11 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("Stop", managed_hook_shell()),
+                                    "command": runtime_hook_command("Stop", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
-                                    "command": coordination_hook_command("Stop", managed_hook_shell()),
+                                    "command": coordination_hook_command("Stop", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2411,8 +2959,8 @@ mod tests {
                 "migration must restore exactly one event dispatcher for {event}, got: {commands:?}"
             );
         }
-        assert!(commands_for_event(&value, "PreToolUse").contains(&"my-custom-hook"));
-        assert!(content.contains("gwtd"));
+        assert!(commands_for_event(&value, "PreToolUse").contains(&"my-custom-hook".to_string()));
+        assert!(inspected_config(&content).contains("gwtd"));
         assert!(!content.contains("\"gwt hook"));
     }
 
@@ -2492,6 +3040,37 @@ mod tests {
                 "gwt_hook_bin_path must return an absolute path or the literal gwtd fallback, got: {path}"
             );
         }
+    }
+
+    /// #4057: a thread-local override outranks the process-global
+    /// `GWT_HOOK_BIN` so parallel tests can each pin their own binary without
+    /// mutating (and leaking) process state.
+    #[test]
+    fn gwt_hook_bin_path_prefers_thread_local_override_over_process_env() {
+        let override_bin = "/isolated/thread/bin/gwtd";
+        {
+            let _override = ScopedHookBin::set(override_bin);
+            assert_eq!(gwt_hook_bin_path(), override_bin);
+            assert_eq!(hook_bin_override().as_deref(), Some(override_bin));
+        }
+        assert_eq!(
+            hook_bin_override(),
+            None,
+            "dropping the guard must restore the previous (absent) override"
+        );
+        assert_ne!(gwt_hook_bin_path(), override_bin);
+    }
+
+    /// #4057: overrides are per thread, so one thread's pin never reaches a
+    /// concurrently running test on another thread.
+    #[test]
+    fn hook_bin_override_is_thread_local() {
+        let _override = ScopedHookBin::set("/main/thread/gwtd");
+        let seen_on_other_thread = std::thread::spawn(hook_bin_override)
+            .join()
+            .expect("join override probe thread");
+        assert_eq!(seen_on_other_thread, None);
+        assert_eq!(hook_bin_override().as_deref(), Some("/main/thread/gwtd"));
     }
 
     #[test]
@@ -2640,7 +3219,7 @@ mod tests {
             "tracked PATH-less literal must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook event PreToolUse"),
+            inspected_config(&content).contains("hook event PreToolUse"),
             "migrated file must dispatch through the event dispatcher, got: {content}"
         );
     }

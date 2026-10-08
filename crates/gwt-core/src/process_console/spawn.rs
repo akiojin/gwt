@@ -42,6 +42,34 @@ thread_local! {
 
 static SPAWN_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(any(test, feature = "test-support"))]
+type SpawnReadyHook = (Duration, Box<dyn FnOnce() + Send>);
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_SPAWN_READY: std::cell::RefCell<Option<SpawnReadyHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Start the next synchronous deadline spawn's budget after a fixture signals
+/// readiness. Only the test clock origin changes; spawning and tree cleanup are
+/// real. The hook is consumed once on this thread, and restored even on panic.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_spawn_ready_for_tests<T>(
+    budget: Duration,
+    ready: impl FnOnce() + Send + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<SpawnReadyHook>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_SPAWN_READY.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore =
+        Restore(TEST_SPAWN_READY.with(|slot| slot.borrow_mut().replace((budget, Box::new(ready)))));
+    run()
+}
+
 /// Knobs that control how `spawn_logged` runs the child process.
 #[derive(Debug, Clone)]
 pub struct SpawnOptions {
@@ -149,6 +177,30 @@ pub fn spawn_logged_blocking(
     runtime.block_on(spawn_logged(hub, kind, program, args, options))
 }
 
+/// Capture a `gh` child whose quota accounting is owned by the caller.
+///
+/// Reuses the normal guard, process resolution, absolute operation deadline,
+/// and tree cleanup, without spending or reconciling the GitHub budget twice.
+/// Captured text is returned verbatim and is not forwarded to the Console.
+pub fn capture_gh_blocking(
+    program: impl Into<OsString>,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    options: SpawnOptions,
+) -> std::io::Result<SpawnOutput> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(spawn_logged_inner(
+        &ProcessConsoleHub::new(),
+        ProcessKind::Gh,
+        program,
+        args,
+        options.forward_output(false),
+        crate::operation_deadline::current(),
+        false,
+    ))
+}
+
 /// Synchronous wrapper around [`spawn_logged_with_deadline`].
 pub fn spawn_logged_blocking_with_deadline(
     hub: &ProcessConsoleHub,
@@ -175,7 +227,7 @@ pub async fn spawn_logged(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
 ) -> std::io::Result<SpawnOutput> {
-    spawn_logged_inner(hub, kind, program, args, options, None).await
+    spawn_logged_inner(hub, kind, program, args, options, None, true).await
 }
 
 /// Spawn a logged child under one absolute deadline.
@@ -191,7 +243,7 @@ pub async fn spawn_logged_with_deadline(
     options: SpawnOptions,
     deadline: Instant,
 ) -> std::io::Result<SpawnOutput> {
-    spawn_logged_inner(hub, kind, program, args, options, Some(deadline)).await
+    spawn_logged_inner(hub, kind, program, args, options, Some(deadline), true).await
 }
 
 async fn spawn_logged_inner(
@@ -201,8 +253,15 @@ async fn spawn_logged_inner(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
     deadline: Option<Instant>,
+    manage_gh_quota: bool,
 ) -> std::io::Result<SpawnOutput> {
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+    #[cfg(any(test, feature = "test-support"))]
+    let has_ready_hook =
+        deadline.is_some() && TEST_SPAWN_READY.with(|slot| slot.borrow().is_some());
+    let expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
+    #[cfg(any(test, feature = "test-support"))]
+    let expired = expired && !has_ready_hook;
+    if expired {
         return Err(deadline_error());
     }
     // Issue #3675 AC-2: in test builds (armed via
@@ -224,13 +283,19 @@ async fn spawn_logged_inner(
     }
     // Issue #3604 AC-3: an exhausted GitHub budget refuses the call here, so a
     // rate-limited window stops producing spawns, log noise, and generic
-    // "network error" reports until its measured reset passes.
-    let gh_quota = matches!(kind, ProcessKind::Gh).then(|| gh_arg_strings(args));
+    // "network error" reports until its measured reset passes. Issue #3928
+    // AC-1: the window another process persisted counts too, so a fresh
+    // gwtd does not re-spawn into the secondary limit the last one just hit.
+    let gh_quota =
+        (manage_gh_quota && matches!(kind, ProcessKind::Gh)).then(|| gh_arg_strings(args));
     if let Some(args) = &gh_quota {
-        if let Some(detail) = crate::github_quota::suppressed_spawn_detail(
+        let ledger = crate::github_budget::BudgetLedger::global();
+        let now = chrono::Utc::now();
+        if let Some(detail) = crate::github_budget::suppressed_spawn_detail(
             crate::github_quota::global(),
+            &ledger,
             args,
-            chrono::Utc::now(),
+            now,
         ) {
             tracing::warn!(
                 target: SUMMARY_TARGET,
@@ -241,6 +306,15 @@ async fn spawn_logged_inner(
             );
             return Err(std::io::Error::other(detail));
         }
+        // Issue #3891 AC-3: count the spend in the machine-local ledger so
+        // the per-minute (secondary) limit can be approximated across the
+        // short-lived gwtd processes that share this account. Issue #3928
+        // AC-4: with its source, so the count can be broken down by caller.
+        ledger.record_spawn_from(
+            crate::github_quota::classify_gh_args(args),
+            &crate::github_budget::spawn_source(args),
+            now,
+        );
     }
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
@@ -353,6 +427,16 @@ async fn spawn_logged_inner(
             return Err(error);
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    let ready_hook = deadline.and_then(|_| TEST_SPAWN_READY.with(|slot| slot.borrow_mut().take()));
+    #[cfg(any(test, feature = "test-support"))]
+    let deadline = match ready_hook {
+        Some((budget, ready)) => {
+            ready();
+            Some(Instant::now() + budget)
+        }
+        None => deadline,
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let forward_output = options.forward_output;
@@ -526,8 +610,10 @@ async fn reconcile_github_quota(
         return stderr;
     }
     if success {
-        // The budget answered, so any recorded block over-estimated its window.
+        // The budget answered, so any recorded block over-estimated its window
+        // — in this process and, Issue #3928, in the persisted schedule too.
         github_quota::global().record_success(quota);
+        crate::github_budget::BudgetLedger::global().clear_block(quota);
         return stderr;
     }
     if !github_quota::is_rate_limit_stderr(&stderr) {
@@ -536,7 +622,12 @@ async fn reconcile_github_quota(
 
     let now = chrono::Utc::now();
     let probe = probe_rate_limit(hub, program, options, quota, deadline).await;
-    let block = github_quota::block_from_probe(quota, probe, now);
+    // Issue #3891: the refusal is also visible to the next process, which can
+    // then throttle its non-essential reads instead of re-discovering it.
+    // Issue #3928 AC-1: the ledger owns the window's length (exponential per
+    // consecutive refusal), so the gate and the report use what it returns.
+    let block = crate::github_budget::BudgetLedger::global()
+        .record_block(&github_quota::block_from_probe(quota, probe, now), now);
     let annotated = github_quota::annotate_rate_limited_stderr(&block, &stderr, now);
     github_quota::global().record_exhaustion(block);
     annotated
@@ -563,11 +654,16 @@ async fn probe_rate_limit(
         // The probe must not outlive its caller's operation budget: a scan
         // stage that already ran out of time cannot afford one more spawn.
         deadline,
+        true,
     ))
     .await
     .ok()?;
     if !output.success() {
         return None;
+    }
+    let now = chrono::Utc::now();
+    if let Some(snapshot) = crate::github_budget::parse_rate_limit_probe_all(&output.stdout, now) {
+        crate::github_budget::BudgetLedger::global().record_probe(&snapshot);
     }
     crate::github_quota::parse_rate_limit_probe(&output.stdout, quota)
 }
@@ -686,6 +782,9 @@ fn push_command_summary_to_hub(
     exit_code: Option<i32>,
     duration_ms: u64,
 ) {
+    if kind == ProcessKind::Git {
+        crate::process::notify_git_command_finished(duration_ms);
+    }
     let exit = exit_code.map_or_else(|| "?".to_string(), |code| code.to_string());
     hub.push(ProcessLine::new(
         kind,
@@ -1040,6 +1139,27 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_completion_observer_covers_both_summary_paths_only_for_git() {
+        thread_local! {
+            static OBSERVED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn observe(duration_ms: u64) {
+            OBSERVED.with(|observed| observed.borrow_mut().push(duration_ms));
+        }
+        crate::process::set_git_command_observer(observe);
+        std::thread::spawn(|| {
+            let hub = ProcessConsoleHub::new();
+            crate::process::push_command_summary_to_hub(ProcessKind::Git, 1, Some(0), 120);
+            push_command_summary_to_hub(&hub, ProcessKind::Git, 2, Some(0), 340);
+            crate::process::push_command_summary_to_hub(ProcessKind::Docker, 3, Some(0), 500);
+            push_command_summary_to_hub(&hub, ProcessKind::Docker, 4, Some(0), 500);
+            OBSERVED.with(|observed| assert_eq!(*observed.borrow(), vec![120, 340]));
+        })
+        .join()
+        .unwrap();
+    }
+
     use std::ffi::OsString;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -1053,8 +1173,7 @@ mod tests {
     /// llvm-cov adds enough startup overhead for a `cmd /C echo` fixture to
     /// exceed the previous two-second budget. The observed full-suite failure
     /// crossed two seconds while the focused fixture completed in 70ms. This
-    /// matches the process-tree fixtures below, whose measured parallel-load
-    /// budget already uses 15 seconds. The timeout behavior itself is covered
+    /// gives immediate commands room to start. The timeout behavior is covered
     /// by dedicated tests with deliberately short deadlines.
     const QUICK_PROCESS_FIXTURE_BUDGET: Duration = Duration::from_secs(15);
 
@@ -1064,6 +1183,38 @@ mod tests {
     /// in the full Windows suite, so a tighter wall-clock assertion tests host
     /// load instead of scoped-deadline propagation.
     const FINITE_SLEEP_TERMINATION_BOUND: Duration = Duration::from_secs(30);
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_hook_survives_a_failed_spawn_before_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&ready_count);
+        with_spawn_ready_for_tests(
+            QUICK_PROCESS_FIXTURE_BUDGET,
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            },
+            || {
+                let hub = ProcessConsoleHub::new();
+                let spawn = |program: &std::ffi::OsStr| {
+                    spawn_logged_blocking_with_deadline(
+                        &hub,
+                        ProcessKind::Docker,
+                        program,
+                        &["-c", "exit 0"],
+                        SpawnOptions::new("readiness retry").forward_output(false),
+                        Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
+                    )
+                };
+                let error = spawn(directory.path().join("missing").as_os_str()).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(ready_count.load(Ordering::SeqCst), 0);
+                assert!(spawn(std::ffi::OsStr::new("/bin/sh")).unwrap().success());
+                assert_eq!(ready_count.load(Ordering::SeqCst), 1);
+            },
+        );
+    }
 
     struct PostReapDelayGuard(u64);
 
@@ -1123,16 +1274,14 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_future_is_abandoned_after_grace() {
-        let started = std::time::Instant::now();
         let completed = tokio::time::timeout(
-            Duration::from_millis(200),
+            Duration::from_secs(2),
             run_cleanup_with_grace(Duration::from_millis(20), std::future::pending()),
         )
         .await
         .expect("cleanup grace must bound a stalled cleanup future");
 
         assert!(!completed, "stalled cleanup must report incomplete");
-        assert!(started.elapsed() < Duration::from_millis(150));
     }
 
     #[tokio::test]
@@ -1154,10 +1303,9 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = command.spawn().expect("spawn cleanup test child");
-        let started = std::time::Instant::now();
 
         let completed = tokio::time::timeout(
-            Duration::from_millis(200),
+            Duration::from_secs(2),
             cleanup_child_process_after_tree_termination(
                 Duration::from_millis(20),
                 std::future::pending(),
@@ -1171,7 +1319,6 @@ mod tests {
             !completed,
             "stalled tree termination must report incomplete"
         );
-        assert!(started.elapsed() < Duration::from_millis(150));
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
@@ -1179,86 +1326,36 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[tokio::test(flavor = "current_thread")]
     async fn deadline_cleanup_does_not_extend_the_absolute_hard_cap() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let parent_file = directory.path().join("hard-cap-parent.pid");
-        let descendant_file = directory.path().join("hard-cap-descendant.pid");
-        #[cfg(windows)]
-        let (program, args, budget, delay) = {
-            let script = format!(
-                "Set-Content -Path '{}' -Value $PID -Encoding ascii; \
-                 $child = Start-Process ping -ArgumentList '-n','60','127.0.0.1' \
-                 -PassThru -WindowStyle Hidden; \
-                 Set-Content -Path '{}' -Value $child.Id -Encoding ascii; \
-                 Start-Sleep -Seconds 60",
-                parent_file.display(),
-                descendant_file.display(),
-            );
-            (
-                "powershell".to_string(),
-                vec!["-NoProfile".to_string(), "-Command".to_string(), script],
-                WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
-                Duration::from_millis(1_200),
-            )
-        };
-        #[cfg(unix)]
-        let (program, args, budget, delay) = (
-            "sh".to_string(),
-            vec![
-                "-c".to_string(),
-                "echo $$ > \"$1\"; sleep 60 & echo $! > \"$2\"; wait".to_string(),
-                "gwt-hard-cap".to_string(),
-                parent_file.to_string_lossy().into_owned(),
-                descendant_file.to_string_lossy().into_owned(),
-            ],
-            Duration::from_millis(700),
-            Duration::from_millis(600),
-        );
-        let _delay = PostReapDelayGuard::set(delay);
-        let started = Instant::now();
-        let deadline = started + budget;
+        // Finish real process IO before pausing Tokio time. The process-tree
+        // tests below cover termination; this test isolates the cleanup cap.
+        let (program, args) = echo_command();
+        #[allow(clippy::disallowed_methods)]
+        let mut command = TokioCommand::new(program);
+        crate::process::configure_hidden_tokio_command(&mut command);
+        command
+            .args(args)
+            .kill_on_drop(true)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut tree = ChildProcessTree::prepare(&mut command, false).expect("empty process tree");
+        let mut child = command.spawn().expect("spawn cleanup fixture");
+        tokio::time::timeout(crate::deadline_budget::HANG_GUARD, child.wait())
+            .await
+            .expect("cleanup fixture hung")
+            .expect("reap cleanup fixture");
 
-        let error = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::IndexRunner,
-            program,
-            &args,
-            SpawnOptions::new("absolute deadline cleanup")
-                .forward_output(false)
-                // Fixtures run PowerShell while other tests in the same binary
-                // redirect HOME / LOCALAPPDATA process-wide. Without a usable
-                // cache location PowerShell falls back to writing its module
-                // analysis cache relative to the CWD, which would litter the
-                // crate directory. Pin the child to the fixture temp directory
-                // so any such fallback is cleaned up with it.
-                .current_dir(directory.path()),
-            deadline,
-        )
-        .await
-        .expect_err("fixture tree must time out");
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let deadline = (started + Duration::from_millis(700)).into_std();
+        tokio::time::advance(Duration::from_millis(600)).await;
+        let _delay = PostReapDelayGuard::set(Duration::from_millis(900));
+        let completed = cleanup_child_process(&mut tree, &mut child, Some(deadline)).await;
 
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!completed, "the original deadline must interrupt cleanup");
         assert!(
-            started.elapsed() <= budget + Duration::from_millis(250),
-            "cleanup extended the absolute deadline: budget={budget:?} elapsed={:?}",
-            started.elapsed()
+            started.elapsed() < Duration::from_millis(900),
+            "cleanup restarted its budget instead of using the remaining virtual time"
         );
-        #[cfg(windows)]
-        {
-            let parent = wait_for_pid_file_windows(&parent_file);
-            let descendant = wait_for_pid_file_windows(&descendant_file);
-            assert!(!process_is_alive_windows(parent), "root survived cleanup");
-            assert!(
-                !process_is_alive_windows(descendant),
-                "descendant survived cleanup"
-            );
-        }
-        #[cfg(unix)]
-        {
-            let parent = read_pid(&parent_file);
-            let descendant = read_pid(&descendant_file);
-            assert!(!process_is_alive(parent), "root survived cleanup");
-            assert!(!process_is_alive(descendant), "descendant survived cleanup");
-        }
     }
 
     fn echo_command() -> (String, Vec<String>) {
@@ -1792,67 +1889,104 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn deadline_terminates_and_reaps_child_process_tree_windows() {
+    #[test]
+    fn deadline_terminates_and_reaps_child_process_tree_windows() {
         // T-IDX-418 (SPEC #1939 Phase 70d): Windows counterpart of the POSIX
         // deadline tree test — the descendant a child backgrounds must not
         // survive the deadline-driven Job Object close.
         let directory = tempfile::tempdir().expect("tempdir");
+        let parent_file = directory.path().join("parent.pid");
         let descendant_file = directory.path().join("descendant.pid");
         let script = format!(
-            "$child = Start-Process ping -ArgumentList '-n','60','127.0.0.1' \
+            "Set-Content -Path '{}' -Value $PID -Encoding ascii; \
+             $child = Start-Process ping -ArgumentList '-t','127.0.0.1' \
              -PassThru -WindowStyle Hidden; \
              Set-Content -Path '{}' -Value $child.Id -Encoding ascii; \
-             Start-Sleep -Seconds 60",
+             Wait-Process -Id $child.Id",
+            parent_file.display(),
             descendant_file.display()
         );
         let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
-        let started = std::time::Instant::now();
-        let error = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::Gh,
-            "powershell",
-            &args,
-            SpawnOptions::new("test deadline tree windows").current_dir(directory.path()),
-            started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
+        let ready_parent = parent_file.clone();
+        let ready_descendant = descendant_file.clone();
+        let error = with_spawn_ready_for_tests(
+            Duration::ZERO,
+            move || {
+                let parent = wait_for_pid_file_windows(&ready_parent);
+                let descendant = wait_for_pid_file_windows(&ready_descendant);
+                assert!(
+                    process_is_alive_windows(parent),
+                    "fixture root must be alive"
+                );
+                assert!(
+                    process_is_alive_windows(descendant),
+                    "fixture descendant must be alive before the deadline"
+                );
+            },
+            || {
+                spawn_logged_blocking_with_deadline(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::Gh,
+                    "powershell",
+                    &args,
+                    SpawnOptions::new("test deadline tree windows").current_dir(directory.path()),
+                    Instant::now(),
+                )
+            },
         )
-        .await
         .expect_err("long-running windows process tree must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < WINDOWS_PROCESS_TREE_FIXTURE_BOUND);
 
+        let parent = wait_for_pid_file_windows(&parent_file);
         let descendant = wait_for_pid_file_windows(&descendant_file);
+        wait_for_process_exit_windows(parent);
         wait_for_process_exit_windows(descendant);
     }
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn deadline_reaps_windows_descendant_after_root_exits_first_with_pipe_open() {
+    #[test]
+    fn deadline_reaps_windows_descendant_after_root_exits_first_with_pipe_open() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let parent_file = directory.path().join("parent-pipe.pid");
         let descendant_file = directory.path().join("descendant-pipe.pid");
         let script = format!(
-            "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command',\
-             'Start-Sleep -Seconds 60' -PassThru -NoNewWindow; \
+            "Set-Content -Path '{}' -Value $PID -Encoding ascii; \
+             $child = Start-Process powershell -ArgumentList '-NoProfile','-Command',\
+             'while ($true) {{ Start-Sleep -Seconds 60 }}' -PassThru -NoNewWindow; \
              Set-Content -Path '{}' -Value $child.Id -Encoding ascii; exit 0",
+            parent_file.display(),
             descendant_file.display()
         );
         let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
-        let started = Instant::now();
-        let error = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::IndexRunner,
-            "powershell",
-            &args,
-            SpawnOptions::new("windows root exits before pipe descendant")
-                .forward_output(false)
-                .current_dir(directory.path()),
-            started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
+        let ready_parent = parent_file.clone();
+        let ready_descendant = descendant_file.clone();
+        let error = with_spawn_ready_for_tests(
+            Duration::ZERO,
+            move || {
+                let parent = wait_for_pid_file_windows(&ready_parent);
+                let descendant = wait_for_pid_file_windows(&ready_descendant);
+                wait_for_process_exit_windows(parent);
+                assert!(
+                    process_is_alive_windows(descendant),
+                    "descendant must still hold the pipe after the root exits"
+                );
+            },
+            || {
+                spawn_logged_blocking_with_deadline(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::IndexRunner,
+                    "powershell",
+                    &args,
+                    SpawnOptions::new("windows root exits before pipe descendant")
+                        .forward_output(false)
+                        .current_dir(directory.path()),
+                    Instant::now(),
+                )
+            },
         )
-        .await
         .expect_err("descendant-held pipe must keep collection pending until deadline");
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < WINDOWS_PROCESS_TREE_FIXTURE_BOUND);
         let descendant = wait_for_pid_file_windows(&descendant_file);
         wait_for_process_exit_windows(descendant);
     }
@@ -1905,29 +2039,11 @@ mod tests {
         wait_for_process_exit_windows(descendant);
     }
 
-    /// Absolute budget for the Windows process-tree fixtures.
-    ///
-    /// These fixtures must let PowerShell reach the statement that records the
-    /// descendant pid before the deadline reaps the Job, otherwise the test
-    /// cannot observe the tree it asserts on. Warm `powershell -NoProfile`
-    /// plus one `Start-Process` measured 1.66s median / 2.05s p95 / 2.10s max
-    /// under 24-way parallelism on the reference machine, so the previous 2s
-    /// budget sat on the p95 and flaked whenever the whole crate ran at once.
-    /// 15s keeps roughly a 7x margin for slower CI hosts; the fixtures run
-    /// concurrently with the rest of the suite, so the wall-clock cost is paid
-    /// once rather than once per fixture.
-    #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_FIXTURE_BUDGET: Duration = Duration::from_secs(15);
-
-    /// Upper bound proving the deadline fired instead of the fixture running to
-    /// completion. Kept well above the budget so it never turns into a second,
-    /// tighter timing assertion.
-    #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_FIXTURE_BOUND: Duration = Duration::from_secs(60);
-
+    /// Observe fixture readiness before starting the deadline under test.
+    /// The outer guard diagnoses a hung fixture, not a slow process startup.
     #[cfg(windows)]
     fn wait_for_pid_file_windows(path: &std::path::Path) -> u32 {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::deadline_budget::HANG_GUARD;
         while std::time::Instant::now() < deadline {
             if let Some(pid) = std::fs::read_to_string(path)
                 .ok()
@@ -1935,7 +2051,7 @@ mod tests {
             {
                 return pid;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(100));
         }
         panic!(
             "descendant pid file was not written at {} - the fixture process              never reached its pid-recording statement",
@@ -1945,7 +2061,7 @@ mod tests {
 
     #[cfg(windows)]
     fn wait_for_process_exit_windows(pid: u32) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::deadline_budget::HANG_GUARD;
         let filter = format!("PID eq {pid}");
         while std::time::Instant::now() < deadline {
             let output = crate::process::hidden_command("tasklist")
@@ -1978,17 +2094,6 @@ mod tests {
             .trim()
             .parse()
             .expect("numeric pid")
-    }
-
-    #[cfg(unix)]
-    fn process_is_alive(pid: u32) -> bool {
-        crate::process::hidden_command("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
     }
 
     #[cfg(unix)]

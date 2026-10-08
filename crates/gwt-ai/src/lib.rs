@@ -24,7 +24,7 @@ pub use models_probe::{
     ModelInfo, ProbeError, PROBE_TIMEOUT,
 };
 pub use session_converter::{
-    convert_session, get_encoder, ClaudeEncoder, CodexEncoder, GeminiEncoder, OpenCodeEncoder,
-    Role, SessionEncoder, SessionMessage,
+    convert_session, get_encoder, ClaudeEncoder, CodexEncoder, OpenCodeEncoder, Role,
+    SessionEncoder, SessionMessage,
 };
 pub use work_summary::{parse_work_summaries, summarize_work_purposes, WorkSummaryInput};

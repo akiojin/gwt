@@ -60,7 +60,11 @@ pub fn build(log_dir: &Path) -> std::io::Result<(NonBlocking, WorkerGuard)> {
     // boundaries and names files with the UTC date. Keep the helper
     // contract aligned with that behavior so tests, housekeeping, and
     // the Logs watcher all point at the same file.
-    let file_appender = rolling::daily(log_dir, LOG_FILE_BASENAME);
+    let file_appender = rolling::RollingFileAppender::builder()
+        .rotation(rolling::Rotation::DAILY)
+        .filename_prefix(LOG_FILE_BASENAME)
+        .build(log_dir)
+        .map_err(std::io::Error::other)?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     Ok((non_blocking, guard))
 }
@@ -100,6 +104,175 @@ fn tighten_log_dir_permissions(_log_dir: &Path) {
     // `%USERPROFILE%`, which already covers the project-scoped
     // `~/.gwt/projects/<repo-hash>/logs/` directory. No additional
     // hardening is required.
+}
+
+/// Stable, explicitly registered project destination. Keep a clone with background work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectLogScope {
+    token: String,
+    log_dir: PathBuf,
+}
+
+impl ProjectLogScope {
+    pub fn as_str(&self) -> &str {
+        &self.token
+    }
+    pub fn log_dir(&self) -> &Path {
+        &self.log_dir
+    }
+    pub fn enter(&self) -> tracing::span::EnteredSpan {
+        tracing::trace_span!(target: "gwt_log_scope", "project_operation", gwt_project_scope = self.as_str()).entered()
+    }
+}
+
+struct ProjectSink {
+    scope: ProjectLogScope,
+    writer: Option<NonBlocking>,
+    guard: Option<WorkerGuard>,
+    failed: bool,
+}
+
+/// One registry for all project writers owned by the process logging handles.
+#[derive(Clone)]
+pub struct ProjectLogRouter {
+    machine: NonBlocking,
+    global_log_dir: PathBuf,
+    projects_dir: PathBuf,
+    projects: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ProjectSink>>>,
+    retention_days: u32,
+}
+
+impl ProjectLogRouter {
+    pub(crate) fn new(machine: NonBlocking, retention_days: u32, global_log_dir: PathBuf) -> Self {
+        Self {
+            machine,
+            global_log_dir,
+            projects_dir: crate::paths::gwt_home().join("projects"),
+            projects: Default::default(),
+            retention_days,
+        }
+    }
+
+    pub fn global_log_dir(&self) -> &Path {
+        &self.global_log_dir
+    }
+
+    pub fn register_project(&self, project: &Path) -> std::io::Result<ProjectLogScope> {
+        let canonical = std::fs::canonicalize(project)?;
+        let token = crate::paths::project_scope_hash(&canonical).to_string();
+        let log_dir = self.projects_dir.join(&token).join("logs");
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(projects
+            .entry(token.clone())
+            .or_insert_with(|| ProjectSink {
+                scope: ProjectLogScope { token, log_dir },
+                writer: None,
+                guard: None,
+                failed: false,
+            })
+            .scope
+            .clone())
+    }
+
+    pub(crate) fn resolve<S>(
+        &self,
+        event: &tracing::Event<'_>,
+        spans: Option<tracing_subscriber::registry::Scope<'_, S>>,
+    ) -> Option<String>
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        let mut direct = ScopeField::default();
+        event.record(&mut direct);
+        let token = direct.0.or_else(|| {
+            spans.and_then(|mut spans| {
+                spans.find_map(|span| {
+                    span.extensions()
+                        .get::<ScopeField>()
+                        .and_then(|field| field.0.clone())
+                })
+            })
+        })?;
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let sink = projects.get_mut(&token)?;
+        if sink.failed {
+            return None;
+        }
+        if sink.writer.is_none() {
+            // Never emit tracing under the registry lock: subscriber recursion would deadlock.
+            super::housekeep::housekeep(
+                &sink.scope.log_dir,
+                self.retention_days,
+                "gwt.log.",
+                "%Y-%m-%d",
+            );
+            match build(&sink.scope.log_dir) {
+                Ok((writer, guard)) => {
+                    sink.writer = Some(writer);
+                    sink.guard = Some(guard);
+                }
+                Err(error) => {
+                    // Bound open attempts and diagnostics to one per registered store.
+                    sink.failed = true;
+                    let diagnostic = serde_json::json!({
+                        "timestamp": Utc::now().to_rfc3339(),
+                        "level": "WARN",
+                        "target": "gwt_core::logging",
+                        "fields": {
+                            "message": "project log writer unavailable; using machine diagnostics",
+                            "project": token,
+                            "error": error.to_string(),
+                        }
+                    });
+                    use std::io::Write;
+                    let _ = writeln!(self.machine.clone(), "{diagnostic}");
+                    return None;
+                }
+            }
+        }
+        Some(token)
+    }
+
+    pub(crate) fn write(&self, scope: Option<&str>, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(writer) = scope
+            .and_then(|token| projects.get_mut(token))
+            .and_then(|sink| sink.writer.as_mut())
+        {
+            return writer.write_all(bytes);
+        }
+        drop(projects);
+        self.machine.clone().write_all(bytes)
+    }
+
+    pub(crate) fn shutdown(&self) {
+        // The subscriber retains a router clone; handles explicitly own shutdown.
+        let guards: Vec<_> = self
+            .projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values_mut()
+            .filter_map(|sink| sink.guard.take())
+            .collect();
+        drop(guards);
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ScopeField(pub Option<String>);
+
+impl tracing::field::Visit for ScopeField {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "gwt_project_scope" {
+            self.0 = Some(value.to_owned());
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "gwt_project_scope" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
 }
 
 #[cfg(test)]

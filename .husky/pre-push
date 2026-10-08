@@ -3,57 +3,41 @@
 set -e
 
 # git は hook 子プロセスへ GIT_DIR / GIT_INDEX_FILE などを export する。
-# それらが cargo test 配下の subprocess (git on tempdir 等) に継承される
-# と、tempdir に対する git 操作が本リポジトリ自身に向いてしまい、
-# tests が並列実行時に flaky になる。pre-push の検証はリポジトリ
-# 自身の git 状態に依存しないので、ここで一律に unset しておく。
+# それらが hook 配下の subprocess (tempdir に対する git 操作等) へ継承される
+# と、その git 操作が本リポジトリ自身に向いてしまう。ここでの検証は
+# リポジトリ自身の git 状態に依存しないので、一律に unset しておく。
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX \
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
     GIT_NAMESPACE GIT_COMMON_DIR
 
-ensure_coverage_tooling() {
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "cargo is required for pre-push checks but was not found on PATH." >&2
-    exit 1
-  fi
+# SPEC #3576: この hook は重量級の Cargo ジョブを起動しない。
+#
+# hook は `gwtd` ではなく `git push` の subtree で走るため、ホスト単位の
+# verification lease の外側にある。以前ここに置いていた
+# `cargo clippy --all-targets --all-features` と
+# `cargo llvm-cov -p gwt-core -p gwt --all-features` は、lease 保持者の
+# canonical 検証と並走してホストの CPU を飽和させ、wall-clock 依存 fixture の
+# 偽 FAIL を誘発していた。加えて保持者の子プロセスを見て「遊んでいる」と
+# 誤読させる原因にもなっていた。#4339 で全 worktree が hook を
+# materialize するようになり、push のたびにこれが起きる状態になった。
+#
+# 除去した検査は PR ごとに CI が同等以上の範囲で強制している。
+# clippy / fmt / markdownlint / frontmatter は Lint workflow
+# (`cargo clippy --workspace`)、テストは Test workflow
+# (`cargo test --workspace --all-features`)、カバレッジ 90% 閾値は
+# Coverage workflow が担当する。したがってここでの実行は二重であり、
+# gate を緩めずに重複だけを落とせる。
+#
+# ここに残すのはコンパイルを伴わない高速な検査だけにすること。
+# 契約は scripts/verify-husky-hooks.sh が固定している。
 
-  if cargo llvm-cov --version >/dev/null 2>&1; then
-    return
-  fi
+echo "Running fast pre-push checks..."
 
-  echo "cargo-llvm-cov is not installed. Installing it before coverage check..."
-  if ! cargo install cargo-llvm-cov --locked; then
-    echo "Failed to install cargo-llvm-cov." >&2
-    echo "Run manually: cargo install cargo-llvm-cov --locked" >&2
-    exit 1
-  fi
-
-  if command -v rustup >/dev/null 2>&1; then
-    echo "Ensuring llvm-tools-preview is available..."
-    if ! rustup component add llvm-tools-preview; then
-      echo "Warning: failed to install llvm-tools-preview." >&2
-      echo "Continuing; cargo llvm-cov will validate llvm tool availability." >&2
-      echo "Manual recovery: rustup component add llvm-tools-preview" >&2
-    fi
-  else
-    echo "rustup not found; assuming llvm tools are provided by the active toolchain."
-  fi
-
-  if ! cargo llvm-cov --version >/dev/null 2>&1; then
-    echo "cargo-llvm-cov was installed, but cargo llvm-cov is still unavailable." >&2
-    echo "Ensure Cargo's bin directory is on PATH, then retry push." >&2
-    exit 1
-  fi
-}
-
-echo "Running CI-equivalent lint checks..."
-
-cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
-ensure_coverage_tooling
-cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json -- --test-threads=1
-node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90
-bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md
+# `tasks/` はリポジトリの info/exclude で git 無視されるローカル作業領域
+# （AGENTS.md が tasks/todo.md の使用を指示している）。追跡対象でない
+# scratch を lint して push を止めないよう、ディレクトリごと除外する。
+bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks
 bash scripts/validate-skill-frontmatter.sh
 
 echo "All pre-push checks passed."

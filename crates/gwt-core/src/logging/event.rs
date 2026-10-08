@@ -34,9 +34,10 @@ pub struct LogEvent {
     pub message: String,
     pub detail: Option<String>,
     pub timestamp: DateTime<Utc>,
-    /// Extra structured fields collected from the tracing event
-    /// (`tracing::field::Visit`). Empty when produced by a plain
-    /// `tracing::info!("msg")` call without kv pairs.
+    /// Resolved registered project token; absent for machine-wide events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_scope: Option<String>,
+    /// Extra structured fields collected from the tracing event.
     #[serde(default)]
     pub fields: serde_json::Map<String, serde_json::Value>,
 }
@@ -54,6 +55,7 @@ impl LogEvent {
             message: message.into(),
             detail: None,
             timestamp: Utc::now(),
+            project_scope: None,
             fields: serde_json::Map::new(),
         }
     }
@@ -106,6 +108,40 @@ mod tests {
             e.fields.get("session_id"),
             Some(&serde_json::json!("abc-123"))
         );
+    }
+
+    #[test]
+    fn serde_missing_project_scope_defaults_to_none() {
+        let legacy = serde_json::json!({
+            "id": 42,
+            "severity": "Info",
+            "source": "gwt::legacy",
+            "message": "legacy payload",
+            "detail": null,
+            "timestamp": "2026-08-29T00:00:00Z",
+            "fields": {}
+        });
+
+        let event: LogEvent =
+            serde_json::from_value(legacy).expect("deserialize legacy LogEvent payload");
+
+        assert_eq!(event.project_scope, None);
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_project_scope() {
+        let mut event = LogEvent::new(LogLevel::Info, "gwt::project", "scoped payload");
+        event.project_scope = Some("0123456789abcdef".to_string());
+
+        let value = serde_json::to_value(&event).expect("serialize scoped LogEvent");
+        assert_eq!(
+            value.get("project_scope"),
+            Some(&serde_json::json!("0123456789abcdef"))
+        );
+
+        let restored: LogEvent =
+            serde_json::from_value(value).expect("deserialize scoped LogEvent");
+        assert_eq!(restored.project_scope.as_deref(), Some("0123456789abcdef"));
     }
 
     #[test]

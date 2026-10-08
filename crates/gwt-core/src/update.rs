@@ -216,6 +216,332 @@ pub fn clear_pending_update_manifest_in(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Issue #4038 (AC-3): one project the GUI had open when the update apply
+/// began. `update_drain` records whether the Issue Monitor of that project
+/// was holding new launches (#4037) so the post-restart bootstrap can release
+/// exactly the holds the apply created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateResumeProject {
+    pub hash: String,
+    #[serde(default)]
+    pub update_drain: bool,
+}
+
+/// Issue #4038 (AC-3): what the GUI was doing right before it quit to apply an
+/// update, written to `~/.gwt/update-resume/marker.json` before the helper is
+/// spawned and consumed by the next bootstrap. Its presence is the only
+/// signal that a launch is the tail of an apply rather than a cold start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateResumeMarker {
+    /// Version that wrote the marker.
+    pub from_version: String,
+    /// Version the helper was asked to install (without the leading `v`).
+    pub to_version: String,
+    /// RFC3339 timestamp of when the apply started.
+    pub started_at: String,
+    /// Argv (without `argv[0]`) of the quitting process, for diagnostics.
+    #[serde(default)]
+    pub restart_args: Vec<String>,
+    /// Projects open at apply time.
+    #[serde(default)]
+    pub projects: Vec<UpdateResumeProject>,
+    /// How many restarts have tried to settle this marker (starts at 1).
+    #[serde(default = "default_update_resume_attempt")]
+    pub attempt: u32,
+}
+
+fn default_update_resume_attempt() -> u32 {
+    1
+}
+
+/// `~/.gwt/update-resume/`.
+pub fn update_resume_dir() -> PathBuf {
+    crate::paths::gwt_home().join("update-resume")
+}
+
+/// Atomically write the resume marker.
+pub fn persist_update_resume_marker(marker: &UpdateResumeMarker) -> Result<(), String> {
+    persist_update_resume_marker_in(&update_resume_dir(), marker)
+}
+
+/// Test-friendly variant of [`persist_update_resume_marker`].
+pub fn persist_update_resume_marker_in(
+    dir: &Path,
+    marker: &UpdateResumeMarker,
+) -> Result<(), String> {
+    write_json_atomically(dir, "marker.json", marker, "update resume marker")
+}
+
+/// Load the resume marker, or `None` when absent or malformed.
+pub fn load_update_resume_marker() -> Option<UpdateResumeMarker> {
+    load_update_resume_marker_in(&update_resume_dir())
+}
+
+/// Test-friendly variant of [`load_update_resume_marker`].
+pub fn load_update_resume_marker_in(dir: &Path) -> Option<UpdateResumeMarker> {
+    let bytes = fs::read(dir.join("marker.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Remove the resume marker. A missing marker is not an error.
+pub fn clear_update_resume_marker() -> Result<(), String> {
+    clear_update_resume_marker_in(&update_resume_dir())
+}
+
+/// Test-friendly variant of [`clear_update_resume_marker`].
+pub fn clear_update_resume_marker_in(dir: &Path) -> Result<(), String> {
+    match fs::remove_file(dir.join("marker.json")) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("Failed to remove update resume marker: {err}")),
+    }
+}
+
+/// Issue #4038 (AC-4 / AC-5): whether the restart that consumed a resume
+/// marker actually runs the requested version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateApplyOutcome {
+    Success,
+    Failure,
+}
+
+/// Issue #4038 (AC-4 / AC-5): durable record of the last apply, written to
+/// `~/.gwt/updates/apply-result.json` by the bootstrap that settles a resume
+/// marker. Overwritten by each settle; a plain launch never touches it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateApplyResult {
+    pub outcome: UpdateApplyOutcome,
+    pub from_version: String,
+    pub to_version: String,
+    /// `CARGO_PKG_VERSION` of the binary that recorded the result.
+    pub observed_version: String,
+    /// The marker's attempt counter at settle time.
+    pub attempt: u32,
+    /// RFC3339 timestamp of the settle.
+    pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// `~/.gwt/updates/apply-result.json`.
+pub fn update_apply_result_path() -> PathBuf {
+    crate::paths::gwt_updates_dir().join("apply-result.json")
+}
+
+/// Atomically write the apply result.
+pub fn persist_update_apply_result(result: &UpdateApplyResult) -> Result<(), String> {
+    persist_update_apply_result_in(&crate::paths::gwt_updates_dir(), result)
+}
+
+/// Test-friendly variant of [`persist_update_apply_result`].
+pub fn persist_update_apply_result_in(
+    dir: &Path,
+    result: &UpdateApplyResult,
+) -> Result<(), String> {
+    write_json_atomically(dir, "apply-result.json", result, "update apply result")
+}
+
+/// Load the last apply result, or `None` when absent or malformed.
+pub fn load_update_apply_result() -> Option<UpdateApplyResult> {
+    load_update_apply_result_in(&crate::paths::gwt_updates_dir())
+}
+
+/// Test-friendly variant of [`load_update_apply_result`].
+pub fn load_update_apply_result_in(dir: &Path) -> Option<UpdateApplyResult> {
+    let bytes = fs::read(dir.join("apply-result.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Issue #3906 AC-6: whether applying an update needs elevated permissions —
+/// the install location of the running executable is not writable by this
+/// user (an administrator install). Decided by a write probe on the install
+/// root, never by parsing OS ACLs; an unknown executable path counts as
+/// writable so a dev build is never held back.
+pub fn install_requires_elevation() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| install_root_for(&exe))
+        .is_some_and(|root| !dir_writable(&root))
+}
+
+/// The directory an update replaces: the executable's directory, or on macOS
+/// the parent of the `.app` bundle (the dmg install swaps the whole bundle).
+pub fn install_root_for(exe: &Path) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        if let Some(bundle) = exe
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+        {
+            return bundle.parent().map(Path::to_path_buf);
+        }
+    }
+    exe.parent().map(Path::to_path_buf)
+}
+
+/// Whether this user can create a file in `dir` (probe file, removed again).
+pub fn dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".gwt-write-probe-{}", std::process::id()));
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn write_json_atomically<T: Serialize>(
+    dir: &Path,
+    file_name: &str,
+    value: &T,
+    what: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {what} dir: {e}"))?;
+    let path = dir.join(file_name);
+    let tmp = dir.join(format!("{file_name}.tmp"));
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("Failed to serialize {what}: {e}"))?;
+    fs::write(&tmp, json).map_err(|e| format!("Failed to write {what}: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit {what}: {e}"))?;
+    Ok(())
+}
+
+/// Issue #4038 (AC-4 / AC-5): how a resume marker settled at bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateResumeOutcome {
+    /// The running binary is `to_version`; the marker was removed.
+    Applied,
+    /// The running binary is not `to_version` (#3807 no-op apply); the
+    /// marker stays with `attempt` incremented.
+    VersionMismatch { observed_version: String },
+}
+
+/// Issue #4038 (AC-4 / AC-5): the marker as it was found plus the outcome of
+/// settling it. `marker.projects` tells the caller which Issue Monitor holds
+/// to release and which sessions to resume regardless of age.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateResumeSettlement {
+    pub marker: UpdateResumeMarker,
+    pub outcome: UpdateResumeOutcome,
+    pub result: UpdateApplyResult,
+}
+
+impl UpdateResumeSettlement {
+    /// Human-readable notification-center line for this settle.
+    pub fn notice(&self) -> String {
+        match &self.outcome {
+            UpdateResumeOutcome::Applied => format!(
+                "Updated to v{}; execution resumed",
+                self.marker.to_version
+            ),
+            UpdateResumeOutcome::VersionMismatch { observed_version } => format!(
+                "Update to v{} failed: still running v{} (attempt {}); execution resumed without the update",
+                self.marker.to_version, observed_version, self.marker.attempt
+            ),
+        }
+    }
+}
+
+/// Issue #4038 (AC-4 / AC-5): settle the resume marker against the running
+/// version. Returns `None` when no marker exists, which is what makes the
+/// second bootstrap after a successful apply a no-op.
+pub fn settle_update_resume_marker(
+    current_version: &str,
+    now: DateTime<Utc>,
+) -> Option<UpdateResumeSettlement> {
+    settle_update_resume_marker_in(
+        &update_resume_dir(),
+        &crate::paths::gwt_updates_dir(),
+        current_version,
+        now,
+    )
+}
+
+/// Test-friendly variant of [`settle_update_resume_marker`].
+pub fn settle_update_resume_marker_in(
+    resume_dir: &Path,
+    updates_dir: &Path,
+    current_version: &str,
+    now: DateTime<Utc>,
+) -> Option<UpdateResumeSettlement> {
+    let marker = load_update_resume_marker_in(resume_dir)?;
+    let normalize = |v: &str| v.trim().trim_start_matches('v').to_string();
+    let observed_version = normalize(current_version);
+    let applied = observed_version == normalize(&marker.to_version);
+    let (outcome, result) = if applied {
+        (
+            UpdateResumeOutcome::Applied,
+            UpdateApplyResult {
+                outcome: UpdateApplyOutcome::Success,
+                from_version: marker.from_version.clone(),
+                to_version: normalize(&marker.to_version),
+                observed_version: observed_version.clone(),
+                attempt: marker.attempt,
+                recorded_at: now.to_rfc3339(),
+                message: None,
+            },
+        )
+    } else {
+        (
+            UpdateResumeOutcome::VersionMismatch {
+                observed_version: observed_version.clone(),
+            },
+            UpdateApplyResult {
+                outcome: UpdateApplyOutcome::Failure,
+                from_version: marker.from_version.clone(),
+                to_version: normalize(&marker.to_version),
+                observed_version: observed_version.clone(),
+                attempt: marker.attempt,
+                recorded_at: now.to_rfc3339(),
+                message: Some(format!(
+                    "expected v{} after restart but the running binary is v{observed_version}",
+                    normalize(&marker.to_version)
+                )),
+            },
+        )
+    };
+    if let Err(err) = persist_update_apply_result_in(updates_dir, &result) {
+        log_update_event(
+            "fail",
+            &[("stage", "record_apply_result"), ("reason", &err)],
+        );
+    }
+    let marker_write = if applied {
+        clear_update_resume_marker_in(resume_dir)
+    } else {
+        let mut retry = marker.clone();
+        retry.attempt = retry.attempt.saturating_add(1);
+        persist_update_resume_marker_in(resume_dir, &retry)
+    };
+    if let Err(err) = marker_write {
+        log_update_event(
+            "fail",
+            &[("stage", "settle_resume_marker"), ("reason", &err)],
+        );
+    }
+    log_update_event(
+        if applied {
+            "resume_applied"
+        } else {
+            "resume_version_mismatch"
+        },
+        &[
+            ("to_version", &result.to_version),
+            ("observed_version", &result.observed_version),
+        ],
+    );
+    Some(UpdateResumeSettlement {
+        marker,
+        outcome,
+        result,
+    })
+}
+
 /// SPEC-2041 Phase 19 (FR-065): per-day log file for the post-click update
 /// flow. Stages and failure reasons append as JSONL entries so the failure
 /// modal's `[Open log]` button has a stable target. Format:
@@ -232,6 +558,63 @@ where
 {
     let date = now.format("%Y-%m-%d").to_string();
     crate::paths::gwt_logs_dir().join(format!("update-{date}.log"))
+}
+
+/// Latest project-local observation of a staged update. This is diagnostic
+/// information, never authority to apply an update or a liveness guarantee.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateWaitObservation {
+    pub version: String,
+    pub stage: String,
+    pub reason: String,
+    pub observed_at: String,
+    pub next_evaluation_at: Option<String>,
+}
+
+pub fn load_update_wait_observation(project_root: &Path) -> Option<UpdateWaitObservation> {
+    let path = crate::paths::gwt_project_dir_for_repo_path(project_root).join("update-wait.json");
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+/// Refresh the snapshot on every evaluation, but keep unchanged reasons out
+/// of the daily log. Different projects never overwrite each other's state.
+fn record_wait_observation(entry: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let string = |key: &str| entry.get(key).and_then(serde_json::Value::as_str);
+    let (Some(project), Some(version), Some(stage), Some(reason)) = (
+        string("project_root"),
+        string("version"),
+        string("stage"),
+        string("reason"),
+    ) else {
+        return false;
+    };
+    if !stage.starts_with("pending_") {
+        return false;
+    }
+    let project = Path::new(project);
+    let observation = UpdateWaitObservation {
+        version: version.to_owned(),
+        stage: stage.to_owned(),
+        reason: reason.to_owned(),
+        observed_at: string("observed_at")
+            .or_else(|| string("ts"))
+            .unwrap_or_default()
+            .to_owned(),
+        next_evaluation_at: string("next_evaluation_at").map(str::to_owned),
+    };
+    let unchanged = load_update_wait_observation(project).is_some_and(|prior| {
+        prior.version == observation.version
+            && prior.stage == observation.stage
+            && prior.reason == observation.reason
+    });
+    let dir = crate::paths::gwt_project_dir_for_repo_path(project);
+    let written = serde_json::to_vec(&observation).ok().is_some_and(|bytes| {
+        fs::create_dir_all(&dir)
+            .and_then(|()| crate::atomic_file::write_atomic(&dir.join("update-wait.json"), &bytes))
+            .is_ok()
+    });
+    // A failed diagnostic write must not suppress the only remaining log.
+    unchanged && written
 }
 
 /// SPEC-2041 Phase 19 (FR-065): append a structured stage entry to the
@@ -257,6 +640,9 @@ pub fn log_update_event(stage: &str, fields: &[(&str, &str)]) {
             (*k).to_string(),
             serde_json::Value::String((*v).to_string()),
         );
+    }
+    if record_wait_observation(&entry) {
+        return;
     }
     let line = match serde_json::to_string(&entry) {
         Ok(s) => format!("{s}\n"),
@@ -2187,6 +2573,33 @@ fn replace_paths(target_exe: &Path, backup_path: &Path, tmp_path: &Path) -> io::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_wait_log_retains_project_diagnostic_for_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        let project = temp.path().join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        super::log_update_event(
+            "pending_waiting",
+            &[
+                ("project_root", project.to_str().unwrap()),
+                ("version", "9.106.0"),
+                ("reason", "active agents"),
+                ("next_evaluation_at", "2026-10-01T12:00:15Z"),
+            ],
+        );
+        let path = crate::paths::gwt_project_dir_for_repo_path(&project).join("update-wait.json");
+        assert!(
+            path.exists(),
+            "status needs the latest project wait observation"
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["reason"], "active agents");
+        assert_eq!(value["next_evaluation_at"], "2026-10-01T12:00:15Z");
+        assert_eq!(value["version"], "9.106.0");
+        assert!(value["observed_at"].as_str().is_some());
+    }
     use chrono::TimeZone;
     use std::{
         io::{Cursor, Read, Write},
@@ -4322,5 +4735,177 @@ mod tests {
         assert!(!pending_version_is_newer("abc", "9.25.0"));
         assert!(!pending_version_is_newer("9.26.0", "not-a-version"));
         assert!(!pending_version_is_newer("abc", "def"));
+    }
+
+    // Issue #4038 (AC-3): resume marker persist / load / clear round trip.
+    fn sample_resume_marker() -> UpdateResumeMarker {
+        UpdateResumeMarker {
+            from_version: "9.30.0".to_string(),
+            to_version: "9.31.0".to_string(),
+            started_at: "2026-09-07T00:00:00Z".to_string(),
+            restart_args: vec!["--no-tray".to_string()],
+            projects: vec![UpdateResumeProject {
+                hash: "99a8660247f5bc49".to_string(),
+                update_drain: true,
+            }],
+            attempt: 1,
+        }
+    }
+
+    #[test]
+    fn update_resume_marker_round_trips_and_clears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = sample_resume_marker();
+        assert!(load_update_resume_marker_in(dir.path()).is_none());
+
+        persist_update_resume_marker_in(dir.path(), &marker).expect("persist");
+        assert_eq!(load_update_resume_marker_in(dir.path()), Some(marker));
+
+        clear_update_resume_marker_in(dir.path()).expect("clear");
+        assert!(load_update_resume_marker_in(dir.path()).is_none());
+        clear_update_resume_marker_in(dir.path()).expect("clear is idempotent");
+    }
+
+    #[test]
+    fn update_resume_marker_load_returns_none_when_malformed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("marker.json"), b"{not json").unwrap();
+        assert!(load_update_resume_marker_in(dir.path()).is_none());
+    }
+
+    // Issue #4038 (AC-4): a marker whose `to_version` matches the running
+    // binary settles as success, records the result, and is removed. A second
+    // settle is a no-op (idempotent).
+    #[test]
+    fn settle_update_resume_marker_records_success_and_clears_marker() {
+        let resume_dir = tempfile::tempdir().expect("resume dir");
+        let updates_dir = tempfile::tempdir().expect("updates dir");
+        persist_update_resume_marker_in(resume_dir.path(), &sample_resume_marker())
+            .expect("persist");
+        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 7, 1, 0, 0).unwrap();
+
+        let settlement =
+            settle_update_resume_marker_in(resume_dir.path(), updates_dir.path(), "v9.31.0", now)
+                .expect("marker present");
+        assert_eq!(settlement.outcome, UpdateResumeOutcome::Applied);
+        assert_eq!(settlement.marker, sample_resume_marker());
+        assert!(
+            load_update_resume_marker_in(resume_dir.path()).is_none(),
+            "a successful settle removes the marker"
+        );
+        let result = load_update_apply_result_in(updates_dir.path()).expect("apply result");
+        assert_eq!(result.outcome, UpdateApplyOutcome::Success);
+        assert_eq!(result.from_version, "9.30.0");
+        assert_eq!(result.to_version, "9.31.0");
+        assert_eq!(result.observed_version, "9.31.0");
+        assert_eq!(result.attempt, 1);
+        assert_eq!(result.recorded_at, now.to_rfc3339());
+
+        assert!(
+            settle_update_resume_marker_in(
+                resume_dir.path(),
+                updates_dir.path(),
+                "9.31.0",
+                now + chrono::Duration::minutes(1),
+            )
+            .is_none(),
+            "settling twice must not re-apply side effects"
+        );
+        assert_eq!(
+            load_update_apply_result_in(updates_dir.path()).expect("apply result"),
+            result,
+            "the recorded result must survive the second bootstrap unchanged"
+        );
+    }
+
+    // Issue #4038 (AC-5): a version mismatch (#3807 no-op apply) records a
+    // failure, bumps `attempt`, and keeps the marker.
+    #[test]
+    fn settle_update_resume_marker_records_failure_and_keeps_marker_on_mismatch() {
+        let resume_dir = tempfile::tempdir().expect("resume dir");
+        let updates_dir = tempfile::tempdir().expect("updates dir");
+        persist_update_resume_marker_in(resume_dir.path(), &sample_resume_marker())
+            .expect("persist");
+        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 7, 1, 0, 0).unwrap();
+
+        let settlement =
+            settle_update_resume_marker_in(resume_dir.path(), updates_dir.path(), "9.30.0", now)
+                .expect("marker present");
+        assert_eq!(
+            settlement.outcome,
+            UpdateResumeOutcome::VersionMismatch {
+                observed_version: "9.30.0".to_string()
+            }
+        );
+        let remaining = load_update_resume_marker_in(resume_dir.path()).expect("marker kept");
+        assert_eq!(remaining.attempt, 2, "each failed restart bumps attempt");
+        assert_eq!(remaining.to_version, "9.31.0");
+        let result = load_update_apply_result_in(updates_dir.path()).expect("apply result");
+        assert_eq!(result.outcome, UpdateApplyOutcome::Failure);
+        assert_eq!(result.observed_version, "9.30.0");
+        assert_eq!(result.attempt, 1);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("9.31.0"),
+            "failure message names the expected version: {result:?}"
+        );
+    }
+
+    // Issue #3906 AC-6: the elevation probe is a write test on the install
+    // root — the bundle's parent on macOS, the executable's directory
+    // elsewhere — so an administrator install falls back to the manual path.
+    #[test]
+    fn install_root_and_writability_probe_decide_elevation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let exe = temp.path().join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let root = install_root_for(&exe).expect("root");
+        if cfg!(target_os = "macos") {
+            let bundled = temp
+                .path()
+                .join("Applications")
+                .join("GWT.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("gwt");
+            assert_eq!(
+                install_root_for(&bundled).expect("bundle root"),
+                temp.path().join("Applications")
+            );
+        }
+        assert_eq!(root, exe.parent().unwrap());
+        assert!(dir_writable(&root));
+        assert!(
+            !dir_writable(&temp.path().join("missing")),
+            "a directory that cannot take a file is not writable"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = temp.path().join("locked");
+            fs::create_dir_all(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+            let writable = dir_writable(&locked);
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            // root ignores mode bits; everyone else is refused.
+            assert_eq!(writable, unsafe { libc::geteuid() } == 0);
+        }
+    }
+
+    #[test]
+    fn settle_update_resume_marker_returns_none_without_marker() {
+        let resume_dir = tempfile::tempdir().expect("resume dir");
+        let updates_dir = tempfile::tempdir().expect("updates dir");
+        assert!(settle_update_resume_marker_in(
+            resume_dir.path(),
+            updates_dir.path(),
+            "9.31.0",
+            chrono::Utc::now()
+        )
+        .is_none());
+        assert!(load_update_apply_result_in(updates_dir.path()).is_none());
     }
 }

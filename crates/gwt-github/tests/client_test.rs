@@ -153,9 +153,11 @@ fn red_39_set_labels_replaces() {
 fn red_40_set_state_transitions() {
     let c = FakeIssueClient::new();
     seed_simple(&c, 7, "x", "b");
-    let closed = c.set_state(IssueNumber(7), IssueState::Closed).unwrap();
+    let closed = c
+        .set_state(IssueNumber(7), IssueState::Closed, None)
+        .unwrap();
     assert_eq!(closed.state, IssueState::Closed);
-    let reopened = c.set_state(IssueNumber(7), IssueState::Open).unwrap();
+    let reopened = c.set_state(IssueNumber(7), IssueState::Open, None).unwrap();
     assert_eq!(reopened.state, IssueState::Open);
 }
 
@@ -182,7 +184,8 @@ fn red_42_list_spec_issues_state_filter() {
     let c = FakeIssueClient::new();
     seed_spec(&c, 1, "a", "phase/done");
     seed_spec(&c, 2, "b", "phase/implementation");
-    c.set_state(IssueNumber(1), IssueState::Closed).unwrap();
+    c.set_state(IssueNumber(1), IssueState::Closed, None)
+        .unwrap();
     let filter = SpecListFilter {
         phase: None,
         state: Some(IssueState::Closed),
@@ -285,4 +288,23 @@ fn red_47_delete_unknown_comment_errors() {
     seed_simple(&c, 3002, "SPEC", "body");
     let err = c.delete_comment(CommentId(99_999)).unwrap_err();
     assert!(matches!(err, ApiError::CommentNotFound(CommentId(99_999))));
+}
+
+#[test]
+fn directional_labels_preserve_unrelated_labels_and_issue_state() {
+    let client = FakeIssueClient::new();
+    let seeded = seed_simple(&client, 42, "title", "body");
+    client
+        .add_labels_mutation(IssueNumber(42), &["new".into(), "gwt-spec".into()])
+        .unwrap();
+    client
+        .remove_label_mutation(IssueNumber(42), "phase/review")
+        .unwrap();
+    let FetchResult::Updated(issue) = client.fetch(IssueNumber(42), None).unwrap() else {
+        panic!("expected updated")
+    };
+    assert_eq!(issue.labels, ["gwt-spec", "new"]);
+    assert_eq!(issue.state, seeded.state);
+    assert_eq!(issue.title, seeded.title);
+    assert_eq!(issue.body, seeded.body);
 }

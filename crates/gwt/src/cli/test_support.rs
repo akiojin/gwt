@@ -58,8 +58,32 @@ fn main() -> ExitCode {
     let state_file = env::var("GWT_FAKE_GH_STATE_FILE").ok();
 
     match args.as_slice() {
+        [repo, view, json, field, jq, selector]
+            if mode == "pre-pr-writer-probe"
+                && repo == "repo" && view == "view" && json == "--json"
+                && field == "nameWithOwner" && jq == "--jq" && selector == ".nameWithOwner" => {
+            println!("akiojin/gwt");
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint, jq, selector]
+            if mode == "pre-pr-writer-probe"
+                && api == "api" && endpoint == "repos/akiojin/gwt/branches/develop/protection"
+                && jq == "--jq" && selector == ".required_status_checks.contexts" => {
+            let lease_path = fs::read_to_string(state_file.as_deref().expect("probe state path")).unwrap();
+            let path = std::path::Path::new(&lease_path);
+            let lease = fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+            if let Err(error) = lease.try_lock() {
+                eprintln!("trusted writer unavailable during required-context read: {error}");
+                return ExitCode::FAILURE;
+            }
+            fs::write(path.with_file_name("pre-pr-writer-probe.json"), "written").unwrap();
+            println!(r#"["Test (Rust)","Clippy & Rustfmt","coverage / Rust Coverage"]"#);
+            return ExitCode::SUCCESS;
+        }
         [pr, list, ..] if pr == "pr" && list == "list" => {
-            if mode == "multi-pr-current" {
+            if mode == "foreign-fork-fallback" {
+                println!("[]");
+            } else if mode == "multi-pr-current" {
                 println!("{}", r#"[
 {"number":2537,"title":"Older PR","state":"CLOSED","url":"https://github.com/akiojin/gwt/pull/2537","createdAt":"2026-05-07T08:05:00Z","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"UNKNOWN","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}},
 {"number":2538,"title":"Newer PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}}
@@ -75,21 +99,34 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
+            if mode == "foreign-fork-fallback" {
+                let mut pr = pr_json("12", "Foreign fork PR");
+                pr.pop();
+                pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"other-user"}, "headRepository":{"name":"gwt"}}"#);
+                println!("{pr}");
+                return ExitCode::SUCCESS;
+            }
             if mode == "no-current-pr" {
                 eprintln!("no pull requests found for branch");
                 return ExitCode::from(1);
             }
-            if mode == "behind" {
-                println!("{}", behind_pr_json("12", "Current PR"));
+            let mut pr = if mode == "behind" {
+                behind_pr_json("12", "Current PR")
             } else {
-                println!("{}", pr_json("12", "Current PR"));
-            }
+                pr_json("12", "Current PR")
+            };
+            pr.pop();
+            pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"akiojin"}, "headRepository":{"name":"gwt"}}"#);
+            println!("{pr}");
             return ExitCode::SUCCESS;
         }
         [pr, view, number, repo_flag, _, json_flag, ..]
             if pr == "pr" && view == "view" && repo_flag == "--repo" && json_flag == "--json" =>
         {
-            if mode == "behind" {
+            if mode.starts_with("checks-pending") || mode.starts_with("checks-merge-") {
+                let merge_state = mode.strip_prefix("checks-merge-").unwrap_or("BLOCKED");
+                println!("{}", pr_json(number, "Fetched PR").replace("\"CLEAN\"", &format!("\"{merge_state}\"")));
+            } else if mode == "behind" {
                 println!("{}", behind_pr_json(number, "Fetched PR"));
             } else {
                 println!("{}", pr_json(number, "Fetched PR"));
@@ -107,9 +144,26 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, checks, _, json_flag, fields] if pr == "pr" && checks == "checks" && json_flag == "--json" => {
-            if mode == "checks-fallback" && !fields.contains("bucket") {
+            if (mode == "checks-fallback" || mode == "checks-pending-fallback") && !fields.contains("bucket") {
                 eprintln!("unknown JSON field\nAvailable fields:\n  name\n  state\n  bucket\n  link\n  startedAt\n  completedAt\n  workflow");
                 return ExitCode::from(1);
+            }
+            if mode == "checks-pending-partial-required" {
+                println!("{}", r#"[{"name":"passed","state":"SUCCESS","bucket":"pass","isRequired":false},{"name":"Build","state":"QUEUED","bucket":"pending"}]"#);
+                return ExitCode::SUCCESS;
+            }
+            if mode.starts_with("checks-pending") {
+                println!("{}", r#"[
+                    {"name":"passed","state":"SUCCESS","bucket":"pass"},
+                    {"name":"skipped","state":"SKIPPED","bucket":"skipping"},
+                    {"name":"failed","state":"FAILURE","bucket":"fail"},
+                    {"name":"Build","state":"QUEUED","conclusion":"SUCCESS","bucket":"pending","isRequired":true},
+                    {"name":"Test","state":"IN_PROGRESS","bucket":"pending","isRequired":false},
+                    {"name":"Check Windows","state":"PENDING","bucket":"pending","isRequired":true},
+                    {"name":"Review","state":"WAITING","bucket":"pending","isRequired":false},
+                    {"name":"Check macOS","state":"REQUESTED","bucket":"pending","isRequired":true}
+                ]"#);
+                return if mode == "checks-pending-fallback" { ExitCode::from(8) } else { ExitCode::SUCCESS };
             }
             if fields.contains("bucket") {
                 println!("[{{\"name\":\"CI\",\"state\":\"COMPLETED\",\"bucket\":\"pass\",\"link\":\"https://example.test/checks/12\",\"startedAt\":\"2026-04-20T00:00:00Z\",\"completedAt\":\"2026-04-20T00:01:00Z\",\"workflow\":\"coverage\"}}]");
@@ -160,7 +214,14 @@ fn main() -> ExitCode {
             println!("[]");
             return ExitCode::SUCCESS;
         }
-        [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" => {
+        // Issue #4849 AC-1: the job log endpoint is read with
+        // `--allow-escape-sequences`; without it current `gh` refuses a response
+        // that carries colour codes, which every cargo test job does.
+        [api, allow, endpoint]
+            if api == "api"
+                && allow == "--allow-escape-sequences"
+                && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
+        {
             if mode == "job-log-zip" {
                 print!("PKZIP");
             } else {
@@ -348,6 +409,8 @@ pub fn sample_issue_snapshot() -> IssueSnapshot {
 
 pub fn sample_pr_status() -> gwt_git::PrStatus {
     gwt_git::PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 128,
         title: "Enforce coverage".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -373,4 +436,24 @@ pub fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<
         .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
         .filter_map(|hook| hook["command"].as_str())
         .collect()
+}
+
+/// Declare that this test accepts its runner's own scheduling priority for
+/// verification children (Issue #4409).
+///
+/// `verify.run` refuses to launch verification from a process running at a
+/// degraded nice value when no daemon can launch it instead, because spawning
+/// in place would hand the workload the agent launch policy's priority. A test
+/// runner inherits whatever priority its parent had and cannot change it, so a
+/// test that drives the real operation would pass or fail on where it happened
+/// to be started from — green in CI and in a terminal, red inside an agent.
+///
+/// These tests are about the record, the settlement rules, and the PR
+/// lifecycle, not about where verification is hosted; the placement decision
+/// has its own tests in `gwt_core::verification_priority` and
+/// `cli::daemon::verification_host`. Hold [`gwt_core::test_support::env_lock`]
+/// before calling this, like any other environment override.
+#[must_use]
+pub fn declare_inherited_spawn_host() -> ScopedEnvVar {
+    ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit")
 }

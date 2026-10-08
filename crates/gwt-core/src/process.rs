@@ -63,6 +63,19 @@ pub fn run_command_with_env(cmd: &str, args: &[&str], env: &[(String, String)]) 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static GIT_SPAWN_COUNTER: AtomicU64 = AtomicU64::new(1);
+static GIT_COMMAND_OBSERVER: std::sync::OnceLock<fn(u64)> = std::sync::OnceLock::new();
+
+/// Observe logged Git completions on any thread; the argument is wall time in ms.
+/// The first observer remains installed for the lifetime of the process.
+pub fn set_git_command_observer(observer: fn(u64)) {
+    let _ = GIT_COMMAND_OBSERVER.set(observer);
+}
+
+pub(crate) fn notify_git_command_finished(duration_ms: u64) {
+    if let Some(observer) = GIT_COMMAND_OBSERVER.get() {
+        observer(duration_ms);
+    }
+}
 
 fn next_git_spawn_id() -> u64 {
     note_thread_git_spawn();
@@ -71,6 +84,12 @@ fn next_git_spawn_id() -> u64 {
 
 thread_local! {
     static THREAD_GIT_SPAWN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static THREAD_GIT_DURATION_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Cumulative wall time of synchronous logged Git commands on this thread.
+pub fn thread_git_duration_ms() -> u64 {
+    THREAD_GIT_DURATION_MS.with(std::cell::Cell::get)
 }
 
 /// Record one git subprocess spawned by the current thread.
@@ -147,6 +166,7 @@ pub fn run_git_logged(
     };
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    THREAD_GIT_DURATION_MS.with(|total| total.set(total.get().saturating_add(duration_ms)));
     push_command_summary_to_hub(
         crate::process_console::ProcessKind::Git,
         spawn_id,
@@ -233,6 +253,7 @@ pub fn run_git_logged_with_stdin(
     };
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    THREAD_GIT_DURATION_MS.with(|total| total.set(total.get().saturating_add(duration_ms)));
     push_command_summary_to_hub(
         crate::process_console::ProcessKind::Git,
         spawn_id,
@@ -288,6 +309,9 @@ pub fn push_command_summary_to_hub(
     exit_code: Option<i32>,
     duration_ms: u64,
 ) {
+    if kind == crate::process_console::ProcessKind::Git {
+        notify_git_command_finished(duration_ms);
+    }
     let hub = crate::process_console::global();
     let exit = match exit_code {
         Some(code) => code.to_string(),
@@ -422,6 +446,7 @@ pub fn configure_hidden_command(command: &mut Command) -> &mut Command {
     {
         use std::os::windows::process::CommandExt;
 
+        disinherit_std_handles();
         command.creation_flags(flags);
     }
     #[cfg(not(windows))]
@@ -441,6 +466,7 @@ pub fn configure_hidden_tokio_command(
     let flags = hidden_creation_flags();
     #[cfg(windows)]
     {
+        disinherit_std_handles();
         command.creation_flags(flags);
     }
     #[cfg(not(windows))]
@@ -448,6 +474,46 @@ pub fn configure_hidden_tokio_command(
         let _ = flags;
     }
     command
+}
+
+/// Issue #4105: keep this process's standard handles out of its children.
+///
+/// The standard library always calls `CreateProcess` with
+/// `bInheritHandles = TRUE`, so every inheritable handle in this process is
+/// copied into each child — including the stdout / stderr pipe a shell, a
+/// test harness, or Claude Code handed us — even when the child's own stdio
+/// is redirected to NUL. A detached child (the `verify.lease.hold` holder,
+/// the runtime daemon) then keeps the pipe's write end open, and whoever
+/// reads our output to EOF waits for that child instead of for us. Clearing
+/// `HANDLE_FLAG_INHERIT` on our own standard handles closes the leak;
+/// `Stdio::inherit` keeps working because the standard library duplicates
+/// the handle as inheritable for that one spawn. Unix needs nothing: every
+/// descriptor is `CLOEXEC` there.
+///
+/// Best effort: a standard handle that is absent (GUI subsystem) or refuses
+/// the flag change is simply left alone.
+#[cfg(windows)]
+fn disinherit_std_handles() {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows::Win32::Foundation::{
+        SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+    };
+
+    let handles = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    for raw in handles {
+        let handle = HANDLE(raw);
+        if handle.is_invalid() {
+            continue;
+        }
+        // SAFETY: `handle` is one of this process's live standard handles;
+        // changing its inherit flag does not affect its use in this process.
+        let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+    }
 }
 
 #[cfg(windows)]
@@ -469,15 +535,28 @@ fn hidden_creation_flags() -> u32 {
 /// the calling repo. Apply this helper to a `Command` whose target is
 /// determined by `current_dir` so the invocation stays hermetic.
 pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env_remove("GIT_PREFIX")
-        .env_remove("GIT_NAMESPACE")
-        .env_remove("GIT_COMMON_DIR")
+    for key in GIT_ENV_SCRUB_KEYS {
+        cmd.env_remove(key);
+    }
+    cmd
 }
+
+/// The variables [`scrub_git_env`] removes.
+///
+/// Exposed as data because a caller that builds a child's environment as a
+/// list instead of mutating a [`Command`] — daemon-hosted verification does,
+/// Issue #4409 — has to remove the same set, and a second hand-written copy
+/// would drift.
+pub const GIT_ENV_SCRUB_KEYS: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_COMMON_DIR",
+];
 
 /// Get the version string of a command by running `<cmd> --version`.
 pub fn get_command_version(cmd: &str) -> Result<String> {
@@ -628,6 +707,44 @@ mod tests {
             handle, 0,
             "child console window handle must be NULL under CREATE_NO_WINDOW"
         );
+    }
+
+    /// Regression test for Issue #4105: building a command through
+    /// `hidden_command` must leave this process's standard handles
+    /// non-inheritable, otherwise every child — including detached ones whose
+    /// own stdio is redirected to NUL — receives a copy of our stdout / stderr
+    /// pipe and keeps it open past our exit.
+    #[cfg(windows)]
+    #[test]
+    fn hidden_command_leaves_std_handles_non_inheritable() {
+        use std::os::windows::io::AsRawHandle;
+
+        use windows::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+        let _ = hidden_command("cmd");
+        let handles = [
+            ("stdin", std::io::stdin().as_raw_handle()),
+            ("stdout", std::io::stdout().as_raw_handle()),
+            ("stderr", std::io::stderr().as_raw_handle()),
+        ];
+        for (name, raw) in handles {
+            let handle = HANDLE(raw);
+            if handle.is_invalid() {
+                continue;
+            }
+            let mut flags = 0u32;
+            // SAFETY: `handle` is a live standard handle of this process and
+            // `flags` outlives the call.
+            let queried = unsafe { GetHandleInformation(handle, &mut flags) };
+            if queried.is_err() {
+                continue;
+            }
+            assert_eq!(
+                flags & HANDLE_FLAG_INHERIT.0,
+                0,
+                "{name} must not be inheritable after hidden_command"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,266 @@
+{
+  "issue": 4172,
+  "source_commit": "cb4297a50ea00a9e89ccb66a55b59a7e71af78f6",
+  "captured_at": "2026-09-09T23:35:33.9141533+09:00",
+  "platform": "Windows x86_64",
+  "profile": "dev unoptimized",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "method": "Single fixture repeated health evaluation; no GUI, Board projection, distinct Work fixtures or user input measured",
+  "ledger_snapshot": [
+    {
+      "name": "errors.2026-08-31.jsonl",
+      "bytes": 19446,
+      "sha256": "C2ABDB20DAE2D47D955569CD2DCDDEF172014F2A1B53CFB4C8F10013834347D9",
+      "lines": 47
+    },
+    {
+      "name": "errors.2026-09-01.jsonl",
+      "bytes": 71409,
+      "sha256": "A09F27C4F438E5CC3E7C844DA02AFACBACC74E10E91E879994476771179DF78F",
+      "lines": 136
+    },
+    {
+      "name": "errors.2026-09-02.jsonl",
+      "bytes": 45783,
+      "sha256": "072C3AA0B8C28252594F3BB5C6859BA89FB15945B8135357A4D0FDFA83D3A9C1",
+      "lines": 89
+    },
+    {
+      "name": "errors.2026-09-03.jsonl",
+      "bytes": 7460,
+      "sha256": "8019DF94AD891B710F0F56498FF7F687710C845D68134A08442906647BB97869",
+      "lines": 13
+    },
+    {
+      "name": "errors.2026-09-04.jsonl",
+      "bytes": 23485,
+      "sha256": "2706D827C2B978F9053E7D64F89976C83F13C3DE63A4230D208F04914F2F924A",
+      "lines": 37
+    },
+    {
+      "name": "errors.2026-09-05.jsonl",
+      "bytes": 80062,
+      "sha256": "E268C247C794DCA32155725B3462CDB6270336FBDFC1E640807480E0CD6C333E",
+      "lines": 144
+    },
+    {
+      "name": "errors.2026-09-06.jsonl",
+      "bytes": 21656,
+      "sha256": "B7D97A2E05821944913754954B9272DCA13EC2155C7B51C3CDC59C2463A9F9C3",
+      "lines": 29
+    },
+    {
+      "name": "errors.2026-09-07.jsonl",
+      "bytes": 136856,
+      "sha256": "05DADA8645C915705271B3C3083D1EB8ADF88FD536D026D3CFC1B04A5F05152E",
+      "lines": 197
+    },
+    {
+      "name": "errors.2026-09-08.jsonl",
+      "bytes": 100180,
+      "sha256": "A96D2DD2AFC5AC341C5623C5B18250DF0C3CE13EAD2455EA810E96E479ACEE51",
+      "lines": 166
+    },
+    {
+      "name": "errors.2026-09-09.jsonl",
+      "bytes": 151545,
+      "sha256": "EDA94F34DA3541A996B21DF3346D2724E2B78A3BED70635830F0108078EF7221",
+      "lines": 288
+    }
+  ],
+  "harness_sha256": "7DA79C53C9A00F6240F973E1FCC0B8FBE7608C52E6E092F2748BEF74C019E4F9",
+  "cases": [
+    {
+      "name": "empty",
+      "ledger": {
+        "ledger_files": 0,
+        "ledger_bytes": 0,
+        "ledger_nonempty_lines": 0
+      },
+      "samples": [
+        {
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 903,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 775,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 758,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 22211,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 23944,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 21492,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 179798,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 173066,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 175409,
+          "issue_count_sum": 0
+        }
+      ]
+    },
+    {
+      "name": "half",
+      "ledger": {
+        "ledger_files": 10,
+        "ledger_bytes": 325439,
+        "ledger_nonempty_lines": 576
+      },
+      "samples": [
+        {
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 12826,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 13143,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 13409,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 414300,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 429720,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 418313,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 3199288,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 3109291,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 3158575,
+          "issue_count_sum": 0
+        }
+      ]
+    },
+    {
+      "name": "full",
+      "ledger": {
+        "ledger_files": 10,
+        "ledger_bytes": 657882,
+        "ledger_nonempty_lines": 1145
+      },
+      "samples": [
+        {
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 22198,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 23604,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 24210,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 758443,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 766328,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 750889,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 5790498,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 5870885,
+          "issue_count_sum": 0
+        },
+        {
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 5861104,
+          "issue_count_sum": 0
+        }
+      ]
+    }
+  ]
+}

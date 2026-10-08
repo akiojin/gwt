@@ -1,10 +1,7 @@
 use std::io;
 
 use gwt_git::PrStatus;
-use gwt_github::{
-    client::{ApiError, ResolutionDeadline},
-    IssueNumber, IssueSnapshot,
-};
+use gwt_github::{IssueNumber, IssueSnapshot};
 
 use super::{CliEnv, InternalCommandOutput};
 use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
@@ -16,21 +13,9 @@ pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
 
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     type Client = E::Client;
-    type OwnerClient = E::OwnerClient;
 
     fn client(&self) -> &Self::Client {
         self.inner.client()
-    }
-
-    fn improvement_owner_client(
-        &self,
-        deadline: &ResolutionDeadline,
-    ) -> Result<&Self::OwnerClient, ApiError> {
-        self.inner.improvement_owner_client(deadline)
-    }
-
-    fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {
-        self.inner.improvement_source_scope_nonce()
     }
 
     fn cache_root(&self) -> std::path::PathBuf {
@@ -89,6 +74,25 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.create_pr(base, head, title, body, labels, draft)
     }
 
+    fn compare_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: Option<&str>,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        self.inner.compare_pr_head(base, head, verified)
+    }
+    fn inspect_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: &str,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        self.inner.inspect_pr_head(base, head, verified)
+    }
+    fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
+        self.inner.fetch_pr_head_sha(number)
+    }
     fn edit_pr(
         &mut self,
         number: u64,
@@ -103,12 +107,37 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_pr(number)
     }
 
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        self.inner.fetch_pr_quarantine_context(number)
+    }
+
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        self.inner.list_open_prs(options)
+    }
+
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        self.inner.probe_github_rate_limit()
+    }
+
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.inner.mark_pr_ready(number)
     }
 
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
         self.inner.convert_pr_to_draft(number)
+    }
+
+    fn update_pr_branch(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::types::PrUpdateBranchResult> {
+        self.inner.update_pr_branch(number)
     }
 
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()> {
@@ -141,6 +170,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String> {
         self.inner.fetch_actions_job_log(job_id)
+    }
+
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        self.inner.rerun_actions(target)
     }
 
     fn run_internal_command(

@@ -11,21 +11,34 @@ import path from "node:path";
 
 const WEB_ROOT = path.resolve(process.cwd(), "crates/gwt/web");
 
-export const APP_URL = "http://gwt-playwright.local/";
+// Issue #4538: `/` is the Hub; the Project workspace lives at
+// `/p/<repo-hash>`. Behaviour specs drive the Project app, so APP_URL is a
+// fixed Project route and HUB_URL is the root picker.
+export const ORIGIN_URL = "http://gwt-playwright.local/";
+export const APP_PROJECT_KEY = "0123456789abcdef";
+export const APP_URL = `${ORIGIN_URL}p/${APP_PROJECT_KEY}`;
+export const HUB_URL = ORIGIN_URL;
 
 const ROOT_MODULES = new Set([
   "app.js",
+  "pm-chat.js",
+  // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
+  "frontend-bootstrap.js",
+  "frontend-route.js",
+  "hub-app.js",
   // SPEC-2008 Phase 38 — Agent Kanban window surface.
   "agent-kanban-surface.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
-  // SPEC #3200 Phase 5 — autonomous Issue Monitor toast stack.
-  "autonomous-notifications.js",
-  // SPEC #3206 — shared floating-toast primitive (autonomous log region).
+  "project-page-metadata.js",
+  // SPEC #3206 — shared floating-toast primitive (alerts + notification history).
   "toast-host.js",
+  // SPEC #3206 v2 — notification center (bell + unread badge + drawer).
+  "notification-center.js",
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",
+  "recovery-center-modal.js",
   "branch-cleanup-modal.js",
   // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
   // self-heal / last-known retention / stale-load guard.
@@ -38,7 +51,7 @@ const ROOT_MODULES = new Set([
   "camera-framing.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
-  "close-project-tab-confirm-modal.js",
+  "close-project-confirm-modal.js",
   "window-close-confirm-modal.js",
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
@@ -47,9 +60,14 @@ const ROOT_MODULES = new Set([
   "file-tree-surface.js",
   // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
   "fleet-minimap.js",
+  // Issue #4777 T-1 — rail surface selection (Issues / Agents / Board / Settings).
+  "surface-rail.js",
+  "split-surfaces.js",
+  "agents-surface.js",
+  "terminal-text-preview.js",
   "focus-trap.js",
+  "startup-metrics.js",
   "hotkey.js",
-  "improvement-inbox-surface.js",
   "index-settings-panel.js",
   // SPEC-3431 FR-026 — PM settings panel.
   "pm-settings-panel.js",
@@ -74,11 +92,8 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface.
   "project-shell-surface.js",
   // SPEC-2013 2026-06-16 amendment — internal Project Switcher popover.
-  "project-switcher.js",
-  "project-tabs-renderer.js",
   // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface.
   "provider-usage-surface.js",
-  "window-tabs-renderer.js",
   // SPEC-3015 — generated protocol enum contract + extracted window runtime
   // state helpers.
   "protocol-enums.js",
@@ -92,9 +107,12 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E4) — Settings windows surface.
   "settings-surface.js",
   "socket-receive-dispatcher.js",
+  "ui-state-store.js",
+  "ui-content.js",
   // Issue #3365 — render-key exception safety + degradation banner.
-  "workspace-render-sync.js",
+  "issue-render-sync.js",
   "render-degradation-banner.js",
+  "workspace-state-notice.js",
   // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface.
   "terminal-attachments.js",
   "terminal-copy-shortcut.js",
@@ -113,13 +131,13 @@ const ROOT_MODULES = new Set([
   "window-list-model.js",
   "window-geometry-sync.js",
   "window-docking.js",
-  "workspace-kanban-surface.js",
+  "issue-other-surface.js",
   // SPEC-2359 US-42 — Workspace Resume Picker modal renderer.
   "workspace-resume-picker-modal.js",
 ]);
 
 export async function installEmbeddedRoutes(page: any): Promise<void> {
-  await page.route(`${APP_URL}**`, async (route: any) => {
+  await page.route(`${ORIGIN_URL}**`, async (route: any) => {
     const url = new URL(route.request().url());
     const assetPath = resolveAssetPath(url.pathname);
     if (!assetPath) {
@@ -138,7 +156,7 @@ export async function installEmbeddedRoutes(page: any): Promise<void> {
 }
 
 function resolveAssetPath(pathname: string): string | null {
-  if (pathname === "/" || pathname === "/index.html") {
+  if (pathname === "/" || pathname === "/index.html" || /^\/p\/[0-9a-f]{16}$/.test(pathname)) {
     return path.join(WEB_ROOT, "index.html");
   }
   if (pathname === "/assets/xterm/xterm.css") {

@@ -39,6 +39,84 @@ export function presetSupportsWaitingStatus(preset) {
   return preset === "agent" || preset === "claude" || preset === "codex";
 }
 
+function isCanvasAgentFocusCandidate(windowData) {
+  const placementKind = windowData?.placement?.kind;
+  if (placementKind && placementKind !== "canvas") {
+    return false;
+  }
+  const agentId = String(windowData?.agent_id || "").trim();
+  return Boolean(
+    windowData?.id &&
+      (agentId || presetSupportsWaitingStatus(windowData?.preset)),
+  );
+}
+
+function agentFocusPriority(windowData, runtimeStateForWindow) {
+  const resolvedRuntimeState =
+    typeof runtimeStateForWindow === "function"
+      ? runtimeStateForWindow(windowData)
+      : undefined;
+  const rawState = String(
+    resolvedRuntimeState ?? windowData?.status ?? "running",
+  ).toLowerCase();
+  // Display normalization intentionally falls back unknown states to running.
+  // Focus ordering must instead fail closed: future states belong to the final
+  // bucket until their interaction priority is explicitly designed.
+  const runtimeState = LEGACY_WINDOW_RUNTIME_STATE_ALIASES[rawState] || rawState;
+  if (runtimeState === "running" || runtimeState === "starting") {
+    return 0;
+  }
+  if (runtimeState === "waiting" || runtimeState === "idle") {
+    return 1;
+  }
+  return 2;
+}
+
+// Issue #3551 — focus navigation uses a deterministic Agent-only projection
+// of the Canvas workspace. Hidden tab members stay in the projection so the
+// caller can activate them before framing. Sorting by the original index after
+// the runtime bucket makes the order independent of z-index and render state.
+export function selectNextAgentFocusWindowId(
+  windows,
+  focusedId,
+  direction = "forward",
+  runtimeStateForWindow,
+) {
+  const candidates = (windows || [])
+    .map((windowData, index) => ({ windowData, index }))
+    .filter(({ windowData }) => isCanvasAgentFocusCandidate(windowData))
+    .map((candidate) => ({
+      ...candidate,
+      priority: agentFocusPriority(
+        candidate.windowData,
+        runtimeStateForWindow,
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        left.priority - right.priority || left.index - right.index,
+    )
+    .map(({ windowData }) => windowData);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const currentIndex = candidates.findIndex(
+    (windowData) => windowData.id === focusedId,
+  );
+  if (currentIndex === -1) {
+    return direction === "backward"
+      ? candidates[candidates.length - 1].id
+      : candidates[0].id;
+  }
+
+  const delta = direction === "backward" ? -1 : 1;
+  const nextIndex =
+    (currentIndex + delta + candidates.length) % candidates.length;
+  return candidates[nextIndex].id;
+}
+
 export function normalizeWindowRuntimeState(status, preset) {
   const rawState = String(status || "running").toLowerCase();
   const normalizedState = LEGACY_WINDOW_RUNTIME_STATE_ALIASES[rawState] || rawState;
@@ -53,6 +131,23 @@ export function normalizeWindowRuntimeState(status, preset) {
 
 export function windowRuntimeLabel(status) {
   return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
+}
+
+// Keep compact state labels stable while explaining what an idle turn means.
+export function windowRuntimeDescription(status, preset) {
+  if (!presetSupportsWaitingStatus(preset)) {
+    return windowRuntimeLabel(status);
+  }
+  switch (status) {
+    case "idle":
+      return "Turn ended; ready for input";
+    case "running":
+      return "Turn in progress, including waiting for a model response";
+    case "waiting":
+      return "Waiting for approval or an external condition";
+    default:
+      return windowRuntimeLabel(status);
+  }
 }
 
 // SPEC-2356 — translate runtime state vocabulary to Operator telemetry states

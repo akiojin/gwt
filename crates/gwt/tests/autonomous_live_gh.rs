@@ -6,8 +6,7 @@
 //! coverage in `cli::daemon::server`; this test keeps the cross-crate subprocess
 //! pipeline (spawn → gh → parse → gate → proposal → arm) live and observable.
 //!
-//! Both scenarios live in ONE test: PATH + mock env are process-global, so a
-//! single sequential test avoids cross-thread env races.
+//! PATH + mock env are process-global; hold the shared environment lock.
 
 #![cfg(unix)]
 
@@ -40,6 +39,7 @@ case "$all" in
   *"pr view"*state,headRefOid,autoMergeRequest,mergeCommit*)
     echo '{"state":"OPEN","headRefOid":"abc123","autoMergeRequest":null,"mergeCommit":null}' ;;
   *"pr view"*headRefOid*)         echo '{"headRefOid":"abc123"}' ;;
+  *"pr view"*mergeStateStatus*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   *"pr view"*statusCheckRollup*)  echo '{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;
   *"pr view"*mergeCommit*)        echo '{"mergeCommit":{"oid":"squashcommit999"}}' ;;
   *"pr diff"*)                    echo 'diff --git a/x b/x' ;;
@@ -72,6 +72,7 @@ fn reviewed_monitor() -> IssueMonitorState {
             ..IssueMonitorPrefs::default()
         },
     );
+    monitor.terminal_queue_push(&[42], "operator", "2026-06-29T00:00:00Z");
     gwt::scan_issue_monitor_candidates(&mut monitor, &[auto_issue()], "2026-06-29T00:00:00Z");
     monitor.capture_acceptance_snapshot(
         42,
@@ -111,6 +112,9 @@ fn init_repo_with_default_branch(repo: &Path) {
 
 #[test]
 fn autonomous_merge_pipeline_executes_through_mock_gh() {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = std::env::temp_dir().join(format!("gwt-mockgh-{}", std::process::id()));
     let bin = tmp.join("bin");
     fs::create_dir_all(&bin).expect("mkdir mock bin");
@@ -122,24 +126,32 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     init_repo_with_default_branch(&repo);
 
     let orig_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin.display(), orig_path));
-    std::env::set_var("GWT_MOCK_GH_LOG", &merge_log);
+    let _path = gwt_core::test_support::ScopedEnvVar::set(
+        "PATH",
+        format!("{}:{}", bin.display(), orig_path),
+    );
+    let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_MOCK_GH_LOG", &merge_log);
     // Issue #3675: mark the mock as installed so the unsandboxed-gh spawn
     // guard lets the pipeline's gh spawns through.
-    std::env::set_var("GWT_TEST_GH_SANDBOX", "1");
+    let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
 
     let now = "2026-06-29T00:10:00Z";
     let issues = [auto_issue()];
 
     // Full pass → the real merge_pr_auto executes against the (mock) gh
-    // subprocess → layer-4 (reviewed == headRefOid) holds → completion.
+    // subprocess → layer-4 (reviewed == headRefOid) holds → delivery completion.
     let _ = fs::remove_file(&merge_log);
     let mut monitor = reviewed_monitor();
 
     // Tick 1: Reviewing → real fetchers (mock gh) → real gate → durable arm
     // proposal. The scan itself has no authority to invoke the remote mutation.
-    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
-        .expect("gate scan succeeds");
+    let degradations =
+        try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+            .expect("gate scan succeeds");
+    assert!(
+        degradations.is_empty(),
+        "every readback must actually succeed here: {degradations:?}"
+    );
     assert_eq!(
         monitor.autonomous_record(42).map(|r| r.phase),
         Some(AutonomousPhase::Reviewing),
@@ -195,24 +207,33 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
         "the real arm adapter invoked `gh pr merge --auto` (log={log:?})",
     );
 
-    // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed ⇒ done.
-    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
-        .expect("delivery scan succeeds");
+    // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed
+    // completes the delivery. The ordinary Issue is still Open, so it returns
+    // to the queue in a fresh session instead of becoming terminal.
+    let degradations =
+        try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+            .expect("delivery scan succeeds");
+    assert!(
+        degradations.is_empty(),
+        "every readback must actually succeed here: {degradations:?}"
+    );
     assert!(
         monitor.autonomous_record(42).is_none(),
-        "merged head (headRefOid) == reviewed_sha ⇒ record cleared (completion)",
+        "merged head (headRefOid) == reviewed_sha ⇒ delivery record cleared",
     );
     assert_eq!(
         monitor.inbox_item(42).map(|i| i.state),
-        Some(MonitorInboxState::Merged),
+        Some(MonitorInboxState::Queued),
+    );
+    assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    assert_eq!(
+        monitor.prefs().queued_launch_session_strategies.get(&42),
+        Some(&gwt::IssueMonitorLaunchSessionStrategy::FreshRequired),
     );
 
-    cleanup(&tmp, &orig_path);
+    cleanup(&tmp);
 }
 
-fn cleanup(tmp: &Path, orig_path: &str) {
-    std::env::set_var("PATH", orig_path);
-    std::env::remove_var("GWT_MOCK_GH_LOG");
-    std::env::remove_var("GWT_TEST_GH_SANDBOX");
+fn cleanup(tmp: &Path) {
     let _ = fs::remove_dir_all(tmp);
 }

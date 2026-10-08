@@ -16,6 +16,8 @@ use std::{
     path::Path,
 };
 
+use gwt_agent::GWT_SESSION_ID_ENV;
+
 use super::{envelope::stop_hook_active_from, HookError, HookOutput};
 use crate::discussion_resume::discussion_stop_blocker;
 
@@ -23,16 +25,26 @@ pub fn handle() -> Result<HookOutput, HookError> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
     let cwd = std::env::current_dir()?;
-    Ok(handle_with_input(&cwd, &input))
+    let current_session = std::env::var(GWT_SESSION_ID_ENV).ok();
+    Ok(handle_with_input(&cwd, &input, current_session.as_deref()))
 }
 
 /// Pure core decision. Always returns `Silent` on any parse/IO failure
 /// so the Stop hook stays fail-open.
-pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
+///
+/// Issue #3465: `current_session_id` keeps the gate inside the session that
+/// opened the discussion. The canonical log is project-scoped, so without it
+/// any session's active proposal blocks every other session of the same
+/// project, and the only offered exits rewrite the owner's state.
+pub fn handle_with_input(
+    worktree: &Path,
+    input: &str,
+    current_session_id: Option<&str>,
+) -> HookOutput {
     if stop_hook_active_from(input) {
         return HookOutput::Silent;
     }
-    let Ok(Some(pending)) = discussion_stop_blocker(worktree) else {
+    let Ok(Some(pending)) = discussion_stop_blocker(worktree, current_session_id) else {
         return HookOutput::Silent;
     };
     let Some(question) = pending
@@ -150,7 +162,7 @@ mod tests {
     fn blocks_when_active_proposal_has_non_empty_next_question() {
         let dir = tempfile::tempdir().unwrap();
         write_discussion(dir.path(), ACTIVE_WITH_QUESTION);
-        let output = handle_with_input(dir.path(), "{}");
+        let output = handle_with_input(dir.path(), "{}", None);
         assert_stop_block(
             output,
             &[
@@ -174,7 +186,7 @@ mod tests {
         );
 
         assert_stop_block(
-            handle_with_input(dir.path(), "{}"),
+            handle_with_input(dir.path(), "{}", None),
             &[
                 "Hook-driven resume",
                 "Should SessionStart or UserPromptSubmit surface the resume proposal?",
@@ -190,7 +202,7 @@ mod tests {
         // tool call does not split on whitespace.
         let dir = tempfile::tempdir().unwrap();
         write_discussion(dir.path(), ACTIVE_WITH_QUESTION);
-        match handle_with_input(dir.path(), "{}") {
+        match handle_with_input(dir.path(), "{}", None) {
             HookOutput::StopBlock { reason } => {
                 assert!(
                     reason.contains("params.proposal:\"Proposal A\""),
@@ -205,12 +217,35 @@ mod tests {
         }
     }
 
+    /// Issue #3465: a discussion entry opened by another session must not
+    /// block this session's Stop.
+    #[test]
+    fn silent_when_canonical_entry_belongs_to_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        write_canonical_discussion(
+            dir.path(),
+            &format!(
+                "# Discussions\n\n## 2026-08-04 — Other session\n\nStatus: active\nOrigin Session: sess-owner\n\n{}",
+                ACTIVE_WITH_QUESTION
+            ),
+        );
+
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("sess-unrelated")),
+            HookOutput::Silent
+        );
+        assert_stop_block(
+            handle_with_input(dir.path(), "{}", Some("sess-owner")),
+            &["Hook-driven resume"],
+        );
+    }
+
     #[test]
     fn silent_when_stop_hook_active_flag_is_true() {
         let dir = tempfile::tempdir().unwrap();
         write_discussion(dir.path(), ACTIVE_WITH_QUESTION);
         assert_eq!(
-            handle_with_input(dir.path(), r#"{"stop_hook_active":true}"#),
+            handle_with_input(dir.path(), r#"{"stop_hook_active":true}"#, None),
             HookOutput::Silent
         );
     }
@@ -218,14 +253,20 @@ mod tests {
     #[test]
     fn silent_when_discussion_file_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(handle_with_input(dir.path(), "{}"), HookOutput::Silent);
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", None),
+            HookOutput::Silent
+        );
     }
 
     #[test]
     fn silent_when_active_proposal_has_empty_next_question() {
         let dir = tempfile::tempdir().unwrap();
         write_discussion(dir.path(), ACTIVE_WITHOUT_QUESTION);
-        assert_eq!(handle_with_input(dir.path(), "{}"), HookOutput::Silent);
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", None),
+            HookOutput::Silent
+        );
     }
 
     #[test]
@@ -233,7 +274,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_discussion(dir.path(), ACTIVE_WITH_EXIT_BLOCKER_WITHOUT_QUESTION);
         assert_stop_block(
-            handle_with_input(dir.path(), "{}"),
+            handle_with_input(dir.path(), "{}", None),
             &[
                 "Evidence gate",
                 "Exit Blockers remain unresolved",
@@ -247,7 +288,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_discussion(dir.path(), ACTIVE_WITH_DEPTH_BLOCKER_WITHOUT_QUESTION);
         assert_stop_block(
-            handle_with_input(dir.path(), "{}"),
+            handle_with_input(dir.path(), "{}", None),
             &[
                 "Depth gate",
                 "Depth Gate is not complete",
@@ -260,7 +301,10 @@ mod tests {
     fn silent_when_no_active_proposals_remain() {
         let dir = tempfile::tempdir().unwrap();
         write_discussion(dir.path(), ALL_RESOLVED);
-        assert_eq!(handle_with_input(dir.path(), "{}"), HookOutput::Silent);
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", None),
+            HookOutput::Silent
+        );
     }
 
     #[test]
@@ -272,6 +316,9 @@ mod tests {
             dir.path(),
             "### Proposal ??? broken header without status label\n",
         );
-        assert_eq!(handle_with_input(dir.path(), "{}"), HookOutput::Silent);
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", None),
+            HookOutput::Silent
+        );
     }
 }

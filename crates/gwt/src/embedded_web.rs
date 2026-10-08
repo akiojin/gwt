@@ -16,7 +16,7 @@
 //! `include_str!` / `include_bytes!` time instead of 404ing in production.
 
 use axum::{
-    http::{header, HeaderValue},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 
@@ -24,6 +24,7 @@ const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
 const CSS_CONTENT_TYPE: &str = "text/css; charset=utf-8";
 const FONT_CONTENT_TYPE: &str = "font/woff2";
+const ICON_CONTENT_TYPE: &str = "image/x-icon";
 
 /// First-party sources change on every build; never serve them stale.
 const MUTABLE_CACHE_CONTROL: &str = "no-store, max-age=0";
@@ -63,6 +64,12 @@ macro_rules! root_js_modules {
 // runtime and the splash hangs because no boot wiring runs (learned the hard
 // way with /release-notes-window.js, see SPEC-2780 and PR #2797 memory).
 root_js_modules! {
+    // Issue #4538 — route bootstrap: `/` loads the Hub, `/p/<repo-hash>`
+    // loads /app.js. index.html's only module script is the bootstrap.
+    "frontend-bootstrap.js" => "bootFrontendRoute",
+    "frontend-route.js" => "parseFrontendRoute",
+    "hub-app.js" => "createHubApp",
+    "startup-metrics.js" => "createStartupMetrics",
     "branch-cleanup-modal.js" => "renderBranchCleanupModal",
     // SPEC-2009 Phase 7 (FR-064..FR-067) — Branches detail-check reconnect
     // self-heal / last-known retention / stale-load guard. app.js imports
@@ -70,16 +77,16 @@ root_js_modules! {
     // module load fails and the splash hangs.
     "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
-    "close-project-tab-confirm-modal.js" => "renderCloseProjectTabConfirmModal",
+    "close-project-confirm-modal.js" => "createCloseProjectController",
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
-    "project-switcher.js" => "createProjectSwitcherController",
     // SPEC-2008 Camera Focus: rail-safe viewport framing math for local
     // per-viewer camera moves.
     "camera-framing.js" => "computeCameraFrameArea",
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
     // notification controller.
     "agent-completion-notifications.js" => "createAgentCompletionNotifier",
+    "project-page-metadata.js" => "createProjectPageMetadata",
     // SPEC-3038 US-3: Close Guard — window close confirm modal renderer.
     "window-close-confirm-modal.js" => "renderWindowCloseConfirmModal",
     "migration-modal.js" => "renderMigrationModal",
@@ -87,8 +94,7 @@ root_js_modules! {
     "window-docking.js" => "findTitlebarDockTarget",
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
-    "workspace-kanban-surface.js" => "createWorkspaceKanbanSurface",
-    "improvement-inbox-surface.js" => "createImprovementInboxSurface",
+    "issue-other-surface.js" => "createIssueOtherSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",
     "terminal-context-menu.js" => "createTerminalContextMenuController",
@@ -101,14 +107,7 @@ root_js_modules! {
     "hotkey.js" => "createHotkeyManager",
     "operator-shell.js" => "initOperatorShell",
     "focus-trap.js" => "createFocusTrap",
-    // Issue #2698 — stable project tab renderer. Keeps tab DOM keyed by
-    // project tab id so status-only workspace refreshes do not rebuild the
-    // whole tab strip.
-    "project-tabs-renderer.js" => "renderProjectTabs",
-    // SPEC-2008 Phase 34 — stable window tab renderer. Keeps grouped-window
-    // tab DOM keyed by window id so active-tab switches do not blank/rebuild
-    // the tab strip or disturb the terminal body.
-    "window-tabs-renderer.js" => "renderWindowTabs",
+    "recovery-center-modal.js" => "createRecoveryCenterController",
     // SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
     "index-settings-panel.js" => "renderIndexSettingsPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
@@ -120,13 +119,17 @@ root_js_modules! {
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
+    // SPEC-5016 — shared immutable model and selector subscriptions.
+    "ui-state-store.js" => "createUiStateStore",
+    "ui-content.js" => "renderUiContent",
     // Issue #3365 — render-key lifecycle with per-window exception isolation
     // (a failed sync retries on the next workspace_state instead of freezing
     // the minimap / window list / telemetry behind a committed key).
-    "workspace-render-sync.js" => "createWorkspaceRenderSync",
+    "issue-render-sync.js" => "createWorkspaceRenderSync",
     // Issue #3365 — user-visible degradation notice for swallowed
     // render/receive failures.
     "render-degradation-banner.js" => "createRenderDegradationBanner",
+    "workspace-state-notice.js" => "createWorkspaceStateNotice",
     // SPEC-1939 Phase 24 — per-window terminal output batching before xterm
     // write.
     "terminal-output-buffer.js" => "createTerminalOutputBatcher",
@@ -191,13 +194,14 @@ root_js_modules! {
     // app.js imports this at module top level, so the asset MUST be registered
     // or the ES module load 404s and the splash hangs.
     "pm-settings-panel.js" => "createPmSettingsPanel",
-    // SPEC #3200 FR-034/FR-035 — autonomous Issue Monitor scrollable side-toast
-    // notification stack. app.js imports this at module top level, so the asset
-    // MUST be registered or the ES module load fails and the splash hangs.
-    "autonomous-notifications.js" => "createAutonomousNotifications",
-    // SPEC #3206 — shared floating-toast primitive imported by
-    // autonomous-notifications.js (and later the bottom-right alerts trio).
+    "pm-chat.js" => "createPmChat",
+    // SPEC #3206 — shared floating-toast primitive behind the bottom-right
+    // alerts stack and the notification-center history list.
     "toast-host.js" => "createToastStack",
+    // SPEC #3206 v2 — notification center (bell + unread badge + history
+    // drawer). app.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load fails and the splash hangs.
+    "notification-center.js" => "createNotificationCenter",
     // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
     // worktree picker + text/hex viewer + window mount) extracted from
     // app.js.
@@ -226,6 +230,13 @@ root_js_modules! {
     // cell map + camera frame. app.js imports this at module top level, so the
     // asset MUST be registered or the ES module load 404s and the splash hangs.
     "fleet-minimap.js" => "createFleetMinimap",
+    // Issue #4777 T-1 — the rail picks Issues / Agents / Board / Settings and
+    // presses the surface of the focused window. app.js imports it at module
+    // top level, so a missing entry would hang the splash.
+    "surface-rail.js" => "installSurfaceRail",
+    "split-surfaces.js" => "createSplitSurfaces",
+    "agents-surface.js" => "createAgentsSurface",
+    "terminal-text-preview.js" => "createTerminalTextPreview",
     // SPEC-3038 (2026-06-20) — Command Rail Windows popover model: groups the
     // cross-tab open-window set by owning project tab so the list matches the
     // badge and supports cross-tab focus.
@@ -270,6 +281,12 @@ pub const STATIC_ASSETS: &[StaticAsset] = &[
         content_type: JS_CONTENT_TYPE,
         cache_control: Some(MUTABLE_CACHE_CONTROL),
         body: AssetBody::Text(include_str!("../web/app.js")),
+    },
+    StaticAsset {
+        route: "/favicon.ico",
+        content_type: ICON_CONTENT_TYPE,
+        cache_control: Some(IMMUTABLE_CACHE_CONTROL),
+        body: AssetBody::Bytes(include_bytes!("../../../assets/icons/icon.ico")),
     },
     // Vendored xterm.js — pinned versions bundled so the terminal works
     // offline without CDN reach.
@@ -428,6 +445,34 @@ pub fn static_asset_response(asset: &'static StaticAsset) -> Response {
         );
     }
     response
+}
+
+/// Issue #4538 AC-1: deterministic, path-free answer for a per-project URL
+/// whose hash is not a canonical ProjectKey. A syntactically valid hash is
+/// resolved by the Project app over its scoped WebSocket instead.
+const PROJECT_NOT_FOUND_HTML: &str = include_str!("../web/project-not-found.html");
+
+/// `GET /p/<repo_hash>`: the shared entrypoint for a canonical ProjectKey,
+/// otherwise the not-found page. Never touches the filesystem.
+pub fn project_route_response(repo_hash: &str) -> Response {
+    if gwt_core::repo_hash::ProjectKey::parse(repo_hash).is_ok() {
+        static_asset_response(&STATIC_ASSETS[0])
+    } else {
+        project_not_found_response()
+    }
+}
+
+/// `404` for every unroutable per-project URL.
+pub fn project_not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [
+            (header::CONTENT_TYPE, HTML_CONTENT_TYPE),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
+        PROJECT_NOT_FOUND_HTML,
+    )
+        .into_response()
 }
 
 /// Builds the response for one [`RootJsModuleAsset`] manifest entry

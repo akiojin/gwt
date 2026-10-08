@@ -205,6 +205,8 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         agent_id: AgentId::Custom("integration-fake-agent".to_string()),
         command: "integration-fake-agent".to_string(),
         args: vec!["--flag".to_string()],
+        pending_initial_prompt: None,
+        codex_auth_root: None,
         env_vars: HashMap::from([("EXPLICIT_LAUNCH".to_string(), "yes".to_string())]),
         remove_env: Vec::new(),
         working_dir: Some(worktree.clone()),
@@ -216,8 +218,6 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         color: AgentColor::Green,
         model: None,
         tool_version: None,
-        tool_runtime_provenance: None,
-        tool_runtime_source_session_id: None,
         reasoning_level: None,
         session_mode: SessionMode::Normal,
         resume_session_id: None,
@@ -231,7 +231,11 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         linked_issue_number: None,
         windows_shell: None,
         suppress_execution_control: false,
+        explicit_follow_up: false,
         execution_intent: gwt_agent::ExecutionLaunchIntent::Automatic,
+        launch_route: gwt_agent::LaunchRoute::Manual,
+        automatic_restore: false,
+        permission_decision: gwt_agent::PermissionModeDecision::default(),
     };
 
     let mut refreshed_paths = Vec::new();

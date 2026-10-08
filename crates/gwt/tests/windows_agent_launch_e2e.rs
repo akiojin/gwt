@@ -1,8 +1,8 @@
-//! SPEC-1921 Phase 75: credential-free Windows official-provider launch E2E.
+//! SPEC-1921 Phase L1b: credential-free Windows installed-provider launch E2E.
 //!
-//! CI runs four explicit shards through `GWT_WINDOWS_AGENT_PROVIDER` and
-//! `GWT_WINDOWS_AGENT_SELECTOR`. Each shard uses the real npm/npx installed on
-//! the runner, but package metadata and tarballs stay on a loopback registry.
+//! CI runs both providers through `GWT_WINDOWS_AGENT_PROVIDER`. The loopback
+//! registry installs a fixture CLI before launch; every launch then probes and
+//! dispatches the installed direct command without package-runner activity.
 //!
 //! Positive evidence is deliberately compositional: the 32-case matrix drives
 //! the exact shared launch boundary, the source contract proves every reachable
@@ -22,10 +22,7 @@ use std::{
 
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
-use gwt_agent::{
-    prepare_agent_launch, AgentId, AgentLaunchBuilder, HostRunnerProbeKind, Session, SessionMode,
-    ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
-};
+use gwt_agent::{prepare_agent_launch, AgentId, AgentLaunchBuilder, Session, SessionMode};
 use gwt_core::test_support::{
     summarize_pty_output_for_diagnostics, WindowsNpmRegistryFixture, WindowsRealGwtFixture,
 };
@@ -35,19 +32,12 @@ use gwt_terminal::{
 };
 
 const PROVIDER_ENV: &str = "GWT_WINDOWS_AGENT_PROVIDER";
-const SELECTOR_ENV: &str = "GWT_WINDOWS_AGENT_SELECTOR";
 const CREDENTIAL_FREE_ENV: &str = "GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE";
-const TEST_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
-const TEST_REGISTRY_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
-// Issue #3656: the first ConPTY route pays the cold-cache cost of fetching
-// and extracting the provider tarball inside this budget. Saturated CI
-// runners showed a 5-7x slowdown on the preflight probes while the old
-// 60-second budget flaked, so align with the 180-second public-WS agent
-// budget below and log the observed marker latency for regression tracking.
+const TEST_FIXTURE_INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
+// Keep the saturated-runner marker budget and report observed latency.
 const TEST_AGENT_READY_TIMEOUT: Duration = Duration::from_secs(180);
-// The npx parent must exit after the marker so its shared cache is finalized;
-// the old 10-second wait is exposed to the same host saturation.
-const TEST_NPX_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+// The direct provider process must exit after its readiness marker.
+const TEST_PROVIDER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provider {
@@ -144,18 +134,9 @@ fn required_env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("{key} must be set for an explicit CI shard"))
 }
 
-fn selected_selector() -> String {
-    let selector = required_env(SELECTOR_ENV);
-    assert!(
-        matches!(selector.as_str(), "latest" | "exact"),
-        "{SELECTOR_ENV} must be latest or exact, got {selector:?}"
-    );
-    selector
-}
-
 #[test]
-#[ignore = "runs real npm/npx against a loopback registry"]
-fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
+#[ignore = "installs a fixture CLI from a loopback registry, then runs direct Windows launches"]
+fn windows_official_provider_launch_uses_installed_direct_runner() {
     init_test_tracing();
     assert_eq!(
         required_env(CREDENTIAL_FREE_ENV),
@@ -163,7 +144,6 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
         "the Windows launch E2E must run in credential-free mode"
     );
     let provider = Provider::from_env();
-    let selector_shard = selected_selector();
     let temp = tempfile::tempdir().expect("Phase 75 E2E tempdir");
     let fixture = WindowsNpmRegistryFixture::create(temp.path())
         .expect("create loopback npm registry fixture");
@@ -179,23 +159,13 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
         "initialize E2E Git worktree: {}",
         String::from_utf8_lossy(&git_init.stderr)
     );
-    let requested_selector = if selector_shard == "exact" {
-        fixture.exact_version.as_str()
-    } else {
-        "latest"
-    };
     let sessions_dir = fixture.profile.join(".gwt").join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("create isolated Session directory");
     let _hook_bin =
         gwt_core::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"));
-    let launch_env = launch_env_with_real_gwtd(&fixture);
-    assert_loopback_registry_preflight(
-        &fixture,
-        &launch_env,
-        &worktree,
-        provider,
-        requested_selector,
-    );
+    let installed_bin = install_fixture_provider(&fixture, provider);
+    let launch_env = launch_env_with_real_gwtd(&fixture, &installed_bin);
+    let registry_requests_after_install = fixture.requests().len();
     assert_canonical_route_manifest();
     let public_route_only = std::env::var_os("GWT_WINDOWS_AGENT_E2E_PUBLIC_ROUTE_ONLY")
         .is_some_and(|value| value == "1");
@@ -206,7 +176,6 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
             run_shared_launch_boundary_case(
                 route,
                 provider,
-                requested_selector,
                 &fixture,
                 &launch_env,
                 &worktree,
@@ -222,14 +191,23 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
         );
     }
 
-    assert_public_ws_agent_route_boundary(
-        temp.path(),
-        provider,
-        requested_selector,
-        &fixture,
-        &launch_env,
-    );
+    // Issue #5102 AC-2: independent launches on the same tree must retain the
+    // exact persisted identity assertion on every run, not pass by retrying.
+    for repetition in 1..=3 {
+        eprintln!("public Board installed identity {provider:?} repetition {repetition}/3");
+        assert_public_ws_agent_route_boundary(
+            &temp.path().join(format!("public-repeat-{repetition}")),
+            provider,
+            &fixture,
+            &launch_env,
+        );
+    }
 
+    assert_eq!(
+        fixture.requests().len(),
+        registry_requests_after_install,
+        "installed launches must not access the registry"
+    );
     let requests = fixture.requests();
     assert!(!requests.is_empty(), "npm must use the loopback registry");
     assert!(
@@ -261,7 +239,6 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
 fn assert_public_ws_agent_route_boundary(
     temp_root: &Path,
     provider: Provider,
-    requested_selector: &str,
     npm_fixture: &WindowsNpmRegistryFixture,
     launch_env: &std::collections::HashMap<String, String>,
 ) {
@@ -282,22 +259,10 @@ fn assert_public_ws_agent_route_boundary(
     std::fs::create_dir_all(&sessions_dir).expect("create public WS sessions directory");
     std::fs::copy(&npm_fixture.npmrc, home.join(".npmrc"))
         .expect("install isolated loopback npmrc for the real gwt route");
-    let provider_session_id = format!(
-        "phase75-public-{}-{}",
-        provider.package().replace(['@', '/'], "-"),
-        requested_selector.replace('.', "-")
-    );
+    let provider_session_id = format!("phase75-public-{}-installed", provider.agent_id().command());
     let mut source = Session::new(&workspace, "master", provider.agent_id());
     source.agent_session_id = Some(format!("source-{provider_session_id}"));
-    source.tool_version = Some(requested_selector.to_string());
-    source.tool_runtime_provenance = Some(gwt_agent::ToolRuntimeProvenance {
-        schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-        official_package: provider.package().to_string(),
-        requested_selector: requested_selector.to_string(),
-        resolved_exact_version: npm_fixture.exact_version.clone(),
-        runner_kind: ToolRuntimeRunnerKind::Npx,
-        resolution_reason: gwt_agent::ToolRuntimeResolutionReason::RequestedSelector,
-    });
+    source.tool_version = Some(npm_fixture.exact_version.clone());
     source
         .save(&sessions_dir)
         .expect("persist public WS Board origin Session");
@@ -326,7 +291,7 @@ fn assert_public_ws_agent_route_boundary(
         origin_session_id: source.id,
         capture,
         provider,
-        exact_version: npm_fixture.exact_version.clone(),
+        observed_version: npm_fixture.exact_version.clone(),
         provider_session_id,
         sessions_dir,
     };
@@ -343,13 +308,67 @@ fn assert_public_ws_agent_route_boundary(
     }
 }
 
+/// Issue #4644: since #4537 the bootstrap `/ws` connection is Hub-only. It
+/// answers `frontend_ready` with the lightweight `hub_state` catalog (the
+/// browser's `receiveHubState`); project `workspace_state` is sent only on a
+/// connection bound to a project key.
+#[derive(Debug, PartialEq, Eq)]
+enum HubBootstrapReply {
+    Synced,
+    Pending,
+}
+
+fn classify_hub_bootstrap_reply(kind: &str) -> Result<HubBootstrapReply, String> {
+    match kind {
+        "hub_state" => Ok(HubBootstrapReply::Synced),
+        "workspace_state" => Err(
+            "Hub bootstrap connection received project-scoped workspace_state; \
+             the Hub contract (#4537) syncs with hub_state only"
+                .to_string(),
+        ),
+        _ => Ok(HubBootstrapReply::Pending),
+    }
+}
+
+fn hub_project_keys(hub_state: &serde_json::Value) -> Vec<String> {
+    hub_state["hub"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project["project_key"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn hub_bootstrap_reply_names_the_scope_violation_instead_of_timing_out() {
+    assert_eq!(
+        classify_hub_bootstrap_reply("hub_state"),
+        Ok(HubBootstrapReply::Synced)
+    );
+    for pending in ["runtime_health", "provider_usage", "update_state"] {
+        assert_eq!(
+            classify_hub_bootstrap_reply(pending),
+            Ok(HubBootstrapReply::Pending)
+        );
+    }
+    let error = classify_hub_bootstrap_reply("workspace_state").unwrap_err();
+    assert!(error.contains("hub_state"), "{error}");
+    assert_eq!(
+        hub_project_keys(&serde_json::json!({
+            "kind": "hub_state",
+            "hub": {"projects": [{"project_key": "0123456789abcdef"}]},
+        })),
+        vec!["0123456789abcdef".to_string()]
+    );
+}
+
 struct PublicRouteExpectation {
     ws_url: String,
     workspace: String,
     origin_session_id: String,
     capture: PathBuf,
     provider: Provider,
-    exact_version: String,
+    observed_version: String,
     provider_session_id: String,
     sessions_dir: PathBuf,
 }
@@ -363,7 +382,7 @@ async fn assert_public_ws_conpty_boundary_async(
         origin_session_id,
         capture,
         provider,
-        exact_version,
+        observed_version,
         provider_session_id,
         sessions_dir,
     } = expectation;
@@ -376,8 +395,8 @@ async fn assert_public_ws_conpty_boundary_async(
     // consuming frontend events instead of racing one pre-run send.
     let handshake_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut observed_kinds = Vec::new();
-    let mut frontend_ready = false;
-    while !frontend_ready && tokio::time::Instant::now() < handshake_deadline {
+    let mut known_project_keys = None;
+    while known_project_keys.is_none() && tokio::time::Instant::now() < handshake_deadline {
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 r#"{"kind":"frontend_ready"}"#.into(),
@@ -404,18 +423,19 @@ async fn assert_public_ws_conpty_boundary_async(
             };
             if let Some(kind) = value["kind"].as_str() {
                 observed_kinds.push(kind.to_string());
-                frontend_ready = kind == "workspace_state";
-            }
-            if frontend_ready {
-                break;
+                if classify_hub_bootstrap_reply(kind)? == HubBootstrapReply::Synced {
+                    known_project_keys = Some(hub_project_keys(&value));
+                    break;
+                }
             }
         }
     }
-    if !frontend_ready {
+    let Some(known_project_keys) = known_project_keys else {
         return Err(format!(
-            "timed out waiting for frontend sync; observed={observed_kinds:?}"
+            "Hub bootstrap connection never answered frontend_ready with hub_state; \
+             observed={observed_kinds:?}"
         ));
-    }
+    };
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
             serde_json::json!({
@@ -430,41 +450,60 @@ async fn assert_public_ws_conpty_boundary_async(
     let project_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let canonical_workspace = std::fs::canonicalize(&workspace)
         .map_err(|error| format!("canonicalize public workspace: {error}"))?;
-    let mut project_open = false;
+    let mut project_key = None;
     let mut project_event_kinds = Vec::new();
-    while !project_open && tokio::time::Instant::now() < project_deadline {
+    while project_key.is_none() && tokio::time::Instant::now() < project_deadline {
         let remaining = project_deadline.saturating_duration_since(tokio::time::Instant::now());
         let message = tokio::time::timeout(remaining, socket.next())
             .await
             .map_err(|_| {
                 format!(
-                    "timed out waiting for project workspace_state; observed={project_event_kinds:?}"
+                    "timed out waiting for the opened project in hub_state; observed={project_event_kinds:?}"
                 )
             })?
             .ok_or_else(|| "public websocket closed before project open".to_string())?
-            .map_err(|error| format!("read project workspace_state: {error}"))?;
+            .map_err(|error| format!("read project hub_state: {error}"))?;
         let Some(payload) = message.to_text().ok() else {
             continue;
         };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             continue;
         };
-        if let Some(kind) = value["kind"].as_str() {
-            project_event_kinds.push(kind.to_string());
+        let Some(kind) = value["kind"].as_str() else {
+            continue;
+        };
+        project_event_kinds.push(kind.to_string());
+        if kind == "project_open_error" {
+            return Err(format!("reopen_recent_project failed: {value}"));
         }
-        project_open = value["kind"] == "workspace_state"
-            && value["workspace"]["tabs"].as_array().is_some_and(|tabs| {
-                tabs.iter().any(|tab| {
-                    tab["project_root"]
-                        .as_str()
-                        .and_then(|path| std::fs::canonicalize(Path::new(path)).ok())
-                        .is_some_and(|path| path == canonical_workspace)
-                })
-            });
+        if classify_hub_bootstrap_reply(kind)? == HubBootstrapReply::Synced {
+            project_key = hub_project_keys(&value)
+                .into_iter()
+                .find(|key| !known_project_keys.contains(key));
+        }
     }
-    if !project_open {
-        return Err("project tab was not materialized".to_string());
-    }
+    let project_key =
+        project_key.ok_or_else(|| "project tab key was not materialized".to_string())?;
+    // Match the browser: the bootstrap connection is Hub-only; project
+    // mutations require a new connection bound to the materialized key.
+    socket
+        .close(None)
+        .await
+        .map_err(|error| format!("close Hub websocket: {error}"))?;
+    let mut project_ws_url = reqwest::Url::parse(&ws_url)
+        .map_err(|error| format!("parse public websocket URL: {error}"))?;
+    project_ws_url
+        .query_pairs_mut()
+        .append_pair("repo_hash", &project_key);
+    let (mut socket, _) = tokio_tungstenite::connect_async(project_ws_url.as_str())
+        .await
+        .map_err(|error| format!("connect project websocket: {error}"))?;
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"kind":"frontend_ready"}"#.into(),
+        ))
+        .await
+        .map_err(|error| format!("send project frontend_ready: {error}"))?;
 
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -489,6 +528,18 @@ async fn assert_public_ws_conpty_boundary_async(
         };
         if value["kind"] != "workspace_state" {
             continue;
+        }
+        let tab = &value["workspace"]["tabs"][0];
+        let tab_root = tab["project_root"]
+            .as_str()
+            .and_then(|path| std::fs::canonicalize(Path::new(path)).ok());
+        if tab["project_key"].as_str() != Some(project_key.as_str())
+            || tab_root.as_deref() != Some(canonical_workspace.as_path())
+        {
+            return Err(format!(
+                "project connection {project_key} served another project: {}",
+                value["workspace"]["tabs"]
+            ));
         }
         board_id = value["workspace"]["tabs"]
             .as_array()
@@ -609,14 +660,14 @@ async fn assert_public_ws_conpty_boundary_async(
     )
     .map_err(|error| format!("parse public Board route receipt: {error}"))?;
     if receipt["package"] != provider.package()
-        || receipt["version"] != exact_version
+        || receipt["version"] != observed_version
         || receipt["provider_session_id"] != provider_session_id
         || receipt["hook_status"].as_i64() != Some(0)
         || receipt["hook_forward_token_present"].as_bool() != Some(true)
         || receipt["tty"].as_bool() != Some(true)
     {
         return Err(format!(
-            "public Board route receipt did not prove exact authenticated ConPTY launch: {receipt}"
+            "public Board route receipt did not prove installed authenticated ConPTY launch: {receipt}"
         ));
     }
     let launched_session_id = receipt["gwt_session_id"]
@@ -625,16 +676,12 @@ async fn assert_public_ws_conpty_boundary_async(
     let persisted = Session::load(&sessions_dir.join(format!("{launched_session_id}.toml")))
         .map_err(|error| format!("load public Board route Session: {error}"))?;
     if persisted.agent_session_id.as_deref() != Some(provider_session_id.as_str())
-        || persisted
-            .tool_runtime_provenance
-            .as_ref()
-            .is_none_or(|provenance| {
-                provenance.official_package != provider.package()
-                    || provenance.resolved_exact_version != exact_version
-            })
+        || persisted.tool_version.as_deref() != Some(observed_version.as_str())
+        || persisted.tool_runtime_provenance.is_some()
+        || receipt["npm_exec_identity"] != serde_json::Value::Null
     {
         return Err(format!(
-            "public Board route Session did not commit authenticated exact provenance: {persisted:?}"
+            "public Board route Session did not commit authenticated installed identity: {persisted:?}; receipt={receipt}"
         ));
     }
     let capture_before_focus = std::fs::read(&capture)
@@ -815,7 +862,6 @@ async fn assert_public_ws_conpty_boundary_async(
 fn run_shared_launch_boundary_case(
     route: RouteCase,
     provider: Provider,
-    requested_selector: &str,
     fixture: &WindowsNpmRegistryFixture,
     launch_env: &std::collections::HashMap<String, String>,
     worktree: &Path,
@@ -828,26 +874,10 @@ fn run_shared_launch_boundary_case(
     let prompt = format!("route {}: $gwt-execute #3152 — café 日本語", route.id);
     let provider_session_id = format!("phase75-{}", route.id.replace('.', "-"));
     let mut builder = AgentLaunchBuilder::new(provider.agent_id())
-        .version(requested_selector)
         .working_dir(worktree)
         .extra_arg(&prompt)
         .env("GWT_PHASE75_CAPTURE", capture.to_string_lossy())
         .env("GWT_PHASE75_PROVIDER_SESSION_ID", &provider_session_id);
-    // The public route owners are proved to converge on the app transaction by
-    // `every_reachable_app_route_enters_the_shared_agent_launch_transaction`.
-    // At this boundary, Resume/Continue cases must carry their persisted exact
-    // logical plan even when the original selector was `latest`; only Fresh
-    // cases are allowed to resolve `latest` again.
-    if matches!(route.mode, RouteMode::Resume | RouteMode::Continue) {
-        builder = builder.tool_runtime_provenance(gwt_agent::ToolRuntimeProvenance {
-            schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: provider.package().to_string(),
-            requested_selector: requested_selector.to_string(),
-            resolved_exact_version: fixture.exact_version.clone(),
-            runner_kind: ToolRuntimeRunnerKind::Npx,
-            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-        });
-    }
     builder = match route.mode {
         RouteMode::Fresh => builder,
         RouteMode::Resume => builder
@@ -861,38 +891,21 @@ fn run_shared_launch_boundary_case(
     let mut config = builder.build();
     config.remove_env.extend(credential_env_removals());
 
-    let accepted_connection_count_before = fixture.accepted_connection_count();
-    let header_complete_request_count_before = fixture.requests().len();
     let prepared = prepare_agent_launch(worktree, sessions_dir, config, None, |path| {
         gwt::refresh_managed_gwt_assets_for_agent(path, &provider.agent_id())
             .map_err(|error| error.to_string())
     })
-    .unwrap_or_else(|error| {
-        let accepted_connection_count = fixture.accepted_connection_count();
-        let request_snapshot = registry_request_diagnostic_snapshot(fixture);
-        let header_complete_request_count = request_snapshot.len();
-        let accepted_connection_delta =
-            accepted_connection_count.saturating_sub(accepted_connection_count_before);
-        let header_complete_request_delta =
-            header_complete_request_count.saturating_sub(header_complete_request_count_before);
-        panic!(
-            "{} must prepare an exact npx plan: {error}; accepted_connection_delta={accepted_connection_delta}; header_complete_request_delta={header_complete_request_delta}; request_snapshot={request_snapshot:?}",
-            route.id
-        )
-    });
+    .unwrap_or_else(|error| panic!("{} installed launch preparation failed: {error}", route.id));
+    let expected_command = format!("{}.cmd", provider.agent_id().command());
     assert!(runner_file_name_is(
         &prepared.process_launch.command,
-        "npx.cmd"
+        &expected_command
     ));
-    let provenance = prepared
-        .session
-        .tool_runtime_provenance
-        .as_ref()
-        .expect("targeted Session provenance");
-    assert_eq!(provenance.runner_kind, ToolRuntimeRunnerKind::Npx);
-    assert_eq!(provenance.official_package, provider.package());
-    assert_eq!(provenance.resolved_exact_version, fixture.exact_version);
-    assert_eq!(provenance.requested_selector, requested_selector);
+    assert_eq!(
+        prepared.session.tool_version.as_deref(),
+        Some(fixture.exact_version.as_str())
+    );
+    assert!(prepared.session.tool_runtime_provenance.is_none());
     assert_eq!(
         prepared
             .process_launch
@@ -969,7 +982,7 @@ fn run_shared_launch_boundary_case(
         dunce::canonicalize(env!("CARGO_BIN_EXE_gwtd")).expect("canonicalize checkout gwtd"),
         "generated hook must execute this checkout's gwtd binary"
     );
-    assert!(receipt["npm_exec_identity"].as_str().is_some());
+    assert_eq!(receipt["npm_exec_identity"], serde_json::Value::Null);
     assert_eq!(
         receipt["project_root"].as_str(),
         Some(worktree.to_string_lossy().as_ref())
@@ -991,7 +1004,12 @@ fn run_shared_launch_boundary_case(
         "{} must append provider identity to Session history",
         route.id
     );
-    eprintln!("phase75 shared launch boundary PASS: {}", route.id);
+    assert!(persisted.tool_runtime_provenance.is_none());
+    assert_eq!(
+        persisted.tool_version.as_deref(),
+        Some(fixture.exact_version.as_str())
+    );
+    eprintln!("phase75 installed launch boundary PASS: {}", route.id);
 }
 
 fn read_pty_until_marker(
@@ -1038,7 +1056,7 @@ fn read_pty_until_marker(
             break Err(TerminalError::PtyIoError {
                 details: if exit_deadline.is_some() {
                     format!(
-                        "PTY marker {marker:?} was observed but npx did not exit cleanly; waited={:?} budget={TEST_NPX_EXIT_TIMEOUT:?}; {}",
+                        "PTY marker {marker:?} was observed but provider did not exit cleanly; waited={:?} budget={TEST_PROVIDER_EXIT_TIMEOUT:?}; {}",
                         wait_started.elapsed(),
                         summarize_pty_output_for_diagnostics(&bytes)
                     )
@@ -1077,10 +1095,8 @@ fn read_pty_until_marker(
                         wait_started.elapsed().as_millis(),
                         timeout.as_millis()
                     );
-                    // The package entrypoint emits the marker before returning
-                    // to npx. Wait for the npx parent to exit normally so its
-                    // shared cache is finalized before the next route starts.
-                    exit_deadline = Some(Instant::now() + TEST_NPX_EXIT_TIMEOUT);
+                    // Wait for the installed CLI to exit before the next route starts.
+                    exit_deadline = Some(Instant::now() + TEST_PROVIDER_EXIT_TIMEOUT);
                 }
             }
             Ok(Err(error)) => {
@@ -1114,13 +1130,14 @@ fn read_pty_until_marker(
 
 fn launch_env_with_real_gwtd(
     fixture: &WindowsNpmRegistryFixture,
+    installed_bin: &Path,
 ) -> std::collections::HashMap<String, String> {
     let mut env = fixture.launch_env();
     let gwtd_dir = Path::new(env!("CARGO_BIN_EXE_gwtd"))
         .parent()
         .expect("gwtd binary parent");
     let current = env.get("PATH").map(String::as_str).unwrap_or_default();
-    let mut paths = vec![gwtd_dir.to_path_buf()];
+    let mut paths = vec![installed_bin.to_path_buf(), gwtd_dir.to_path_buf()];
     paths.extend(std::env::split_paths(current));
     env.insert(
         "PATH".to_string(),
@@ -1161,140 +1178,50 @@ fn credential_env_removals() -> Vec<String> {
     .collect()
 }
 
-fn registry_request_diagnostic_snapshot(fixture: &WindowsNpmRegistryFixture) -> Vec<String> {
-    fixture
-        .requests()
-        .into_iter()
-        .map(|request| format!("{} {}", request.method, request.path))
-        .collect()
-}
-
-fn panic_loopback_registry_preflight_failure(
-    fixture: &WindowsNpmRegistryFixture,
-    outcome: &gwt_agent::HostRunnerProbeOutcome,
-    observed_value: &str,
-    detail: &str,
-) -> ! {
-    let accepted_connection_count = fixture.accepted_connection_count();
-    let request_snapshot = registry_request_diagnostic_snapshot(fixture);
-    let header_complete_request_count = request_snapshot.len();
-    panic!(
-        "loopback registry preflight failure: {detail}; expected_registry={:?}; observed_value={observed_value:?}; outcome={outcome:?}; accepted_connection_count={accepted_connection_count}; header_complete_request_count={header_complete_request_count}; request_snapshot={request_snapshot:?}",
-        fixture.registry_url
-    );
-}
-
-fn assert_loopback_registry_preflight(
-    fixture: &WindowsNpmRegistryFixture,
-    launch_env: &std::collections::HashMap<String, String>,
-    worktree: &Path,
-    provider: Provider,
-    requested_selector: &str,
-) {
-    let remove_env = credential_env_removals();
-    let mut preflight_env = launch_env.clone();
-    assert_eq!(
-        preflight_env.remove("NPM_CONFIG_REGISTRY").as_deref(),
-        Some(fixture.registry_url.as_str()),
-        "preflight launch environment must contain the isolated registry URL"
-    );
-    assert!(
-        preflight_env
-            .values()
-            .all(|value| value != &fixture.registry_url),
-        "preflight probe redaction inputs must not contain the expected registry URL"
-    );
-    let outcome = gwt_agent::prepare::probe_host_runner_with_timeout(
-        HostRunnerProbeKind::Runner,
+fn install_fixture_provider(fixture: &WindowsNpmRegistryFixture, provider: Provider) -> PathBuf {
+    use gwt_core::process_console::{
+        spawn_logged_blocking_with_deadline, ProcessConsoleHub, ProcessKind, SpawnOptions,
+    };
+    let prefix = fixture.profile.join("installed provider");
+    std::fs::create_dir_all(&prefix).expect("create installed provider prefix");
+    let args = vec![
+        "install".to_string(),
+        "--prefix".to_string(),
+        prefix.to_string_lossy().into_owned(),
+        "--ignore-scripts".to_string(),
+        "--no-audit".to_string(),
+        "--no-fund".to_string(),
+        "--package-lock=false".to_string(),
+        format!("{}@{}", provider.package(), fixture.exact_version),
+    ];
+    let mut options = SpawnOptions::new("install Windows provider fixture")
+        .current_dir(&prefix)
+        .forward_output(false);
+    for (key, value) in fixture.launch_env() {
+        options = options.env(key, value);
+    }
+    for key in credential_env_removals() {
+        options = options.env_remove(key);
+    }
+    let output = spawn_logged_blocking_with_deadline(
+        &ProcessConsoleHub::new(),
+        ProcessKind::AgentBootstrap,
         "npm.cmd",
-        ["config", "get", "registry", "--json"]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        &preflight_env,
-        &remove_env,
-        Some(worktree.to_path_buf()),
-        TEST_PREFLIGHT_TIMEOUT,
-        Duration::from_millis(50),
-    );
-    let observed_registry = outcome.stdout.trim();
-    if !outcome.success || observed_registry != fixture.registry_url {
-        panic_loopback_registry_preflight_failure(
-            fixture,
-            &outcome,
-            observed_registry,
-            "npm config registry mismatch",
-        );
-    }
-    if let Err(error) = fixture.probe_registry_health(TEST_REGISTRY_HEALTH_TIMEOUT) {
-        panic_loopback_registry_preflight_failure(
-            fixture,
-            &outcome,
-            observed_registry,
-            &format!("loopback HTTP healthcheck failed: {error}"),
-        );
-    }
-    if requested_selector == "latest" {
-        let metadata_request_count_before = fixture.requests().len();
-        let metadata_outcome = gwt_agent::prepare::probe_host_runner_with_timeout(
-            HostRunnerProbeKind::Runner,
-            "npm.cmd",
-            vec![
-                "view".to_string(),
-                format!("{}@latest", provider.package()),
-                "version".to_string(),
-                "--json".to_string(),
-            ],
-            &preflight_env,
-            &remove_env,
-            Some(worktree.to_path_buf()),
-            TEST_PREFLIGHT_TIMEOUT,
-            Duration::from_millis(50),
-        );
-        let observed_metadata = metadata_outcome.stdout.trim();
-        if !metadata_outcome.success {
-            panic_loopback_registry_preflight_failure(
-                fixture,
-                &metadata_outcome,
-                observed_metadata,
-                "metadata preflight process failed",
-            );
-        }
-        let resolved_version =
-            serde_json::from_str::<String>(observed_metadata).unwrap_or_else(|error| {
-                panic_loopback_registry_preflight_failure(
-                    fixture,
-                    &metadata_outcome,
-                    observed_metadata,
-                    &format!("metadata preflight returned invalid JSON: {error}"),
-                )
-            });
-        if resolved_version != fixture.exact_version {
-            panic_loopback_registry_preflight_failure(
-                fixture,
-                &metadata_outcome,
-                &resolved_version,
-                "metadata preflight version mismatch",
-            );
-        }
-        let metadata_requests = fixture.requests();
-        let reached_packument = metadata_requests
-            .get(metadata_request_count_before..)
-            .is_some_and(|requests| {
-                requests.iter().any(|request| {
-                    let path = request.path.to_ascii_lowercase();
-                    path.contains("%2f") || path.contains(provider.package())
-                })
-            });
-        if !reached_packument {
-            panic_loopback_registry_preflight_failure(
-                fixture,
-                &metadata_outcome,
-                &resolved_version,
-                "metadata preflight did not reach the loopback packument",
-            );
-        }
-    }
+        &args,
+        options,
+        Instant::now() + TEST_FIXTURE_INSTALL_TIMEOUT,
+    )
+    .expect("bounded loopback fixture install");
+    assert!(output.success(), "fixture install failed: {output:?}");
+    let installed_bin = prefix.join("node_modules").join(".bin");
+    // This Windows fixture pins the spawnable .cmd installation entrypoint.
+    // Remove npm's POSIX sibling so direct PATH lookup proves that exact path.
+    std::fs::remove_file(installed_bin.join(provider.agent_id().command()))
+        .expect("remove fixture POSIX shim");
+    assert!(installed_bin
+        .join(format!("{}.cmd", provider.agent_id().command()))
+        .is_file());
+    installed_bin
 }
 
 fn route_capture_path(root: &Path, route_id: &str) -> PathBuf {

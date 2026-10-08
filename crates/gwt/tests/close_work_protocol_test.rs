@@ -4,7 +4,7 @@ use serde_json::json;
 // SPEC-2359 Phase W-12 Slice 4 (FR-352): the Work surface Done / Discard
 // buttons send `{kind: "close_work", work_id, close_kind}`. Verify the backend
 // protocol deserializes both close kinds so the wire contract with
-// `web/workspace-kanban-surface.js` stays intact.
+// `web/issue-other-surface.js` stays intact.
 #[test]
 fn frontend_event_deserializes_close_work_done() {
     let event = serde_json::from_value::<FrontendEvent>(json!({

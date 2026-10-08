@@ -19,13 +19,16 @@ node_check() {
 }
 
 node_check crates/gwt/web/app.js
+node_check crates/gwt/web/frontend-bootstrap.js
+node_check crates/gwt/web/frontend-route.js
+node_check crates/gwt/web/hub-app.js
 node_check crates/gwt/web/branch-cleanup-modal.js
 node_check crates/gwt/web/branch-list-state.js
 node_check crates/gwt/web/migration-modal.js
 node_check crates/gwt/web/project-clone-modal.js
 node_check crates/gwt/web/board-surface.js
 node_check crates/gwt/web/agent-kanban-surface.js
-node_check crates/gwt/web/workspace-kanban-surface.js
+node_check crates/gwt/web/issue-other-surface.js
 node_check crates/gwt/web/theme-manager.js
 node_check crates/gwt/web/theme-toggle.js
 node_check crates/gwt/web/hotkey.js
@@ -40,17 +43,15 @@ node_check crates/gwt/web/canvas-wheel-gesture.js
 node_check crates/gwt/web/window-geometry-sync.js
 node_check crates/gwt/web/custom-agent-env-editor.js
 node_check crates/gwt/web/socket-receive-dispatcher.js
-node_check crates/gwt/web/workspace-render-sync.js
+node_check crates/gwt/web/issue-render-sync.js
 node_check crates/gwt/web/render-degradation-banner.js
 node_check crates/gwt/web/interaction-guard.js
 node_check crates/gwt/web/viewport-persist-throttle.js
 node_check crates/gwt/web/viewport-sync.js
-node_check crates/gwt/web/project-tabs-renderer.js
-node_check crates/gwt/web/window-tabs-renderer.js
 node_check crates/gwt/web/clone-modal-focus-guard.js
 node_check crates/gwt/web/ui-trace-profiler.js
 node_check crates/gwt/web/ui-trace-wiring.js
-node_check crates/gwt/web/close-project-tab-confirm-modal.js
+node_check crates/gwt/web/close-project-confirm-modal.js
 node_check crates/gwt/web/release-notes-window.js
 node_check crates/gwt/web/console-window.js
 node_check crates/gwt/web/provider-usage-surface.js

@@ -266,3 +266,88 @@ pub(crate) fn trim_surrounding_newlines(raw: &str) -> &str {
     }
     &raw[start..end]
 }
+
+/// Repair the one malformed shape a failed section write can leave behind: the
+/// writer wrapped content that already carried its own marker pair, so the
+/// artifact holds `BEGIN name / BEGIN name / … / END name / END name` and
+/// [`extract_sections`] rejects it with `nested BEGIN`.
+///
+/// Keeps the outermost pair and drops the inner one, which preserves the
+/// content byte for byte. Returns `None` whenever the text is not exactly that
+/// shape, so a differently-broken artifact is left for a human rather than
+/// rewritten on a guess.
+pub fn repair_duplicated_markers(text: &str) -> Option<String> {
+    let begin_re = Regex::new(
+        r"(?m)^[ \t]*<!--\s*artifact:(?P<name>[A-Za-z0-9_./\-]+)\s+BEGIN\s*-->[ \t]*\r?\n?",
+    )
+    .expect("valid begin regex");
+    let end_re = Regex::new(
+        r"(?m)^[ \t]*<!--\s*artifact:(?P<name>[A-Za-z0-9_./\-]+)\s+END\s*-->[ \t]*\r?\n?",
+    )
+    .expect("valid end regex");
+
+    let begins: Vec<_> = begin_re.captures_iter(text).collect();
+    let ends: Vec<_> = end_re.captures_iter(text).collect();
+    if begins.len() != 2 || ends.len() != 2 {
+        return None;
+    }
+
+    // Both pairs must name the same section; anything else is a different bug.
+    let name = begins[0].name("name")?.as_str();
+    if begins[1].name("name")?.as_str() != name
+        || ends[0].name("name")?.as_str() != name
+        || ends[1].name("name")?.as_str() != name
+    {
+        return None;
+    }
+
+    let b0 = begins[0].get(0)?;
+    let b1 = begins[1].get(0)?;
+    let e0 = ends[0].get(0)?;
+    let e1 = ends[1].get(0)?;
+
+    // Require strict nesting in source order: BEGIN BEGIN … END END.
+    if !(b0.start() < b1.start() && b1.end() <= e0.start() && e0.end() <= e1.start()) {
+        return None;
+    }
+
+    // Drop the inner BEGIN and the inner END, keeping the outer pair.
+    let mut repaired = String::with_capacity(text.len());
+    repaired.push_str(&text[..b1.start()]);
+    repaired.push_str(&text[b1.end()..e0.start()]);
+    repaired.push_str(&text[e0.end()..]);
+    Some(repaired)
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    #[test]
+    fn repairs_a_doubled_marker_pair_and_keeps_the_content() {
+        let broken = "<!-- artifact:spec BEGIN -->\n<!-- artifact:spec BEGIN -->\n# Title\n\nbody\n<!-- artifact:spec END -->\n<!-- artifact:spec END -->\n";
+        let repaired = repair_duplicated_markers(broken).expect("repairable");
+        let sections = extract_sections(&repaired).expect("parses after repair");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].name.0, "spec");
+        assert_eq!(sections[0].content, "# Title\n\nbody");
+    }
+
+    #[test]
+    fn leaves_a_well_formed_artifact_alone() {
+        let ok = "<!-- artifact:spec BEGIN -->\nbody\n<!-- artifact:spec END -->\n";
+        assert!(repair_duplicated_markers(ok).is_none());
+    }
+
+    #[test]
+    fn refuses_when_the_two_pairs_name_different_sections() {
+        let mixed = "<!-- artifact:spec BEGIN -->\n<!-- artifact:plan BEGIN -->\nbody\n<!-- artifact:plan END -->\n<!-- artifact:spec END -->\n";
+        assert!(repair_duplicated_markers(mixed).is_none());
+    }
+
+    #[test]
+    fn refuses_two_sibling_pairs_that_are_not_nested() {
+        let siblings = "<!-- artifact:spec BEGIN -->\na\n<!-- artifact:spec END -->\n<!-- artifact:spec BEGIN -->\nb\n<!-- artifact:spec END -->\n";
+        assert!(repair_duplicated_markers(siblings).is_none());
+    }
+}

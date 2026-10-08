@@ -20,10 +20,6 @@ const indexSurfaceSource = readFileSync(
   resolve(here, "../project-index-search-surface.js"),
   "utf8",
 );
-const projectTabsRendererSource = readFileSync(
-  resolve(here, "../project-tabs-renderer.js"),
-  "utf8",
-);
 // SPEC-3064 Phase 3 (E4): the Settings window renderer, the settings:open
 // dispatch listener, and requestFullIndexStatusRefresh moved into the
 // extracted settings surface module.
@@ -54,10 +50,6 @@ test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
 });
 
 test("project tab state cues no longer wire Project Index health", () => {
-  assert.ok(
-    !projectTabsRendererSource.includes("aggregateProjectTabDotState"),
-    "project tab state cues should be driven by agent runtime state, not Project Index health",
-  );
   assert.ok(
     !appSource.includes("aggregateProjectTabDotState"),
     "app.js must not import or call the removed project-tab Index health helper",

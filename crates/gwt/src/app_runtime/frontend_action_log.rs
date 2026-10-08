@@ -90,11 +90,7 @@ impl FrontendUserActionLog {
 }
 
 fn sanitize_ui_action_field(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(160)
-        .collect()
+    gwt::perf::sanitize_ui_action_field(value)
 }
 
 fn sanitize_ui_action_url(value: &str) -> String {
@@ -140,6 +136,15 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
         FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::RetryWorkspaceStateLoad => {
+            FrontendUserActionLog::new("retry_workspace_state_load", "workspace")
+        }
+        FrontendEvent::LoadRecoveryCenter { .. } => {
+            FrontendUserActionLog::new("load_recovery_center", "recovery")
+        }
+        FrontendEvent::OpenRecoveryCenterBoardEntry { .. } => {
+            FrontendUserActionLog::new("open_recovery_center_board_entry", "recovery")
+        }
         FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
             FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
                 .mode(if *enabled { "on" } else { "off" })
@@ -159,14 +164,18 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .count(url.len())
                 .mode(parent_path)
         }
-        FrontendEvent::ReopenRecentProject { path } => {
+        FrontendEvent::ReopenRecentProject { path, .. } => {
             FrontendUserActionLog::new("reopen_recent_project", "project").target(path)
         }
-        FrontendEvent::SelectProjectTab { tab_id } => {
-            FrontendUserActionLog::new("select_project_tab", "project").target(tab_id)
+        FrontendEvent::PreviewCloseProject { project_key } => {
+            FrontendUserActionLog::new("preview_close_project", "project").target(project_key)
         }
-        FrontendEvent::CloseProjectTab { tab_id } => {
-            FrontendUserActionLog::new("close_project_tab", "project").target(tab_id)
+        FrontendEvent::ConfirmCloseProject { token } => {
+            FrontendUserActionLog::new("confirm_close_project", "project")
+                .target(&token.project_key)
+        }
+        FrontendEvent::CancelCloseProject { token } => {
+            FrontendUserActionLog::new("cancel_close_project", "project").target(&token.project_key)
         }
         FrontendEvent::CreateWindow { preset, .. } => {
             FrontendUserActionLog::new("create_window", "window").target(format!("{preset:?}"))
@@ -213,6 +222,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::UndockAgentWindow { id, .. } => {
             FrontendUserActionLog::new("undock_agent_window", "window").window(id)
         }
+        FrontendEvent::DockAgentWindowToIssue { id } => {
+            FrontendUserActionLog::new("dock_agent_window_to_issue", "window").window(id)
+        }
         FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
             FrontendUserActionLog::new("set_agent_kanban_card_collapsed", "window")
                 .window(id)
@@ -224,6 +236,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ListWindows => FrontendUserActionLog::new("list_windows", "window"),
         FrontendEvent::CloseWindow { id, .. } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
+        }
+        FrontendEvent::RecoverRestoredWindow { id, .. } => {
+            FrontendUserActionLog::new("recover_restored_window", "window").window(id)
         }
         FrontendEvent::StopWindow { id } => {
             FrontendUserActionLog::new("stop_window", "window").window(id)
@@ -270,6 +285,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             branches,
             delete_remote,
             force_filesystem_delete,
+            ..
         } => FrontendUserActionLog::new("run_branch_cleanup", "branches")
             .window(id)
             .target(summarize_ui_action_values(
@@ -286,6 +302,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             branch,
             delete_remote,
             force_filesystem_delete,
+            ..
         } => FrontendUserActionLog::new("run_workspace_cleanup", "workspace")
             .target(branch)
             .count(1)
@@ -295,6 +312,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 "local_only"
             })
             .force(*force_filesystem_delete),
+        FrontendEvent::SyncBranchCleanup { id, .. } => {
+            FrontendUserActionLog::new("sync_branch_cleanup", "branches").window(id)
+        }
+        FrontendEvent::ClearBranchCleanupStatus { id, .. } => {
+            FrontendUserActionLog::new("clear_branch_cleanup_status", "branches").window(id)
+        }
         FrontendEvent::LoadBoard { id, all } => FrontendUserActionLog::new("load_board", "board")
             .window(id)
             .mode(if *all { "all" } else { "workspace" }),
@@ -354,7 +377,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .profile(profile_name)
         }
-        FrontendEvent::LoadLogs { id } => {
+        FrontendEvent::LoadLogs { id, .. } => {
             FrontendUserActionLog::new("load_logs", "logs").window(id)
         }
         FrontendEvent::LoadKnowledgeBridge {
@@ -427,9 +450,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .target(issue_number.to_string())
         }
-        FrontendEvent::OpenIntakeSession => {
-            FrontendUserActionLog::new("open_intake_session", "launch")
-        }
         FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
             FrontendUserActionLog::new("open_start_work_in_agent_kanban", "launch")
                 .window(board_id)
@@ -487,7 +507,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 | LaunchWizardAction::SetBranchType { prefix: value }
                 | LaunchWizardAction::SetModel { model: value }
                 | LaunchWizardAction::SetReasoning { reasoning: value }
-                | LaunchWizardAction::SetVersion { version: value }
                 | LaunchWizardAction::SetExecutionMode { mode: value }
                 | LaunchWizardAction::SetDockerService { service: value } => {
                     log = log.target(value);
@@ -521,6 +540,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ApplyUpdateRestartNow => {
             FrontendUserActionLog::new("apply_update_restart_now", "update")
         }
+        FrontendEvent::CancelUpdateAutoApply => {
+            FrontendUserActionLog::new("cancel_update_auto_apply", "update")
+        }
         FrontendEvent::OpenUpdateLog { log_path } => {
             FrontendUserActionLog::new("open_update_log", "update")
                 .target(log_path.as_deref().unwrap_or_default())
@@ -530,6 +552,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::ListCustomAgents => {
             FrontendUserActionLog::new("list_custom_agents", "custom_agents")
+        }
+        FrontendEvent::ListSupportedAgents => {
+            FrontendUserActionLog::new("list_supported_agents", "settings")
         }
         FrontendEvent::ListCustomAgentPresets => {
             FrontendUserActionLog::new("list_custom_agent_presets", "custom_agents")
@@ -647,20 +672,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
-        FrontendEvent::ImprovementPromoteIssue { id } => {
-            FrontendUserActionLog::new("improvement_promote_issue", "improvement").target(id)
-        }
-        FrontendEvent::ImprovementResolve { id, .. } => {
-            FrontendUserActionLog::new("improvement_resolve", "improvement").target(id)
-        }
-        FrontendEvent::ImprovementSelectOwner {
-            id, owner_number, ..
-        } => FrontendUserActionLog::new("improvement_select_owner", "improvement")
-            .target(id)
-            .mode(format!("owner:{owner_number}")),
-        FrontendEvent::ImprovementDismiss { id, .. } => {
-            FrontendUserActionLog::new("improvement_dismiss", "improvement").target(id)
-        }
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
         FrontendEvent::PaneSendInput { session_id, .. } => {
@@ -677,24 +688,58 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
+        FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendUserActionLog::new("set_issue_monitor_auto_apply_updates", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::IssueMonitorProfilesSet { profiles, .. } => {
+            FrontendUserActionLog::new("issue_monitor_profiles_set", "issue_monitor")
+                .target(profiles.len().to_string())
+        }
         FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
             FrontendUserActionLog::new("set_issue_monitor_max_active_agents", "issue_monitor")
                 .target(max_active_agents.to_string())
+        }
+        FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels, .. } => {
+            FrontendUserActionLog::new("set_issue_monitor_allowed_labels", "issue_monitor")
+                .count(allowed_labels.len())
         }
         FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
             FrontendUserActionLog::new("reorder_issue_monitor_issues", "issue_monitor")
                 .target(issue_numbers.len().to_string())
         }
+        FrontendEvent::IssueMonitorQueuePush { issue_numbers } => {
+            FrontendUserActionLog::new("issue_monitor_queue_push", "issue_monitor")
+                .target(issue_numbers.len().to_string())
+        }
+        FrontendEvent::IssueMonitorQueueRemove { issue_numbers } => {
+            FrontendUserActionLog::new("issue_monitor_queue_remove", "issue_monitor")
+                .target(issue_numbers.len().to_string())
+        }
+        FrontendEvent::IssueMonitorQueueMove { issue_number, .. } => {
+            FrontendUserActionLog::new("issue_monitor_queue_move", "issue_monitor")
+                .target(issue_number.to_string())
+        }
+        FrontendEvent::SetIssueMonitorAutoRefill { enabled, .. } => {
+            FrontendUserActionLog::new("set_issue_monitor_auto_refill", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
         FrontendEvent::ListIssueMonitor => {
             FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
         }
-        FrontendEvent::QuickRegisterIssue { title, launch } => {
+        FrontendEvent::QuickRegisterIssue { title, launch, .. } => {
             FrontendUserActionLog::new("quick_register_issue", "issue_monitor")
                 .mode(if *launch { "launch" } else { "register" })
                 .count(title.len())
         }
         FrontendEvent::IssueMonitorLaunchNow { issue_number, .. } => {
             FrontendUserActionLog::new("issue_monitor_launch_now", "issue_monitor")
+                .target(issue_number.to_string())
+        }
+        // Issue #3628 (AC-3): an operator recovery that changes launch
+        // eligibility is exactly the kind of deliberate action worth a record.
+        FrontendEvent::IssueMonitorRequeue { issue_number } => {
+            FrontendUserActionLog::new("issue_monitor_requeue", "issue_monitor")
                 .target(issue_number.to_string())
         }
         FrontendEvent::IssueMonitorConfigureIssue { issue_number, .. } => {
@@ -716,6 +761,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 "off"
             })
         }
+        FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
+            FrontendUserActionLog::new("set_pm_loop_interval", "pm")
+                .target(loop_interval_secs.to_string())
+        }
         FrontendEvent::SetPmLaunchProfile {
             agent_id, model, ..
         } => FrontendUserActionLog::new("set_pm_launch_profile", "pm")
@@ -725,10 +774,14 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
+        | FrontendEvent::ProjectAggregateAck { .. }
+        | FrontendEvent::StartupFirstFrame { .. }
+        | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
+        | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachFiles { .. } => return None,

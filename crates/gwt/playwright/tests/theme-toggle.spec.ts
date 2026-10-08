@@ -8,7 +8,7 @@ test.describe("Theme toggle", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
   test("segmented control commits preference and reflects via data-theme + aria-checked", async ({ page }) => {
-    await gotoLiveGwt(page, BASE);
+    await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
     const html = page.locator("html");
     const auto = page.locator('#op-theme-toggle [data-theme-value="auto"]');
     const dark = page.locator('#op-theme-toggle [data-theme-value="dark"]');

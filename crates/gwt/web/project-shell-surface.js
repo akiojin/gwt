@@ -50,18 +50,7 @@
 //   migrationDialog: modal elements owned by app.js because the focus
 //   shortcut guard and clone-modal-focus-guard wiring also read them.
 import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
-import { renderProjectCloneModal as renderProjectCloneModalView } from "/project-clone-modal.js";
-import {
-  renderProjectTabs as renderProjectTabsView,
-  updateProjectTabStateCue as updateProjectTabStateCueView,
-} from "/project-tabs-renderer.js";
-import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
-import {
-  createProjectSwitcherController,
-  nextProjectTabId,
-  shouldHandleProjectSwitcherShortcut,
-  shouldTriggerOpenFolderHotkey,
-} from "/project-switcher.js";
+import { renderProjectCloneModal as renderProjectCloneModalView, createFolderPickerController, createOpenProjectPathForm, createOpenProjectPathDialog } from "/project-clone-modal.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
 import { groupProjectWindowList } from "/window-list-model.js";
 import {
@@ -70,6 +59,14 @@ import {
   windowWorktreeBadgeView,
   windowWorktreeForm,
 } from "/window-worktree-form.js";
+
+function shouldTriggerOpenFolderHotkey(event, { modalOpen = false } = {}) {
+  const target = event?.target;
+  return Boolean(event && !event.repeat && (event.metaKey || event.ctrlKey)
+    && !event.shiftKey && !event.altKey && !modalOpen
+    && !target?.closest?.('input, textarea, select, [contenteditable="true"]')
+    && (String(event.key || '').toLowerCase() === 'o' || event.code === 'KeyO'));
+}
 
 export function createProjectShellSurface({
   send,
@@ -103,13 +100,6 @@ export function createProjectShellSurface({
   migrationDialog,
   isModalOpen = () => false,
 }) {
-      const projectTabs = document.getElementById("project-tabs");
-      const projectSwitcherButton = document.getElementById(
-        "project-switcher-button",
-      );
-      const projectSwitcherPanel = document.getElementById(
-        "project-switcher-panel",
-      );
       const projectPicker = document.getElementById("project-picker");
       const projectPickerError = document.getElementById("project-picker-error");
       const pickerOpenProjectButton = document.getElementById("picker-open-project");
@@ -135,7 +125,7 @@ export function createProjectShellSurface({
       let renderedProjectPickerKey = "";
       let renderedProjectOnboardingKey = "";
       let renderedActionAvailabilityKey = "";
-      const unreadProjectIds = new Set();
+
 
       function recentProjectsRenderKey(state) {
         return JSON.stringify(
@@ -146,68 +136,6 @@ export function createProjectShellSurface({
           })),
         );
       }
-
-      function desktopNotificationPermission() {
-        return window?.Notification?.permission || "unsupported";
-      }
-
-      function requestDesktopNotificationPermission() {
-        if (typeof window?.Notification?.requestPermission !== "function") {
-          return Promise.resolve(desktopNotificationPermission());
-        }
-        return window.Notification.requestPermission();
-      }
-
-      function renderProjectSwitcherButtonState() {
-        if (!projectSwitcherButton) {
-          return;
-        }
-        projectSwitcherButton.classList.toggle(
-          "has-unread",
-          unreadProjectIds.size > 0,
-        );
-      }
-
-      function renderProjectSwitcher() {
-        projectSwitcherController.render();
-        renderProjectSwitcherButtonState();
-      }
-
-      function clearProjectUnread(projectId, { render = true } = {}) {
-        if (!projectId || !unreadProjectIds.delete(projectId)) {
-          return;
-        }
-        if (render) {
-          renderProjectSwitcher();
-        }
-      }
-
-      function markProjectUnread(projectId) {
-        if (!projectId || projectId === getAppState()?.active_tab_id) {
-          return;
-        }
-        unreadProjectIds.add(projectId);
-        renderProjectSwitcher();
-      }
-
-      function closeProjectSwitcher({ restoreFocus = false } = {}) {
-        projectSwitcherController.close({ restoreFocus });
-      }
-
-      const projectSwitcherController = createProjectSwitcherController({
-        buttonEl: projectSwitcherButton,
-        panelEl: projectSwitcherPanel,
-        getState: getAppState,
-        send,
-        createNode,
-        runtimeStateForWindow,
-        unreadProjectIds,
-        clearUnreadProject: clearProjectUnread,
-        getNotificationPermission: desktopNotificationPermission,
-        requestNotificationPermission: requestDesktopNotificationPermission,
-        onOpenFolder: sendOpenProjectDialog,
-        onCloneFromGithub: openCloneProjectModal,
-      });
 
       function windowListRenderKey() {
         const appState = getAppState();
@@ -358,8 +286,38 @@ export function createProjectShellSurface({
       };
 
       function sendOpenProjectDialog() {
-        send({ kind: "open_project_dialog" });
+        openPathDialog.open();
+        folderPicker.begin("open");
       }
+
+      const openPathDialog = createOpenProjectPathDialog(document, {
+        onChoose: () => folderPicker.begin("open"),
+        onOpen: (path, request_id) => send({ kind: "reopen_recent_project", path, request_id }),
+      });
+
+      const folderPicker = createFolderPickerController({
+        send,
+        onChange: (pending, message) => {
+          openPathDialog.update(pending, message);
+          for (const button of [pickerOpenProjectButton, onboardingOpenProjectButton]) {
+            button.textContent = pending ? "Choosing folder…" : "Open Folder…";
+            button.setAttribute("aria-busy", String(Boolean(pending)));
+          }
+          cloneProjectModalState = { ...cloneProjectModalState, pickerPending: Boolean(pending), pickerMessage: message };
+          renderProjectCloneModal();
+        },
+        onSelected: (event) => {
+          if (event.purpose === "open") openPathDialog.waitForOpen(event.path, `picker:${event.request_id}`);
+          if (event.purpose === "clone_parent") {
+            cloneProjectModalState = { ...cloneProjectModalState, parentPath: event.path, error: "" };
+            renderProjectCloneModal();
+          }
+        },
+      });
+
+      function applyPickerReceiveEvent(event) { return folderPicker.receive(event); }
+      function applyProjectOpenReceiveEvent(event) { openPathDialog.receive(event); }
+      function clearPickerPending() { folderPicker.connectionLost(); }
 
       function openCloneProjectModal() {
         cloneProjectModalState = {
@@ -413,8 +371,9 @@ export function createProjectShellSurface({
             cloneProjectModalState = { ...cloneProjectModalState, url };
           },
           onParentSelect: () => {
-            send({ kind: "select_clone_project_parent" });
+            folderPicker.begin("clone_parent");
           },
+          onParentChange: (parentPath) => { cloneProjectModalState = { ...cloneProjectModalState, parentPath }; },
           onSearchQueryChange: (query) => {
             cloneProjectModalState = { ...cloneProjectModalState, query };
           },
@@ -625,115 +584,6 @@ export function createProjectShellSurface({
       // (frameWindow / enterOverview), so there is no shared maximized fill to
       // reconcile per client.
 
-      function renderProjectTabs() {
-        const appState = getAppState();
-        clearProjectUnread(appState.active_tab_id, { render: false });
-        renderProjectTabsView({
-          projectTabs,
-          tabs: appState.tabs || [],
-          activeTabId: appState.active_tab_id,
-          runtimeStateForWindow,
-          send,
-          requestCloseProjectTab,
-          onSelectProjectTab: clearProjectUnread,
-        });
-        renderProjectSwitcherButtonState();
-        if (projectSwitcherController.isOpen()) {
-          renderProjectSwitcher();
-        }
-      }
-
-      // SPEC-2013 FR-012 / 2026-06-16 amendment: project tab close always
-      // opens the confirm modal. Running agents only change the copy and
-      // destructive emphasis. Confirm emits close_project_tab; Cancel never
-      // emits a message.
-      const closeProjectTabModalEl = document.getElementById(
-        "close-project-tab-modal",
-      );
-      const closeProjectTabModalDialogEl = closeProjectTabModalEl
-        ? closeProjectTabModalEl.querySelector(".modal-shell")
-        : null;
-      let closeProjectTabModalState = {
-        open: false,
-        tabId: null,
-        tabTitle: null,
-        runningAgents: [],
-      };
-
-      function renderCloseProjectTabModal() {
-        if (!closeProjectTabModalEl || !closeProjectTabModalDialogEl) {
-          return;
-        }
-        renderCloseProjectTabConfirmModal({
-          modalEl: closeProjectTabModalEl,
-          dialogEl: closeProjectTabModalDialogEl,
-          state: closeProjectTabModalState,
-          createNode,
-          onCancel: () => {
-            closeProjectTabModalState = {
-              open: false,
-              tabId: null,
-              tabTitle: null,
-              runningAgents: [],
-            };
-            renderCloseProjectTabModal();
-          },
-          onConfirm: () => {
-            const targetId = closeProjectTabModalState.tabId;
-            closeProjectTabModalState = {
-              open: false,
-              tabId: null,
-              tabTitle: null,
-              runningAgents: [],
-            };
-            renderCloseProjectTabModal();
-            if (targetId) {
-              send({ kind: "close_project_tab", tab_id: targetId });
-            }
-          },
-        });
-      }
-
-      function requestCloseProjectTab(tabId) {
-        const appState = getAppState();
-        const tabs = appState.tabs || [];
-        const tab = tabs.find((entry) => entry.id === tabId);
-        const runningAgents = Array.isArray(tab && tab.running_agents)
-          ? tab.running_agents
-          : [];
-        const count = Number.isFinite(tab && tab.running_agent_count)
-          ? tab.running_agent_count
-          : runningAgents.length;
-        const effectiveRunningAgents =
-          runningAgents.length > 0 || count <= 0
-            ? runningAgents
-            : Array.from({ length: count }, () => ({ display_name: "agent" }));
-        closeProjectTabModalState = {
-          open: true,
-          tabId,
-          tabTitle: (tab && tab.title) || null,
-          runningAgents: effectiveRunningAgents,
-        };
-        renderCloseProjectTabModal();
-      }
-
-      function updateProjectTabStateCue(buttonEl, tab) {
-        updateProjectTabStateCueView(buttonEl, tab, { runtimeStateForWindow });
-      }
-
-      function refreshProjectTabStateCues() {
-        const appState = getAppState();
-        const tabsById = new Map(
-          (appState.tabs || []).map((tab) => [tab.id, tab]),
-        );
-        for (const buttonEl of projectTabs.querySelectorAll(".project-tab")) {
-          updateProjectTabStateCue(
-            buttonEl,
-            tabsById.get(buttonEl.dataset.projectTabId),
-          );
-        }
-      }
-
       function renderRecentProjects({ force = false } = {}) {
         const appState = getAppState();
         const nextKey = recentProjectsRenderKey(appState);
@@ -768,9 +618,6 @@ export function createProjectShellSurface({
             });
             recentProjectList.appendChild(row);
           }
-        }
-        if (projectSwitcherController.isOpen()) {
-          renderProjectSwitcher();
         }
       }
 
@@ -1029,47 +876,12 @@ export function createProjectShellSurface({
       function projectShellModalOrDropdownOpen() {
         return (
           Boolean(isModalOpen?.()) ||
-          closeProjectTabModalEl?.classList.contains("open") ||
+          document.getElementById("close-project-modal")?.classList.contains("open") ||
+          openPathDialog.modal.classList.contains("open") ||
           cloneProjectModal?.classList.contains("open") ||
           migrationModal?.classList.contains("open") ||
-          windowListOpen ||
-          projectSwitcherController.isOpen()
+          windowListOpen
         );
-      }
-
-      function selectProjectTab(tabId) {
-        if (!tabId) {
-          return;
-        }
-        clearProjectUnread(tabId);
-        send({ kind: "select_project_tab", tab_id: tabId });
-      }
-
-      function handleProjectSwitcherShortcut(event) {
-        const appState = getAppState();
-        if (
-          !shouldHandleProjectSwitcherShortcut(event, {
-            projectCount: (appState.tabs || []).length,
-            modalOpen: projectShellModalOrDropdownOpen(),
-          })
-        ) {
-          return false;
-        }
-        event.preventDefault();
-        if (String(event.key || "").toLowerCase() === "p") {
-          projectSwitcherController.open();
-          return true;
-        }
-        const direction = event.key === "ArrowUp" ? "previous" : "next";
-        const tabId = nextProjectTabId(
-          appState.tabs || [],
-          appState.active_tab_id,
-          direction,
-        );
-        if (tabId) {
-          selectProjectTab(tabId);
-        }
-        return true;
       }
 
       // SPEC-2013 US-10 / FR-025: Cmd+O (mac) / Ctrl+O (Windows/Linux) opens the
@@ -1099,39 +911,25 @@ export function createProjectShellSurface({
       // switcher (onOpenFolder / onCloneFromGithub above) and Open Folder is
       // also reachable via the Cmd+O / Ctrl+O hotkey (handleOpenFolderHotkey).
       function installProjectShellChrome() {
+        document.body.append(openPathDialog.modal);
+        for (const button of [pickerOpenProjectButton, onboardingOpenProjectButton]) {
+          button.parentElement.append(createOpenProjectPathForm(document, (path) => send({ kind: "reopen_recent_project", path })));
+        }
         pickerOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
         pickerCloneProjectButton.addEventListener("click", openCloneProjectModal);
         onboardingOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
-
-        // Escape closes the Projects switcher even when focus has left its panel
-        // (e.g. returned to the trigger button or the document body).
-        document.addEventListener("keydown", (event) => {
-          if (event.key === "Escape" && projectSwitcherController.isOpen()) {
-            event.preventDefault();
-            closeProjectSwitcher({ restoreFocus: true });
-          }
-        });
 
         windowListButton.addEventListener("click", toggleWindowList);
 
         window.addEventListener(
           "keydown",
           (event) => {
-            handleProjectSwitcherShortcut(event);
             handleOpenFolderHotkey(event);
           },
           true,
         );
 
         window.addEventListener("pointerdown", (event) => {
-          if (projectSwitcherController.isOpen()) {
-            const insideProjectSwitcher =
-              projectSwitcherPanel?.contains(event.target) ||
-              projectSwitcherButton?.contains(event.target);
-            if (!insideProjectSwitcher) {
-              closeProjectSwitcher();
-            }
-          }
           if (!windowListOpen) {
             return;
           }
@@ -1153,16 +951,14 @@ export function createProjectShellSurface({
         requestWindowList,
         renderWindowList,
         toggleWindowList,
-        renderProjectTabs,
-        refreshProjectTabStateCues,
-        markProjectUnread,
-        clearProjectUnread,
-        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
         applyWindowListEvent,
         applyCloneProjectReceiveEvent,
+        applyPickerReceiveEvent,
+        applyProjectOpenReceiveEvent,
+        clearPickerPending,
         applyMigrationReceiveEvent,
         handleMigrationModalEscape,
         handleWindowListEscape,

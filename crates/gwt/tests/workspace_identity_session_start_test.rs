@@ -3,10 +3,7 @@
 //! reaches the matching agent record instead of being silently dropped at
 //! the `apply_update` matcher in `gwt_core::workspace_projection`.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-};
+use std::path::{Path, PathBuf};
 
 use gwt::cli::hook::{event_dispatcher, HookOutput, IntentBoundaryEvent};
 use gwt_agent::{
@@ -24,9 +21,8 @@ use gwt_core::{
 };
 use tempfile::TempDir;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 struct EnvGuard {
@@ -39,7 +35,7 @@ struct EnvGuard {
     // Declared last so it drops last: the env-lock stays held while the
     // ScopedEnvVar guards above restore HOME / USERPROFILE, keeping the
     // process-global env mutation serialized against other tests.
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _guard: gwt_core::test_support::EnvLockGuard,
 }
 
 impl Drop for EnvGuard {

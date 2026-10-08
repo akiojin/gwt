@@ -17,6 +17,7 @@ import {
   acquireLiveGwtBackendLock,
   clearLiveLaunchWizard,
   gotoLiveGwt,
+  openLiveLaunchWizardForBranch,
   openLiveGwtProject,
   sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
@@ -28,8 +29,10 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test.setTimeout(120_000);
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
+  let cleanupLaunchFixture: (() => Promise<void>) | undefined;
 
   test.beforeEach(async ({ page }, testInfo) => {
+    cleanupLaunchFixture = undefined;
     releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
@@ -39,8 +42,14 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
 
   test.afterEach(async ({ page }) => {
     if (!releaseBackendLock) return;
+    const cleanup = cleanupLaunchFixture;
+    cleanupLaunchFixture = undefined;
     try {
-      await clearLiveLaunchWizard(page);
+      try {
+        await clearLiveLaunchWizard(page);
+      } finally {
+        await cleanup?.();
+      }
     } finally {
       await releaseBackendLock();
       releaseBackendLock = undefined;
@@ -50,10 +59,10 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test("Target is a segmented radiogroup that toggles agent settings", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await enterIntakeSettings(page);
+    await enterLaunchSettings(page);
 
     const target = wizard.getByRole("radiogroup", { name: "Target" });
     await expect(target).toBeVisible();
@@ -80,12 +89,24 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
     const wizard = page.locator("#wizard-modal");
-    await enterIntakeSettings(page);
+    await enterLaunchSettings(page);
 
     const agentField = wizard.getByLabel("Agent", { exact: true });
     const tag = await agentField.evaluate((node) => node.tagName.toLowerCase());
+    // Issue #4660: the real backend catalog retires Gemini while preserving
+    // the other built-ins, regardless of the count-adaptive control layout.
+    const agentOptions = agentField.locator(
+      tag === "select" ? "option" : ".launch-segmented__option",
+    );
+    const agentIds = await agentOptions.evaluateAll((options) =>
+      options.map((option) =>
+        option.getAttribute("value") ?? option.getAttribute("data-value"),
+      ),
+    );
+    expect(agentIds).not.toContain("gemini");
+    expect(agentIds).toEqual(expect.arrayContaining(["claude", "codex", "grok", "agy"]));
     if (tag === "select") {
       await expect(agentField.locator('option[value="grok"]')).toHaveText(
         "Grok Build",
@@ -159,8 +180,17 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    const panel = page.locator("#pm-settings-panel");
+    const settingsWindow = page.locator(
+      '.workspace-window[data-preset="settings"]',
+    );
+    const panel = settingsWindow.locator(
+      '[data-settings-panel="project-manager"]',
+    );
     await page.getByRole("button", { name: "Project Manager settings" }).click();
+    await expect(settingsWindow).toBeVisible();
+    await expect(
+      settingsWindow.locator('[data-settings-tab="project-manager"]'),
+    ).toHaveAttribute("aria-selected", "true");
     await expect(panel).toBeVisible();
 
     const agent = panel.locator('[data-role="pm-agent-select"]');
@@ -252,13 +282,71 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  test("Claude model rows preserve versionless labels and alias selections", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    const wizard = page.locator("#wizard-modal");
+    await enterLaunchSettings(page);
+    await selectWizardAgent(page, "claude");
+    await expect(agentSummaryValue(page)).toHaveText("Claude Code");
+
+    const model = wizard.getByLabel("Model", { exact: true });
+    await expect(model.locator("option")).toHaveText([
+      "Default", "Opus", "Fable", "Sonnet", "Haiku",
+    ]);
+    expect(await model.locator("option").evaluateAll((options) =>
+      options.map((option) => (option as HTMLOptionElement).value),
+    )).toEqual(["", "opus", "fable", "sonnet", "haiku"]);
+
+    const range = wizard.locator(".launch-range__input");
+    const auto = wizard.locator('[data-reasoning-auto] input[type="checkbox"]');
+    let opusEffortValues: (string | null)[] = [];
+    for (const alias of ["opus", "fable", "sonnet", "haiku"]) {
+      await model.selectOption(alias);
+      await model.blur();
+      // Wait for backend state after the interaction guard releases on blur.
+      await expect(summaryValue(page, "Model")).toHaveText(alias);
+      if (alias === "opus" || alias === "fable") {
+        await expect(range).toBeVisible();
+        const effortValues = await wizard.locator(".launch-range__tick")
+          .evaluateAll((ticks) => ticks.map((tick) => tick.getAttribute("data-value")));
+        if (alias === "opus") {
+          opusEffortValues = effortValues;
+          expect(effortValues).toEqual(expect.arrayContaining(["xhigh", "max"]));
+        } else {
+          expect(effortValues).toEqual(opusEffortValues);
+        }
+      }
+    }
+    await expect(range).toHaveCount(0);
+    await expect(auto).toHaveCount(0);
+
+    await model.selectOption("");
+    await model.blur();
+    await expect(summaryValue(page, "Model")).toHaveCount(0);
+    await expect(model).toHaveValue("");
+    await expect(range).toBeVisible();
+    await expect(auto).toHaveCount(1);
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
+  });
+
   test("Reasoning renders as a slider with a separate Auto toggle", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await enterIntakeSettings(page);
+    await enterLaunchSettings(page);
 
     await selectWizardAgent(page, "claude");
     // Pin an effort-capable model so the reasoning control is shown
@@ -353,7 +441,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   await blurActiveElement(page);
 }
 
-async function enterIntakeSettings(page: Page): Promise<void> {
+async function enterLaunchSettings(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");
   const target = wizard.getByRole("radiogroup", { name: "Target" });
   if (await target.isVisible().catch(() => false)) {

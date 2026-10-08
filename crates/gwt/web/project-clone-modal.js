@@ -3,6 +3,133 @@ import { createFocusTrap } from "./focus-trap.js";
 const focusReturnMap = new WeakMap();
 const focusTrapMap = new WeakMap();
 
+// One native picker may be pending on each client, across both entry points.
+export function createFolderPickerController({ send, onChange, onSelected }) {
+  let pending = null;
+  function update(message = "") { onChange(pending, message); }
+  return {
+    begin(purpose) {
+      if (pending) { update("A folder picker is already open. Finish or cancel it first."); return false; }
+      pending = { purpose, request_id: null };
+      update();
+      send({ kind: purpose === "open" ? "open_project_dialog" : "select_clone_project_parent" });
+      return true;
+    },
+    receive(event) {
+      if (!event.kind?.startsWith("picker_")) return false;
+      if (event.kind === "picker_busy") {
+        if (pending?.request_id === null) pending = null;
+        update(event.message);
+        return true;
+      }
+      if (!pending || event.purpose !== pending.purpose) return true;
+      if (event.kind === "picker_started") {
+        if (pending.request_id === null) pending.request_id = event.request_id;
+        return true;
+      }
+      if (pending.request_id === null || event.request_id !== pending.request_id) return true;
+      if (!["picker_selected", "picker_cancelled", "picker_error"].includes(event.kind)) return true;
+      pending = null;
+      update(event.kind === "picker_error" ? event.message : "");
+      if (event.kind === "picker_selected") onSelected(event);
+      return true;
+    },
+    connectionLost() { pending = null; update(); },
+  };
+}
+
+export function createOpenProjectPathForm(ownerDoc, onOpen) {
+  const details = ownerDoc.createElement("details");
+  const summary = ownerDoc.createElement("summary");
+  summary.textContent = "Enter folder path…";
+  const { wrapper, input } = labeledInput(ownerDoc, "", "Project folder path", "", "Full folder path", () => {
+    submit.disabled = !input.value.trim();
+  });
+  input.dataset.openProjectPath = "";
+  const submit = button(ownerDoc, "Open path", "wizard-button", () => {
+    if (input.value.trim()) onOpen(input.value.trim());
+  }, true);
+  submit.dataset.openProjectSubmit = "";
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && input.value.trim()) { event.preventDefault(); onOpen(input.value.trim()); }
+  });
+  details.append(summary, wrapper, submit);
+  return details;
+}
+
+export function createOpenProjectPathDialog(ownerDoc, { onChoose, onOpen }) {
+  let awaitingOpen = null;
+  const node = (tag, className, text) => {
+    const element = ownerDoc.createElement(tag);
+    element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  const modal = node("div", "modal-backdrop");
+  modal.id = "open-project-path-modal";
+  modal.setAttribute("aria-hidden", "true");
+  const dialog = node("div", "modal-shell");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "open-project-path-title");
+  dialog.tabIndex = -1;
+  const header = node("div", "modal-header");
+  const title = node("h2", "", "Open Project");
+  title.id = "open-project-path-title";
+  header.append(title);
+  const body = node("div", "modal-body");
+  const status = node("p", "project-picker-copy", "");
+  status.setAttribute("role", "status");
+  status.hidden = true;
+  const form = createOpenProjectPathForm(ownerDoc, (path) => {
+    const requestId = globalThis.crypto?.randomUUID?.()
+      ?? `open-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    waitForOpen(path, requestId);
+    onOpen(path, requestId);
+  });
+  form.open = true;
+  body.append(status, form);
+  const footer = node("div", "modal-footer");
+  const choose = button(ownerDoc, "Choose Folder…", "wizard-button", onChoose);
+  footer.append(button(ownerDoc, "Close", "text-button", hide), choose);
+  dialog.append(header, body, footer);
+  modal.append(dialog);
+  function hide() { awaitingOpen = null; closeModal(modal, dialog); }
+  function waitForOpen(path, requestId) {
+    awaitingOpen = requestId;
+    const input = form.querySelector('[data-open-project-path]');
+    input.value = path;
+    form.querySelector('[data-open-project-submit]').disabled = !path.trim();
+    status.textContent = "Opening project…";
+    status.hidden = false;
+    openModal(modal, dialog, ownerDoc);
+  }
+  modal.addEventListener("click", (event) => { if (event.target === modal) hide(); });
+  modal.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); hide(); }
+  });
+  return {
+    modal,
+    hide,
+    waitForOpen,
+    receive(event) {
+      if (!awaitingOpen || event.request_id !== awaitingOpen || !["project_opened", "project_open_error"].includes(event.kind)) return;
+      awaitingOpen = null;
+      if (event.kind === "project_opened") { hide(); return; }
+      openModal(modal, dialog, ownerDoc);
+      status.textContent = event.message || "Could not open the project.";
+      status.hidden = false;
+    },
+    open() { openModal(modal, dialog, ownerDoc); },
+    update(pending, message) {
+      choose.textContent = pending ? "Choosing folder…" : "Choose Folder…";
+      dialog.setAttribute("aria-busy", String(Boolean(pending)));
+      status.textContent = message || (pending ? "Choose a folder in the system dialog, or cancel to return." : "");
+      status.hidden = !status.textContent;
+    },
+  };
+}
+
 function button(ownerDoc, label, className, onClick, disabled = false) {
   const element = ownerDoc.createElement("button");
   element.type = "button";
@@ -111,6 +238,7 @@ export function renderProjectCloneModal({
   onModeChange,
   onUrlChange,
   onParentSelect,
+  onParentChange = () => {},
   onSearchQueryChange,
   onSearch,
   onRepositorySelect,
@@ -143,6 +271,11 @@ export function renderProjectCloneModal({
   );
 
   const body = createNode("div", "modal-body clone-project-body");
+  function updateCloneAvailability() {
+    const selectedUrl = current.mode === "search" ? current.selectedRepositoryUrl : current.url;
+    const clone = dialogEl.querySelector("#clone-project-start");
+    if (clone) clone.disabled = !String(selectedUrl || "").trim() || !String(current.parentPath || "").trim() || Boolean(current.cloning);
+  }
   const modeRow = createNode("div", "clone-project-mode-row");
   for (const mode of ["url", "search"]) {
     const modeButton = button(
@@ -165,7 +298,12 @@ export function renderProjectCloneModal({
       "Repository search",
       current.query,
       "owner/name or keywords",
-      onSearchQueryChange,
+      (value) => {
+        current.query = value;
+        onSearchQueryChange(value);
+        const searchButton = searchRow.querySelector("button");
+        searchButton.disabled = Boolean(current.searching || current.cloning || !value.trim());
+      },
     );
     const searchRow = createNode("div", "clone-project-search-row");
     searchRow.append(
@@ -190,27 +328,28 @@ export function renderProjectCloneModal({
       "Repository URL",
       current.url,
       "https://github.com/owner/repo.git or git@github.com:owner/repo.git",
-      onUrlChange,
+      (value) => { current.url = value; onUrlChange(value); updateCloneAvailability(); },
     );
     body.appendChild(wrapper);
   }
 
   const destination = createNode("div", "clone-project-destination");
-  const selectedPath = current.parentPath || "No destination selected";
+  const { wrapper: parentField } = labeledInput(ownerDoc, "clone-project-parent-input", "Destination parent", current.parentPath,
+    "Full destination folder path", (value) => { current.parentPath = value; onParentChange(value); updateCloneAvailability(); });
   const parentButton = button(
     ownerDoc,
-    "Choose Folder...",
+    current.pickerPending ? "Choosing folder…" : "Choose Folder...",
     "wizard-button",
     onParentSelect,
     Boolean(current.cloning),
   );
   parentButton.id = "clone-project-parent-button";
   destination.append(
-    createNode("span", "clone-project-field-label", "Destination parent"),
-    createNode("code", "clone-project-path", selectedPath),
+    parentField,
     parentButton,
   );
   body.appendChild(destination);
+  if (current.pickerMessage) body.appendChild(createNode("p", "clone-project-progress", current.pickerMessage));
 
   if (current.progress) {
     body.appendChild(createNode("div", "clone-project-progress", current.progress));

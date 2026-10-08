@@ -41,6 +41,18 @@ fn cli_command_family_split_round_trip_parses() {
     let cmd = parse_pr_args(&[s("current")]).expect("parse pr current");
     assert_eq!(cmd, CliCommand::Pr(PrCommand::Current));
 
+    let cmd = parse_pr_args(&[s("list")]).expect("parse pr list");
+    assert_eq!(
+        cmd,
+        CliCommand::Pr(PrCommand::List {
+            stale_after_hours: None,
+            escalate_after_cycles: None,
+            refresh: false,
+            include: None,
+            force_reason: None,
+        })
+    );
+
     // legacy parser fixture: pr checks 12
     let cmd = parse_pr_args(&[s("checks"), s("12")]).expect("parse pr checks");
     assert_eq!(cmd, CliCommand::Pr(PrCommand::Checks { number: 12 }));
@@ -60,6 +72,8 @@ fn cli_command_family_split_round_trip_parses() {
             json: true,
             workspace: None,
             all: false,
+            limit: None,
+            unresolved: false,
         })
     );
 
@@ -123,7 +137,7 @@ fn cli_command_family_split_round_trip_parses() {
         .expect("parse discuss park");
     assert!(matches!(
         cmd,
-        CliCommand::Discuss(DiscussCommand::Park { ref proposal })
+        CliCommand::Discuss(DiscussCommand::Park { ref proposal, .. })
             if proposal == "Proposal A"
     ));
 

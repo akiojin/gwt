@@ -93,14 +93,20 @@ fitting owner. Creating a new SPEC is the last resort, decided through
      verification because the fix looks small; `gwt-verify` self-selects the
      matrix (cargo / frontend / Playwright / docs) for the changed surfaces.
 5. **Gate the PR.** PR work goes through `gwt-manage-pr`, which requires
-   `gwt-verify --mode pre-pr` and a recorded `User Verification Result`. Do not
-   create or update a Ready PR until that result is `confirmed` (UI-affecting
-   changes) or `n/a` (no user-visible surface). Never open a Ready PR on a
-   `pending` verification. For code-changing direct fixes, PR handoff is part
-   of completion: a commit hash, branch push, and closure comment are
-   push-only evidence, not completion. If no PR URL or PR number exists yet,
-   report `PR handoff pending` or `blocked(<reason>)` and keep working through
-   `gwt-manage-pr`; do not say the Issue is complete.
+   `gwt-verify --mode pre-pr` and a recorded `User Verification Result`.
+   Manual launches retain their `confirmed` (UI changes) or `n/a` (no visible
+   surface) gate. Autonomous launches record `n/a (autonomous)` and proceed
+   through a Ready PR and the existing CI auto-merge path until merged.
+   UI work requires `Agent Visual Check: pass` and actual passing headed
+   Chromium dark/light results in the same fresh `verify.run` record, selected
+   with `params.headed_e2e_commands`. Existing autonomous PRs may retain the
+   legacy `deferred (autonomous execution)` body value with fresh evidence;
+   no rewrite or human confirmation is required. Never open a Ready PR on
+   `pending`, failed automatic verification, or known blockers. For code-changing
+   direct fixes, PR handoff is part of completion: a commit hash, branch push,
+   and closure comment are push-only evidence, not completion. If no PR URL or
+   PR number exists yet, report `PR handoff pending` or `blocked(<reason>)` and
+   keep working through `gwt-manage-pr`; do not say the Issue is complete.
 6. **Close with a durable record.** On direct-fix completion, post the mandatory
    closure comment through JSON operation `issue.comment` following the bundled
    `references/closure-comment.md` (current runtime's `gwt-fix-issue` skill

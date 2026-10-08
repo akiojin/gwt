@@ -11,8 +11,24 @@ fn root_js_module_source(path: &str) -> &'static str {
         .source
 }
 
-fn project_tabs_renderer_js() -> &'static str {
-    root_js_module_source("/project-tabs-renderer.js")
+fn js_braced_block_after<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
+    let marker_start = source.find(marker)?;
+    let search_start = marker_start + marker.len();
+    let open = search_start + source[search_start..].find('{')?;
+    let mut depth = 0_u32;
+    for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return source.get((open + 1)..(open + offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn terminal_context_menu_js() -> &'static str {
@@ -55,7 +71,7 @@ fn launch_wizard_surface_js() -> &'static str {
 }
 
 fn workspace_kanban_surface_js() -> &'static str {
-    root_js_module_source("/workspace-kanban-surface.js")
+    root_js_module_source("/issue-other-surface.js")
 }
 
 fn styles_components_css() -> &'static str {
@@ -74,6 +90,28 @@ fn xterm_css() -> &'static str {
     static_asset_text("/assets/xterm/xterm.css")
 }
 
+#[test]
+fn embedded_web_registers_the_browser_favicon_as_a_binary_asset() {
+    let asset = static_assets()
+        .iter()
+        .find(|asset| asset.route == "/favicon.ico")
+        .expect("favicon must be served by the embedded asset manifest");
+
+    assert!(
+        matches!(asset.body, AssetBody::Bytes(bytes) if !bytes.is_empty()),
+        "favicon must embed the packaged application icon",
+    );
+
+    let response = static_asset_response(asset);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/x-icon"),
+    );
+}
+
 fn frontend_bundle_source() -> &'static str {
     concat!(
         include_str!("../web/index.html"),
@@ -82,13 +120,15 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         include_str!("../web/app.js"),
         "\n",
+        include_str!("../web/frontend-route.js"),
+        "\n",
         include_str!("../web/branch-list-state.js"),
         "\n",
         include_str!("../web/board-surface.js"),
         "\n",
         include_str!("../web/agent-kanban-surface.js"),
         "\n",
-        include_str!("../web/workspace-kanban-surface.js"),
+        include_str!("../web/issue-other-surface.js"),
         "\n",
         include_str!("../web/update-cta.js"),
         "\n",
@@ -257,8 +297,8 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls(
         "Issue Monitor must let users change max active agents"
     );
     assert!(
-        surface_js.contains("reorder_issue_monitor_issues"),
-        "Issue Monitor must send priority reorder events"
+        surface_js.contains("issue_monitor_queue_move"),
+        "Issue Monitor must send terminal queue move events"
     );
     assert!(
         surface_js.contains("↑")
@@ -280,6 +320,26 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls(
     assert!(
         surface_js.contains("exclusion_reason") && surface_js.contains("Unknown (${state})"),
         "Issue rows must show exclusion reasons and preserve unknown monitor states"
+    );
+}
+
+#[test]
+fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
+    let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
+    assert!(
+        surface_js.contains("set_issue_monitor_allowed_labels")
+            && surface_js.contains("allowed_labels")
+            && surface_js.contains("label_excluded_count")
+            && surface_js.contains("label_excluded_issues"),
+        "Issue Monitor must edit the allowed labels and display server exclusion evidence"
+    );
+    assert!(
+        surface_js
+            .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#)
+            && surface_js.contains("knowledge-monitor-pool-field")
+            && surface_js.contains("Empty list allows all labels")
+            && surface_js.contains("any listed label on this terminal"),
+        "allowed labels must use existing Operator controls and explain empty/any-of admission"
     );
 }
 
@@ -671,19 +731,18 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // stay layout-locked there until the next manual resize.
     let html = frontend_bundle_source();
     // The rAF must dispatch to completeInitialFitHandshake — keeping
-    // the handshake idempotent and gated on visibility (see helper
-    // below). Inlining the activation / replay in the rAF would let
-    // `isReady` flip while the window is still hidden, defeating the
-    // deferredWrites buffer (CodeRabbit PR #2693 concern).
+    // the handshake idempotent and gated on real layout (see helper
+    // below). Agents tabs keep a layout box while hidden; ordinary hidden
+    // windows still wait for reveal. Inlining replay before fit would
+    // defeat the deferredWrites buffer (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
             r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
         )
         .expect("valid regex");
-    // The helper itself must (a) bail when canRefreshTerminalViewport
-    // is false so we do not flip isReady while hidden, and (b) only
-    // mark the runtime ready after activation succeeds.
+    // The helper must (a) bail on hidden windows outside the measurable
+    // Agents tab layout, and (b) mark ready only after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -708,7 +767,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         );
     assert!(
             handshake_helper.is_match(html),
-            "expected completeInitialFitHandshake to bail on canRefreshTerminalViewport=false and only set isReady=true after activation succeeds (FR-057, CodeRabbit fix)",
+            "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Agents tabs, and only set isReady=true after activation succeeds (FR-057)",
         );
     assert!(
             reveal_completes_handshake.is_match(html),
@@ -746,7 +805,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // resize-recovers-on-move signature documented in
     // .gwt/work/memory.md 2026-05-13.
     let layout_box_gate = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
     assert!(
@@ -1235,6 +1294,7 @@ fn embedded_web_static_asset_manifest_is_complete() {
     let expected: &[(&str, &str, Option<&str>)] = &[
         ("/", "text/html; charset=utf-8", MUTABLE),
         ("/app.js", JS, MUTABLE),
+        ("/favicon.ico", "image/x-icon", IMMUTABLE),
         ("/assets/xterm/xterm.mjs", JS, None),
         ("/assets/xterm/addon-fit.mjs", JS, None),
         ("/assets/xterm/xterm.css", CSS, None),
@@ -1441,7 +1501,6 @@ fn embedded_web_window_status_chip_uses_running_idle_stopped_error_variants() {
 fn embedded_web_project_bar_omits_index_status_badge() {
     let html = frontend_styles_bundle();
     let js = app_js();
-    let project_tabs_js = project_tabs_renderer_js();
 
     // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
     // surface and its supporting controller / progress-toast wiring must
@@ -1482,13 +1541,7 @@ fn embedded_web_project_bar_omits_index_status_badge() {
                 && settings_surface_js().contains("renderIndexSettingsPanel({"),
             "SPEC-1939 Phase 15: Settings must drop Index while the Index window keeps the health panel",
         );
-    assert!(
-        html.contains(".project-tab-state-cue")
-            && project_tabs_js.contains("projectTabAgentCueState")
-            && project_tabs_js.contains("projectTabStateForRuntimeState")
-            && !project_tabs_js.contains("aggregateProjectTabDotState"),
-        "SPEC-2013 Phase 6: project tab state cue must reflect agent runtime state, not Index health",
-    );
+    assert!(!index_html().contains("id=\"project-tabs\""));
 }
 
 #[test]
@@ -1534,7 +1587,7 @@ fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
     assert!(
         html.contains("--agent-claude")
             && html.contains("--agent-codex")
-            && html.contains("--agent-gemini")
+            && html.contains("--agent-hermes")
             && html.contains("--agent-opencode")
             && html.contains("--agent-copilot")
             && html.contains("--agent-custom"),
@@ -1684,9 +1737,19 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
             "expected presetRoleLabel to cover {label}",
         );
     }
+    // SPEC-3671 FR-014 / 受け入れシナリオ 9: `issue` / `issue_monitor` / `spec`
+    // used to collapse into a single "Issue" badge, so an open window could not
+    // say which face it was. Each face now carries its own label.
     assert!(
-        js.contains(r#"issue: "Issue""#) && js.contains(r#"spec: "Issue""#),
-        "expected legacy issue/spec presets to share the Issue role label",
+        js.contains(r#"issue: "Issue""#)
+            && js.contains(r#"issue_monitor: "Issue Monitor""#)
+            && js.contains(r#"spec: "SPEC""#),
+        "expected the three Issue-family presets to carry distinguishable role labels",
+    );
+    // SPEC-3885: legacy Work presets now open the Issue surface.
+    assert!(
+        js.contains(r#"work: "Issue""#) && js.contains(r#"workspace: "Issue""#),
+        "expected legacy Work presets to identify the Issue surface",
     );
     assert!(
         js.contains("function shouldShowRuntimeStatus(windowData)")
@@ -1765,17 +1828,19 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
     let js = app_js();
     let apply_status = regex::Regex::new(
-            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*runtimeState\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
         )
         .expect("valid regex");
 
     assert!(
-        js.contains("const windowRuntimeStateMap = new Map();"),
-        "expected embedded js to keep a shared runtime-state map for badges and the window list",
+        js.contains("const windowRuntimeStateMap = new Map();")
+            && js.contains("return normalizeWindowRuntimeState(sourceState, windowData.preset);")
+            && js.contains("function runtimeStateForAgentFocus(windowData)"),
+        "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
             apply_status.is_match(js),
-            "expected applyStatus to normalize runtime state once, update the shared map, and re-render the window list",
+            "expected applyStatus to retain source state, normalize display state once, and re-render the window list",
         );
 }
 
@@ -1863,34 +1928,31 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         "expected socket listener registration to be isolated behind an installer",
     );
     assert!(
-        html.contains("activeSocket.addEventListener(\"open\", handleSocketOpen)")
-            && html.contains("activeSocket.addEventListener(\"message\", handleSocketMessage)")
-            && html.contains("activeSocket.addEventListener(\"close\", handleSocketClose)"),
-        "expected socket listeners to be registered through named handlers",
+        html.contains("[\"open\", handleSocketOpen]")
+            && html.contains("[\"message\", handleSocketMessage]")
+            && html.contains("[\"close\", handleSocketClose]")
+            && html.contains("activeSocket.addEventListener(kind, (event) => {")
+            && html.contains("if (socket === activeSocket) handler(event);"),
+        "expected named socket handlers to ignore events from replaced connections",
     );
 }
 
 #[test]
 fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
     let html = frontend_bundle_source();
-    // Issue #2694 Phase C: handleSocketOpen now also re-initializes the
-    // per-connection dispatcher before the frontend_ready handshake. The
-    // regex below is intentionally `[\s\S]*?` (non-greedy any) between
-    // setConnectionState and the pendingMessages flush so dispatcher
-    // setup is allowed inside the function, but the ordering assertion
-    // — frontend_ready strictly precedes the queued-message replay — is
-    // preserved.
+    // Readiness must precede queue replay, and replay must match the immutable
+    // connection scope. Other projects retain their own pending messages.
     let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
-        )
-        .expect("valid regex");
+        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+    )
+    .expect("valid regex");
 
     assert!(
         html.contains("function connectSocket()"),
         "expected socket transport bootstrap helper in embedded html",
     );
     assert!(
-            html.contains("socket = new WebSocket(websocketUrl());")
+            html.contains("socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;")
                 && html.contains("setConnectionState(false);")
                 && html.contains("installSocketEventHandlers(socket);"),
             "expected socket bootstrap to create the websocket, reset connection state, and install handlers",
@@ -1938,13 +2000,18 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
 #[test]
 fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
     let html = frontend_bundle_source();
+    // Issue #4538: the Project app and the Hub share one route helper.
+    let delegation = regex::Regex::new(
+        r#"function websocketUrl\(projectKey = activeProjectKey\(\)\)\s*\{\s*return routeWebSocketUrl\(window\.location\.href, projectKey\);\s*\}"#,
+    )
+    .expect("valid regex");
     let websocket_url = regex::Regex::new(
-            r#"function websocketUrl\(\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
+            r#"export function routeWebSocketUrl\(locationHref, projectKey\)\s*\{\s*const url = new URL\(locationHref\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*if \(projectKey\) url\.searchParams\.set\("repo_hash", projectKey\);\s*return url\.toString\(\);\s*\}"#,
         )
         .expect("valid regex");
 
     assert!(
-            websocket_url.is_match(html),
+            delegation.is_match(html) && websocket_url.is_match(html),
             "expected embedded bundle to derive the websocket endpoint from window.location without host-specific branches",
         );
     assert!(
@@ -2105,7 +2172,8 @@ fn embedded_web_branches_surface_remains_branch_browser() {
 fn embedded_web_serves_every_root_module_import() {
     let embedded_web_source = include_str!("embedded_web.rs");
     let embedded_server_source = include_str!("embedded_server.rs");
-    let mut module_graph_source = String::from(app_js());
+    // index.html loads the route bootstrap, which loads app.js / hub-app.js.
+    let mut module_graph_source = format!("{}\n{}", index_html(), app_js());
     for asset in root_js_module_assets() {
         module_graph_source.push('\n');
         module_graph_source.push_str(asset.source);
@@ -2149,7 +2217,7 @@ fn embedded_web_root_js_module_registry_covers_app_imports() {
 
     for module_path in [
         "/branch-cleanup-modal.js",
-        "/close-project-tab-confirm-modal.js",
+        "/close-project-confirm-modal.js",
         "/migration-modal.js",
         "/window-docking.js",
         "/board-surface.js",
@@ -2308,9 +2376,9 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
     );
     assert!(
         html.contains(
-            "if (preset === \"issue\" || preset === \"issue_monitor\" || preset === \"spec\")",
+            "[\"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
         ) && html.contains("return \"issue\";"),
-        "expected legacy SPEC and Issue Monitor presets to open the unified Work Item issue view",
+        "expected legacy SPEC, Issue Monitor and Workspace presets to open the unified Issue view",
     );
 }
 
@@ -2985,16 +3053,12 @@ fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
 }
 
 #[test]
-fn embedded_web_add_window_modal_offers_improvement_inbox() {
+fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"data-preset="improvement""#),
-        "expected Add window modal to expose the Improvement Inbox preset",
-    );
-    assert!(
-        html.contains("<strong>Improvement Inbox</strong>"),
-        "expected Improvement Inbox to have a visible preset label",
+        !html.contains(r#"data-preset="improvement""#),
+        "the retired Improvement Inbox preset must not appear in the Add window modal",
     );
 }
 
@@ -3116,16 +3180,16 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     );
 }
 
-// SPEC-3245 Phase 3: Start Work is removed; the Intake session command is the
-// global entry that drives the shared wizard renderer.
+// SPEC-3245 Stage E: the Intake-only command route is retired while the shared
+// Launch Wizard renderer and its generic controls remain available.
 #[test]
-fn embedded_web_intake_session_uses_shared_wizard_renderer() {
+fn embedded_web_has_no_legacy_intake_route_and_keeps_shared_wizard_renderer() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"case "intake-session":"#)
-            && html.contains(r#"kind: "open_intake_session""#),
-        "expected Intake session to use a global command instead of a Branches window action",
+        !html.contains(r#"case "intake-session":"#)
+            && !html.contains(r#"kind: "open_intake_session""#),
+        "legacy Intake-only command and event routes must be absent from the embedded bundle",
     );
     assert!(
         !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
@@ -3440,7 +3504,6 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         ".surface-knowledge",
         ".surface-mock",
         ".surface-profile",
-        ".surface-improvement",
     ];
 
     for (anchor, role) in [
@@ -3712,15 +3775,13 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
     let pairs: &[(WindowSurface, &str)] = &[
         (WindowSurface::Terminal, "terminal"),
         (WindowSurface::FileTree, "file-tree"),
-        // Branches now redirects to the workspace surface in JS;
-        // the enum variant is kept for backend compatibility but
-        // no longer needs its own JS return path.
+        // Branches and Work redirect to Knowledge in JS. Their enum variants
+        // remain for persisted backend compatibility without a separate UI.
         (WindowSurface::Profile, "profile"),
         (WindowSurface::Board, "board"),
         (WindowSurface::Logs, "logs"),
         (WindowSurface::Knowledge, "knowledge"),
         (WindowSurface::Index, "index"),
-        (WindowSurface::Work, "work"),
         (WindowSurface::AgentKanban, "agent-kanban"),
         (WindowSurface::Console, "console"),
         (WindowSurface::Mock, "mock"),
@@ -3740,8 +3801,10 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
     }
 
     assert!(
-        js.contains("preset === \"branches\"") && js.contains("return \"work\";"),
-        "expected JS `presetSurface()` to route branches preset to work surface",
+        WindowSurface::Work.as_str() == "work"
+            && js.contains("if (preset === \"work\" || preset === \"workspace\") {\n          return \"knowledge\";")
+            && js.contains("if (preset === \"branches\") {\n          return \"knowledge\";"),
+        "expected legacy Work and Branches presets to route to Knowledge while preserving the backend wire value",
     );
     assert!(
         js.contains("preset === \"issue_monitor\"") && js.contains("return \"knowledge\";"),
@@ -3803,24 +3866,11 @@ fn embedded_web_project_picker_exposes_github_clone_action_and_modal() {
 // Clone from GitHub intake actions, so the top toolbar carries a single
 // project control and no split-button group remains.
 #[test]
-fn embedded_web_top_toolbar_is_single_projects_switcher() {
+fn embedded_web_top_toolbar_exposes_close_project() {
     let html = index_html();
-
-    assert!(
-        !html.contains("id=\"open-project-group\"")
-            && !html.contains("class=\"split-button-group\"")
-            && !html.contains("id=\"open-project-menu\""),
-        "the Open Project split-button group must be removed from the top toolbar"
-    );
-    assert!(
-        html.contains("id=\"project-switcher-button\"")
-            && html.contains("aria-controls=\"project-switcher-panel\""),
-        "top toolbar must mount the single Projects switcher button"
-    );
-    assert!(
-        html.contains("id=\"project-switcher-panel\"") && html.contains("role=\"listbox\""),
-        "Projects switcher panel must mount as a listbox"
-    );
+    assert!(html.contains("id=\"close-project-button\""));
+    assert!(!html.contains("id=\"project-switcher-button\""));
+    assert!(!html.contains("id=\"project-tabs\""));
 }
 
 /// Launch Wizard hydration can add QuickStart, Docker, and Advanced form
@@ -4075,4 +4125,228 @@ fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
         !picker.contains("kind: \"continue_work\"") && !wizard.contains("kind: \"continue_work\""),
         "Resume surfaces must never synthesize the producing Continue work request",
     );
+}
+
+#[test]
+fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
+    let knowledge = root_js_module_source("/knowledge-kanban-surface.js");
+    let resume = knowledge
+        .split("function resumeKnowledgeRelatedSession")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("function renderKnowledgeRelatedSessionAction")
+                .next()
+        })
+        .expect("bounded Issue Related Work Resume producer");
+    assert!(
+        resume.contains("const operationId = createLaunchOperationId(\"resume\");"),
+        "the shipped Related Work producer must create one canonical Resume operation identity",
+    );
+    let pending_identity = regex::Regex::new(
+        r#"(?s)launchPending\.begin\(\s*knowledgeRelatedWorkPendingKey\(sessionId\),\s*"Resume",\s*operationId,?\s*\)"#,
+    )
+    .expect("pending identity regex");
+    assert!(
+        pending_identity.is_match(resume),
+        "the shipped pending entry must retain the producer operation identity",
+    );
+    let payload_identity = regex::Regex::new(
+        r#"(?s)send\(\{.*?kind:\s*"resume_workspace_agent",.*?operation_id:\s*operationId,.*?session_id:\s*sessionId,"#,
+    )
+    .expect("payload identity regex");
+    assert!(
+        payload_identity.is_match(resume),
+        "the shipped Resume payload must carry the same operation identity",
+    );
+
+    let app = app_js();
+    let pending_controller = app
+        .split("const launchPending = createLaunchPendingController({")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("const continueWorkDispatcher = createContinueWorkDispatcher({")
+                .next()
+        })
+        .expect("bounded launchPending onChange wiring");
+    let pending_on_change = js_braced_block_after(pending_controller, "onChange: () =>")
+        .expect("launchPending onChange block");
+    assert!(
+        pending_on_change.contains("renderKnowledgeBridge(")
+            || pending_on_change.contains("renderAllKnowledge"),
+        "the shipped pending listener must redraw Knowledge immediately after begin, settle, or timeout",
+    );
+
+    let error_case = app
+        .split("case \"workspace_resume_agent_error\":")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("case \"workspace_resume_agent_started\":")
+                .next()
+        })
+        .expect("bounded workspace Resume error case");
+    let picker = error_case
+        .find("workspaceResumePicker.handleError(event)")
+        .expect("picker error handler");
+    let exact_settle = regex::Regex::new(
+        r"const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*launchPending\.settleAck\(event\)",
+    )
+    .expect("exact settle regex")
+    .captures(error_case)
+    .expect("retained exact-settle result");
+    let settle = exact_settle
+        .get(0)
+        .expect("exact settle expression")
+        .start();
+    assert!(
+        picker < settle,
+        "the shipped picker handler must consume the local error before settlement rerenders it",
+    );
+    let settled_name = exact_settle.get(1).expect("exact settle binding").as_str();
+    let settled_guard = format!("if ({settled_name})");
+    let settled_feedback =
+        js_braced_block_after(error_case, &settled_guard).expect("exact-settle feedback block");
+    assert!(
+        settled_feedback.contains("alertsToasts.push({")
+            && settled_feedback.contains("level: \"error\"")
+            && (settled_feedback.contains("event?.message")
+                || settled_feedback.contains("event.message"))
+            && settled_feedback.contains("dismissible: true")
+            && settled_feedback.contains("timeoutMs: 0")
+            && settled_feedback.contains("scheduleKnowledgeRelatedWorkRefresh()"),
+        "only an exactly-settled shipped Resume error may show sticky feedback and schedule a cache-first Related Work refresh",
+    );
+    assert_eq!(
+        error_case.matches("launchPending.settleAck(event)").count(),
+        1,
+        "the shipped shared pending entry must settle exactly once",
+    );
+    assert_eq!(
+        error_case.matches("alertsToasts.push({").count(),
+        1,
+        "the shipped Resume error case must not show feedback outside the exact-settle guard",
+    );
+    assert_eq!(
+        error_case
+            .matches("scheduleKnowledgeRelatedWorkRefresh()")
+            .count(),
+        1,
+        "the shipped Resume error case must not refresh outside the exact-settle guard",
+    );
+    let related_refresh = knowledge
+        .split("function scheduleKnowledgeRelatedWorkRefresh")
+        .nth(1)
+        .and_then(|tail| tail.split("function applyLocalKnowledgeFilter").next())
+        .expect("bounded Related Work refresh scheduler");
+    assert!(
+        regex::Regex::new(r"requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)",)
+            .expect("cache-first refresh regex")
+            .is_match(related_refresh),
+        "the shipped Related Work refresh scheduler must stay cache-first",
+    );
+}
+
+#[test]
+fn embedded_web_retires_the_autonomous_notifications_log_region() {
+    // SPEC #3206 v2 FR-012 (Sc 6): the top-right floating "autonomous
+    // notifications" log region is replaced by the notification center (bell +
+    // unread badge + history drawer). Nothing of the retired surface may ship:
+    // no module registration, no import / mount / fan-out in app.js, no CSS.
+    // Precedent: SPEC-1939 Phase 13 (project-bar Index badge withdrawal).
+    let html = frontend_styles_bundle();
+    let js = app_js();
+    let module_graph: String = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.source)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/autonomous-notifications.js"),
+        "SPEC #3206 FR-012: autonomous-notifications.js must not be registered",
+    );
+    assert!(
+        !js.contains("autonomous-notifications")
+            && !js.contains("createAutonomousNotifications")
+            && !js.contains("autonomousNotifications"),
+        "SPEC #3206 FR-012: app.js must not import, mount or fan out to the retired log region",
+    );
+    assert!(
+        !module_graph.contains("createAutonomousNotifications"),
+        "SPEC #3206 FR-012: no embedded module may still define the retired region",
+    );
+    assert!(
+        !html.contains(".autonomous-notifications"),
+        "SPEC #3206 FR-012: retired region CSS must not ship",
+    );
+
+    // The replacement is wired: registered + imported, bell in the rail, and
+    // the autonomous fan-out records into the notification center history.
+    assert!(
+        root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/notification-center.js"),
+        "SPEC #3206 v2: notification-center.js must be registered",
+    );
+    assert!(
+        js.contains("from \"/notification-center.js\"")
+            && js.contains("notificationCenter.mount(document.body)"),
+        "SPEC #3206 v2: app.js must import and mount the notification center on <body>",
+    );
+    assert!(
+        html.contains("id=\"op-notifications-button\"")
+            && html.contains("data-cmd=\"toggle-notifications\""),
+        "SPEC #3206 FR-009: the rail must carry the notification bell",
+    );
+    assert!(
+        js.contains("case \"issue_monitor_toast\"") && js.contains("kind: \"issue-monitor\""),
+        "SPEC #3206 FR-011: issue_monitor_toast must record into the notification center",
+    );
+}
+
+#[test]
+fn embedded_web_issue_monitor_candidate_pool_contract() {
+    let surface = root_js_module_source("/knowledge-kanban-surface.js");
+    for contract in [
+        "knowledge-monitor-pool",
+        "knowledge-monitor-candidate",
+        "issue_monitor_profiles_set",
+        "Add candidate",
+        "prefer_for",
+        "usage_threshold_percent",
+    ] {
+        assert!(
+            surface.contains(contract),
+            "missing pool contract: {contract}"
+        );
+    }
+    let css = static_asset_text("/styles/app.css");
+    let pool_styles = css
+        .split("/* Issue #4530 candidate pool */")
+        .nth(1)
+        .expect("pool styles");
+    assert!(pool_styles.contains("var(--color-border)"));
+    assert!(pool_styles.contains("var(--type-"));
+    assert!(!pool_styles.contains("rgba("));
+    assert!(!pool_styles.contains("rgb("));
+}
+
+#[test]
+fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
+    let js = app_js();
+    assert!(js.contains("import { createPmChat } from \"/pm-chat.js\""));
+    assert!(root_js_module_source("/pm-chat.js").contains("export function createPmChat"));
+    assert!(js.contains("windowData.is_pm && presetSurface(windowData.preset) === \"terminal\""));
+    assert!(js.contains("event.session_id === view.sessionId"));
+    let render_key = js_braced_block_after(js, "function workspaceWindowsRenderKey(").unwrap();
+    assert!(render_key.contains("windowData?.session_id"));
+    assert!(render_key.contains("windowData?.is_pm"));
+    assert!(js.contains("view.controller.setSession(windowData.session_id)"));
+    assert!(js.contains("view.controller.dispose()"));
+    assert!(js.contains("kind: \"load_pm_conversation\", id: windowData.id"));
+    assert!(js.contains("window.setInterval(requestVisiblePmConversations, 5000)"));
+    assert!(js.contains("case \"pm_conversation\""));
+    assert!(js.contains("case \"pane_send_result\""));
+    assert!(js.contains("frontendUnits.terminalHost.writeOutput(event.id, event.data_base64)"));
 }

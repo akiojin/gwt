@@ -7,7 +7,8 @@ use std::{
 };
 
 use super::{
-    quick_start, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, QuickStartEntry,
+    quick_start, HermesLaunchPreferences, LaunchWizardPreviousProfile,
+    LaunchWizardPreviousProfiles, QuickStartEntry,
 };
 
 pub fn load_previous_launch_profile(
@@ -85,17 +86,7 @@ pub fn previous_launch_profiles_for_repo_from_sessions(
 }
 
 pub(super) fn load_launch_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
+    gwt_agent::session_ledger::load_sessions(sessions_dir).unwrap_or_default()
 }
 
 fn launch_profile_session_cmp(left: &gwt_agent::Session, right: &gwt_agent::Session) -> Ordering {
@@ -126,23 +117,43 @@ pub fn quick_start_entries_from_sessions(
 
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
     let fast_mode = session.fast_mode_enabled();
+    let hermes = hermes_preferences_from_session(&session);
     LaunchWizardPreviousProfile {
         agent_id: session.agent_id.command().to_string(),
         model: session.model,
         reasoning: session.reasoning_level,
-        version: session.tool_version.or_else(|| {
-            session
-                .agent_id
-                .package_name()
-                .map(|_| "installed".to_string())
-        }),
         session_mode: session.session_mode,
         skip_permissions: session.skip_permissions,
-        codex_fast_mode: fast_mode,
+        fast_mode,
         runtime_target: session.runtime_target,
         docker_service: session.docker_service,
         docker_lifecycle_intent: session.docker_lifecycle_intent,
         windows_shell: session.windows_shell,
+        hermes,
+    }
+}
+
+/// Issue #3863 AC-7: Hermes-specific launch values are persisted only as the
+/// session's `launch_args` (see `AgentLaunchBuilder::build_hermes_args`), so
+/// read them back from the flag pairs. Non-Hermes sessions yield defaults.
+fn hermes_preferences_from_session(session: &gwt_agent::Session) -> HermesLaunchPreferences {
+    if session.agent_id != gwt_agent::AgentId::Hermes {
+        return HermesLaunchPreferences::default();
+    }
+    let flag_value = |flag: &str| {
+        session
+            .launch_args
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .filter(|value| !value.trim().is_empty())
+    };
+    HermesLaunchPreferences {
+        provider: flag_value("--provider"),
+        profile: flag_value("--profile"),
+        toolsets: flag_value("--toolsets"),
+        skills: flag_value("--skills"),
+        max_turns: flag_value("--max-turns"),
     }
 }
 
@@ -323,19 +334,96 @@ mod tests {
         newer.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
         newer.save(dir.path()).expect("save newer session");
 
+        // Issue #4660 AC-6: a retired built-in record must not prevent the
+        // loader from retaining valid sessions or selecting their profile.
+        let retired = sample_session_record(
+            "feature/retired",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            None,
+        );
+        let retired_toml = toml::to_string(&retired)
+            .expect("serialize retired session fixture")
+            .replace("type = \"Codex\"", "type = \"Gemini\"");
+        std::fs::write(dir.path().join("retired-gemini.toml"), retired_toml)
+            .expect("write legacy Gemini session");
+        let sessions = load_launch_sessions(dir.path());
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|session| session.id == older.id));
+        assert!(sessions.iter().any(|session| session.id == newer.id));
+
         let profile =
             load_previous_launch_profile(&worktree, dir.path()).expect("previous profile");
 
         assert_eq!(profile.agent_id, "codex");
         assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(profile.reasoning.as_deref(), Some("high"));
-        assert_eq!(profile.version.as_deref(), Some("0.110.0"));
         assert_eq!(profile.session_mode, gwt_agent::SessionMode::Continue);
         assert_eq!(
             profile.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
         );
         assert_eq!(profile.docker_service.as_deref(), Some("gwt"));
+    }
+
+    // Issue #3863 AC-7: Hermes-specific values are persisted only as
+    // `launch_args`; the previous profile reads them back so the wizard can
+    // restore provider / profile / toolsets / skills / max turns.
+    #[test]
+    fn previous_profile_restores_hermes_options_from_launch_args() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let mut hermes = sample_session_record(
+            "feature/hermes",
+            &worktree,
+            gwt_agent::AgentId::Hermes,
+            Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
+            None,
+        );
+        hermes.launch_args = [
+            "chat",
+            "--accept-hooks",
+            "--pass-session-id",
+            "--provider",
+            "ollama-launch",
+            "--model",
+            "qwen3.5",
+            "--profile",
+            "concise",
+            "--toolsets",
+            "terminal,web",
+            "--skills",
+            "github",
+            "--max-turns",
+            "40",
+            "--safe-mode",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let profiles = previous_launch_profiles_from_sessions(std::slice::from_ref(&hermes));
+        let profile = profiles.profile_for("hermes").expect("hermes profile");
+        assert_eq!(profile.hermes.provider.as_deref(), Some("ollama-launch"));
+        assert_eq!(profile.hermes.profile.as_deref(), Some("concise"));
+        assert_eq!(profile.hermes.toolsets.as_deref(), Some("terminal,web"));
+        assert_eq!(profile.hermes.skills.as_deref(), Some("github"));
+        assert_eq!(profile.hermes.max_turns.as_deref(), Some("40"));
+
+        // Non-Hermes sessions never carry Hermes values, even with look-alike args.
+        let mut codex = sample_session_record(
+            "feature/codex",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 9, 1, 11, 0, 0).unwrap(),
+            None,
+        );
+        codex.launch_args = vec!["--profile".to_string(), "work".to_string()];
+        let profiles = previous_launch_profiles_from_sessions(std::slice::from_ref(&codex));
+        let profile = profiles.profile_for("codex").expect("codex profile");
+        assert_eq!(profile.hermes, HermesLaunchPreferences::default());
     }
 
     #[test]
@@ -352,7 +440,7 @@ mod tests {
             None,
         );
         lower_id.id = "session-a".to_string();
-        lower_id.model = Some("gpt-5.4".to_string());
+        lower_id.model = Some("gpt-5.6-luna".to_string());
         let mut higher_id = sample_session_record(
             "feature/higher",
             &worktree,
@@ -387,7 +475,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.4".to_string());
+        codex.model = Some("gpt-5.5".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -426,27 +514,26 @@ mod tests {
 
         assert_eq!(view.branch_name, "feature/current");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
-        assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
-        // Issue #3462: Continue inherits the Skip Permissions preference.
+        // L2 uses fixed launch choices after restoring the saved agent profile.
         assert!(
             view.skip_permissions,
-            "a Continue launch must inherit the Skip Permissions preference"
+            "a Continue launch uses Skip Permissions"
         );
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.codex_fast_mode);
+        assert!(!view.fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
         assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
-        assert!(config.codex_fast_mode);
+        assert!(!config.codex_fast_mode);
         assert!(
             config.skip_permissions,
-            "a Continue launch must carry the inherited Skip Permissions preference"
+            "a Continue launch uses Skip Permissions"
         );
         assert_eq!(config.working_dir.as_deref(), Some(current_repo.as_path()));
     }
@@ -469,7 +556,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.4".to_string());
+        codex.model = Some("gpt-5.5".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -489,14 +576,14 @@ mod tests {
         let view = state.view();
 
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_execution_mode, "continue");
         // Issue #3462: the restored preference is advertised on Continue.
         assert!(view.skip_permissions);
-        // Toggle visibility still follows the manual-setup launch path.
+        // L2 exposes the fixed values without launch-choice controls.
         assert!(!view.show_skip_permissions);
-        assert!(view.codex_fast_mode);
+        assert!(!view.fast_mode);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("api"));
         assert_eq!(view.selected_docker_lifecycle, "start");
@@ -658,7 +745,7 @@ mod tests {
 
         let mut ctx = context(branch("origin/feature/gui"), "feature/gui");
         ctx.quick_start_root = worktree;
-        let state = LaunchWizardState::open(ctx, dir.path(), &dir.path().join("versions.json"));
+        let state = LaunchWizardState::open(ctx, dir.path());
 
         assert_eq!(state.step, LaunchWizardStep::QuickStart);
         assert_eq!(state.quick_start_entries.len(), 1);

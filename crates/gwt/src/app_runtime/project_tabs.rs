@@ -5,11 +5,11 @@
 //! - Open Project / Reopen Recent / clone-project flows
 //!   ([`AppRuntime::open_project_dialog_events`],
 //!   [`AppRuntime::clone_project_start_events`],
-//!   [`AppRuntime::open_project_path`], ...)
+//!   [`AppRuntime::open_project_path_events`], ...)
 //! - GitHub repository search for the clone dialog
 //!   (`search_github_repositories`, `parse_github_repository_search_results`)
-//! - Project tab selection / close ([`AppRuntime::select_project_tab_events`],
-//!   [`AppRuntime::close_project_tab_events`]) and recent-project bookkeeping
+//! - Explicit Project close ([`AppRuntime::close_project_tab_events`]) and
+//!   recent-project bookkeeping
 //! - SPEC-1934 migration detection broadcasts / replies
 //!   (`recovery_state_label` stays re-exported through `mod.rs` for
 //!   `migration.rs`)
@@ -17,13 +17,82 @@
 //! Behavior-preserving move: `ProjectTabRuntime` / `ProjectOpenTarget` stay
 //! in `mod.rs` and are reached via `super`.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
+use super::project_route::ProjectOpenControlFailure;
+use super::startup::prepare_open_project_window_restores;
+#[cfg(test)]
+use super::PreparedProjectSwitch;
 use super::{
     combined_window_id, load_restored_workspace_state, normalize_recent_project_path,
-    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    ProjectOpenTarget, ProjectTabRuntime, UserEvent, Uuid, WindowCanvasState,
+    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, FrontendEvent,
+    OutboundEvent, PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext,
+    ProjectIncarnation, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectNavigationRequest, ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime,
+    UserEvent, Uuid, WindowCanvasState,
 };
+
+#[derive(Clone, Copy)]
+enum PickerPurpose {
+    Open,
+    CloneParent,
+}
+
+impl PickerPurpose {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::CloneParent => "clone_parent",
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ProjectPickerState {
+    next_id: u64,
+    pending: HashMap<String, (u64, PickerPurpose)>,
+    // A terminal timeout reply does not mean the native dialog has closed.
+    workers: HashMap<String, u64>,
+}
+
+fn pick_project_folder_with_deadline(deadline: Instant) -> Result<Option<PathBuf>, String> {
+    // The independent runtime timer sends the deadline reply. Keep this worker
+    // alive until the native thread exits, including on platforms without a
+    // programmatic dialog cancellation API, so another dialog cannot overlap.
+    std::thread::Builder::new()
+        .name("gwt-project-picker".into())
+        .spawn(move || super::native_project_picker::pick_project_folder(deadline))
+        .map_err(|error| error.to_string())?
+        .join()
+        .map_err(|_| "Folder selection worker stopped".to_string())?
+}
+
+pub(crate) fn initial_project_tab_incarnations(
+    tabs: &[ProjectTabRuntime],
+) -> (HashMap<String, ProjectIncarnation>, u64) {
+    let mut next_generation = 1_u64;
+    let incarnations = tabs
+        .iter()
+        .map(|tab| {
+            let generation = next_generation;
+            next_generation = next_generation.saturating_add(1);
+            (
+                tab.id.clone(),
+                ProjectIncarnation {
+                    project_key: gwt_core::paths::resolve_project_scope(&tab.project_root).hash,
+                    generation,
+                    project_root: tab.project_root.clone(),
+                    migration_pending: tab.migration_pending,
+                },
+            )
+        })
+        .collect();
+    (incarnations, next_generation)
+}
 
 pub(super) fn recovery_state_label(recovery: gwt_core::migration::RecoveryState) -> &'static str {
     use gwt_core::migration::RecoveryState;
@@ -104,7 +173,7 @@ fn search_github_repositories(
     }
     let hub = gwt_core::process_console::global();
     let limit_str = limit.to_string();
-    let output = gwt_core::process_console::spawn_logged_blocking(
+    let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
         &hub,
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
@@ -118,6 +187,7 @@ fn search_github_repositories(
             limit_str.as_str(),
         ],
         gwt_core::process_console::SpawnOptions::new("gh search repos"),
+        Instant::now() + Duration::from_secs(15),
     )
     .map_err(|error| format!("gh search repos: {error}"))?;
     if !output.success() {
@@ -158,29 +228,225 @@ fn detect_locked_worktrees(project_root: &Path) -> bool {
         .any(|line| line.starts_with("locked"))
 }
 
+fn prepare_migration_snapshot(target: &ProjectOpenTarget) -> Option<PreparedMigrationSnapshot> {
+    target.needs_migration.then(|| PreparedMigrationSnapshot {
+        branch: read_head_branch(&target.project_root),
+        has_dirty: detect_dirty(&target.project_root),
+        has_locked: detect_locked_worktrees(&target.project_root),
+        has_submodules: target.project_root.join(".gitmodules").is_file(),
+        has_backup: target
+            .project_root
+            .join(gwt_core::migration::backup::BACKUP_DIR_NAME)
+            .is_dir(),
+    })
+}
+
+fn prepare_project_open(
+    path: PathBuf,
+    sessions_dir: PathBuf,
+) -> Result<ProjectNavigationPayload, String> {
+    let target = resolve_project_target(&path)?;
+    let project_key = gwt_core::paths::resolve_project_scope(&target.project_root).hash;
+    let workspace =
+        load_restored_workspace_state(&target.project_root).map_err(|error| error.to_string())?;
+    let window_restores = prepare_open_project_window_restores(
+        &workspace,
+        &sessions_dir,
+        target.kind,
+        target.needs_migration,
+    );
+    let recent_path = normalize_recent_project_path(&target.project_root);
+    let migration = prepare_migration_snapshot(&target);
+    Ok(ProjectNavigationPayload::Open(PreparedProjectOpen {
+        target,
+        project_key,
+        workspace,
+        window_restores,
+        recent_path,
+        migration,
+    }))
+}
+
+#[cfg(test)]
+fn prepare_project_switch(
+    tab_id: String,
+    project_root: PathBuf,
+) -> Result<ProjectNavigationPayload, String> {
+    Ok(ProjectNavigationPayload::Switch(PreparedProjectSwitch {
+        tab_id,
+        project_key: gwt_core::paths::resolve_project_scope(&project_root).hash,
+    }))
+}
+
 impl AppRuntime {
-    pub(crate) fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
-        let selected = rfd::FileDialog::new().pick_folder();
+    /// Publish snapshots only to viewers of the explicitly selected project.
+    pub(crate) fn project_snapshot_broadcasts(
+        &mut self,
+        context: &ProjectContext,
+    ) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change(&context.tab_id) {
+            events.push(event);
+        }
+        events.extend(self.pm_status_broadcast_events(context));
+        events
+    }
+
+    pub(crate) fn open_project_dialog_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        self.request_project_picker(client_id, PickerPurpose::Open)
+    }
+
+    fn request_project_picker(
+        &mut self,
+        client_id: &str,
+        purpose: PickerPurpose,
+    ) -> Vec<OutboundEvent> {
+        if self.project_picker.workers.contains_key(client_id) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PickerBusy {
+                    purpose: purpose.as_str().into(),
+                    message: "Folder selection is already open. Finish or cancel it first.".into(),
+                },
+            )];
+        }
+        self.project_picker.next_id = self
+            .project_picker
+            .next_id
+            .checked_add(1)
+            .expect("picker request id exhausted");
+        let request_id = self.project_picker.next_id;
+        self.project_picker
+            .pending
+            .insert(client_id.into(), (request_id, purpose));
+        self.project_picker
+            .workers
+            .insert(client_id.into(), request_id);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        // The deadline must run independently of the blocking pool: a queued
+        // dialog still owes its client a terminal reply within the same budget.
+        match &self.blocking_tasks {
+            super::BlockingTaskSpawner::Tokio(handle) => {
+                let proxy = self.proxy.clone();
+                let client_id = client_id.to_string();
+                drop(handle.spawn(async move {
+                    tokio::time::sleep_until(deadline.into()).await;
+                    proxy.send(UserEvent::ProjectPickerFinished {
+                        client_id,
+                        request_id,
+                        worker_finished: false,
+                        result: Err("Folder selection timed out".into()),
+                    });
+                }));
+            }
+            #[cfg(test)]
+            _ => {}
+        }
+        let proxy = self.proxy.clone();
+        let client = client_id.to_string();
+        let mut events = vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::PickerStarted {
+                request_id,
+                purpose: purpose.as_str().into(),
+            },
+        )];
+        tracing::info!(
+            request_id,
+            client_id,
+            purpose = purpose.as_str(),
+            "project picker started"
+        );
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = pick_project_folder_with_deadline(deadline);
+            proxy.send(UserEvent::ProjectPickerFinished {
+                client_id: client,
+                request_id,
+                worker_finished: true,
+                result,
+            });
+        }) {
+            events.extend(self.handle_project_picker_finished(
+                client_id,
+                request_id,
+                true,
+                Err(error),
+            ));
+        }
+        events
+    }
+
+    pub(crate) fn handle_project_picker_finished(
+        &mut self,
+        client_id: &str,
+        request_id: u64,
+        worker_finished: bool,
+        result: Result<Option<PathBuf>, String>,
+    ) -> Vec<OutboundEvent> {
+        if worker_finished && self.project_picker.workers.get(client_id) == Some(&request_id) {
+            self.project_picker.workers.remove(client_id);
+        }
+        let Some(&(pending_id, purpose)) = self.project_picker.pending.get(client_id) else {
+            return Vec::new();
+        };
+        if pending_id != request_id {
+            return Vec::new();
+        }
+        self.project_picker.pending.remove(client_id);
+        let purpose_name = purpose.as_str().to_string();
+        let mut events = Vec::new();
+        let event = match result {
+            Ok(Some(path)) => {
+                tracing::info!(request_id, client_id, purpose = %purpose_name, path = %path.display(), "project picker picked");
+                let selected = BackendEvent::PickerSelected {
+                    request_id,
+                    purpose: purpose_name,
+                    path: path.display().to_string(),
+                };
+                if matches!(purpose, PickerPurpose::Open) {
+                    events.extend(self.open_project_path_with_request_events(
+                        path,
+                        Some(format!("picker:{request_id}")),
+                    ));
+                }
+                selected
+            }
+            Ok(None) => {
+                tracing::info!(request_id, client_id, purpose = %purpose_name, "project picker cancelled");
+                BackendEvent::PickerCancelled {
+                    request_id,
+                    purpose: purpose_name,
+                }
+            }
+            Err(message) => {
+                tracing::warn!(request_id, client_id, purpose = %purpose_name, %message, "project picker failed");
+                BackendEvent::PickerError {
+                    request_id,
+                    purpose: purpose_name,
+                    message,
+                }
+            }
+        };
+        events.insert(0, OutboundEvent::reply(client_id, event));
+        events
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_project_dialog_selection_events(
+        &mut self,
+        selected: Option<PathBuf>,
+    ) -> Vec<OutboundEvent> {
         let Some(path) = selected else {
             return Vec::new();
         };
-        self.open_project_path_events(path)
+        self.request_project_open(path, ProjectNavigationSource::Open { request_id: None })
     }
 
     pub(crate) fn select_clone_project_parent_events(
         &mut self,
         client_id: &str,
     ) -> Vec<OutboundEvent> {
-        let selected = rfd::FileDialog::new().pick_folder();
-        let Some(path) = selected else {
-            return Vec::new();
-        };
-        vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::CloneProjectParentSelected {
-                path: path.display().to_string(),
-            },
-        )]
+        self.request_project_picker(client_id, PickerPurpose::CloneParent)
     }
 
     pub(crate) fn github_repository_search_events(
@@ -188,22 +454,33 @@ impl AppRuntime {
         client_id: &str,
         query: &str,
     ) -> Vec<OutboundEvent> {
-        match search_github_repositories(query, 20) {
-            Ok(repositories) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::GithubRepositorySearchResults {
-                    query: query.to_string(),
+        let proxy = self.proxy.clone();
+        let client = client_id.to_string();
+        let search_query = query.to_string();
+        if let Err(message) = self.blocking_tasks.try_spawn(move || {
+            let event = match search_github_repositories(&search_query, 20) {
+                Ok(repositories) => BackendEvent::GithubRepositorySearchResults {
+                    query: search_query,
                     repositories,
                 },
-            )],
-            Err(message) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::GithubRepositorySearchError {
-                    query: query.to_string(),
+                Err(message) => BackendEvent::GithubRepositorySearchError {
+                    query: search_query,
                     message,
                 },
-            )],
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client, event,
+            )]));
+        }) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::GithubRepositorySearchError {
+                    query: query.into(),
+                    message,
+                },
+            )];
         }
+        Vec::new()
     }
 
     pub(crate) fn clone_project_start_events(
@@ -257,81 +534,388 @@ impl AppRuntime {
     }
 
     pub(crate) fn open_project_path_events(&mut self, path: PathBuf) -> Vec<OutboundEvent> {
-        match self.open_project_path(path) {
-            Ok(wizard_closed) => {
-                let mut events = vec![self.workspace_state_broadcast()];
-                // Issue #2942: restore the opened tab's process windows the
-                // user did not explicitly close — resume agents (native session
-                // id) and fresh-launch shells. The startup `bootstrap` queue
-                // only covers tabs open at launch, so projects opened via this
-                // path (Open Project / Reopen Recent) were never restored and
-                // their agent panes stayed `Stopped`.
-                if let Some(active_tab_id) = self.active_tab_id.clone() {
-                    events.extend(self.restore_open_project_windows(&active_tab_id));
-                    // SPEC-3431 FR-002: the resident PM pane follows the same
-                    // "open the project, get the pane" rule as window restore.
-                    events.extend(self.ensure_pm_agent_for_tab(
-                        &active_tab_id,
-                        crate::app_runtime::pm::PmEnsureTrigger::Automatic,
-                    ));
-                }
-                // SPEC-2359 W-16 (FR-387): run the cross-machine intake for
-                // the opened project; its completion event reconciles the
-                // worktrees (intake → reconcile order) and kicks the merge
-                // scan, then rebroadcasts the projection.
-                if let Some(project_root) = self
-                    .active_tab_id
-                    .as_ref()
-                    .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
-                    .map(|tab| tab.project_root.clone())
-                {
-                    self.spawn_work_events_ingest(project_root, true);
-                }
-                if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                    events.push(event);
-                }
-                if wizard_closed {
-                    events.push(self.launch_wizard_state_broadcast(None));
-                }
-                // SPEC-1934 US-6.1: when a tab was opened on a Normal Git
-                // layout, surface the confirmation modal alongside the regular
-                // workspace broadcast.
-                events.extend(self.migration_detected_broadcasts());
-                events.extend(self.migration_recovery_broadcasts());
-                events
-            }
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: error,
-            })],
-        }
+        self.request_project_open(path, ProjectNavigationSource::Open { request_id: None })
+    }
+
+    pub(crate) fn open_project_path_with_request_events(
+        &mut self,
+        path: PathBuf,
+        request_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        self.request_project_open(path, ProjectNavigationSource::Open { request_id })
     }
 
     pub(crate) fn handle_clone_project_done(
         &mut self,
         workspace_home: &Path,
     ) -> Vec<OutboundEvent> {
-        match self.open_project_path(workspace_home.to_path_buf()) {
-            Ok(wizard_closed) => {
-                self.remember_recent_clone_workspace_home(workspace_home);
-                let _ = self.persist();
-                let mut events = vec![
-                    self.workspace_state_broadcast(),
-                    OutboundEvent::broadcast(BackendEvent::CloneProjectDone {
-                        workspace_home: workspace_home.display().to_string(),
-                    }),
-                ];
-                if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                    events.push(event);
+        self.request_project_open(
+            workspace_home.to_path_buf(),
+            ProjectNavigationSource::Clone {
+                workspace_home: workspace_home.to_path_buf(),
+            },
+        )
+    }
+
+    fn next_project_navigation_request_id(&mut self) -> u64 {
+        self.project_navigation_request =
+            self.project_navigation_request.checked_add(1).unwrap_or(1);
+        self.project_navigation_request
+    }
+
+    fn reserve_project_navigation(
+        &mut self,
+        source: ProjectNavigationSource,
+        target_incarnation: Option<ProjectIncarnation>,
+    ) -> ProjectNavigationRequest {
+        let request = ProjectNavigationRequest {
+            id: self.next_project_navigation_request_id(),
+            source,
+            target_incarnation,
+        };
+        self.pending_project_navigation = Some(request.clone());
+        request
+    }
+
+    fn request_project_open(
+        &mut self,
+        path: PathBuf,
+        source: ProjectNavigationSource,
+    ) -> Vec<OutboundEvent> {
+        let request = self.reserve_project_navigation(source, None);
+        tracing::info!(request_id = request.id, path = %path.display(), "project-open preparation started");
+        // Issue #4145 AC-1: start of the project-open route; closed in
+        // `handle_project_navigation_prepared` once the tab is committed.
+        self.project_open_started = Some((request.id, Instant::now()));
+        let request_for_worker = request.clone();
+        let proxy = self.proxy.clone();
+        let sessions_dir = self.sessions_dir.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            proxy.send(UserEvent::ProjectNavigationPrepared(Box::new(
+                ProjectNavigationPrepared {
+                    request: request_for_worker,
+                    result: prepare_project_open(path, sessions_dir),
+                },
+            )));
+        }) {
+            tracing::warn!(request_id = request.id, %error, "project-open preparation could not start");
+            if self
+                .pending_project_navigation
+                .as_ref()
+                .is_some_and(|pending| pending.id == request.id)
+            {
+                self.pending_project_navigation = None;
+            }
+            return self.project_open_error_events(&request.source, error);
+        }
+        Vec::new()
+    }
+
+    fn project_open_error_events(
+        &self,
+        source: &ProjectNavigationSource,
+        message: String,
+    ) -> Vec<OutboundEvent> {
+        let event = match source {
+            ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError { message },
+            ProjectNavigationSource::Open { request_id } => BackendEvent::ProjectOpenError {
+                message,
+                request_id: request_id.clone(),
+            },
+            #[cfg(test)]
+            ProjectNavigationSource::Switch { .. } => BackendEvent::ProjectOpenError {
+                message,
+                request_id: None,
+            },
+        };
+        vec![OutboundEvent::hub(event)]
+    }
+
+    fn project_navigation_request_is_current(&self, request: &ProjectNavigationRequest) -> bool {
+        if self.pending_project_navigation.as_ref() != Some(request) {
+            return false;
+        }
+        request.target_incarnation.as_ref().is_none_or(|expected| {
+            #[cfg(test)]
+            if let ProjectNavigationSource::Switch { tab_id } = &request.source {
+                return self.project_tab_incarnations.get(tab_id) == Some(expected);
+            }
+            let _ = expected;
+            false
+        })
+    }
+
+    /// Issue #4145 AC-1: close the project-open route when the committed
+    /// navigation matches the request that opened it. A superseded request
+    /// leaves the slot alone so the newer open still gets its own sample.
+    fn record_project_open_route(&mut self, request_id: u64) {
+        let Some((pending_id, started)) = self.project_open_started else {
+            return;
+        };
+        if pending_id != request_id {
+            return;
+        }
+        self.project_open_started = None;
+        gwt::perf::record_route(gwt::perf::PerfRoute::ProjectOpen, started.elapsed());
+    }
+
+    pub(crate) fn handle_project_navigation_prepared(
+        &mut self,
+        prepared: ProjectNavigationPrepared,
+    ) -> Vec<OutboundEvent> {
+        if !self.project_navigation_request_is_current(&prepared.request) {
+            tracing::warn!(
+                request_id = prepared.request.id,
+                "project-open preparation superseded"
+            );
+            self.settle_project_open_waiter(
+                prepared.request.id,
+                Err(ProjectOpenControlFailure::Unavailable(
+                    "superseded by a newer project navigation".to_string(),
+                )),
+            );
+            return Vec::new();
+        }
+        match prepared.result {
+            Err(error) => {
+                tracing::warn!(request_id = prepared.request.id, %error, "project-open preparation failed");
+                self.pending_project_navigation = None;
+                self.settle_project_open_waiter(
+                    prepared.request.id,
+                    Err(ProjectOpenControlFailure::Rejected(error.clone())),
+                );
+                self.project_open_error_events(&prepared.request.source, error)
+            }
+            Ok(ProjectNavigationPayload::Open(open)) => {
+                tracing::info!(request_id = prepared.request.id, project_key = %open.project_key, "project-open preparation finished");
+                #[cfg(test)]
+                if matches!(
+                    prepared.request.source,
+                    ProjectNavigationSource::Switch { .. }
+                ) {
+                    return Vec::new();
                 }
-                if wizard_closed {
-                    events.push(self.launch_wizard_state_broadcast(None));
-                }
+                self.pending_project_navigation = None;
+                let project_key = open.project_key.clone();
+                let events = self.commit_prepared_project_open(open, prepared.request.source);
+                self.record_project_open_route(prepared.request.id);
+                self.settle_project_open_waiter(prepared.request.id, Ok(project_key));
                 events
             }
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::CloneProjectError {
-                message: error,
-            })],
+            #[cfg(test)]
+            Ok(ProjectNavigationPayload::Switch(switch)) => {
+                let ProjectNavigationSource::Switch { tab_id } = &prepared.request.source else {
+                    return Vec::new();
+                };
+                if tab_id != &switch.tab_id
+                    || prepared
+                        .request
+                        .target_incarnation
+                        .as_ref()
+                        .is_none_or(|incarnation| incarnation.project_key != switch.project_key)
+                {
+                    return Vec::new();
+                }
+                self.pending_project_navigation = None;
+                if let Some(tab) = self.tab(&switch.tab_id) {
+                    self.spawn_work_events_ingest_for_project_key(
+                        tab.project_root.clone(),
+                        switch.project_key,
+                        false,
+                        None,
+                    );
+                }
+                Vec::new()
+            }
         }
+    }
+
+    fn commit_prepared_project_open(
+        &mut self,
+        prepared: PreparedProjectOpen,
+        source: ProjectNavigationSource,
+    ) -> Vec<OutboundEvent> {
+        self.remember_prepared_recent_project(&prepared);
+        let existing_tab_id =
+            self.project_tab_incarnations
+                .iter()
+                .find_map(|(tab_id, incarnation)| {
+                    (incarnation.project_key == prepared.project_key).then(|| tab_id.clone())
+                });
+        let (tab_id, new_tab) = if let Some(tab_id) = existing_tab_id {
+            (tab_id, false)
+        } else {
+            let tab_id = format!("project-{}", Uuid::new_v4().simple());
+            self.tabs.push(ProjectTabRuntime {
+                id: tab_id.clone(),
+                title: prepared.target.title.clone(),
+                project_root: prepared.target.project_root.clone(),
+                kind: prepared.target.kind,
+                workspace: WindowCanvasState::from_persisted(prepared.workspace),
+                migration_pending: prepared.target.needs_migration,
+                main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+            });
+            let generation = self.next_project_incarnation;
+            self.next_project_incarnation = self.next_project_incarnation.saturating_add(1);
+            self.project_tab_incarnations.insert(
+                tab_id.clone(),
+                ProjectIncarnation {
+                    project_key: prepared.project_key.clone(),
+                    generation,
+                    project_root: prepared.target.project_root.clone(),
+                    migration_pending: prepared.target.needs_migration,
+                },
+            );
+            (tab_id, true)
+        };
+
+        self.refresh_project_state(&tab_id);
+        if new_tab {
+            // Persisted windows need addresses before restore or frontend requests.
+            // Register only this Project: rebuilding the global lookup would
+            // invalidate unrelated Projects' window lifecycle generations.
+            let window_ids = self
+                .tab(&tab_id)
+                .expect("opened project tab")
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(|window| window.id.clone())
+                .collect::<Vec<_>>();
+            for window_id in window_ids {
+                self.register_window(&tab_id, &window_id);
+            }
+        }
+        let context = self
+            .project_context(&tab_id)
+            .expect("opened project context");
+        #[cfg(test)]
+        self.set_active_tab(tab_id.clone());
+        self.register_project_log_scope(&tab_id);
+        let project_scope = self.project_log_scope_for_tab(&tab_id).cloned();
+        let _project_scope = project_scope.as_ref().map(|scope| scope.enter());
+        if let ProjectNavigationSource::Clone { workspace_home } = &source {
+            self.remember_recent_clone_workspace_home(workspace_home);
+        }
+        let _ = self.persist();
+
+        let mut events = vec![
+            self.hub_state_broadcast(),
+            self.workspace_state_broadcast(&context),
+            OutboundEvent::hub(BackendEvent::ProjectOpened {
+                project_key: prepared.project_key.to_string(),
+                title: prepared.target.title.clone(),
+                request_id: match &source {
+                    ProjectNavigationSource::Open { request_id } => request_id.clone(),
+                    _ => None,
+                },
+            }),
+        ];
+        if new_tab {
+            events.extend(
+                self.restore_prepared_open_project_windows(&tab_id, prepared.window_restores),
+            );
+            events.extend(self.ensure_pm_agent_for_tab(
+                &tab_id,
+                crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+            ));
+            self.spawn_work_events_ingest_for_project_key(
+                prepared.target.project_root.clone(),
+                prepared.project_key,
+                true,
+                None,
+            );
+        }
+        // Window restore and PM ensure may report intermediate PM state.
+        // Replace those snapshots at this aggregation boundary with one final
+        // active-project bundle after every restore and ensure mutation has
+        // settled.
+        events.retain(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. }));
+        events.extend(self.project_snapshot_broadcasts(&context));
+        if let Some(snapshot) = prepared.migration.as_ref() {
+            events.push(OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::MigrationDetected {
+                    tab_id: tab_id.clone(),
+                    project_root: prepared.target.project_root.display().to_string(),
+                    branch: snapshot.branch.clone(),
+                    has_dirty: snapshot.has_dirty,
+                    has_locked: snapshot.has_locked,
+                    has_submodules: snapshot.has_submodules,
+                },
+            ));
+            if snapshot.has_backup {
+                let tab = self.tab(&tab_id).expect("opened project tab");
+                events.push(OutboundEvent::project(
+                    context.project_key.clone(),
+                    self.migration_backup_error_event_for(tab),
+                ));
+            }
+        }
+        if let ProjectNavigationSource::Clone { workspace_home } = source {
+            events.push(OutboundEvent::hub(BackendEvent::CloneProjectDone {
+                workspace_home: workspace_home.display().to_string(),
+            }));
+        }
+        events
+    }
+
+    /// Issue #2867: Recent Projects は同一プロジェクトの worktree で埋め尽く
+    /// されないよう、`target.project_root` を workspace home に正規化してから
+    /// 登録する。タブ open 時の direct-pick semantics は `target.title` 側で
+    /// 保持する（例: git subdir を選んだ場合の選択ディレクトリ名）。
+    fn remember_prepared_recent_project(&mut self, prepared: &PreparedProjectOpen) {
+        let title = if prepared.recent_path == prepared.target.project_root {
+            prepared.target.title.clone()
+        } else {
+            gwt::project_title_from_path(&prepared.recent_path)
+        };
+        self.recent_projects
+            .retain(|entry| !same_worktree_path(&entry.path, &prepared.recent_path));
+        self.recent_projects.insert(
+            0,
+            gwt::RecentProjectEntry {
+                path: prepared.recent_path.clone(),
+                title,
+                kind: prepared.target.kind,
+            },
+        );
+        self.recent_projects.truncate(12);
+        self.remember_recent_project_key(
+            prepared.recent_path.clone(),
+            prepared.project_key.clone(),
+        );
+    }
+
+    pub(crate) fn refresh_project_tab_incarnation(&mut self, tab_id: &str) {
+        let window_ids = self
+            .window_lookup
+            .iter()
+            .filter(|(_, address)| address.tab_id == tab_id)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for window_id in window_ids {
+            self.invalidate_launch_delivery_ack(&window_id);
+            self.pending_launch_completions.remove(&window_id);
+        }
+        let Some(tab) = self.tab(tab_id).cloned() else {
+            self.project_tab_incarnations.remove(tab_id);
+            self.refresh_project_state(tab_id);
+            return;
+        };
+        let generation = self.next_project_incarnation;
+        self.next_project_incarnation = self.next_project_incarnation.saturating_add(1);
+        self.project_tab_incarnations.insert(
+            tab_id.to_string(),
+            ProjectIncarnation {
+                project_key: gwt_core::paths::resolve_project_scope(&tab.project_root).hash,
+                generation,
+                project_root: tab.project_root,
+                migration_pending: tab.migration_pending,
+            },
+        );
+        self.refresh_project_state(tab_id);
     }
 
     fn remember_recent_clone_workspace_home(&mut self, workspace_home: &Path) {
@@ -350,39 +934,6 @@ impl AppRuntime {
         if self.recent_projects.len() > 12 {
             self.recent_projects.truncate(12);
         }
-    }
-
-    pub(crate) fn open_project_path(&mut self, path: PathBuf) -> Result<bool, String> {
-        let target = resolve_project_target(&path)?;
-        if let Some(existing) = self
-            .tabs
-            .iter()
-            .find(|tab| same_worktree_path(&tab.project_root, &target.project_root))
-            .map(|tab| tab.id.clone())
-        {
-            let wizard_closed = self.set_active_tab(existing);
-            self.remember_recent_project(&target);
-            self.persist().map_err(|error| error.to_string())?;
-            return Ok(wizard_closed);
-        }
-
-        let tab_id = format!("project-{}", Uuid::new_v4().simple());
-        self.tabs.push(ProjectTabRuntime {
-            id: tab_id.clone(),
-            title: target.title.clone(),
-            project_root: target.project_root.clone(),
-            kind: target.kind,
-            workspace: WindowCanvasState::from_persisted({
-                load_restored_workspace_state(&target.project_root)
-                    .map_err(|error| error.to_string())?
-            }),
-            migration_pending: target.needs_migration,
-            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
-        });
-        let wizard_closed = self.set_active_tab(tab_id);
-        self.remember_recent_project(&target);
-        self.persist().map_err(|error| error.to_string())?;
-        Ok(wizard_closed)
     }
 
     fn migration_detected_event_for(&self, tab: &ProjectTabRuntime) -> BackendEvent {
@@ -422,99 +973,175 @@ impl AppRuntime {
 
     /// SPEC-1934 US-6.1 broadcast variant: used by `open_project_path_events`
     /// to inform every connected frontend that a tab needs migration.
+    #[cfg(test)]
     pub(crate) fn migration_detected_broadcasts(&self) -> Vec<OutboundEvent> {
         self.tabs
             .iter()
             .filter(|tab| tab.migration_pending)
-            .map(|tab| OutboundEvent::broadcast(self.migration_detected_event_for(tab)))
-            .collect()
-    }
-
-    /// SPEC-1934 US-6.6/T-085: if a previous migration was interrupted after
-    /// Backup, surface the leftover snapshot on launch so the user does not
-    /// start another destructive migration over an unresolved backup.
-    pub(crate) fn migration_recovery_broadcasts(&self) -> Vec<OutboundEvent> {
-        self.tabs
-            .iter()
-            .filter(|tab| tab.migration_pending && Self::has_migration_backup(tab))
-            .map(|tab| OutboundEvent::broadcast(self.migration_backup_error_event_for(tab)))
+            .map(|tab| {
+                OutboundEvent::project(
+                    self.project_key_for_tab(&tab.id).unwrap().clone(),
+                    self.migration_detected_event_for(tab),
+                )
+            })
             .collect()
     }
 
     /// SPEC-1934 US-6.1 reply variant: used by `frontend_sync_events` so a
     /// freshly-connected frontend learns about pending migrations during
     /// state hydration without resending to other clients.
-    pub(crate) fn migration_detected_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn migration_detected_replies(
+        &self,
+        client_id: &str,
+        context: &ProjectContext,
+    ) -> Vec<OutboundEvent> {
         self.tabs
             .iter()
-            .filter(|tab| tab.migration_pending)
+            .filter(|tab| tab.id == context.tab_id && tab.migration_pending)
             .map(|tab| OutboundEvent::reply(client_id, self.migration_detected_event_for(tab)))
             .collect()
     }
 
-    pub(crate) fn migration_recovery_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn migration_recovery_replies(
+        &self,
+        client_id: &str,
+        context: &ProjectContext,
+    ) -> Vec<OutboundEvent> {
         self.tabs
             .iter()
-            .filter(|tab| tab.migration_pending && Self::has_migration_backup(tab))
+            .filter(|tab| {
+                tab.id == context.tab_id && tab.migration_pending && Self::has_migration_backup(tab)
+            })
             .map(|tab| OutboundEvent::reply(client_id, self.migration_backup_error_event_for(tab)))
             .collect()
     }
 
-    /// SPEC-1934 FR-019: user accepted the migration confirmation modal.
-    ///
-    /// Issue #2867: Recent Projects は同一プロジェクトの worktree で埋め尽く
-    /// されないよう、`target.project_root` を workspace home に正規化してから
-    /// 登録する。タブ open 時の direct-pick semantics は `target` 側で保持。
-    pub(crate) fn remember_recent_project(&mut self, target: &ProjectOpenTarget) {
-        let recent_path = normalize_recent_project_path(&target.project_root);
-        let recent_title = if recent_path == target.project_root {
-            target.title.clone()
-        } else {
-            gwt::project_title_from_path(&recent_path)
-        };
-        self.recent_projects
-            .retain(|entry| !same_worktree_path(&entry.path, &recent_path));
-        self.recent_projects.insert(
-            0,
-            gwt::RecentProjectEntry {
-                path: recent_path,
-                title: recent_title,
-                kind: target.kind,
-            },
-        );
-        if self.recent_projects.len() > 12 {
-            self.recent_projects.truncate(12);
-        }
-    }
-
+    #[cfg(test)]
     pub(crate) fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        if !self.tabs.iter().any(|tab| tab.id == tab_id) {
+        // Issue #4145 AC-1: the whole user-visible switch runs synchronously on
+        // the GUI event loop here, so this guard is the switch route.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::ProjectSwitch);
+        let Some(target_incarnation) = self.project_tab_incarnations.get(tab_id).cloned() else {
             return Vec::new();
-        }
-        let wizard_closed = self.set_active_tab(tab_id.to_string());
+        };
+        let project_root = target_incarnation.project_root.clone();
+        let context = self
+            .project_context(tab_id)
+            .expect("selected project context");
+        #[cfg(test)]
+        self.set_active_tab(tab_id.to_string());
+        let request = self.reserve_project_navigation(
+            ProjectNavigationSource::Switch {
+                tab_id: tab_id.to_string(),
+            },
+            Some(target_incarnation),
+        );
         let _ = self.persist();
-        // SPEC-2359 W-16 (FR-387): tab changes piggyback the cross-machine
-        // intake, throttled to once per 30s per project.
-        if let Some(project_root) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .map(|tab| tab.project_root.clone())
+        let request_for_worker = request.clone();
+        let tab_id_for_worker = tab_id.to_string();
+        let proxy = self.proxy.clone();
+        let prepare_error = self
+            .blocking_tasks
+            .try_spawn(move || {
+                proxy.send(UserEvent::ProjectNavigationPrepared(Box::new(
+                    ProjectNavigationPrepared {
+                        request: request_for_worker,
+                        result: prepare_project_switch(tab_id_for_worker, project_root),
+                    },
+                )));
+            })
+            .err();
+        if prepare_error.is_some()
+            && self
+                .pending_project_navigation
+                .as_ref()
+                .is_some_and(|pending| pending.id == request.id)
         {
-            self.spawn_work_events_ingest(project_root, false);
+            self.pending_project_navigation = None;
         }
-        let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-            events.push(event);
-        }
-        if wizard_closed {
-            events.push(self.launch_wizard_state_broadcast(None));
+        let mut events = vec![self.workspace_state_broadcast(&context)];
+        events.extend(self.project_snapshot_broadcasts(&context));
+        if let Some(error) = prepare_error {
+            events.extend(self.project_open_error_events(&request.source, error));
         }
         events
     }
 
+    /// Route explicit close requests before normal Project dispatch so stale
+    /// connections receive a deterministic client-only error, even after close.
+    pub(super) fn close_project_request_events(
+        &mut self,
+        client_id: &str,
+        event: &FrontendEvent,
+        scope: &super::ClientScope,
+    ) -> Option<Vec<OutboundEvent>> {
+        let (project_key, token) = match event {
+            FrontendEvent::PreviewCloseProject { project_key } => (project_key, None),
+            FrontendEvent::ConfirmCloseProject { token }
+            | FrontendEvent::CancelCloseProject { token } => (&token.project_key, Some(token)),
+            _ => return None,
+        };
+        let error = || {
+            let event = BackendEvent::CloseProjectError {
+                project_key: project_key.clone(),
+                message: "Close request expired or unauthorized. Try Close Project again.".into(),
+            };
+            Some(vec![OutboundEvent::reply(client_id.to_string(), event)])
+        };
+        if matches!(scope, super::ClientScope::Project(key) if key.as_str() != project_key) {
+            return error();
+        }
+        let Some(context) = self
+            .project_contexts()
+            .into_iter()
+            .find(|context| context.project_key.as_str() == project_key)
+        else {
+            return error();
+        };
+        if let Some(token) = token {
+            let Some(state) = self.project_state_mut(&context) else {
+                return error();
+            };
+            if token.generation != context.generation
+                || state.close_project_nonces.get(client_id) != Some(&token.nonce)
+            {
+                return error();
+            }
+            state.close_project_nonces.remove(client_id);
+            return Some(
+                if matches!(event, FrontendEvent::ConfirmCloseProject { .. }) {
+                    self.close_project_tab_events(&context.tab_id)
+                } else {
+                    Vec::new()
+                },
+            );
+        }
+        let tab = self.tabs.iter().find(|tab| tab.id == context.tab_id)?;
+        let title = tab.title.clone();
+        let running_agents =
+            crate::runtime_support::collect_running_agents(&tab.workspace.persisted().windows);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        self.project_state_mut(&context)?
+            .close_project_nonces
+            .insert(client_id.to_string(), nonce.clone());
+        Some(vec![OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::CloseProjectPreview {
+                token: gwt::protocol::CloseProjectToken {
+                    project_key: project_key.clone(),
+                    generation: context.generation,
+                    nonce,
+                },
+                title,
+                running_agents,
+            },
+        )])
+    }
+
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        let previous_project_root = self.active_project_root().map(Path::to_path_buf);
+        let Some(context) = self.project_context(tab_id) else {
+            return Vec::new();
+        };
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
@@ -533,47 +1160,37 @@ impl AppRuntime {
             })
             .unwrap_or_default();
         for window_id in &window_ids {
-            self.clear_agent_window_startup_restore(window_id);
-            self.stop_window_runtime(window_id);
-            self.remove_window_state_tracking(window_id);
+            self.queue_accepted_window_close_finalizer(
+                window_id,
+                Some(closing_project_root.clone()),
+                true,
+                None,
+            );
             self.window_lookup.remove(window_id);
-            self.profile_selections.remove(window_id);
         }
-
-        // Return any Issue Monitor launched windows to pending before the tab is
-        // removed. The closing tab owns this lifecycle even when another tab is
-        // active. Closing a project pauses (does not complete) its in-flight work.
-        let issue_monitor_events =
-            self.issue_monitor_windows_closed_events(&closing_project_root, &window_ids);
 
         self.tabs.remove(index);
-        if self.tabs.is_empty() {
-            self.active_tab_id = None;
-        } else if self.active_tab_id.as_deref() == Some(tab_id) {
-            let next_index = index.saturating_sub(1).min(self.tabs.len() - 1);
-            self.active_tab_id = self.tabs.get(next_index).map(|tab| tab.id.clone());
-        }
-
-        let wizard_closed = self
-            .launch_wizard
-            .as_ref()
-            .is_some_and(|wizard| wizard.tab_id == tab_id);
-        if wizard_closed {
-            self.launch_wizard = None;
-        }
-        if self.active_project_root().map(Path::to_path_buf) != previous_project_root {
-            self.schedule_active_improvement_candidates_refresh();
-        }
+        self.project_log_scopes.remove(tab_id);
+        let project_still_open = self
+            .tabs
+            .iter()
+            .any(|tab| same_worktree_path(&tab.project_root, &closing_project_root));
+        self.discard_active_work_projection_for_closed_tab(
+            tab_id,
+            &closing_project_root,
+            project_still_open,
+        );
+        self.project_tab_incarnations.remove(tab_id);
+        self.refresh_project_state(tab_id);
         let _ = self.persist();
-
-        let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-            events.push(event);
-        }
-        if wizard_closed {
-            events.push(self.launch_wizard_state_broadcast(None));
-        }
-        events.extend(issue_monitor_events);
-        events
+        vec![
+            OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::ProjectClosed {
+                    project_key: context.project_key.to_string(),
+                },
+            ),
+            self.hub_state_broadcast(),
+        ]
     }
 }

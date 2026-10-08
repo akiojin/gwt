@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use gwt::worktree_inventory::{
-    enumerate_worktrees, enumerate_worktrees_with_sessions_dir, WorktreeEntryKind,
-};
+use gwt::worktree_inventory::{enumerate_worktrees, WorktreeEntryKind};
 use gwt_core::process::hidden_command;
 use tempfile::tempdir;
 
@@ -167,7 +165,10 @@ fn enumerate_worktrees_lists_entries_from_workspace_home_with_child_bare_repo() 
 }
 
 #[test]
-fn enumerate_worktrees_includes_session_ids_for_each_worktree() {
+fn worktree_entries_carry_no_session_ids() {
+    // Issue #4377: the inventory used to parse every Session TOML under
+    // `~/.gwt/sessions` to attach session ids that nothing read, once per
+    // project tab at startup. The picker contract has no such field.
     let dir = tempdir().expect("tempdir");
     let repo = dir.path().join("repo");
     init_repo(&repo);
@@ -183,24 +184,16 @@ fn enumerate_worktrees_includes_session_ids_for_each_worktree() {
         ],
         &repo,
     );
-    let sessions_dir = dir.path().join("sessions");
-    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-    for session_id in ["session-b", "session-a"] {
-        let mut session =
-            gwt_agent::Session::new(&worktree_path, "feature/a", gwt_agent::AgentId::Codex);
-        session.id = session_id.to_string();
-        session.save(&sessions_dir).expect("save session");
-    }
-    let mut main_session = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::ClaudeCode);
-    main_session.id = "session-main".to_string();
-    main_session.save(&sessions_dir).expect("save main session");
 
-    let entries = enumerate_worktrees_with_sessions_dir(&repo, Some(&worktree_path), &sessions_dir)
-        .expect("inventory");
+    let entries = enumerate_worktrees(&repo, Some(&worktree_path)).expect("inventory");
 
-    assert_eq!(entries[0].session_ids, vec!["session-main".to_string()]);
-    assert_eq!(
-        entries[1].session_ids,
-        vec!["session-a".to_string(), "session-b".to_string()]
+    assert_eq!(entries.len(), 2);
+    let json = serde_json::to_value(&entries).expect("serialize entries");
+    assert!(
+        json.as_array()
+            .expect("entries array")
+            .iter()
+            .all(|entry| entry.get("session_ids").is_none()),
+        "worktree entries must not carry session ids: {json}"
     );
 }

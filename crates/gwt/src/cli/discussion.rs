@@ -155,8 +155,15 @@ pub fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     match command {
         DiscussionCommand::Update(update) => {
-            let path =
-                update_discussion_entry(env.repo_path(), &update).map_err(io_as_spec_error)?;
+            // Issue #3465: stamp the owning session at the edge so the
+            // project-scoped discussion log stays shareable while the Stop
+            // gate can tell whose discussion an entry is.
+            let origin_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty());
+            let path = update_discussion_entry(env.repo_path(), &update, origin_session.as_deref())
+                .map_err(io_as_spec_error)?;
             out.push_str(&format!("discussion updated: {}\n", path.display()));
             Ok(0)
         }
@@ -178,6 +185,7 @@ pub fn migrate_legacy_discussions_file(repo_root: &Path) -> std::io::Result<bool
 fn update_discussion_entry(
     repo_root: &Path,
     update: &DiscussionUpdateCommand,
+    origin_session: Option<&str>,
 ) -> std::io::Result<PathBuf> {
     let path = gwt_core::paths::gwt_work_notes_discussions_path(repo_root);
     crate::work_notes::with_work_notes_lock(repo_root, || {
@@ -190,7 +198,7 @@ fn update_discussion_entry(
             .clone()
             .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
         let heading = format!("## {date} — {}", update.title);
-        let entry = format_discussion_entry(&date, update);
+        let entry = format_discussion_entry(&date, update, origin_session);
         content = replace_or_append_section(&content, &heading, &entry);
         fs::write(&path, content)
     })?;
@@ -204,7 +212,11 @@ fn ensure_discussions_file(path: &Path) -> std::io::Result<()> {
     fs::write(path, DEFAULT_DISCUSSIONS_HEADER)
 }
 
-fn format_discussion_entry(date: &str, update: &DiscussionUpdateCommand) -> String {
+fn format_discussion_entry(
+    date: &str,
+    update: &DiscussionUpdateCommand,
+    origin_session: Option<&str>,
+) -> String {
     let related_specs = if update.related_specs.is_empty() {
         String::new()
     } else {
@@ -215,8 +227,16 @@ fn format_discussion_entry(date: &str, update: &DiscussionUpdateCommand) -> Stri
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let origin_session = origin_session
+        .map(|id| {
+            format!(
+                "{field}: {id}\n",
+                field = crate::discussion_resume::ORIGIN_SESSION_FIELD
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "## {date} — {title}\n\nStatus: {status}\nTopics: {topics}\nRelated SPECs: {related_specs}\nRelated Works: {related_works}\nPromoted To: {promoted_to}\n\nSummary:\n{summary}\n\nDecisions:\n{decisions}\n\nOpen Questions:\n{open_questions}\n\nNext:\n{next}\n",
+        "## {date} — {title}\n\nStatus: {status}\n{origin_session}Topics: {topics}\nRelated SPECs: {related_specs}\nRelated Works: {related_works}\nPromoted To: {promoted_to}\n\nSummary:\n{summary}\n\nDecisions:\n{decisions}\n\nOpen Questions:\n{open_questions}\n\nNext:\n{next}\n",
         title = update.title,
         status = update.status,
         topics = update.topics.join(", "),
@@ -262,6 +282,10 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
         .find("\n## ")
         .map(|index| start + heading.len() + index + 1)
         .unwrap_or(content.len());
+    // Issue #4434: proposals are `### Proposal ...` blocks stored *inside*
+    // the entry being replaced. Carry them over, or the update silently
+    // drops them along with the fields it is refreshing.
+    let entry = preserve_existing_proposal_blocks(entry, &content[start..next]);
     let mut output = String::new();
     output.push_str(content[..start].trim_end());
     output.push_str("\n\n");
@@ -271,6 +295,85 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
     output
 }
 
+/// Re-attaches the proposal blocks of the entry being replaced to the freshly
+/// formatted entry, so they keep following their own discussion fields.
+fn preserve_existing_proposal_blocks(entry: &str, existing_section: &str) -> String {
+    let Some(blocks) = proposal_blocks(existing_section) else {
+        return entry.to_string();
+    };
+    let mut output = entry.trim_end().to_string();
+    output.push_str("\n\n");
+    output.push_str(blocks.trim());
+    output.push('\n');
+    output
+}
+
+/// Returns the tail of `section` starting at its first `### Proposal ` heading.
+fn proposal_blocks(section: &str) -> Option<&str> {
+    let mut offset = 0;
+    for line in section.split_inclusive('\n') {
+        if line.trim_start().starts_with("### Proposal ") {
+            return Some(&section[offset..]);
+        }
+        offset += line.len();
+    }
+    None
+}
+
 fn io_as_spec_error(err: std::io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gwt_core::test_support::ScopedGwtHome;
+
+    fn update_command(summary: &str) -> DiscussionUpdateCommand {
+        DiscussionUpdateCommand {
+            date: Some("2026-09-16".to_string()),
+            title: "Proposal survival across updates".to_string(),
+            status: "active".to_string(),
+            topics: Vec::new(),
+            related_specs: Vec::new(),
+            related_works: Vec::new(),
+            promoted_to: Vec::new(),
+            summary: summary.to_string(),
+            decisions: Vec::new(),
+            open_questions: Vec::new(),
+            next: "Continue".to_string(),
+        }
+    }
+
+    /// Issue #4434 (AC-3): a proposal that survives the entry replacement has
+    /// to stay where `discussion_resume` looks for it, so the resume prompt
+    /// still picks it up after the update.
+    #[test]
+    fn preserved_proposal_stays_visible_to_discussion_resume() {
+        let repo = tempfile::tempdir().expect("repo");
+        let _home = ScopedGwtHome::set(repo.path().join("gwt-home"));
+
+        let path = update_discussion_entry(repo.path(), &update_command("Initial summary"), None)
+            .expect("first update");
+        let mut seeded = fs::read_to_string(&path).expect("read discussions");
+        seeded.push_str(
+            "\n### Proposal A - Preserve proposals on update [active]\n\
+             - Implementation Proof: pending\n\
+             - Next Question: Keep this proposal while refreshing the summary?\n",
+        );
+        fs::write(&path, seeded).expect("append proposal");
+
+        update_discussion_entry(repo.path(), &update_command("Updated summary"), None)
+            .expect("second update");
+
+        let pending = crate::discussion_resume::load_pending_resume(repo.path())
+            .expect("load pending resume")
+            .expect("preserved proposal must still be a resume candidate");
+        assert_eq!(pending.proposal_label, "Proposal A");
+        assert_eq!(pending.proposal_title, "Preserve proposals on update");
+        assert_eq!(
+            pending.next_question.as_deref(),
+            Some("Keep this proposal while refreshing the summary?")
+        );
+    }
 }

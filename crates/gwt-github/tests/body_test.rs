@@ -249,6 +249,39 @@ fn mk_part_comment(id: u64, name: &str, index: u32, total: u32, content: &str) -
     }
 }
 
+#[test]
+fn index_diagnostics_report_all_missing_and_orphan_parts_without_parsing_body() {
+    let body = mk_split_body("plan", &[111, 222]);
+    let comments = [
+        mk_part_comment(333, "plan", 1, 2, "alpha"),
+        mk_part_comment(444, "plan", 2, 2, "beta"),
+        mk_comment(555, "tasks", "orphan tasks"),
+    ];
+    assert!(SpecBody::parse(&body, &comments).is_err());
+    assert_eq!(
+        gwt_github::body::diagnose_index(&body, &comments).unwrap(),
+        "missing: section=plan comment:111\nmissing: section=plan comment:222\n\
+orphan: section=plan comment:333 part=1/2\n\
+orphan: section=plan comment:444 part=2/2\n\
+orphan: section=tasks comment:555 part=unmarked"
+    );
+}
+
+#[test]
+fn index_diagnostics_accept_referenced_artifacts_and_ordinary_comments() {
+    let body = mk_body("s", "t", 42);
+    let comments = [
+        mk_comment(42, "plan", "p"),
+        Comment {
+            id: 43,
+            body: "ordinary discussion".into(),
+        },
+    ];
+    assert!(gwt_github::body::diagnose_index(&body, &comments)
+        .unwrap()
+        .is_empty());
+}
+
 // RED-80: a part is missing (totals say 3, only parts 1 and 2 referenced) —
 // parse must fail closed instead of silently joining a truncated section.
 #[test]

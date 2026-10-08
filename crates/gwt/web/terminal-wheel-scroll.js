@@ -49,12 +49,24 @@ export function hasNormalScrollback(terminal) {
   return Number(terminal?.buffer?.active?.baseY || 0) > 0;
 }
 
+// Issue #4909 AC-6: an application that enabled mouse tracking already receives
+// the wheel as mouse events from xterm.js, so a synthesized PageUp/PageDown
+// would reach it twice. Codex TUI opens its transcript overlay on PageUp and
+// routes the following keystrokes to Find, so the fallback must stay silent
+// there and only serve applications that handle no mouse input (Claude Code).
 export function applicationScrollInputForWheel(
   event,
   { terminal, enabled } = {},
 ) {
   const isEnabled = typeof enabled === "function" ? enabled() : Boolean(enabled);
-  if (!isEnabled || !event || event.ctrlKey || event.metaKey || hasNormalScrollback(terminal)) {
+  if (
+    !isEnabled ||
+    !event ||
+    event.ctrlKey ||
+    event.metaKey ||
+    hasNormalScrollback(terminal) ||
+    isTerminalMouseTrackingActive(terminal)
+  ) {
     return null;
   }
   const deltaY = Number(event.deltaY || 0);

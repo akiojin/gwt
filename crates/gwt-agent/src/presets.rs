@@ -18,10 +18,8 @@ use serde_json::Value;
 /// The `ClaudeCodeOpenaiCompat` preset predates the Backend Override
 /// schema (`[builtinAgents.<agent>.backends.<id>]`). New callers should
 /// use `crates/gwt/src/backend_service.rs::add_agent_backend` instead;
-/// FR-101 silent migration moves any rows still seeded through this preset
-/// into the new section on next gwt startup. The preset is preserved for
-/// backwards compatibility with persisted user configs and is scheduled
-/// for removal in a future major version.
+/// Existing rows remain readable, but are not automatically migrated.
+/// Re-register their provider in Settings before launching (#4825).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresetId {
@@ -31,8 +29,7 @@ pub enum PresetId {
     /// Superseded by [`crate::backend::AgentBackendProfile`] +
     /// `backend_store::add_backend(_, BuiltinAgentId::ClaudeCode, ...)`.
     /// Use the new path for any new Settings UI dispatch; this variant is
-    /// kept only so older clients can still seed rows that the next
-    /// `gwt_agent::migrate_legacy_backend_rows` scan migrates forward.
+    /// retained for reading legacy preset identifiers.
     ClaudeCodeOpenaiCompat,
 }
 
@@ -272,10 +269,6 @@ pub fn claude_code_openai_compat_preset(
         "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".to_string(),
         "1".to_string(),
     );
-    env.insert(
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
-        "1".to_string(),
-    );
 
     CustomCodingAgent {
         id: id.into(),
@@ -318,12 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn preset_env_contains_twelve_entries() {
+    fn preset_env_contains_eleven_entries() {
         let preset = claude_code_openai_compat_preset("x", "X", "http://a", "k", "m");
         assert_eq!(
             preset.env.len(),
-            12,
-            "preset must seed exactly 12 env vars and avoid legacy no-flicker defaults"
+            11,
+            "preset must seed exactly 11 env vars and avoid legacy no-flicker defaults"
         );
     }
 
@@ -348,7 +341,6 @@ mod tests {
             "DISABLE_ERROR_REPORTING",
             "DISABLE_FEEDBACK_COMMAND",
             "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         ];
         for key in expected_keys {
             assert!(
@@ -408,7 +400,10 @@ mod tests {
         assert_eq!(preset.env["DISABLE_ERROR_REPORTING"], "1");
         assert_eq!(preset.env["DISABLE_FEEDBACK_COMMAND"], "1");
         assert_eq!(preset.env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"], "1");
-        assert_eq!(preset.env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
+        assert!(!preset
+            .env
+            .contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
+        assert!(!preset.env.contains_key("DISABLE_AUTOUPDATER"));
     }
 
     #[test]
@@ -437,7 +432,7 @@ mod tests {
 
         assert_eq!(preset.id, "claude-code-openai");
         assert_eq!(preset.command, "@anthropic-ai/claude-code@latest");
-        assert_eq!(preset.env.len(), 12);
+        assert_eq!(preset.env.len(), 11);
         assert_eq!(
             preset.env["ANTHROPIC_BASE_URL"],
             "https://proxy.example.com"

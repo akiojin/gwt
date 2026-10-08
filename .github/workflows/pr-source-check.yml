@@ -6,29 +6,57 @@ on:
       - main
     types: [opened, reopened, synchronize]
 
+# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
+# update-branch `synchronize` starts a fresh run, and without this group the
+# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
+# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
+# only this PR's older run of this workflow. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check-source-branch:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
       - name: Check PR source branch
         env:
-          GH_TOKEN: ${{ github.token }}
           PR_HEAD_REF: ${{ github.head_ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
+          set -euo pipefail
           echo "PR head ref: $PR_HEAD_REF"
 
-          # Allow PRs only from develop branch
+          if [[ "$PR_HEAD_REPO" != "$GITHUB_REPOSITORY" ]]; then
+            echo "::error::Release PRs must originate in $GITHUB_REPOSITORY, not $PR_HEAD_REPO."
+            exit 1
+          fi
+
+          # Keep existing develop PRs compatible during the snapshot transition.
           if [[ "$PR_HEAD_REF" == develop ]]; then
             echo "Valid source branch: $PR_HEAD_REF"
             exit 0
           fi
 
-          echo "::error::PRs to main must come from the 'develop' branch only."
-          echo "::error::Current source branch: $PR_HEAD_REF"
-          echo ""
-          echo "Please:"
-          echo "1. Close this PR"
-          echo "2. Merge your changes into develop first"
-          echo "3. Use the /release command to create a proper release PR from develop"
-          exit 1
+          if [[ ! "$PR_HEAD_REF" =~ ^release/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::PRs to main require develop or a release/vX.Y.Z snapshot. Merge changes into develop first, then run Prepare Release."
+            exit 1
+          fi
+
+          git fetch --no-tags origin develop
+          SNAPSHOT=$(git merge-base HEAD FETCH_HEAD)
+          echo "Develop snapshot: $SNAPSHOT"
+          # Main base synchronization may add merge ancestry, but must never
+          # introduce content that has not already landed on develop.
+          if ! git diff --quiet "$SNAPSHOT" HEAD --; then
+            echo "::error::Release content differs from its develop snapshot. Merge changes into develop and prepare a new release; do not alter the frozen head."
+            git diff --name-only "$SNAPSHOT" HEAD --
+            exit 1
+          fi
+          echo "Valid frozen develop snapshot: $PR_HEAD_REF"

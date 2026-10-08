@@ -38,6 +38,94 @@ pub enum PmCommand {
         project_root: Option<String>,
         session_id: Option<String>,
     },
+    /// `pm.capabilities` (Issue #4249 FR-003) — what the PM can do through
+    /// JSON operations, and the owner action for everything it cannot.
+    Capabilities,
+}
+
+/// Why the PM cannot perform a capability itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityGapReason {
+    /// The operation exists but refuses these parameters by design.
+    Permission,
+    /// No operation exists for it yet.
+    MissingOperation,
+}
+
+/// One row of `pm.capabilities`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Capability {
+    pub operation: String,
+    /// The parameters this row is about; `None` means the operation as a whole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+    pub executable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<CapabilityGapReason>,
+    /// What the owner does instead, when the PM cannot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_action: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilitiesReport {
+    pub schema_version: u32,
+    pub capabilities: Vec<Capability>,
+}
+
+/// The things the PM cannot do. Only these are declared by hand; every
+/// executable row comes from the dispatch catalog, and the test fails when a
+/// missing operation lands or a permission row names an unknown operation.
+const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
+    (
+        "issue.monitor.config.set",
+        r#"{"enabled":true}"#,
+        CapabilityGapReason::Permission,
+        "Issue Monitor panel: Start",
+    ),
+    (
+        "issue.monitor.config.set",
+        r#"{"autonomous_mode":true}"#,
+        CapabilityGapReason::Permission,
+        "Issue Monitor panel: Autonomous switch -> On",
+    ),
+    (
+        "actions.dispatch",
+        "",
+        CapabilityGapReason::MissingOperation,
+        "GitHub Actions: Run workflow on the target workflow (e.g. prepare-release.yml)",
+    ),
+    (
+        "pr.close",
+        "",
+        CapabilityGapReason::MissingOperation,
+        "GitHub: Close pull request",
+    ),
+];
+
+pub(crate) fn capabilities_report() -> CapabilitiesReport {
+    let executable = crate::cli::operation_catalog::canonical_names().map(|name| Capability {
+        operation: name.to_string(),
+        params: None,
+        executable: true,
+        reason: None,
+        owner_action: None,
+    });
+    let gaps = CAPABILITY_GAPS
+        .iter()
+        .map(|(operation, params, reason, owner_action)| Capability {
+            operation: (*operation).to_string(),
+            params: (!params.is_empty())
+                .then(|| serde_json::from_str(params).expect("capability params are JSON")),
+            executable: false,
+            reason: Some(*reason),
+            owner_action: Some((*owner_action).to_string()),
+        });
+    CapabilitiesReport {
+        schema_version: 1,
+        capabilities: executable.chain(gaps).collect(),
+    }
 }
 
 /// Result of a `pm.stop`.
@@ -49,6 +137,9 @@ pub struct PmStopReport {
     /// this is not the caller's store, which is the whole point.
     pub project_dir: String,
     pub stopped_self: bool,
+    /// `false` when the target held no registration — a PM-worktree Session
+    /// that restore brought back (Issue #4394). Only its Session is retired.
+    pub registration_cleared: bool,
     /// Whether the durable Session record was marked terminal. `false` means
     /// the record was already gone; the registration is cleared either way.
     pub session_record_updated: bool,
@@ -93,6 +184,17 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             Ok(0)
         }
+        PmCommand::Capabilities => {
+            let rendered =
+                serde_json::to_string_pretty(&capabilities_report()).map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to serialize pm.capabilities report: {error}"
+                    )))
+                })?;
+            out.push_str(&rendered);
+            out.push('\n');
+            Ok(0)
+        }
         PmCommand::Stop {
             project_root,
             session_id,
@@ -117,11 +219,39 @@ fn resolve_repo_path<E: CliEnv>(env: &E, project_root: Option<String>) -> PathBu
         .unwrap_or_else(|| env.repo_path().to_path_buf())
 }
 
-fn ambient_session_id() -> Option<String> {
+pub(crate) fn ambient_session_id() -> Option<String> {
     std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// SPEC #4778 AC-1.
+///
+/// The resident PM is the user's standing delegate, so it is the one JSON
+/// caller that may turn the Issue Monitor back on. Authority is proved the same
+/// way `pm.stop` proves it — an ambient Session id that appears in this
+/// repository's PM registrations — so a stray envelope from any other process
+/// still cannot flip the switch.
+pub(crate) fn caller_is_registered_pm(repo_path: &Path) -> bool {
+    let Some(caller_session) = ambient_session_id() else {
+        return false;
+    };
+    // Two stores answer this question and neither covers the other: the
+    // per-path prefs file is the one a plain directory has, and the
+    // repository-scoped registry is the one that still resolves when the PM
+    // runs from a sibling worktree. Either registration is authority.
+    if pm_registry::session_is_registered_pm(
+        &pm_registry::pm_prefs_path_for_repo_path(repo_path),
+        &caller_session,
+    ) {
+        return true;
+    }
+    pm_registry::pm_repository_key(repo_path).is_some_and(|repository_key| {
+        pm_registry::pm_registrations_for_repository(&repository_key)
+            .iter()
+            .any(|record| record.registration.session_id == caller_session)
+    })
 }
 
 /// Issue #3607 AC-5/AC-6.
@@ -163,14 +293,31 @@ fn stop_pm(
     }
 
     let target_session = requested_session.unwrap_or(caller_session.as_str());
-    let Some(stopped) =
-        pm_registry::stop_pm_registration_in_repository(&repository_key, target_session)
-    else {
-        return Err(refusal(format!(
-            "pm.stop found no PM registered as Session {target_session} in this repository; run \
-             JSON operation `pm.status` and use a `session_id` from its \
-             `repository_registrations`"
-        )));
+    let (project_dir, registration_cleared) = match pm_registry::stop_pm_registration_in_repository(
+        &repository_key,
+        target_session,
+    ) {
+        Some(stopped) => (stopped.project_dir, true),
+        // Issue #4394 AC-4: an unregistered PM-worktree Session is a
+        // `registered: false` row of `pm.status`, so it must be retirable
+        // too. A registered Session never takes this path.
+        None => {
+            let Some(project_dir) = pm_registry::unregistered_pm_worktree_sessions(
+                &repository_key,
+                &registrations,
+                &gwt_sessions_dir(),
+            )
+            .into_iter()
+            .find(|session| session.id == target_session)
+            .and_then(|session| pm_registry::pm_worktree_store_dir(&session.worktree_path)) else {
+                return Err(refusal(format!(
+                    "pm.stop found no PM registered as Session {target_session} in this \
+                         repository; run JSON operation `pm.status` and use a `session_id` from \
+                         its `repository_registrations`"
+                )));
+            };
+            (project_dir, false)
+        }
     };
 
     // Clearing the registration ends PM authority, but restore resolves a
@@ -187,8 +334,9 @@ fn stop_pm(
     Ok(PmStopReport {
         schema_version: 1,
         stopped_session_id: target_session.to_string(),
-        project_dir: stopped.project_dir.display().to_string(),
+        project_dir: project_dir.display().to_string(),
         stopped_self: target_session == caller_session,
+        registration_cleared,
         session_record_updated,
     })
 }
@@ -202,6 +350,66 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use std::fs;
+
+    /// Issue #4249 AC-4 / T-121 / T-122: every dispatched operation is listed
+    /// as executable, straight from the catalog, and each thing the PM cannot
+    /// do carries why and the owner action that does it.
+    #[test]
+    fn capabilities_derive_from_the_catalog_and_explain_every_gap() {
+        let report = capabilities_report();
+        for name in crate::cli::operation_catalog::canonical_names() {
+            assert!(
+                report
+                    .capabilities
+                    .iter()
+                    .any(|entry| entry.operation == name
+                        && entry.params.is_none()
+                        && entry.executable),
+                "{name} is dispatched, so the PM can call it"
+            );
+        }
+        let dispatched = |name: &str| {
+            crate::cli::operation_catalog::canonical_names().any(|known| known == name)
+        };
+        let gaps = report
+            .capabilities
+            .iter()
+            .filter(|entry| !entry.executable)
+            .collect::<Vec<_>>();
+        assert!(!gaps.is_empty());
+        for gap in gaps {
+            assert!(gap.owner_action.as_deref().is_some_and(|a| !a.is_empty()));
+            match gap.reason {
+                Some(CapabilityGapReason::Permission) => assert!(
+                    dispatched(&gap.operation) && gap.params.is_some(),
+                    "{} is refused by parameter, not missing",
+                    gap.operation
+                ),
+                // A missing operation that lands must leave this list.
+                Some(CapabilityGapReason::MissingOperation) => assert!(
+                    !dispatched(&gap.operation),
+                    "{} is dispatched now; drop it from the missing list",
+                    gap.operation
+                ),
+                None => panic!("{} is not executable without a reason", gap.operation),
+            }
+        }
+
+        let autonomous_on = report
+            .capabilities
+            .iter()
+            .find(|entry| {
+                entry.operation == "issue.monitor.config.set"
+                    && entry.params == Some(serde_json::json!({"autonomous_mode": true}))
+            })
+            .expect("autonomous_mode ON is described");
+        assert!(!autonomous_on.executable);
+        assert_eq!(autonomous_on.reason, Some(CapabilityGapReason::Permission));
+        assert!(autonomous_on
+            .owner_action
+            .as_deref()
+            .is_some_and(|action| action.contains("Autonomous")));
+    }
 
     /// Issue #3607 AC-4: two project stores over one repository, the shape the
     /// incident produced. The `.git` / `commondir` pair is written by hand so
@@ -268,6 +476,7 @@ mod tests {
                         next_not_before: None,
                     }),
                     settings: pm_registry::PmSettings::default(),
+                    ..pm_registry::PmPrefs::default()
                 },
             )
             .expect("save prefs");
@@ -288,7 +497,7 @@ mod tests {
         }
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_lock() -> gwt_core::test_support::EnvLockGuard {
         crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -436,5 +645,71 @@ mod tests {
             views.iter().any(|view| !view.is_current_store),
             "the orphan's store must be flagged as a different store: {views:?}"
         );
+    }
+
+    /// Issue #4394 AC-4: a PM-worktree Session that restore brought back
+    /// without a registration must be visible to the PM, not only to
+    /// `pane.list`.
+    #[test]
+    fn status_lists_a_pm_worktree_session_that_holds_no_registration() {
+        let _lock = env_lock();
+        let fixture = Fixture::new(&["store-a"]);
+        fixture.register(0, "the-pm");
+        fixture.save_session(0, "the-pm");
+        fixture.save_session(0, "restored-orphan-pm");
+
+        let views = pm_registry::pm_repository_registration_views(&fixture.repo);
+
+        let orphan = views
+            .iter()
+            .find(|view| view.session_id == "restored-orphan-pm")
+            .unwrap_or_else(|| panic!("the unregistered PM must be listed: {views:?}"));
+        assert!(!orphan.registered, "{orphan:?}");
+        let registered: Vec<_> = views
+            .iter()
+            .filter(|view| view.session_id == "the-pm")
+            .collect();
+        assert_eq!(registered.len(), 1, "{views:?}");
+        assert!(registered[0].registered);
+        assert_eq!(
+            orphan.project_dir, registered[0].project_dir,
+            "the orphan must be attributed to the store whose PM worktree it runs in"
+        );
+        assert_eq!(orphan.is_current_store, registered[0].is_current_store);
+    }
+
+    /// Issue #4394 AC-4: the row is actionable — `pm.stop` retires an
+    /// unregistered PM-worktree Session so it neither runs on nor restores.
+    #[test]
+    fn stop_retires_an_unregistered_pm_worktree_session() {
+        let _lock = env_lock();
+        let fixture = Fixture::new(&["store-a"]);
+        let prefs = fixture.register(0, "the-pm");
+        fixture.save_session(0, "restored-orphan-pm");
+        let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "the-pm");
+
+        let report = stop_pm(&fixture.repo, Some("restored-orphan-pm")).expect("retire the orphan");
+
+        assert_eq!(report.stopped_session_id, "restored-orphan-pm");
+        assert!(!report.stopped_self);
+        assert!(!report.registration_cleared);
+        assert!(report.session_record_updated);
+        let retired = gwt_agent::Session::load_and_migrate(
+            &gwt_sessions_dir().join("restored-orphan-pm.toml"),
+        )
+        .expect("load retired session");
+        assert!(!retired.restore_window_on_startup);
+        assert_eq!(retired.status, gwt_agent::AgentStatus::Stopped);
+        assert_eq!(
+            pm_registry::load_pm_prefs(&prefs)
+                .expect("prefs")
+                .registration
+                .map(|registration| registration.session_id),
+            Some("the-pm".to_string()),
+            "retiring an orphan must not touch the real registration"
+        );
+        assert!(pm_registry::pm_repository_registration_views(&fixture.repo)
+            .iter()
+            .all(|view| view.session_id != "restored-orphan-pm"));
     }
 }

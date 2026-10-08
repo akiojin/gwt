@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     io,
     path::{Path, PathBuf},
@@ -8,6 +6,9 @@ use std::{
 use gwt_agent::PendingDiscussionResume;
 
 pub const DISCUSSION_RELATIVE_PATH: &str = ".gwt/discussion.md";
+/// Entry-level metadata field that records which agent session opened the
+/// discussion entry (Issue #3465). Written by `discussion.update`.
+pub const ORIGIN_SESSION_FIELD: &str = "Origin Session";
 pub const CANONICAL_DISCUSSIONS_DISPLAY_PATH: &str = ".gwt/work/discussions.md";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,18 +24,9 @@ struct DiscussionDocument {
     source: DiscussionSource,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ResumePromptSessionState {
-    pub last_source_event: Option<String>,
-    pub saw_session_start: bool,
-    pub fallback_armed: bool,
-    pub prompt_pending: bool,
-    pub last_handled_proposal: Option<String>,
-}
-
 pub fn load_pending_resume(worktree: &Path) -> io::Result<Option<PendingDiscussionResume>> {
-    for document in read_discussion_documents(worktree)? {
-        let proposals = parse_document_proposals(&document);
+    for document in read_discussion_documents(worktree, None)? {
+        let proposals = parse_document_proposals(&document, None);
         if let Some(pending) = select_pending_resume(&proposals) {
             return Ok(Some(pending));
         }
@@ -42,12 +34,13 @@ pub fn load_pending_resume(worktree: &Path) -> io::Result<Option<PendingDiscussi
     Ok(None)
 }
 
+#[cfg(test)]
 pub fn park_pending_resume(worktree: &Path, pending: &PendingDiscussionResume) -> io::Result<bool> {
     crate::work_notes::with_work_notes_lock(worktree, || {
         let Some(document) = read_mutable_discussion_document(worktree)? else {
             return Ok(false);
         };
-        let proposals = parse_document_proposals(&document);
+        let proposals = parse_document_proposals(&document, None);
         let Some(target) = proposals.into_iter().find(|proposal| {
             proposal.status == ProposalStatus::Active
                 && proposal.label == pending.proposal_label
@@ -71,29 +64,90 @@ pub fn park_pending_resume(worktree: &Path, pending: &PendingDiscussionResume) -
     })
 }
 
-/// Set a proposal's status label (e.g. `[active]` → `[chosen]`) by its
-/// label (e.g. `Proposal A`). Returns `Ok(true)` when the proposal was
-/// found in an `[active]` state and rewritten; `Ok(false)` otherwise.
-///
-/// Used by the `discuss.resolve|park|reject` JSON operations to let the LLM
-/// explicitly exit the `gwt-discussion` skill so the Stop-block handler
-/// (SPEC-1935 FR-014p) stays silent.
+/// Explicit historical target. An absent origin matches only unattributed
+/// entries; it never acts as a wildcard for another session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalTarget {
+    pub title: String,
+    pub origin_session: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalStatusUpdate {
+    pub label: String,
+    pub title: String,
+    pub origin_session: Option<String>,
+}
+
+/// Select, authorize, validate and update exactly one active proposal under
+/// the same lock. Rejections do not import or rewrite discussion documents.
 pub fn set_proposal_status_by_label(
     worktree: &Path,
     label: &str,
     new_status: &str,
-) -> io::Result<bool> {
+    current_session: Option<&str>,
+    explicit_target: Option<&ProposalTarget>,
+) -> io::Result<Option<ProposalStatusUpdate>> {
     crate::work_notes::with_work_notes_lock(worktree, || {
-        let Some(document) = read_mutable_discussion_document(worktree)? else {
-            return Ok(false);
+        let Some(document) = read_status_discussion_document(worktree)? else {
+            return Ok(None);
         };
-        let proposals = parse_document_proposals(&document);
-        let Some(target) = proposals
+        let candidates: Vec<_> = parse_document_proposals(&document, None)
             .into_iter()
-            .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
-        else {
-            return Ok(false);
+            .filter(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
+            .map(|proposal| {
+                let origin = proposal_origin_session(&document.content, proposal.header_line_index);
+                (proposal, origin)
+            })
+            .filter(|(proposal, origin)| {
+                explicit_target.is_none_or(|target| {
+                    proposal.title == target.title && *origin == target.origin_session
+                })
+            })
+            .collect();
+        if candidates.len() > 1 {
+            let details = candidates
+                .iter()
+                .map(|(proposal, origin)| {
+                    format!(
+                        "line {}: {} - {}; Origin Session: {}",
+                        proposal.header_line_index + 1,
+                        proposal.label,
+                        proposal.title,
+                        origin.as_deref().unwrap_or("unknown")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("ambiguous proposal {label}; specify title and origin_session:\n{details}"),
+            ));
+        }
+        let Some((target, origin)) = candidates.into_iter().next() else {
+            return Ok(None);
         };
+        if explicit_target.is_none()
+            && (origin.is_none()
+                || origin.as_deref() != current_session.map(str::trim).filter(|id| !id.is_empty()))
+        {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!(
+                "{} - {} belongs to Origin Session: {}; current Session: {}. Historical records require explicit title and origin_session (omit origin_session only for unattributed records)",
+                target.label, target.title, origin.as_deref().unwrap_or("unknown"),
+                current_session.unwrap_or("unknown")
+            )));
+        }
+        if new_status == "chosen" {
+            if let Some(reason) = evidence_gate_blocker(&target) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "cannot resolve {} - {}; Evidence Gate incomplete: {reason}",
+                        target.label, target.title
+                    ),
+                ));
+            }
+        }
 
         let mut lines: Vec<String> = document.content.lines().map(str::to_string).collect();
         if let Some(line) = lines.get_mut(target.header_line_index) {
@@ -107,9 +161,57 @@ pub fn set_proposal_status_by_label(
         } else {
             rewritten
         };
+        crate::work_notes::migrate_discussions_into_home(worktree)?;
+        if let Some(parent) = document.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(document.path, final_content)?;
-        Ok(true)
+        Ok(Some(ProposalStatusUpdate {
+            label: target.label,
+            title: target.title,
+            origin_session: origin,
+        }))
     })
+}
+
+fn proposal_origin_session(content: &str, header_line_index: usize) -> Option<String> {
+    let lines: Vec<_> = content.lines().collect();
+    let start = discussion_entry_heading_indices(&lines)
+        .into_iter()
+        .take_while(|index| *index < header_line_index)
+        .last()?;
+    entry_field(&lines[start..header_line_index], ORIGIN_SESSION_FIELD)
+}
+
+/// Build the prospective home document without importing legacy sources.
+/// Selection must succeed before the first discussion-file write occurs.
+fn read_status_discussion_document(worktree: &Path) -> io::Result<Option<DiscussionDocument>> {
+    let canonical = canonical_discussions_path(worktree);
+    let tasks = worktree.join("tasks/discussions.md");
+    let source = if canonical.exists() {
+        Some(canonical)
+    } else if tasks.exists() {
+        Some(tasks)
+    } else {
+        None
+    };
+    let legacy = worktree.join(DISCUSSION_RELATIVE_PATH);
+    let mut content = match source {
+        Some(path) => std::fs::read_to_string(path)?,
+        None if legacy.exists() => {
+            canonicalize_legacy_discussion_content(&std::fs::read_to_string(&legacy)?)
+        }
+        None => return Ok(None),
+    };
+    if canonical_allows_legacy_fallback(&content, None) && legacy.exists() {
+        content =
+            append_legacy_discussion_to_canonical(&content, &std::fs::read_to_string(legacy)?);
+    }
+    Ok(Some(DiscussionDocument {
+        path: gwt_core::paths::gwt_work_notes_discussions_path(worktree),
+        content,
+        source: DiscussionSource::Canonical,
+    }))
 }
 
 /// Rewrite only the terminal `[status]` tag on a `### Proposal ...` header
@@ -138,7 +240,7 @@ pub fn clear_proposal_next_question(worktree: &Path, label: &str) -> io::Result<
         let Some(document) = read_mutable_discussion_document(worktree)? else {
             return Ok(false);
         };
-        let proposals = parse_document_proposals(&document);
+        let proposals = parse_document_proposals(&document, None);
         let Some(target) = proposals
             .into_iter()
             .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
@@ -176,6 +278,7 @@ pub fn clear_proposal_next_question(worktree: &Path, label: &str) -> io::Result<
     })
 }
 
+#[cfg(test)]
 pub fn build_resume_prompt(pending: &PendingDiscussionResume) -> String {
     let next_question = pending
         .next_question
@@ -256,12 +359,15 @@ pub fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
     proposals
 }
 
-fn read_discussion_documents(worktree: &Path) -> io::Result<Vec<DiscussionDocument>> {
+fn read_discussion_documents(
+    worktree: &Path,
+    current_session_id: Option<&str>,
+) -> io::Result<Vec<DiscussionDocument>> {
     let mut documents = Vec::new();
     let canonical_path = canonical_discussions_path(worktree);
     let should_read_legacy = if canonical_path.exists() {
         let content = std::fs::read_to_string(&canonical_path)?;
-        let should_read_legacy = canonical_allows_legacy_fallback(&content);
+        let should_read_legacy = canonical_allows_legacy_fallback(&content, current_session_id);
         documents.push(DiscussionDocument {
             content,
             path: canonical_path,
@@ -284,13 +390,13 @@ fn read_discussion_documents(worktree: &Path) -> io::Result<Vec<DiscussionDocume
     Ok(documents)
 }
 
-fn canonical_allows_legacy_fallback(content: &str) -> bool {
+fn canonical_allows_legacy_fallback(content: &str, current_session_id: Option<&str>) -> bool {
     let lines = content.lines().collect::<Vec<_>>();
     let headings = discussion_entry_heading_indices(&lines);
     if headings.is_empty() {
         return parse_proposals(content).is_empty();
     }
-    active_discussion_entry_ranges_from_headings(&lines, &headings).is_empty()
+    active_discussion_entry_ranges_from_headings(&lines, &headings, current_session_id).is_empty()
 }
 
 fn read_mutable_discussion_document(worktree: &Path) -> io::Result<Option<DiscussionDocument>> {
@@ -302,7 +408,7 @@ fn read_mutable_discussion_document(worktree: &Path) -> io::Result<Option<Discus
     if canonical_path.exists() {
         let mut content = std::fs::read_to_string(&canonical_path)?;
         let legacy_path = worktree.join(DISCUSSION_RELATIVE_PATH);
-        if canonical_allows_legacy_fallback(&content) && legacy_path.exists() {
+        if canonical_allows_legacy_fallback(&content, None) && legacy_path.exists() {
             let legacy_content = std::fs::read_to_string(&legacy_path)?;
             content = append_legacy_discussion_to_canonical(&content, &legacy_content);
             std::fs::write(&canonical_path, &content)?;
@@ -370,21 +476,30 @@ fn canonicalize_legacy_discussion_entry(content: &str) -> String {
     )
 }
 
-fn parse_document_proposals(document: &DiscussionDocument) -> Vec<ParsedProposal> {
+fn parse_document_proposals(
+    document: &DiscussionDocument,
+    current_session_id: Option<&str>,
+) -> Vec<ParsedProposal> {
     match document.source {
-        DiscussionSource::Canonical => parse_active_canonical_proposals(&document.content),
+        DiscussionSource::Canonical => {
+            parse_active_canonical_proposals(&document.content, current_session_id)
+        }
         DiscussionSource::Legacy => parse_proposals(&document.content),
     }
 }
 
-fn parse_active_canonical_proposals(content: &str) -> Vec<ParsedProposal> {
+fn parse_active_canonical_proposals(
+    content: &str,
+    current_session_id: Option<&str>,
+) -> Vec<ParsedProposal> {
     let proposals = parse_proposals(content);
     let lines = content.lines().collect::<Vec<_>>();
     let headings = discussion_entry_heading_indices(&lines);
     if headings.is_empty() {
         return proposals;
     }
-    let active_ranges = active_discussion_entry_ranges_from_headings(&lines, &headings);
+    let active_ranges =
+        active_discussion_entry_ranges_from_headings(&lines, &headings, current_session_id);
     if active_ranges.is_empty() {
         return Vec::new();
     }
@@ -398,24 +513,53 @@ fn parse_active_canonical_proposals(content: &str) -> Vec<ParsedProposal> {
         .collect()
 }
 
-fn active_discussion_entry_ranges(content: &str) -> Vec<(usize, usize)> {
-    let lines = content.lines().collect::<Vec<_>>();
-    let headings = discussion_entry_heading_indices(&lines);
-    active_discussion_entry_ranges_from_headings(&lines, &headings)
-}
-
 fn active_discussion_entry_ranges_from_headings(
     lines: &[&str],
     headings: &[usize],
+    current_session_id: Option<&str>,
 ) -> Vec<(usize, usize)> {
     headings
         .iter()
         .enumerate()
         .filter_map(|(position, start)| {
             let end = headings.get(position + 1).copied().unwrap_or(lines.len());
-            entry_is_active(&lines[*start..end]).then_some((*start, end))
+            let entry = &lines[*start..end];
+            (entry_is_active(entry) && entry_belongs_to_session(entry, current_session_id))
+                .then_some((*start, end))
         })
         .collect()
+}
+
+/// Issue #3465: an entry is visible to the Stop gate unless it names an
+/// `Origin Session` that differs from the caller's session. Both sides must
+/// be known before an entry is skipped, so pre-#3465 entries (no field) and
+/// sessions launched outside gwt (no `GWT_SESSION_ID`) keep the previous
+/// blocking behaviour.
+fn entry_belongs_to_session(lines: &[&str], current_session_id: Option<&str>) -> bool {
+    let Some(current) = current_session_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return true;
+    };
+    let Some(origin) = entry_field(lines, ORIGIN_SESSION_FIELD) else {
+        return true;
+    };
+    origin == current
+}
+
+/// Read a `Field: value` line from an entry's metadata block. Proposal
+/// fields are bullets (`- Field: value`), so they never collide here.
+fn entry_field(lines: &[&str], field: &str) -> Option<String> {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .take_while(|line| !line.starts_with("### Proposal "))
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            let value = value.trim();
+            (name.eq_ignore_ascii_case(field) && !value.is_empty()).then(|| value.to_string())
+        })
 }
 
 fn discussion_entry_heading_indices(lines: &[&str]) -> Vec<usize> {
@@ -499,12 +643,13 @@ fn parse_any_field_value(line: &str) -> Option<(String, Option<String>)> {
     ))
 }
 
+#[cfg(test)]
 pub fn proposal_evidence_blocker_by_label(
     worktree: &Path,
     label: &str,
 ) -> io::Result<Option<String>> {
-    for document in read_discussion_documents(worktree)? {
-        let proposals = parse_document_proposals(&document);
+    for document in read_discussion_documents(worktree, None)? {
+        let proposals = parse_document_proposals(&document, None);
         if let Some(blocker) = proposals
             .iter()
             .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
@@ -516,9 +661,24 @@ pub fn proposal_evidence_blocker_by_label(
     Ok(None)
 }
 
-pub fn discussion_stop_blocker(worktree: &Path) -> io::Result<Option<PendingDiscussionResume>> {
-    for document in read_discussion_documents(worktree)? {
-        let proposals = parse_document_proposals(&document);
+/// Stop-gate view of the discussion log.
+///
+/// Issue #3465: the canonical discussion log is machine-local **project**
+/// scoped, so every session of the repository reads the same active
+/// proposals. Blocking Stop on a proposal another session owns leaves the
+/// unrelated session with no non-destructive exit (`discuss.park` /
+/// `resolve` / `reject` all rewrite the owner's state). `current_session_id`
+/// therefore scopes the gate: an entry that records an `Origin Session`
+/// different from the caller is invisible here. Entries without an
+/// `Origin Session` (pre-#3465 logs) and callers without a session id keep
+/// the previous fail-closed behaviour, mirroring the FR-014t precedent in
+/// `cli::hook::state_file_stop_check`.
+pub fn discussion_stop_blocker(
+    worktree: &Path,
+    current_session_id: Option<&str>,
+) -> io::Result<Option<PendingDiscussionResume>> {
+    for document in read_discussion_documents(worktree, current_session_id)? {
+        let proposals = parse_document_proposals(&document, current_session_id);
         if let Some(blocker) = select_pending_discussion_blocker(&proposals) {
             return Ok(Some(blocker));
         }
@@ -527,8 +687,8 @@ pub fn discussion_stop_blocker(worktree: &Path) -> io::Result<Option<PendingDisc
 }
 
 pub fn load_pending_goal(worktree: &Path) -> io::Result<Option<PendingDiscussionGoal>> {
-    for document in read_discussion_documents(worktree)? {
-        let proposals = parse_document_proposals(&document);
+    for document in read_discussion_documents(worktree, None)? {
+        let proposals = parse_document_proposals(&document, None);
         if let Some(goal) = select_pending_goal(&proposals) {
             return Ok(Some(goal));
         }
@@ -540,7 +700,7 @@ pub fn load_pending_goal_from_worktree_files(
     worktree: &Path,
 ) -> io::Result<Option<PendingDiscussionGoal>> {
     for document in read_discussion_documents_from_worktree_files(worktree)? {
-        let proposals = parse_document_proposals(&document);
+        let proposals = parse_document_proposals(&document, None);
         if let Some(goal) = select_pending_goal(&proposals) {
             return Ok(Some(goal));
         }
@@ -564,7 +724,7 @@ fn read_discussion_documents_from_worktree_files(
     };
     let should_read_legacy = if canonical_path.exists() {
         let content = std::fs::read_to_string(&canonical_path)?;
-        let should_read_legacy = canonical_allows_legacy_fallback(&content);
+        let should_read_legacy = canonical_allows_legacy_fallback(&content, None);
         documents.push(DiscussionDocument {
             content,
             path: canonical_path,
@@ -698,7 +858,7 @@ fn upsert_proposal_field_by_label(
         let Some(document) = read_mutable_discussion_document(worktree)? else {
             return Ok(false);
         };
-        let proposals = parse_document_proposals(&document);
+        let proposals = parse_document_proposals(&document, None);
         let Some(target) = proposals.into_iter().find(|proposal| {
             proposal.label.eq_ignore_ascii_case(label)
                 && !matches!(
@@ -866,11 +1026,28 @@ mod tests {
     use super::*;
     use gwt_core::test_support::ScopedGwtHome;
 
+    fn legacy_target(title: &str) -> ProposalTarget {
+        ProposalTarget {
+            title: title.into(),
+            origin_session: None,
+        }
+    }
+
     fn sample_discussion() -> &'static str {
         r#"## Discussion TODO
 
 ### Proposal A - Hook-driven resume [active]
 - Summary: Keep unfinished discussion state in the local artifact.
+- Implementation Proof: discussion implementation inspected
+- SPEC/Issue Proof: Issue 4956 checked
+- Gap Check Proof: migration checked
+- Official Docs Proof: not-applicable: local behavior
+- External Research Proof: not-applicable: local behavior
+- Exit Blockers: none
+- Depth Mode: normal
+- Question Ledger: scope and verification checked
+- Depth Gate: complete
+- Evidence Gate: complete
 - Open Questions: Whether Stop should drive the resume path.
 - Dependency Checks: Hook events already exist.
 - Deferred Decisions: Exact prompt copy.
@@ -944,7 +1121,7 @@ The discussion is still in progress.
                 next_question: Some("Which hook should resume this discussion?".to_string()),
             })
         );
-        let blocker = discussion_stop_blocker(dir.path())
+        let blocker = discussion_stop_blocker(dir.path(), None)
             .unwrap()
             .expect("canonical active proposal should block Stop");
         assert_eq!(blocker.proposal_label, "Proposal A");
@@ -976,7 +1153,7 @@ Status: active
         );
 
         assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
-        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path(), None).unwrap(), None);
     }
 
     #[test]
@@ -997,7 +1174,7 @@ Status: completed
         );
 
         assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
-        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path(), None).unwrap(), None);
     }
 
     #[test]
@@ -1055,14 +1232,22 @@ Status: completed
         std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
         std::fs::write(&legacy_path, sample_discussion()).unwrap();
 
-        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        let changed = set_proposal_status_by_label(
+            dir.path(),
+            "Proposal A",
+            "chosen",
+            None,
+            Some(&legacy_target("Hook-driven resume")),
+        )
+        .unwrap()
+        .is_some();
 
         assert!(changed);
         let canonical = read_canonical_discussion(dir.path());
         assert!(canonical.contains("## Legacy gwt-discussion state"));
         assert!(canonical.contains("### Proposal A - Hook-driven resume [chosen]"));
         assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
-        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path(), None).unwrap(), None);
     }
 
     #[test]
@@ -1135,7 +1320,7 @@ Status: active
         std::fs::write(&legacy_path, sample_discussion()).unwrap();
 
         assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
-        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path(), None).unwrap(), None);
     }
 
     #[test]
@@ -1146,7 +1331,15 @@ Status: active
         std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
         std::fs::write(&legacy_path, sample_discussion()).unwrap();
 
-        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        let changed = set_proposal_status_by_label(
+            dir.path(),
+            "Proposal A",
+            "chosen",
+            None,
+            Some(&legacy_target("Hook-driven resume")),
+        )
+        .unwrap()
+        .is_some();
 
         assert!(changed);
         let legacy = std::fs::read_to_string(&legacy_path).unwrap();
@@ -1179,7 +1372,15 @@ Status: active
         std::fs::create_dir_all(repo_local.parent().unwrap()).unwrap();
         std::fs::write(&repo_local, active_canonical_discussion()).unwrap();
 
-        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        let changed = set_proposal_status_by_label(
+            dir.path(),
+            "Proposal A",
+            "chosen",
+            None,
+            Some(&legacy_target("Canonical discussion state")),
+        )
+        .unwrap()
+        .is_some();
 
         assert!(changed);
         assert_eq!(
@@ -1294,7 +1495,15 @@ Status: active
         std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
         std::fs::write(&discussion_path, sample_discussion()).unwrap();
 
-        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        let changed = set_proposal_status_by_label(
+            dir.path(),
+            "Proposal A",
+            "chosen",
+            None,
+            Some(&legacy_target("Hook-driven resume")),
+        )
+        .unwrap()
+        .is_some();
         assert!(changed);
         let updated = read_canonical_discussion(dir.path());
         assert!(updated.contains("### Proposal A - Hook-driven resume [chosen]"));
@@ -1314,12 +1523,19 @@ Status: active
         std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
         std::fs::write(
             &discussion_path,
-            "### Proposal A - Toggle [active] state review [active]\n\
-             - Next Question: is this safe?\n",
+            concat!("### Proposal A - Toggle [active] state review [active]\n- Next Question: is this safe?\n", "- Implementation Proof: discussion implementation inspected\n- SPEC/Issue Proof: Issue 4956 checked\n- Gap Check Proof: migration checked\n- Official Docs Proof: not-applicable: local behavior\n- External Research Proof: not-applicable: local behavior\n- Exit Blockers: none\n- Depth Mode: normal\n- Question Ledger: scope and verification checked\n- Depth Gate: complete\n- Evidence Gate: complete\n"),
         )
         .unwrap();
 
-        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        let changed = set_proposal_status_by_label(
+            dir.path(),
+            "Proposal A",
+            "chosen",
+            None,
+            Some(&legacy_target("Toggle [active] state review")),
+        )
+        .unwrap()
+        .is_some();
         assert!(changed);
         let updated = read_canonical_discussion(dir.path());
         // Trailing tag flipped to [chosen]; the title substring untouched.
@@ -1343,16 +1559,40 @@ Status: active
         std::fs::write(&discussion_path, sample_discussion()).unwrap();
 
         // Already parked
-        assert!(!set_proposal_status_by_label(dir.path(), "Proposal B", "chosen").unwrap());
+        assert!(set_proposal_status_by_label(
+            dir.path(),
+            "Proposal B",
+            "chosen",
+            None,
+            Some(&legacy_target("Manual follow-up only"))
+        )
+        .unwrap()
+        .is_none());
         // Unknown label
-        assert!(!set_proposal_status_by_label(dir.path(), "Proposal Z", "chosen").unwrap());
+        assert!(set_proposal_status_by_label(
+            dir.path(),
+            "Proposal Z",
+            "chosen",
+            None,
+            Some(&legacy_target("Missing"))
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
     fn set_proposal_status_returns_false_when_discussion_md_absent() {
         let dir = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
-        assert!(!set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap());
+        assert!(set_proposal_status_by_label(
+            dir.path(),
+            "Proposal A",
+            "chosen",
+            None,
+            Some(&legacy_target("Missing"))
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -1432,7 +1672,7 @@ Status: active
         )
         .unwrap();
 
-        let pending = discussion_stop_blocker(dir.path())
+        let pending = discussion_stop_blocker(dir.path(), None)
             .unwrap()
             .expect("exit blocker should keep discussion active");
         assert_eq!(pending.proposal_label, "Proposal A");
@@ -1468,7 +1708,7 @@ Status: active
         )
         .unwrap();
 
-        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path(), None).unwrap(), None);
         assert_eq!(
             proposal_evidence_blocker_by_label(dir.path(), "Proposal A").unwrap(),
             None
@@ -1500,7 +1740,7 @@ Status: active
         )
         .unwrap();
 
-        let pending = discussion_stop_blocker(dir.path())
+        let pending = discussion_stop_blocker(dir.path(), None)
             .unwrap()
             .expect("depth blocker should keep discussion active");
         assert_eq!(pending.proposal_label, "Proposal A");
@@ -1687,6 +1927,90 @@ Status: active
         let updated = read_canonical_discussion(dir.path());
         assert!(updated.contains("- Goal State: started"));
         assert!(updated.contains("- Goal Condition: tests green and verification handoff ready"));
+    }
+
+    /// Issue #3465: the canonical discussion log is shared by every session
+    /// of the project, so an entry owned by another session must not block
+    /// this session's Stop. Entries without an `Origin Session` keep
+    /// blocking (fail-closed, pre-#3465 logs).
+    #[test]
+    fn stop_blocker_ignores_entries_owned_by_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
+        write_canonical_discussion(
+            dir.path(),
+            r#"# Discussions
+
+## 2026-08-04 — canonical SPEC readiness
+
+Status: active
+Origin Session: sess-owner
+
+Summary:
+Owned by the work/issue-3460 session.
+
+### Proposal 3460-A - Canonical SPEC readiness [active]
+- Summary: Investigating readiness derivation.
+- Next Question: Should the not-ready wording be unified?
+"#,
+        );
+
+        assert_eq!(
+            discussion_stop_blocker(dir.path(), Some("sess-unrelated")).unwrap(),
+            None,
+            "another session's proposal must not block this session's Stop"
+        );
+        let owner = discussion_stop_blocker(dir.path(), Some("sess-owner"))
+            .unwrap()
+            .expect("the owning session must still be blocked");
+        assert_eq!(owner.proposal_label, "Proposal 3460-A");
+        assert!(
+            discussion_stop_blocker(dir.path(), None).unwrap().is_some(),
+            "a caller without a session id stays fail-closed"
+        );
+    }
+
+    /// An entry that predates the `Origin Session` field is unattributed and
+    /// keeps blocking every session, exactly as before Issue #3465.
+    #[test]
+    fn stop_blocker_still_blocks_entries_without_origin_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
+        write_canonical_discussion(dir.path(), active_canonical_discussion());
+
+        assert!(discussion_stop_blocker(dir.path(), Some("sess-any"))
+            .unwrap()
+            .is_some());
+    }
+
+    /// Session scoping must not hide a worktree-local legacy discussion:
+    /// when the only active canonical entry belongs to another session, the
+    /// legacy `.gwt/discussion.md` fallback still drives the gate.
+    #[test]
+    fn stop_blocker_falls_back_to_legacy_when_canonical_entry_is_another_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
+        write_canonical_discussion(
+            dir.path(),
+            r#"# Discussions
+
+## 2026-08-04 — other session
+
+Status: active
+Origin Session: sess-owner
+
+### Proposal Z - Other session work [active]
+- Next Question: Owned elsewhere.
+"#,
+        );
+        let legacy_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, sample_discussion()).unwrap();
+
+        let blocker = discussion_stop_blocker(dir.path(), Some("sess-unrelated"))
+            .unwrap()
+            .expect("worktree-local legacy discussion still blocks");
+        assert_eq!(blocker.proposal_label, "Proposal A");
     }
 
     #[test]

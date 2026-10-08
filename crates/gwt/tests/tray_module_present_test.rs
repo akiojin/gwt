@@ -6,12 +6,39 @@
 //! source tree via `include_str!`; no runtime behaviour is exercised.
 
 const CLI_ROOT: &str = include_str!("../src/cli.rs");
+const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
 const MAIN_RS: &str = include_str!("../src/main.rs");
 const TRAY_MOD: &str = include_str!("../src/cli/tray/mod.rs");
 const TRAY_MENU: &str = include_str!("../src/cli/tray/menu.rs");
 const TRAY_AUTOSTART: &str = include_str!("../src/cli/tray/autostart.rs");
 const TRAY_LOCK: &str = include_str!("../src/cli/tray/lock.rs");
 const OPEN_CLI: &str = include_str!("../src/cli/open.rs");
+
+#[test]
+fn startup_tray_contract_does_not_pin_transitive_dependency_versions() {
+    let startup_test = include_str!("startup_tray_performance.rs");
+    assert!(
+        !startup_test.contains("Cargo.lock"),
+        "startup metrics and native menu contracts must survive dependency updates"
+    );
+}
+
+#[test]
+fn tray_event_loop_does_not_wait_for_project_bootstrap() {
+    let startup = MAIN_RS.split_once("fn main()").expect("main entry").1;
+    let before_loop = startup
+        .split_once("event_loop.run(")
+        .expect("native event loop")
+        .0;
+    assert!(
+        !before_loop.contains("app.bootstrap();"),
+        "project bootstrap must not block tray creation and the first native dispatch"
+    );
+    assert!(
+        !before_loop.contains("prepare_front_door_for_path("),
+        "managed hook preparation runs Git and must remain inside the bootstrap worker"
+    );
+}
 
 #[test]
 fn cli_root_declares_tray_and_open_modules() {
@@ -133,6 +160,49 @@ fn tray_autostart_pins_status_surface() {
             "AutostartMechanism must include {mechanism}"
         );
     }
+}
+
+#[test]
+fn tray_autostart_pins_auto_launch_0_6_mode_contract() {
+    assert!(
+        CARGO_MANIFEST.contains(r#"auto-launch = "0.6""#),
+        "gwt must pin the auto-launch 0.6 compatibility baseline"
+    );
+    for mode in [
+        "set_macos_launch_mode(MacOSLaunchMode::LaunchAgent)",
+        "set_linux_launch_mode(LinuxLaunchMode::XdgAutostart)",
+    ] {
+        assert!(
+            TRAY_AUTOSTART.contains(mode),
+            "tray/autostart.rs must explicitly pin `{mode}`"
+        );
+    }
+    assert!(
+        !TRAY_AUTOSTART.contains("set_use_launch_agent"),
+        "auto-launch 0.6 mode contract must not use the deprecated set_use_launch_agent API"
+    );
+    assert!(
+        !TRAY_AUTOSTART.contains("WindowsEnableMode"),
+        "Windows must use the checkout-owned current-user registry implementation"
+    );
+    for route in [
+        "windows_current_user_autostart::install()",
+        "windows_current_user_autostart::uninstall()",
+        "windows_current_user_autostart::status()",
+    ] {
+        assert!(
+            TRAY_AUTOSTART.contains(route),
+            "tray/autostart.rs must route through `{route}` on Windows"
+        );
+    }
+    assert!(
+        TRAY_AUTOSTART.contains("CURRENT_USER"),
+        "Windows autostart must access HKEY_CURRENT_USER"
+    );
+    assert!(
+        !TRAY_AUTOSTART.contains("LOCAL_MACHINE"),
+        "Windows autostart must never access HKEY_LOCAL_MACHINE"
+    );
 }
 
 #[test]

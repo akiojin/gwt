@@ -268,6 +268,31 @@ fn contains_word(lower: &str, word: &str) -> bool {
     false
 }
 
+/// Exclude negated PR requests from both work-verb and PR-reference detection.
+/// Other obligation kinds still use the original prompt for their markers.
+fn without_negated_pr_requests(lower: &str) -> std::borrow::Cow<'_, str> {
+    static NEGATED_PR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?x)
+            (?-u:\b)(?:
+                no[\s-]+ |
+                without\s+(?:(?:creating|opening|making)\s+)? |
+                (?:do\s+not|don't|never)\s+(?:create|open|make)\s+
+            )
+            (?:(?:a|an|any|new|another|implementation)\s+)*
+            (?:pr|pull\s+request)(?-u:\b)
+            |
+            (?:(?-u:\b)(?:pr|pull\s+request)(?-u:\b)|プルリク(?:エスト)?)
+            \s*(?:
+                (?:を|は)?\s*(?:作ら(?:ない|ず)|作成(?:しない|せず)|不要) |
+                の\s*作成\s*は\s*不要
+            )",
+        )
+        .expect("valid negated PR pattern")
+    });
+    NEGATED_PR.replace_all(lower, " ")
+}
+
 /// T-240 core classifier: a prompt arms an obligation only when it carries
 /// an explicit WORK verb (imperative/te-form). Polite forms alone
 /// ("ください", "お願い", "please", "can you") are not sufficient — polite
@@ -302,10 +327,13 @@ pub fn classify_prompt(prompt: &str) -> Option<ObligationKind> {
         "create ",
         "update ",
     ];
-    if !WORK_FORMS.iter().any(|form| lower.contains(form)) {
+    let affirmative = without_negated_pr_requests(&lower);
+    if !WORK_FORMS.iter().any(|form| affirmative.contains(form)) {
         return None;
     }
-    if lower.contains("pull request") || lower.contains("プルリク") || contains_word(&lower, "pr")
+    if affirmative.contains("pull request")
+        || affirmative.contains("プルリク")
+        || contains_word(&affirmative, "pr")
     {
         return Some(ObligationKind::Pr);
     }
@@ -398,7 +426,7 @@ pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::
     };
     match crate::cli::trusted_store::with_write_lease_wait(
         worktree,
-        std::time::Duration::from_millis(300),
+        prompt_write_lease_wait(),
         || {
             let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
             mark_locked(worktree, session_id, prompt, kind)
@@ -415,6 +443,13 @@ pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::
         Err(err) => Err(err),
         Ok(()) => Ok(true),
     }
+}
+
+fn prompt_write_lease_wait() -> std::time::Duration {
+    let configured = std::time::Duration::from_millis(300);
+    gwt_core::operation_deadline::current().map_or(configured, |deadline| {
+        configured.min(deadline.saturating_duration_since(std::time::Instant::now()))
+    })
 }
 
 /// Settle every open obligation of the given kinds with the named canonical
@@ -568,9 +603,13 @@ pub fn open_obligation_refusal(
         .join(", ");
     Some(format!(
         "open action obligations [{kinds}] from this session's prompts are unsettled (T-247). \
-         Settle them first — `issue.comment` / `issue.spec.edit` for issue_update, a plan-covering \
-         all-passing `verify.run` for implementation/verification, `pr.create` / `pr.edit` / `pr.ready` \
-         for pr — or defer them with `execution.blocked` and a non-empty `params.reason`."
+         Settle them with the operation that is executable in the current state — \
+         issue_update: `issue.comment` / `issue.spec.edit`; implementation/verification: a \
+         plan-covering all-passing `verify.run`; pr: `pr.edit` (any PR state, including MERGED), \
+         `pr.ready` (open draft only), `pr.create` (only while no PR exists). A PR that someone \
+         else readied or merged on your behalf is settled by `pr.edit` on it. `execution.blocked` \
+         is not a shortcut: it is terminal, and recovery costs `execution.reopen` plus a fresh \
+         derived-plan `verify.run` — use it only for a real blocker."
     ))
 }
 
@@ -596,6 +635,49 @@ pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_lease_wait_is_bounded_by_the_hook_operation_deadline() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let held_worktree = worktree.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease(&held_worktree, || {
+                acquired_tx.send(()).expect("signal acquired lease");
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("release lease");
+                Ok(())
+            })
+            .expect("hold write lease");
+        });
+        acquired_rx.recv().expect("lease acquired");
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(40),
+        );
+
+        let armed = mark_from_prompt(worktree.path(), "session-deadline", "バグを修正して")
+            .expect("WouldBlock fallback remains fail-open");
+
+        assert!(armed);
+        // Assert the bound itself rather than how long the call happened to
+        // take. The wall clock here measures the runner as much as the code:
+        // under CI's default parallelism this observed 208ms against a 200ms
+        // limit even though the deadline was honoured (Issue #3777, CI run
+        // 34450187892), and in isolation the same call returns in 0.05s.
+        // `prompt_write_lease_wait` is a pure function of the ambient deadline,
+        // so checking it proves the clamp that the timing was only a proxy for.
+        assert!(
+            prompt_write_lease_wait() <= std::time::Duration::from_millis(40),
+            "the lease wait must be clamped to the hook deadline, not the \
+             standalone 300ms wait: {:?}",
+            prompt_write_lease_wait()
+        );
+        release_tx.send(()).expect("release holder");
+        holder.join().expect("holder thread");
+    }
 
     // T-240 core: request-form producing prompts arm typed kinds; status
     // and design questions never arm.
@@ -658,6 +740,53 @@ mod tests {
         assert_eq!(
             classify_prompt("調査の進捗はどうですか？よろしくお願いします"),
             None
+        );
+    }
+
+    #[test]
+    fn classifier_does_not_arm_pr_for_negated_pr_requests() {
+        for prompt in [
+            "PR を作らずに修正して",
+            "PR を作らないで修正して",
+            "新規 PR は作成しない。修正して",
+            "PR を作成せずに修正して",
+            "PR は不要です。修正して",
+            "PR の作成は不要です。修正して",
+            "fix this with no PR",
+            "fix this with no pull request",
+            "fix this without creating a new PR",
+            "fix this; do not create a PR",
+            "fix this; don't open a pull request",
+            "Before changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
+        ] {
+            assert_ne!(classify_prompt(prompt), Some(ObligationKind::Pr), "{prompt}");
+        }
+        assert_eq!(
+            classify_prompt("PR を作らずにテストを実行して"),
+            Some(ObligationKind::Verification)
+        );
+        for prompt in [
+            "Do not change tests; create a PR",
+            "新規 PR は作成しない。既存 PR を更新して",
+            "PR の作成は不要です。既存 PR を更新して",
+        ] {
+            assert_eq!(
+                classify_prompt(prompt),
+                Some(ObligationKind::Pr),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_requires_work_outside_negated_pr_requests() {
+        assert_eq!(
+            classify_prompt("Do not create a PR. Tests already passed."),
+            None
+        );
+        assert_eq!(
+            classify_prompt("Do not create a PR. Fix the tests."),
+            Some(ObligationKind::Verification)
         );
     }
 
@@ -920,6 +1049,30 @@ mod tests {
         let refusal = open_obligation_refusal(dir.path(), "sess-1", &[]).unwrap();
         assert!(refusal.contains("pr"), "{refusal}");
         assert!(refusal.contains("issue_update"), "{refusal}");
+        // Issue #3868 AC-28 / AC-29: the means are stated per PR state, a
+        // proxied Ready/merge has a settlement path, and the deferral names
+        // its recovery cost instead of posing as the easy way out.
+        assert!(
+            refusal.contains("`pr.edit` (any PR state, including MERGED)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`pr.ready` (open draft only)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`pr.create` (only while no PR exists)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("readied or merged on your behalf"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`execution.blocked` is not a shortcut"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("`execution.reopen`"), "{refusal}");
 
         // A PR mutation settles its own kind — excluding it leaves only the
         // issue update in the way.

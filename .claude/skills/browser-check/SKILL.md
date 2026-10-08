@@ -74,6 +74,27 @@ an old browser tab.
    - Seed `"$CHECK_HOME/.gwt/session.json"` with one active project tab for
      the current repository root so the user lands in the actual app instead
      of the Open Project picker.
+   - Resolve `CHECK_REPO_HASH` from the `project_store.hash` returned by the
+     checkout `gwtd` JSON operation `issue.monitor.status` run in `REPO_ROOT`;
+     do not substitute a hash of the worktree path. Before launching, seed
+     the isolated project's preferences as follows. An isolated instance must
+     not become a second resident PM or launch implementation agents.
+
+     ```bash
+     # browser-check-agent-seed-begin
+     CHECK_PROJECT_STATE="$CHECK_HOME/.gwt/projects/${CHECK_REPO_HASH:?Resolve project_store.hash first}/project-state"
+     mkdir -p "$CHECK_PROJECT_STATE"
+     cat > "$CHECK_PROJECT_STATE/pm.json" <<'JSON'
+     {"settings":{"auto_start":false}}
+     JSON
+     cat > "$CHECK_PROJECT_STATE/issue-monitor.json" <<'JSON'
+     {"enabled":false,"max_active_agents":1,"priority_order":[]}
+     JSON
+     # browser-check-agent-seed-end
+     ```
+
+     Keep these files inside `CHECK_HOME`; never symlink the real
+     `.gwt/projects` directory or copy its PM/Issue Monitor preferences.
 
 4. Launch the fresh server:
    - Create temp files:
@@ -121,10 +142,18 @@ an old browser tab.
      fallback with the checkout `gwtd`. This keeps a portable bare `gwtd`
      fallback when `PATH` already resolves a stable install, preserves user
      hooks, and prevents the fresh GUI from inheriting provider-to-provider
-     fallback skew:
+     fallback skew. The block parses `hook.doctor` evidence with `jq`, which
+     is not a gwt runtime requirement, so it preflights `jq` explicitly and
+     fails closed with install guidance instead of dying on
+     `jq: command not found`. Only POSIX utilities (`grep`, `env`) are
+     assumed beyond that:
 
      ```bash
      # browser-check-hook-repair-begin
+     if ! command -v jq >/dev/null 2>&1; then
+       echo "browser-check preflight failed: jq is required to parse hook.doctor evidence; install jq (for example: brew install jq) and rerun" >&2
+       exit 1
+     fi
      HOOK_DOCTOR_ENVELOPE="$(
        jq -n \
          --arg expected_hook_bin "$CHECK_HOOK_BIN" \
@@ -151,6 +180,8 @@ an old browser tab.
                  ($allow_missing_logical
                    and startswith("managed hook binary missing: ")
                    and endswith(" uses gwtd"))
+                 or (startswith("managed hook failure: ")
+                   and test(" state=fail-open( |$)"))
                  | not
                )
            ] as $blocking_issues
@@ -237,6 +268,8 @@ an old browser tab.
                  ($allow_missing_logical
                    and startswith("managed hook binary missing: ")
                    and endswith(" uses gwtd"))
+                 or (startswith("managed hook failure: ")
+                   and test(" state=fail-open( |$)"))
                  | not
                )
            ] as $blocking_issues

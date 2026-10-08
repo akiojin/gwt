@@ -1,13 +1,13 @@
-//! Read-only endpoint selection for Unix daemon subscriptions.
+//! Read-only endpoint selection for daemon subscriptions.
 //!
-//! Exact caller scope always wins. A same-repository sibling is eligible only
+//! The live project authority wins. Without one, exact caller scope wins.
+//! A same-repository sibling is eligible only
 //! when exact evidence is absent or definitely dead, and only one compatible
 //! live sibling exists.
 
 use std::{
     collections::BTreeMap,
     fmt, fs,
-    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,7 +15,9 @@ use std::{
 use gwt_core::daemon::{
     validate_handshake, DaemonEndpoint, IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope,
 };
-use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::UnixStream, time::timeout};
+use tokio::{io::AsyncReadExt, io::AsyncWriteExt, time::timeout};
+
+use super::transport::{bind_rejection, check_server_identity, IpcStream};
 
 const SIBLING_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_HANDSHAKE_RESPONSE_BYTES: usize = 16 * 1024;
@@ -172,7 +174,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn resolve_with_probe<F, P>(
     gwt_home: &Path,
     requested_scope: &RuntimeScope,
@@ -211,6 +213,23 @@ where
     F: Fn(u32) -> bool,
 {
     let exact_path = requested_scope.endpoint_path(gwt_home);
+    if let Some(owner) = crate::daemon_publisher::resolve_live_project_authority(
+        gwt_home,
+        requested_scope,
+        &is_process_alive,
+    )
+    .map_err(|error| {
+        ResolutionFailure::invalid_evidence(requested_scope, exact_path.clone(), error)
+    })? {
+        if owner.protocol_version != expected_protocol_version {
+            return Err(ResolutionFailure::invalid_evidence(
+                requested_scope,
+                exact_path,
+                "project owner protocol mismatch",
+            ));
+        }
+        return Ok(PreparedResolution::Exact(owner));
+    }
     let exact_outcome = match fs::read(&exact_path) {
         Ok(payload) => {
             let endpoint: DaemonEndpoint = serde_json::from_slice(&payload).map_err(|_| {
@@ -265,7 +284,7 @@ fn validate_exact(
             "protocol_mismatch(expected={expected_protocol_version},actual={})",
             endpoint.protocol_version
         ))
-    } else if let Some(reason) = unix_socket_rejection(&endpoint.bind) {
+    } else if let Some(reason) = bind_rejection(&endpoint.bind) {
         Some(reason.to_string())
     } else if endpoint.auth_token.trim().is_empty() {
         Some("missing_auth_token".to_string())
@@ -459,7 +478,7 @@ where
         Some("protocol_mismatch")
     } else if !is_live_pid(endpoint.pid, is_process_alive) {
         Some("dead")
-    } else if let Some(reason) = unix_socket_rejection(&endpoint.bind) {
+    } else if let Some(reason) = bind_rejection(&endpoint.bind) {
         Some(reason)
     } else if endpoint.auth_token.trim().is_empty() {
         Some("missing_auth_token")
@@ -492,24 +511,24 @@ fn failure(
     })
 }
 
-fn unix_socket_rejection(bind: &str) -> Option<&'static str> {
-    let bind = bind.trim();
-    if bind.is_empty() || !Path::new(bind).is_absolute() {
-        return Some("unsupported_transport");
-    }
-    match fs::metadata(bind) {
-        Ok(metadata) if metadata.file_type().is_socket() => None,
-        Ok(_) => Some("not_socket"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some("socket_missing"),
-        Err(_) => Some("socket_unreadable"),
-    }
-}
-
 fn is_live_pid<F>(pid: u32, is_process_alive: &F) -> bool
 where
     F: Fn(u32) -> bool,
 {
-    pid > 0 && libc::pid_t::try_from(pid).is_ok() && is_process_alive(pid)
+    pid > 0 && pid_fits_platform(pid) && is_process_alive(pid)
+}
+
+/// Unix `kill(2)` takes a signed `pid_t`; a value above `i32::MAX` would
+/// wrap negative and probe a process *group* instead. Windows pids are
+/// unsigned DWORDs and need no such bound.
+#[cfg(unix)]
+fn pid_fits_platform(pid: u32) -> bool {
+    i32::try_from(pid).is_ok()
+}
+
+#[cfg(windows)]
+fn pid_fits_platform(_pid: u32) -> bool {
+    true
 }
 
 async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
@@ -519,9 +538,10 @@ async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
     }
 
     let attempt = timeout(SIBLING_HANDSHAKE_TIMEOUT, async {
-        let mut stream = UnixStream::connect(&endpoint.bind)
+        let mut stream = IpcStream::connect(&endpoint.bind)
             .await
             .map_err(ProbeError::Connect)?;
+        check_server_identity(&stream, endpoint.pid).map_err(|_| ProbeError::Handshake)?;
         let request = IpcHandshakeRequest {
             protocol_version: endpoint.protocol_version,
             auth_token: endpoint.auth_token.clone(),
@@ -558,7 +578,7 @@ async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
     }
 }
 
-async fn read_bounded_handshake_response(stream: &mut UnixStream) -> Result<Vec<u8>, ()> {
+async fn read_bounded_handshake_response(stream: &mut IpcStream) -> Result<Vec<u8>, ()> {
     let mut response = Vec::with_capacity(512);
     let mut chunk = [0_u8; 512];
     loop {
@@ -581,15 +601,66 @@ async fn read_bounded_handshake_response(stream: &mut UnixStream) -> Result<Vec<
     }
 }
 
-#[cfg(test)]
+// Fixtures below bind raw `std` Unix listeners and socket pairs.
+#[cfg(all(test, unix))]
 mod tests {
     use gwt_core::daemon::{
         persist_endpoint, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
     };
     use std::os::unix::net::UnixListener;
     use tempfile::TempDir;
+    use tokio::net::UnixStream;
 
     use super::*;
+
+    /// SPEC #4740: the prefs budget the daemon's startup lease runs under,
+    /// named as `cli::daemon::server` registers it.
+    const DAEMON_STARTUP_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+        gwt_core::deadline_budget::DeadlineBudget::new(
+            "ISSUE_MONITOR_PREFS",
+            std::time::Duration::from_millis(250),
+        );
+
+    /// SPEC #4740: a multi-thread runtime whose worker and blocking-pool
+    /// threads pin the daemon's startup budget to the hang guard. These tests
+    /// are about resolution, not about how fast the daemon takes its startup
+    /// lease, and the daemon reads that budget on runtime threads a
+    /// test-thread pin cannot reach. A process-wide env pin would reach them
+    /// too, but it would also relax the budget for sibling tests that rely on
+    /// it expiring, so the pin is confined to this runtime's own threads.
+    fn runtime_with_pinned_daemon_startup() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .on_thread_start(|| {
+                // The thread belongs to this runtime and exits with it.
+                std::mem::forget(gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+                    &DAEMON_STARTUP_BUDGET,
+                ));
+            })
+            .build()
+            .expect("tokio runtime")
+    }
+
+    /// SPEC #4740: wait for the spawned daemon to bind `socket`, and fail
+    /// with the server's own error the moment its task ends first. The verdict
+    /// never depends on elapsed time: the poll interval only sets latency,
+    /// and a genuinely wedged bind is cut by the runner's per-test timeout.
+    async fn wait_for_bound_socket<T: std::fmt::Debug>(
+        socket: &Path,
+        server: &mut tokio::task::JoinHandle<T>,
+    ) {
+        while !socket.exists() {
+            if server.is_finished() {
+                panic!(
+                    "daemon exited before binding {}: {:?}",
+                    socket.display(),
+                    server.await
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
 
     struct Fixture {
         temp: TempDir,
@@ -654,6 +725,74 @@ mod tests {
             is_process_alive,
             |_| ProbeOutcome::Reachable,
         )
+    }
+
+    #[test]
+    fn project_authority_wins_over_a_live_local_endpoint() {
+        let fixture = Fixture::new();
+        let exact = fixture.endpoint("caller", 11);
+        let owner = fixture.endpoint("owner", std::process::id());
+        fixture.persist(&exact);
+        fixture.persist(&owner);
+        let prefs = fixture
+            .gwt_home
+            .join("projects/repo-1/project-state/issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs, &crate::IssueMonitorPrefs::default()).unwrap();
+        crate::persist_issue_monitor_authority_fence(
+            &prefs,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_assuming_reachable(
+                &fixture.gwt_home,
+                &fixture.caller,
+                DAEMON_PROTOCOL_VERSION,
+                |_| true,
+            )
+            .unwrap(),
+            owner
+        );
+    }
+
+    #[test]
+    fn routing_rejects_uncertain_fence_even_with_live_exact_endpoint() {
+        let fixture = Fixture::new();
+        fixture.persist(&fixture.endpoint("caller", 11));
+        let prefs = fixture
+            .gwt_home
+            .join("projects/repo-1/project-state/issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs, &crate::IssueMonitorPrefs::default()).unwrap();
+        crate::persist_legacy_issue_monitor_shutdown_revoke_fence(&prefs).unwrap();
+        assert!(
+            matches!(
+                crate::daemon_publisher::resolve_project_daemon_bootstrap(
+                    &fixture.gwt_home,
+                    &fixture.caller,
+                    None,
+                    &|_| false,
+                )
+                .unwrap(),
+                gwt_core::daemon::DaemonBootstrapAction::Spawn { .. }
+            ),
+            "startup remains eligible for existing lease-guarded recovery"
+        );
+        let fence_path = crate::issue_monitor_authority_fence_path(&prefs);
+        for malformed in [false, true] {
+            if malformed {
+                fs::write(&fence_path, b"not-json").unwrap();
+            }
+            assert!(
+                resolve_assuming_reachable(
+                    &fixture.gwt_home,
+                    &fixture.caller,
+                    DAEMON_PROTOCOL_VERSION,
+                    |_| true
+                )
+                .is_err(),
+                "uncertain fence must not select a live local endpoint (malformed={malformed})"
+            );
+        }
     }
 
     #[test]
@@ -1009,151 +1148,151 @@ mod tests {
         assert!(diagnostic.contains("gwtd daemon start"));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stale_socket_and_reused_pid_do_not_create_false_ambiguity() {
-        use std::time::Duration;
+    #[test]
+    fn stale_socket_and_reused_pid_do_not_create_false_ambiguity() {
+        runtime_with_pinned_daemon_startup().block_on(async {
+            use super::super::{broadcast::BroadcastHub, client::DaemonClient, server};
 
-        use super::super::{broadcast::BroadcastHub, server};
+            let fixture = Fixture::new();
+            let live_socket = fixture.temp.path().join("live-daemon.sock");
+            let live_scope = scope(&fixture.temp, "live");
+            let live = DaemonEndpoint::new(
+                live_scope.clone(),
+                std::process::id(),
+                live_socket.display().to_string(),
+                "live-token".to_string(),
+                "test-daemon".to_string(),
+            );
+            let stale = fixture.endpoint("stale", std::process::id());
+            fixture.persist(&live);
+            fixture.persist(&stale);
 
-        let fixture = Fixture::new();
-        let live_socket = fixture.temp.path().join("live-daemon.sock");
-        let live_scope = scope(&fixture.temp, "live");
-        let live = DaemonEndpoint::new(
-            live_scope.clone(),
-            std::process::id(),
-            live_socket.display().to_string(),
-            "live-token".to_string(),
-            "test-daemon".to_string(),
-        );
-        let stale = fixture.endpoint("stale", std::process::id());
-        fixture.persist(&live);
-        fixture.persist(&stale);
+            let server_endpoint = live.clone();
+            let server_socket = live_socket.clone();
+            let server_endpoint_path = live_scope.endpoint_path(&fixture.gwt_home);
+            let mut server_handle = tokio::spawn(async move {
+                server::run_server(
+                    server_endpoint,
+                    server_socket,
+                    server_endpoint_path,
+                    BroadcastHub::new(),
+                )
+                .await
+            });
+            wait_for_bound_socket(&live_socket, &mut server_handle).await;
+            // Binding precedes synchronous daemon initialization. Complete a real
+            // handshake before measuring sibling reachability with its probe budget.
+            drop(
+                DaemonClient::connect(&live)
+                    .await
+                    .expect("live daemon ready"),
+            );
 
-        let server_endpoint = live.clone();
-        let server_socket = live_socket.clone();
-        let server_endpoint_path = live_scope.endpoint_path(&fixture.gwt_home);
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint,
-                server_socket,
-                server_endpoint_path,
-                BroadcastHub::new(),
+            let resolved = resolve(
+                &fixture.gwt_home,
+                &fixture.caller,
+                DAEMON_PROTOCOL_VERSION,
+                |pid| pid == std::process::id(),
             )
             .await
+            .expect("stale socket must not create ambiguity");
+            assert_eq!(resolved, live);
+
+            server_handle.abort();
+            let _ = server_handle.await;
         });
-        for _ in 0..50 {
-            if live_socket.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(live_socket.exists(), "daemon socket did not appear");
-
-        let resolved = resolve(
-            &fixture.gwt_home,
-            &fixture.caller,
-            DAEMON_PROTOCOL_VERSION,
-            |pid| pid == std::process::id(),
-        )
-        .await
-        .expect("stale socket must not create ambiguity");
-        assert_eq!(resolved, live);
-
-        server_handle.abort();
-        let _ = server_handle.await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn slow_live_and_healthy_live_authorities_fail_closed() {
-        use std::{
-            io::{BufRead, BufReader},
-            sync::mpsc,
-            thread,
-            time::Duration,
-        };
+    #[test]
+    fn slow_live_and_healthy_live_authorities_fail_closed() {
+        runtime_with_pinned_daemon_startup().block_on(async {
+            use std::{
+                io::{BufRead, BufReader},
+                sync::mpsc,
+                thread,
+                time::Duration,
+            };
 
-        use super::super::{broadcast::BroadcastHub, server};
+            use super::super::{broadcast::BroadcastHub, client::DaemonClient, server};
 
-        let fixture = Fixture::new();
-        let healthy_socket = fixture.temp.path().join("healthy.sock");
-        let healthy_scope = scope(&fixture.temp, "healthy");
-        let healthy = DaemonEndpoint::new(
-            healthy_scope.clone(),
-            std::process::id(),
-            healthy_socket.display().to_string(),
-            "healthy-token".to_string(),
-            "test-daemon".to_string(),
-        );
-        let slow_socket = fixture.temp.path().join("slow.sock");
-        let slow_listener = UnixListener::bind(&slow_socket).expect("bind slow socket");
-        let slow = DaemonEndpoint::new(
-            scope(&fixture.temp, "slow"),
-            std::process::id(),
-            slow_socket.display().to_string(),
-            "slow-token".to_string(),
-            "test-daemon".to_string(),
-        );
-        fixture.persist(&healthy);
-        fixture.persist(&slow);
+            let fixture = Fixture::new();
+            let healthy_socket = fixture.temp.path().join("healthy.sock");
+            let healthy_scope = scope(&fixture.temp, "healthy");
+            let healthy = DaemonEndpoint::new(
+                healthy_scope.clone(),
+                std::process::id(),
+                healthy_socket.display().to_string(),
+                "healthy-token".to_string(),
+                "test-daemon".to_string(),
+            );
+            let slow_socket = fixture.temp.path().join("slow.sock");
+            let slow_listener = UnixListener::bind(&slow_socket).expect("bind slow socket");
+            let slow = DaemonEndpoint::new(
+                scope(&fixture.temp, "slow"),
+                std::process::id(),
+                slow_socket.display().to_string(),
+                "slow-token".to_string(),
+                "test-daemon".to_string(),
+            );
+            fixture.persist(&healthy);
+            fixture.persist(&slow);
 
-        let healthy_endpoint = healthy.clone();
-        let server_socket = healthy_socket.clone();
-        let server_endpoint_path = healthy_scope.endpoint_path(&fixture.gwt_home);
-        let healthy_server = tokio::spawn(async move {
-            server::run_server(
-                healthy_endpoint,
-                server_socket,
-                server_endpoint_path,
-                BroadcastHub::new(),
+            let healthy_endpoint = healthy.clone();
+            let server_socket = healthy_socket.clone();
+            let server_endpoint_path = healthy_scope.endpoint_path(&fixture.gwt_home);
+            let mut healthy_server = tokio::spawn(async move {
+                server::run_server(
+                    healthy_endpoint,
+                    server_socket,
+                    server_endpoint_path,
+                    BroadcastHub::new(),
+                )
+                .await
+            });
+            wait_for_bound_socket(&healthy_socket, &mut healthy_server).await;
+            drop(
+                DaemonClient::connect(&healthy)
+                    .await
+                    .expect("healthy daemon ready"),
+            );
+
+            let (release_slow, await_resolver) = mpsc::channel();
+            let slow_server = thread::spawn(move || {
+                let (stream, _) = slow_listener.accept().expect("accept slow probe");
+                let mut reader = BufReader::new(stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).expect("read slow handshake");
+                assert!(!request.is_empty());
+                await_resolver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("resolver must fail closed before slow server exits");
+            });
+
+            let failure = resolve(
+                &fixture.gwt_home,
+                &fixture.caller,
+                DAEMON_PROTOCOL_VERSION,
+                |pid| pid == std::process::id(),
             )
             .await
+            .expect_err("slow live authority must block unique routing");
+            assert_eq!(failure.kind, FailureKind::InvalidEvidence);
+            assert_eq!(failure.candidate_count, 2);
+            assert!(failure.to_string().contains("sibling_probe_uncertain"));
+
+            release_slow.send(()).expect("release slow server");
+            slow_server.join().expect("slow server");
+            healthy_server.abort();
+            let _ = healthy_server.await;
         });
-        for _ in 0..50 {
-            if healthy_socket.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(
-            healthy_socket.exists(),
-            "healthy daemon socket did not appear"
-        );
-
-        let (release_slow, await_resolver) = mpsc::channel();
-        let slow_server = thread::spawn(move || {
-            let (stream, _) = slow_listener.accept().expect("accept slow probe");
-            let mut reader = BufReader::new(stream);
-            let mut request = String::new();
-            reader.read_line(&mut request).expect("read slow handshake");
-            assert!(!request.is_empty());
-            await_resolver
-                .recv_timeout(Duration::from_secs(2))
-                .expect("resolver must fail closed before slow server exits");
-        });
-
-        let failure = resolve(
-            &fixture.gwt_home,
-            &fixture.caller,
-            DAEMON_PROTOCOL_VERSION,
-            |pid| pid == std::process::id(),
-        )
-        .await
-        .expect_err("slow live authority must block unique routing");
-        assert_eq!(failure.kind, FailureKind::InvalidEvidence);
-        assert_eq!(failure.candidate_count, 2);
-        assert!(failure.to_string().contains("sibling_probe_uncertain"));
-
-        release_slow.send(()).expect("release slow server");
-        slow_server.join().expect("slow server");
-        healthy_server.abort();
-        let _ = healthy_server.await;
     }
 
     #[tokio::test]
     async fn handshake_response_reader_rejects_oversized_frame() {
         use tokio::io::AsyncWriteExt;
 
-        let (mut reader, mut writer) = UnixStream::pair().expect("socket pair");
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        let mut reader = IpcStream::Unix(reader);
         let oversized = vec![b'x'; MAX_HANDSHAKE_RESPONSE_BYTES + 1];
         let server = tokio::spawn(async move {
             let _ = writer.write_all(&oversized).await;
@@ -1164,70 +1303,69 @@ mod tests {
         let _ = server.await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resolved_sibling_scope_and_token_complete_subscribe_handshake() {
-        use std::time::Duration;
+    #[test]
+    fn resolved_sibling_scope_and_token_complete_subscribe_handshake() {
+        runtime_with_pinned_daemon_startup().block_on(async {
+            use gwt_core::daemon::{ClientFrame, DaemonFrame};
 
-        use gwt_core::daemon::{ClientFrame, DaemonFrame};
+            use super::super::{broadcast::BroadcastHub, client::DaemonClient, server};
 
-        use super::super::{broadcast::BroadcastHub, client::DaemonClient, server};
+            let fixture = Fixture::new();
+            let socket_path = fixture.temp.path().join("daemon.sock");
+            let sibling_scope = scope(&fixture.temp, "sibling");
+            let endpoint = DaemonEndpoint::new(
+                sibling_scope.clone(),
+                std::process::id(),
+                socket_path.display().to_string(),
+                "sibling-token".to_string(),
+                "test-daemon".to_string(),
+            );
+            fixture.persist(&endpoint);
 
-        let fixture = Fixture::new();
-        let socket_path = fixture.temp.path().join("daemon.sock");
-        let sibling_scope = scope(&fixture.temp, "sibling");
-        let endpoint = DaemonEndpoint::new(
-            sibling_scope.clone(),
-            std::process::id(),
-            socket_path.display().to_string(),
-            "sibling-token".to_string(),
-            "test-daemon".to_string(),
-        );
-        fixture.persist(&endpoint);
+            let server_endpoint = endpoint.clone();
+            let server_socket = socket_path.clone();
+            let server_endpoint_path = sibling_scope.endpoint_path(&fixture.gwt_home);
+            let mut server_handle = tokio::spawn(async move {
+                server::run_server(
+                    server_endpoint,
+                    server_socket,
+                    server_endpoint_path,
+                    BroadcastHub::new(),
+                )
+                .await
+            });
+            wait_for_bound_socket(&socket_path, &mut server_handle).await;
+            drop(
+                DaemonClient::connect(&endpoint)
+                    .await
+                    .expect("sibling daemon ready"),
+            );
 
-        let server_endpoint = endpoint.clone();
-        let server_socket = socket_path.clone();
-        let server_endpoint_path = sibling_scope.endpoint_path(&fixture.gwt_home);
-        let server_handle = tokio::spawn(async move {
-            server::run_server(
-                server_endpoint,
-                server_socket,
-                server_endpoint_path,
-                BroadcastHub::new(),
+            let resolved = resolve(
+                &fixture.gwt_home,
+                &fixture.caller,
+                DAEMON_PROTOCOL_VERSION,
+                |pid| pid == std::process::id(),
             )
             .await
+            .expect("unique sibling");
+            let mut client = DaemonClient::connect(&resolved)
+                .await
+                .expect("sibling handshake");
+            client
+                .send_frame(&ClientFrame::Subscribe {
+                    channels: vec!["issue-monitor".to_string()],
+                })
+                .await
+                .expect("subscribe frame");
+            assert_eq!(
+                client.read_frame::<DaemonFrame>().await.expect("ack"),
+                DaemonFrame::Ack
+            );
+
+            drop(client);
+            server_handle.abort();
+            let _ = server_handle.await;
         });
-        for _ in 0..50 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(socket_path.exists(), "daemon socket did not appear");
-
-        let resolved = resolve(
-            &fixture.gwt_home,
-            &fixture.caller,
-            DAEMON_PROTOCOL_VERSION,
-            |pid| pid == std::process::id(),
-        )
-        .await
-        .expect("unique sibling");
-        let mut client = DaemonClient::connect(&resolved)
-            .await
-            .expect("sibling handshake");
-        client
-            .send_frame(&ClientFrame::Subscribe {
-                channels: vec!["issue-monitor".to_string()],
-            })
-            .await
-            .expect("subscribe frame");
-        assert_eq!(
-            client.read_frame::<DaemonFrame>().await.expect("ack"),
-            DaemonFrame::Ack
-        );
-
-        drop(client);
-        server_handle.abort();
-        let _ = server_handle.await;
     }
 }

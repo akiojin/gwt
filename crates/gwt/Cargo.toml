@@ -8,6 +8,8 @@ authors.workspace = true
 description = "Canvas-based floating terminal GUI for Git Worktree Manager"
 publish = false
 default-run = "gwt"
+# Issue #4135: original tests/*.rs are modules in the explicit suites below.
+autotests = false
 
 [[bin]]
 name = "gwt"
@@ -16,6 +18,46 @@ path = "src/main.rs"
 [[bin]]
 name = "gwtd"
 path = "src/bin/gwtd.rs"
+
+[[test]]
+name = "ci_contracts"
+path = "tests/suites/ci_contracts_test.rs"
+
+[[test]]
+name = "cli_contracts"
+path = "tests/suites/cli_contracts_test.rs"
+
+[[test]]
+name = "coordination_tests"
+path = "tests/suites/coordination_tests_test.rs"
+
+[[test]]
+name = "hook_contracts"
+path = "tests/suites/hook_contracts_test.rs"
+
+[[test]]
+name = "runtime_tests"
+path = "tests/suites/runtime_tests_test.rs"
+
+[[test]]
+name = "open_cli_integration"
+path = "tests/open_cli_integration.rs"
+
+[[test]]
+name = "project_restore_integration"
+path = "tests/project_restore_integration.rs"
+
+[[test]]
+name = "stable_server_port"
+path = "tests/stable_server_port.rs"
+
+[[test]]
+name = "startup_tray_performance"
+path = "tests/startup_tray_performance.rs"
+
+[[test]]
+name = "windows_agent_launch_e2e"
+path = "tests/windows_agent_launch_e2e.rs"
 
 [dependencies]
 # Optional: only compiled for the test-only `test-gh-guard` feature below.
@@ -33,12 +75,14 @@ gwt-terminal.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 dunce.workspace = true
+dirs.workspace = true
 ignore.workspace = true
 chrono.workspace = true
 semver.workspace = true
@@ -50,9 +94,10 @@ axum = { version = "0.8", features = ["ws"] }
 # the cross-platform NSApp / GTK / Windows message-pump glue. The wry
 # WebView dependency was removed alongside the tray migration; muda is
 # still pulled in transitively by tray-icon for menu construction.
-tao = "0.36"
+tao = "0.37"
 base64.workspace = true
 regex.workspace = true
+quick-xml = "0.42.0"
 rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true
@@ -64,10 +109,10 @@ encoding_rs.workspace = true
 pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
-sysinfo.workspace = true
-tray-icon = "0.24"
-auto-launch = "0.5"
-whoami = "1.5"
+sysinfo = { workspace = true, features = ["disk"] }
+tray-icon = "0.26"
+auto-launch = "0.6"
+whoami = "2.1"
 # SPEC #2920 Phase 4: the tray-icon crate needs RGBA bytes, so decode the
 # embedded `assets/icons/icon.png` at runtime via `image` on every host
 # OS. The legacy Windows/Linux-only gate stayed when the GUI route only
@@ -85,11 +130,27 @@ libc = { workspace = true }
 # the `auto-launch` LaunchAgent path. `NSError` is enabled so register /
 # unregister failures surface a real message instead of a silent fallback.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+mac-usernotifications = "0.3.1"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", features = ["NSError"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+rfd = { version = "0.17", features = ["common-controls-v6"] }
+windows = { version = "0.62.2", features = ["UI_Notifications", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-registry = "0.100"
+windows-result = "0.100"
+
+# Native reset consent must not delegate approval to PATH's zenity. Keep the
+# existing rfd/portal folder picker unchanged and fail promptly without DISPLAY.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [features]
 # Issue #3675 AC-2: arms the unsandboxed-gh spawn guard at process start (see
@@ -100,13 +161,16 @@ winresource.workspace = true
 test-gh-guard = ["dep:ctor"]
 
 [dev-dependencies]
-serde_yaml.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 # SPEC-3016 FR-003: shared test helpers live in gwt-core::test_support; the
 # feature is test-only and never ships.
 gwt-core = { workspace = true, features = ["test-support"] }
 gwt = { path = ".", features = ["test-gh-guard"] }
 ctor = "1.0.13"
+# Issue #4095: client-side vt100 model for the pane snapshot / stream
+# ordering fixture (patched to vendor/vt100 like gwt-terminal).
+vt100 = "0.16"
 
 [package.metadata.bundle]
 name = "GWT"

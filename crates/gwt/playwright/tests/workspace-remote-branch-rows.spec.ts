@@ -3,7 +3,7 @@
 // shared "Remote" tag (no separate "Start work on a branch" section, no
 // local/remote split). Picking ▶ continues on the branch via the existing
 // open_launch_wizard path. This E2E renders the real UI so the rows are proven
-// to appear, styled, on the reachable Workspace surface.
+// to appear, styled, on the reachable Issue Other surface.
 
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
@@ -13,12 +13,13 @@ test.beforeEach(async ({ page }) => {
   await installBackend(page);
 });
 
-test("remote branches fold into the unified Workspace list as Remote-tagged rows", async ({
+test("remote branches fold into the Issue Other list as Remote-tagged rows", async ({
   page,
 }) => {
   await page.goto(APP_URL);
+  await page.locator(".issue-other-summary").click();
 
-  // The Workspace surface (the reachable one) mounts.
+  // Persisted Workspace presets restore Issues; Other retains the shared list.
   await expect(page.locator(".workspace-overview-root")).toBeVisible();
 
   // There is no separate remote-branch section — the rows are in the list.
@@ -109,6 +110,7 @@ async function installBackend(page: any) {
         active_works: [
           {
             id: "work-local",
+            linked_issue_numbers: [],
             title: "Local paused work",
             status_category: "idle",
             lifecycle_state: "paused",

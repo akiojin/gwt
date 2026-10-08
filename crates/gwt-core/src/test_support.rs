@@ -8,13 +8,50 @@
 //! `test-support` cargo feature from their dev-dependencies. gwt-only
 //! machinery (the fake `gh` harness and CLI fixtures) stays in
 //! `crates/gwt/src/cli/test_support.rs`.
+//!
+//! # Event waits (SPEC #4740)
+//!
+//! Prefer an existing completion/ready acknowledgement over polling or sleeps.
+//! Use [`recv_event`] for a channel notification of a condition or explicit
+//! synchronization point. If completion already guarantees a queued message,
+//! assert with `try_recv` instead: waiting would hide a broken acknowledgement.
+//! Async fixtures should await their existing channel, notification or task.
+//!
+//! A retained wall-clock wait must carry this marker on its line or the line
+//! immediately before it: `// test-hygiene: allow-wall-clock-deadline <reason>`.
+//! The nonempty reason identifies an external observation with no usable
+//! event, or the real timeout contract being tested. Historical polling is
+//! not a reason. Enforcement belongs to the SPEC's Phase 4 hygiene gate.
+//! A hang guard detects a stuck fixture; never assert elapsed time against it.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::OsString,
+    marker::PhantomData,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{LockResult, Mutex, MutexGuard, OnceLock, PoisonError},
 };
+
+/// Receive a fixture event, with the shared hang guard for stuck producers.
+///
+/// The event determines success. Production deadline pins and load-mode zero
+/// do not shorten this guard. `event` names the synchronization point in a
+/// failure diagnostic. Sender disconnection fails immediately.
+///
+/// # Panics
+/// Panics if every sender disconnects or the fixture exhausts the hang guard.
+#[track_caller]
+pub fn recv_event<T>(receiver: &std::sync::mpsc::Receiver<T>, event: &str) -> T {
+    match receiver.recv_timeout(crate::deadline_budget::HANG_GUARD) {
+        Ok(value) => value,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("waiting for {event}: sender disconnected")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("waiting for {event}: fixture exceeded the hang guard")
+        }
+    }
+}
 #[cfg(windows)]
 use std::{
     collections::HashMap,
@@ -31,9 +68,83 @@ use std::{
 
 /// Process-wide lock serializing tests that read or mutate environment
 /// variables. Lock this before constructing a [`ScopedEnvVar`].
-pub fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+///
+/// The lock is reentrant (Issue #4580): a test body may hold it and still call
+/// a helper that takes it again on the same thread. `std::sync::Mutex` is not
+/// reentrant, so the plain mutex this used to return deadlocked in that shape.
+pub fn env_lock() -> &'static EnvLock {
+    static LOCK: OnceLock<EnvLock> = OnceLock::new();
+    LOCK.get_or_init(|| EnvLock {
+        inner: Mutex::new(()),
+    })
+}
+
+thread_local! {
+    /// How many [`EnvLockGuard`]s the current thread holds. Only the
+    /// outermost one owns the underlying mutex guard.
+    static ENV_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+    /// The underlying guard, parked here for the whole reentrant hold.
+    static ENV_LOCK_HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+}
+
+/// Reentrant counterpart of `Mutex<()>` backing [`env_lock`].
+///
+/// [`EnvLock::lock`] keeps the `LockResult` shape of `Mutex::lock`, so
+/// `.lock().unwrap()` and `.lock().unwrap_or_else(PoisonError::into_inner)`
+/// keep compiling unchanged at every call site.
+pub struct EnvLock {
+    inner: Mutex<()>,
+}
+
+impl EnvLock {
+    /// Acquires the lock, blocking only when another *thread* holds it.
+    ///
+    /// Mirrors `Mutex::lock`: `Err` carries a usable guard and means a thread
+    /// panicked while holding the lock. Nested acquisitions report the same
+    /// poison state as the outermost one, since the mutex cannot become
+    /// poisoned while this thread holds it.
+    pub fn lock(&'static self) -> LockResult<EnvLockGuard> {
+        let depth = ENV_LOCK_DEPTH.with(Cell::get);
+        if depth == 0 {
+            let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            ENV_LOCK_HELD.with(|held| *held.borrow_mut() = Some(guard));
+        }
+        ENV_LOCK_DEPTH.with(|d| d.set(depth + 1));
+
+        let guard = EnvLockGuard {
+            _not_send: PhantomData,
+        };
+        if self.inner.is_poisoned() {
+            Err(PoisonError::new(guard))
+        } else {
+            Ok(guard)
+        }
+    }
+
+    /// Mirrors `Mutex::is_poisoned`.
+    pub fn is_poisoned(&self) -> bool {
+        self.inner.is_poisoned()
+    }
+}
+
+/// Guard returned by [`EnvLock::lock`]. Releasing the outermost one releases
+/// the underlying mutex; inner ones only unwind the reentrancy depth.
+pub struct EnvLockGuard {
+    // The underlying `MutexGuard` lives in thread-local storage, so this guard
+    // must not travel to another thread.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for EnvLockGuard {
+    fn drop(&mut self) {
+        let depth = ENV_LOCK_DEPTH.with(Cell::get);
+        debug_assert!(depth > 0, "EnvLockGuard dropped without a matching lock()");
+        ENV_LOCK_DEPTH.with(|d| d.set(depth.saturating_sub(1)));
+        if depth <= 1 {
+            let released = ENV_LOCK_HELD.with(|held| held.borrow_mut().take());
+            drop(released);
+        }
+    }
 }
 
 thread_local! {
@@ -102,6 +213,47 @@ impl Drop for ScopedEnvVar {
             std::env::remove_var(self.key);
         }
     }
+}
+
+/// Materialize `contents` at `path` as an executable script (mode 0755)
+/// without this process ever holding a writable descriptor to it.
+///
+/// Issue #3521: a test binary writes a fake `git` / `gh` and executes it while
+/// sibling tests fork children of their own. A child forked while the
+/// writable descriptor is still open inherits it until its own exec, and on
+/// Linux `execve` of that file fails with `ETXTBSY` for as long as the
+/// descriptor exists. Unique names, explicit drops, and `sync_all` do not
+/// close that window; never opening the file for writing in this process
+/// does. The file is therefore written by a short-lived `/bin/sh` child that
+/// has exited before this call returns.
+///
+/// `contents` travels as one argument, so keep scripts well below the
+/// platform's single-argument limit (128 KiB on Linux).
+///
+/// The child is given an explicit `PATH`: `chmod` is resolved through it, and
+/// `PATH` is process-wide state that a *sibling* test may legitimately be
+/// rewriting at the same moment (several set it to `""` to prove a lookup
+/// fails). Inheriting it made this helper fail with `chmod: command not found`
+/// in whichever unrelated test happened to be running then.
+#[cfg(unix)]
+pub fn write_executable_script(path: &Path, contents: &str) -> std::io::Result<()> {
+    let output = crate::process::hidden_command("/bin/sh")
+        .env("PATH", "/usr/bin:/bin")
+        .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .arg(contents)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "/bin/sh could not materialize {} ({}): {}",
+        path.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 /// Real executable fixture for Windows-only integration tests of the Bun
@@ -398,7 +550,7 @@ impl WindowsNpmRegistryFixture {
 
         let connect_timeout = remaining_timeout()?;
         let mut stream = TcpStream::connect_timeout(&self.address, connect_timeout)
-            .map_err(&normalize_timeout_error)?;
+            .map_err(normalize_timeout_error)?;
         let request = format!(
             "GET /-/gwt-health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.address
@@ -409,7 +561,7 @@ impl WindowsNpmRegistryFixture {
             stream.set_write_timeout(Some(write_timeout))?;
             let count = stream
                 .write(&request.as_bytes()[written..])
-                .map_err(&normalize_timeout_error)?;
+                .map_err(normalize_timeout_error)?;
             if count == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
@@ -424,7 +576,7 @@ impl WindowsNpmRegistryFixture {
         loop {
             let read_timeout = remaining_timeout()?;
             stream.set_read_timeout(Some(read_timeout))?;
-            let count = stream.read(&mut buffer).map_err(&normalize_timeout_error)?;
+            let count = stream.read(&mut buffer).map_err(normalize_timeout_error)?;
             if count == 0 {
                 break;
             }
@@ -722,13 +874,22 @@ const groups = hookConfig.hooks && hookConfig.hooks.SessionStart;\n\
 const hookCommand = groups && groups[0] && groups[0].hooks && groups[0].hooks[0] && groups[0].hooks[0].command;\n\
 if (!hookCommand) {{ console.error('generated SessionStart hook is missing'); process.exit(3); }}\n\
 const providerSessionId = process.env.GWT_PHASE75_PROVIDER_SESSION_ID || 'phase75-provider-session';\n\
-const hook = childProcess.spawnSync(hookCommand, [], {{\n\
+const hookSpawnOptions = {{\n\
   cwd: process.cwd(),\n\
   env: process.env,\n\
   input: JSON.stringify({{ session_id: providerSessionId, cwd: process.cwd() }}),\n\
-  encoding: 'utf8',\n\
-  shell: true\n\
-}});\n\
+  encoding: 'utf8'\n\
+}};\n\
+// Issue #3966: model each provider's real hook runner, not Node's default.\n\
+// Claude Code runs every hook command through a POSIX shell (Git Bash on\n\
+// Windows) — running it through cmd.exe here is what let a Windows-only\n\
+// PowerShell hook command pass this boundary while it was silently dead in\n\
+// production. Codex keeps the native shell (Issue #3810).\n\
+// Issue #5102: PATH's bash can be WSL, which drops Windows launch identity.\n\
+const claudeShell = process.env.CLAUDE_CODE_GIT_BASH_PATH || path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe');\n\
+const hook = packageName === '@anthropic-ai/claude-code'\n\
+  ? childProcess.spawnSync(claudeShell, ['-c', hookCommand], hookSpawnOptions)\n\
+  : childProcess.spawnSync(hookCommand, [], Object.assign({{ shell: true }}, hookSpawnOptions));\n\
 const receipt = {{\n\
   argv: process.argv.slice(2),\n\
   package: packageName,\n\
@@ -989,6 +1150,22 @@ pub fn summarize_pty_output_for_diagnostics(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn recv_event_observes_producer_completion() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || tx.send(String::from("ready")).unwrap());
+        assert_eq!(recv_event(&rx, "producer ready"), "ready");
+        producer.join().unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "waiting for producer ready: sender disconnected")]
+    fn recv_event_reports_disconnected_producer() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        drop(tx);
+        recv_event(&rx, "producer ready");
+    }
+
     #[cfg(windows)]
     #[test]
     fn percent_decode_registry_path_handles_non_ascii_without_losing_valid_decoding() {
@@ -1074,5 +1251,80 @@ mod tests {
         }
 
         assert!(gwt_home_override().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_executable_script_materializes_a_runnable_script() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("fake-tool");
+        let body = "#!/bin/sh\nprintf '%s %s\\n' \"issue-3521\" \"$1\"\n";
+
+        write_executable_script(&script, body).expect("write script");
+
+        assert_eq!(std::fs::read_to_string(&script).expect("read back"), body);
+        let output = crate::process::hidden_command(&script)
+            .arg("arg")
+            .output()
+            .expect("run script");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "issue-3521 arg\n");
+    }
+
+    /// Issue #3521: a child forked by another thread while this process holds
+    /// the script open for writing inherits that descriptor until its own
+    /// exec, and Linux refuses `execve` of the script with `ETXTBSY` for as
+    /// long as the descriptor exists. The helper must never open that window.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn write_executable_script_is_immediately_executable_under_concurrent_forks() {
+        use std::{
+            os::unix::process::CommandExt,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut command = crate::process::hidden_command("/bin/true");
+                        // Force the fork path and keep the child inside its
+                        // fork-to-exec window, holding every inherited
+                        // descriptor the way a slow child does under CI load.
+                        // SAFETY: `nanosleep` is async-signal-safe, so the
+                        // forked child only sleeps before it execs.
+                        unsafe {
+                            command.pre_exec(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                                Ok(())
+                            });
+                        }
+                        let _ = command.status();
+                    }
+                })
+            })
+            .collect();
+
+        for index in 0..120 {
+            let script = temp.path().join(format!("script-{index}"));
+            write_executable_script(&script, "#!/bin/sh\nexit 0\n").expect("write script");
+            let status = crate::process::hidden_command(&script)
+                .status()
+                .unwrap_or_else(|error| {
+                    panic!("script {index} must run right after it was written: {error}")
+                });
+            assert!(status.success(), "script {index} exited with {status}");
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for forker in forkers {
+            forker.join().expect("forker thread");
+        }
     }
 }

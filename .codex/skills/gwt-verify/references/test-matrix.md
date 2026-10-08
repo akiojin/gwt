@@ -74,7 +74,7 @@ the project-specific recipe.
 
 ### Worked example: acceptance-aware escalation (gwt repo)
 
-A bug fix lands only in `crates/gwt/src/app_runtime.rs` (no `web/**` file
+A bug fix lands only in `crates/gwt/src/app_runtime/` (no `web/**` file
 changed), but the Issue says "the workspace list fails to re-render after a
 viewport update." The acceptance is a WebView behavior. By diff path this is
 business logic (Browser column empty), but acceptance-aware escalation

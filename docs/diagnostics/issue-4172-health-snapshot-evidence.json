@@ -1,0 +1,492 @@
+{
+  "issue": 4172,
+  "source_commit": "4e565a5b74f4ff413d449e32d830a546ccf5bd4f",
+  "working_tree": "uncommitted per-projection hook failure snapshot fix",
+  "captured_at": "2026-09-10T10:52:30.930003+09:00",
+  "platform": "Windows x86_64",
+  "profile": "dev unoptimized",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "method": "Single fixture repeated health evaluation, A/B in one process: 'per_row' rereads the host error ledger for every evaluation (pre-fix shape), 'shared_snapshot' reads it once per projection and reuses it (post-fix shape). No GUI, Board projection, distinct Work fixtures or user input measured.",
+  "ledger_snapshot": [
+    {
+      "name": "errors.2026-08-31.jsonl",
+      "bytes": 19493,
+      "sha256": "C0679E933B246D9AEEFB9F748689462293D415A0BA5729C23313B1B13EAF61BE",
+      "lines": 47
+    },
+    {
+      "name": "errors.2026-09-01.jsonl",
+      "bytes": 71545,
+      "sha256": "6CA9F97738EC4F43A73C593059ED859DC9570BE64C9DC8841468F1842C7F50C5",
+      "lines": 136
+    },
+    {
+      "name": "errors.2026-09-02.jsonl",
+      "bytes": 45872,
+      "sha256": "5FAA251A6CD9E607B527D5E772F1C2D610DFCFC29B4FAA1C0406C5D51EF1C812",
+      "lines": 89
+    },
+    {
+      "name": "errors.2026-09-03.jsonl",
+      "bytes": 7473,
+      "sha256": "F73D1C272A3D6E10D3F11C6F0E35118FBF1798F4988C16E4A772CED5C84391F2",
+      "lines": 13
+    },
+    {
+      "name": "errors.2026-09-04.jsonl",
+      "bytes": 23522,
+      "sha256": "01F8105B4EE3D32EDC022E3BFA6E07E833599EDCD506C74C2BBA1DE9B74E6353",
+      "lines": 37
+    },
+    {
+      "name": "errors.2026-09-05.jsonl",
+      "bytes": 80206,
+      "sha256": "AA45A6C94EC7B06DC621FB005E8B78819C55369242BFCF8869D7F7918AA9420C",
+      "lines": 144
+    },
+    {
+      "name": "errors.2026-09-06.jsonl",
+      "bytes": 21685,
+      "sha256": "3EC292FEE047E8A1C6FF67B79C3753D3BF26D7CCAF91E1F5667C64D99F1DEA7A",
+      "lines": 29
+    },
+    {
+      "name": "errors.2026-09-07.jsonl",
+      "bytes": 137053,
+      "sha256": "F0907A54067F0BDD503036D0790AC211921B682BBE3F4C21925BC96EF8B66201",
+      "lines": 196
+    },
+    {
+      "name": "errors.2026-09-08.jsonl",
+      "bytes": 100346,
+      "sha256": "E4098F0ABD1E34CF1441BA7ACD1E86422517F5363C77E8A6B8917587CE4CDDE3",
+      "lines": 166
+    },
+    {
+      "name": "errors.2026-09-09.jsonl",
+      "bytes": 289548,
+      "sha256": "438CEF5DFD8035575D14C4F8C91E20F0BAC1664BD30811BE0DDE15A21C20FE4C",
+      "lines": 540
+    },
+    {
+      "name": "errors.2026-09-10.jsonl",
+      "bytes": 37418,
+      "sha256": "9AB6F61E5FAE059CB700EBA74F808ACE55DAE2FFCE1524753E22AAF4434642E5",
+      "lines": 77
+    }
+  ],
+  "harness_sha256": {
+    "measure-work-health-4172.rs": "4F2AF967CD42555921A2AA151D97C47030C6864AC097C0C500BA4B1CF6BFCE6D",
+    "measure-work-health-4172.ps1": "42E9B69F2926080FBF6440019217C67EDD2E76976756215031C92CB41B52BD82"
+  },
+  "cases": [
+    {
+      "name": "empty",
+      "ledger": {
+        "ledger_files": 0,
+        "ledger_bytes": 0,
+        "ledger_nonempty_lines": 0
+      },
+      "samples": [
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 559,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 552,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 576,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 734,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 632,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 546,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 17199,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 16419,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 17495,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 17029,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 18717,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 17100,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 139908,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 133530,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 139988,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 142023,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 133292,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 131884,
+          "issue_count_sum": 0
+        }
+      ]
+    },
+    {
+      "name": "half",
+      "ledger": {
+        "ledger_files": 11,
+        "ledger_bytes": 414603,
+        "ledger_nonempty_lines": 741
+      },
+      "samples": [
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 18524,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 18588,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 19006,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 19062,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 22355,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 19957,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 616829,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 35322,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 628681,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 33498,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 604623,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 35696,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 4728456,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 147292,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 4681464,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 162725,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 4703200,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 151371,
+          "issue_count_sum": 0
+        }
+      ]
+    },
+    {
+      "name": "full",
+      "ledger": {
+        "ledger_files": 11,
+        "ledger_bytes": 834161,
+        "ledger_nonempty_lines": 1474
+      },
+      "samples": [
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 35285,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 0,
+          "elapsed_us": 35942,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 34542,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 1,
+          "elapsed_us": 33737,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 33771,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 1,
+          "repeat": 2,
+          "elapsed_us": 34048,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 1176570,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 0,
+          "elapsed_us": 52538,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 1160783,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 1,
+          "elapsed_us": 50494,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 1159777,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 32,
+          "repeat": 2,
+          "elapsed_us": 53013,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 9208173,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 0,
+          "elapsed_us": 179465,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 9118212,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 1,
+          "elapsed_us": 176871,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "per_row",
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 9085025,
+          "issue_count_sum": 0
+        },
+        {
+          "mode": "shared_snapshot",
+          "evaluations": 254,
+          "repeat": 2,
+          "elapsed_us": 166151,
+          "issue_count_sum": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,10 +1,8 @@
 //! Launch environment composition for host and container agent processes.
 
-#[cfg(not(windows))]
-use std::path::PathBuf;
 use std::{
     collections::{BTreeSet, HashMap},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -22,6 +20,12 @@ const GWT_WORKTREE_HASH_ENV: &str = "GWT_WORKTREE_HASH";
 const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
 const INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS: &[&str] = &["NO_COLOR"];
 const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
+    // Independent agents must not inherit Claude's parent-session identity or
+    // child marker, which can disable their own transcript persistence.
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
     CODEX_THREAD_ID_ENV,
     GWT_BIN_PATH_ENV,
     GWT_CONTINUE_WORK_READY_NONCE_ENV,
@@ -150,6 +154,145 @@ where
         home = %home,
         "host PATH hydration applied"
     );
+}
+
+/// Non-secret origin of the environment value selecting Codex authentication state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CodexAuthRootOrigin {
+    Host,
+    Profile,
+    CallerEnv,
+}
+
+/// Launch-time path proof. No authentication-file contents are persisted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodexAuthRoot {
+    pub path: PathBuf,
+    pub origin: CodexAuthRootOrigin,
+}
+
+// Match the final child's case semantics, and reject ambiguous Windows variants.
+fn env_value<'a>(env: &'a HashMap<String, String>, key: &str) -> Result<Option<&'a str>, ()> {
+    let mut matches = env.iter().filter(|(candidate, _)| {
+        if cfg!(windows) {
+            candidate.eq_ignore_ascii_case(key)
+        } else {
+            candidate.as_str() == key
+        }
+    });
+    let value = matches.next().map(|(_, value)| value.as_str());
+    if matches.next().is_some() {
+        return Err(());
+    }
+    Ok(value)
+}
+
+/// Resolve only supported Host authentication roots. Failure leaves reset disabled,
+/// without preventing the original agent from launching.
+pub(crate) fn codex_auth_root_path(
+    config: &crate::LaunchConfig,
+    cwd: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    if config.agent_id != crate::AgentId::Codex
+        || config.runtime_target != LaunchRuntimeTarget::Host
+    {
+        return None;
+    }
+    for key in [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "OPENAI_BASE_URL",
+        "CODEX_API_BASE_URL",
+        "OPENAI_ORG_ID",
+        "OPENAI_ORGANIZATION",
+        "OPENAI_PROJECT_ID",
+        "CHATGPT_BASE_URL",
+    ] {
+        if env_value(&config.env_vars, key)
+            .ok()?
+            .is_some_and(|value| !value.is_empty())
+        {
+            return None;
+        }
+    }
+    if codex_auth_args_override(&config.args) {
+        return None;
+    }
+    let (path, key) = match env_value(&config.env_vars, "CODEX_HOME")
+        .ok()?
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            let path = Path::new(value);
+            (
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    cwd.join(path)
+                },
+                "CODEX_HOME",
+            )
+        }
+        None => {
+            // Windows Codex uses an OS known-folder home, not HOME/USERPROFILE.
+            // Until that identity is available here, require explicit CODEX_HOME.
+            if cfg!(windows) {
+                return None;
+            }
+            let home = Path::new(env_value(&config.env_vars, "HOME").ok()??);
+            if !home.is_absolute() {
+                return None;
+            }
+            (home.join(".codex"), "HOME")
+        }
+    };
+    let path = dunce::canonicalize(path).ok()?;
+    path.is_dir().then_some((path, key))
+}
+
+fn codex_auth_args_override(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        if arg == "--oss"
+            || arg == "--local-provider"
+            || arg.starts_with("--local-provider=")
+            || arg == "--profile"
+            || arg.starts_with("--profile=")
+            || arg == "-p"
+            || (arg.starts_with("-p") && !arg.starts_with("--"))
+        {
+            return true;
+        }
+        let value = if arg == "-c" || arg == "--config" {
+            match args.get(index + 1) {
+                Some(value) => Some(value.as_str()),
+                None => return true,
+            }
+        } else {
+            arg.strip_prefix("--config=")
+                .or_else(|| arg.strip_prefix("-c").filter(|value| !value.is_empty()))
+        };
+        value.is_some_and(|value| {
+            let key = value.split('=').next().unwrap_or_default().trim();
+            // Parse only the TOML key, never the supplied value. This also handles
+            // quoted/dotted keys without allowing auth overrides through aliases.
+            let Ok(parsed) = toml::from_str::<toml::Value>(&format!("{key} = true")) else {
+                return true;
+            };
+            [
+                "auth",
+                "codex_home",
+                "model_provider",
+                "model_providers",
+                "forced_login_method",
+                "forced_chatgpt_workspace_id",
+                "cli_auth_credentials_store",
+                "chatgpt_base_url",
+            ]
+            .iter()
+            .any(|key| parsed.get(key).is_some())
+        })
+    })
 }
 
 /// Effective environment assembled from the active profile and launch context.
@@ -292,6 +435,36 @@ impl LaunchEnvironment {
             );
         }
         self
+    }
+
+    /// Materialize environment and capture non-secret authentication-root provenance.
+    pub fn apply_to_config(&self, config: &mut crate::LaunchConfig) {
+        let caller_codex_home = env_value(&config.env_vars, "CODEX_HOME")
+            .ok()
+            .flatten()
+            .is_some();
+        let caller_home = env_value(&config.env_vars, "HOME").ok().flatten().is_some();
+        self.apply_to_parts(&mut config.env_vars, &mut config.remove_env);
+        config.codex_auth_root = None;
+        let Some(cwd) = config.working_dir.as_deref() else {
+            return;
+        };
+        let Some((path, key)) = codex_auth_root_path(config, cwd) else {
+            return;
+        };
+        let caller_selected = if key == "CODEX_HOME" {
+            caller_codex_home
+        } else {
+            caller_home
+        };
+        let origin = if caller_selected {
+            CodexAuthRootOrigin::CallerEnv
+        } else if env_value(&self.profile_env, key).ok().flatten().is_some() {
+            CodexAuthRootOrigin::Profile
+        } else {
+            CodexAuthRootOrigin::Host
+        };
+        config.codex_auth_root = Some(CodexAuthRoot { path, origin });
     }
 
     /// Merge this environment into spawn parts.
@@ -502,21 +675,136 @@ mod tests {
 
     use super::*;
 
+    /// Issue #3895: `PATH` is process-global and libtest runs tests on
+    /// parallel threads, so a test that swaps `PATH` (even while holding
+    /// `env_lock`) races every concurrent test that spawns `sh` / `git` /
+    /// `docker` by name and fails them with `No such file or directory`.
+    /// Tests must inject `PATH` into the probe or child environment instead
+    /// (`AgentDetector::detect_by_command_in_env`,
+    /// `detect_claude_version_raw_in_env`, the launch `host_path` seams, or
+    /// `ProcessPlanRequest::env`). This scan covers every test region in the
+    /// crate; the only sanctioned process-wide write is the pre-thread PATH
+    /// hydration in production code, which lives outside any test region.
     #[test]
-    fn environment_tests_never_mutate_the_process_path() {
-        let test_source = include_str!("environment.rs")
-            .split_once("mod tests {")
-            .expect("environment test module")
-            .1;
-        for mutation in [
-            concat!("std::env::", "set_var(\"PATH\""),
-            concat!("std::env::", "remove_var(\"PATH\""),
-        ] {
-            assert!(
-                !test_source.contains(mutation),
-                "PATH-mutating tests race every parallel process-spawn test: {mutation}"
-            );
+    fn agent_tests_never_mutate_the_process_path() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        for (file, test_only) in rust_sources(&manifest_dir.join("src"))
+            .into_iter()
+            .map(|file| (file, false))
+            .chain(
+                rust_sources(&manifest_dir.join("tests"))
+                    .into_iter()
+                    .map(|file| (file, true)),
+            )
+        {
+            let source = std::fs::read_to_string(&file).expect("read gwt-agent source");
+            let (skipped_lines, region) = if test_only {
+                (0, source.as_str())
+            } else {
+                match test_region(&source) {
+                    Some(region) => region,
+                    None => continue,
+                }
+            };
+            for (line, pattern) in process_path_mutations(region) {
+                offenders.push(format!(
+                    "{}:{} ({pattern})",
+                    file.strip_prefix(manifest_dir).unwrap_or(&file).display(),
+                    skipped_lines + line
+                ));
+            }
         }
+        assert!(
+            offenders.is_empty(),
+            "tests must not mutate the process-global PATH; inject it into the probe \
+             environment instead (Issue #3895):\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    fn rust_sources(dir: &std::path::Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let path = entry.expect("read dir entry").path();
+            if path.is_dir() {
+                files.extend(rust_sources(&path));
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// The source from the first `#[cfg(test` / `#[cfg(all(test` marker on,
+    /// with the number of lines skipped before it.
+    fn test_region(source: &str) -> Option<(usize, &str)> {
+        let start = ["#[cfg(test", "#[cfg(all(test"]
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min()?;
+        Some((source[..start].lines().count(), &source[start..]))
+    }
+
+    /// `(1-based line, pattern)` for every process-global PATH write in
+    /// `region`. Whitespace is ignored so rustfmt line breaks cannot hide a
+    /// call, and matching is ASCII-case-insensitive because Windows resolves
+    /// `Path` / `path` to the same variable; a hit is attributed to the line
+    /// the call starts on.
+    fn process_path_mutations(region: &str) -> Vec<(usize, &'static str)> {
+        const PATTERNS: [&str; 4] = [
+            concat!("std::env::set_var(", "\"PATH\""),
+            concat!("std::env::remove_var(", "\"PATH\""),
+            concat!("ScopedEnvVar::set(", "\"PATH\""),
+            concat!("ScopedEnvVar::unset(", "\"PATH\""),
+        ];
+        let compact = |text: &str| -> String {
+            text.chars()
+                .filter(|c| !c.is_whitespace())
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        };
+        let lines: Vec<&str> = region.lines().collect();
+        let mut hits = Vec::new();
+        for index in 0..lines.len() {
+            let first = compact(lines[index]);
+            let window = compact(&lines[index..(index + 4).min(lines.len())].join(""));
+            for pattern in PATTERNS {
+                if window
+                    .find(&pattern.to_ascii_lowercase())
+                    .is_some_and(|position| position < first.len())
+                {
+                    hits.push((index + 1, pattern));
+                }
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn process_path_mutation_scan_ignores_case_and_line_breaks() {
+        let region = concat!(
+            "let _a = ScopedEnvVar::set(\n",
+            "    \"Path\",\n",
+            "    temp.path(),\n",
+            ");\n",
+            "std::env::remove_var(\"path\");\n",
+            "let _ok = ScopedEnvVar::set(\"HOME\", temp.path());\n",
+        );
+
+        let hits = process_path_mutations(region);
+
+        assert_eq!(
+            hits,
+            vec![
+                (1, concat!("ScopedEnvVar::set(", "\"PATH\"")),
+                (5, concat!("std::env::remove_var(", "\"PATH\"")),
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -563,6 +851,190 @@ mod tests {
             .insert("PROFILE_ONLY".to_string(), "yes".to_string());
         profile.disabled_env = vec!["SECRET".to_string()];
         profile
+    }
+
+    #[test]
+    fn codex_auth_root_tracks_host_profile_and_caller_at_materialization() {
+        use crate::{AgentId, AgentLaunchBuilder, CodexAuthRootOrigin, Session};
+        let root = tempfile::tempdir().unwrap();
+        let host = root.path().join("host");
+        let profile = root.path().join("profile");
+        let caller = root.path().join("caller");
+        for path in [&host, &profile, &caller] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let mut profile_settings = Profile::new("reset-proof");
+        // Keep profile fixture alive for the actual materialization below.
+        let (_empty_dir, empty_profile_path) = write_profile_config(profile_settings.clone());
+        let host_env = HashMap::from([("CODEX_HOME".to_string(), host.display().to_string())]);
+        let launch_env =
+            LaunchEnvironment::from_active_profile_with_base(&empty_profile_path, host_env.clone())
+                .unwrap();
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        config.working_dir = Some(root.path().to_path_buf());
+        launch_env.apply_to_config(&mut config);
+        let session = Session::from_launch_config(root.path(), "work/test", &config);
+        let proof = session.codex_auth_root.unwrap();
+        assert_eq!(proof.path, dunce::canonicalize(&host).unwrap());
+        assert_eq!(proof.origin, CodexAuthRootOrigin::Host);
+
+        profile_settings
+            .env_vars
+            .insert("CODEX_HOME".into(), profile.display().to_string());
+        let (_profile_dir, profile_path) = write_profile_config(profile_settings);
+        let launch_env =
+            LaunchEnvironment::from_active_profile_with_base(&profile_path, host_env).unwrap();
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        config.working_dir = Some(root.path().to_path_buf());
+        launch_env.apply_to_config(&mut config);
+        let proof = Session::from_launch_config(root.path(), "work/test", &config)
+            .codex_auth_root
+            .unwrap();
+        assert_eq!(proof.path, dunce::canonicalize(&profile).unwrap());
+        assert_eq!(proof.origin, CodexAuthRootOrigin::Profile);
+
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        config.working_dir = Some(root.path().to_path_buf());
+        config
+            .env_vars
+            .insert("CODEX_HOME".into(), caller.display().to_string());
+        launch_env.apply_to_config(&mut config);
+        let session = Session::from_launch_config(root.path(), "work/test", &config);
+        assert_eq!(
+            session.codex_auth_root.as_ref().unwrap().path,
+            dunce::canonicalize(&caller).unwrap()
+        );
+        assert_eq!(
+            session.codex_auth_root.as_ref().unwrap().origin,
+            CodexAuthRootOrigin::CallerEnv
+        );
+        let sessions = root.path().join("sessions");
+        session.save(&sessions).unwrap();
+        assert_eq!(
+            Session::load(&sessions.join(format!("{}.toml", session.id)))
+                .unwrap()
+                .codex_auth_root,
+            session.codex_auth_root
+        );
+        config
+            .env_vars
+            .insert("CODEX_HOME".into(), host.display().to_string());
+        assert!(
+            Session::from_launch_config(root.path(), "work/test", &config)
+                .codex_auth_root
+                .is_none(),
+            "post-materialization root changes must invalidate the proof"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn codex_auth_root_home_fallback_records_winning_source() {
+        use crate::{AgentId, AgentLaunchBuilder, CodexAuthRootOrigin, Session};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".codex")).unwrap();
+        let mut profile = Profile::new("reset-proof");
+        profile
+            .env_vars
+            .insert("HOME".into(), root.path().display().to_string());
+        let (_dir, path) = write_profile_config(profile);
+        let env = LaunchEnvironment::from_active_profile_with_base(&path, HashMap::new()).unwrap();
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        config.working_dir = Some(root.path().to_path_buf());
+        env.apply_to_config(&mut config);
+        let proof = Session::from_launch_config(root.path(), "work/test", &config)
+            .codex_auth_root
+            .unwrap();
+        assert_eq!(proof.origin, CodexAuthRootOrigin::Profile);
+        assert_eq!(
+            proof.path,
+            dunce::canonicalize(root.path().join(".codex")).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_auth_root_missing_legacy_and_non_host_are_unproven() {
+        use crate::{AgentId, AgentLaunchBuilder, Session};
+        let root = tempfile::tempdir().unwrap();
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        config.working_dir = Some(root.path().to_path_buf());
+        let env = LaunchEnvironment::empty();
+        env.apply_to_config(&mut config);
+        assert!(
+            Session::from_launch_config(root.path(), "work/test", &config)
+                .codex_auth_root
+                .is_none()
+        );
+        config
+            .env_vars
+            .insert("CODEX_HOME".into(), root.path().display().to_string());
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        env.apply_to_config(&mut config);
+        assert!(
+            Session::from_launch_config(root.path(), "work/test", &config)
+                .codex_auth_root
+                .is_none()
+        );
+        let legacy = Session::new(root.path(), "work/test", AgentId::Codex);
+        let sessions = root.path().join("sessions");
+        legacy.save(&sessions).unwrap();
+        assert!(Session::load(&sessions.join(format!("{}.toml", legacy.id)))
+            .unwrap()
+            .codex_auth_root
+            .is_none());
+    }
+
+    #[test]
+    fn codex_auth_root_does_not_certify_alternative_api_credentials() {
+        use crate::{AgentId, AgentLaunchBuilder, Session};
+        let root = tempfile::tempdir().unwrap();
+        let env = LaunchEnvironment::from_base_env(HashMap::from([
+            ("CODEX_HOME".to_string(), root.path().display().to_string()),
+            ("OPENAI_API_KEY".to_string(), "fixture-only".to_string()),
+        ]));
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        config.working_dir = Some(root.path().to_path_buf());
+        env.apply_to_config(&mut config);
+        assert!(
+            Session::from_launch_config(root.path(), "work/test", &config)
+                .codex_auth_root
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_auth_root_rejects_profile_or_auth_config_but_keeps_normal_flags() {
+        use crate::{AgentId, AgentLaunchBuilder, Session};
+        let root = tempfile::tempdir().unwrap();
+        let env = LaunchEnvironment::from_base_env(HashMap::from([(
+            "CODEX_HOME".to_string(),
+            root.path().display().to_string(),
+        )]));
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        config.working_dir = Some(root.path().to_path_buf());
+        env.apply_to_config(&mut config);
+        assert!(
+            Session::from_launch_config(root.path(), "work/test", &config)
+                .codex_auth_root
+                .is_some(),
+            "normal generated sandbox/config flags must remain eligible"
+        );
+        config.args.extend([
+            "--config".to_string(),
+            "\"forced_chatgpt_workspace_id\"=other".to_string(),
+        ]);
+        assert!(
+            Session::from_launch_config(root.path(), "work/test", &config)
+                .codex_auth_root
+                .is_none()
+        );
+        config.args.truncate(config.args.len() - 2);
+        config.args.push("--profile=other".to_string());
+        assert!(
+            Session::from_launch_config(root.path(), "work/test", &config)
+                .codex_auth_root
+                .is_none()
+        );
     }
 
     fn expected_launch_remove_env(additional: &[&str]) -> Vec<String> {
@@ -957,6 +1429,74 @@ mod tests {
                 "parent launch-scoped value must be removed regardless of Windows env-key casing: {key}"
             );
         }
+    }
+
+    #[test]
+    fn launch_environment_drops_claude_child_session_marker() {
+        for key in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+        ] {
+            let (env, remove_env) =
+                LaunchEnvironment::from_base_env([(key.to_string(), "parent".to_string())])
+                    .into_parts();
+
+            assert!(!env.contains_key(key), "parent marker remains: {key}");
+            assert!(remove_env.iter().any(|candidate| candidate == key));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launch_environment_drops_claude_child_session_marker_with_windows_casing() {
+        for key in [
+            "Claude_Code_Child_Session",
+            "ClaudeCode",
+            "Claude_Code_Session_Id",
+            "Claude_Code_Session_Attended",
+        ] {
+            let (env, remove_env) =
+                LaunchEnvironment::from_base_env([(key.to_string(), "parent".to_string())])
+                    .into_parts();
+
+            assert!(!env
+                .keys()
+                .any(|candidate| candidate.eq_ignore_ascii_case(key)));
+            assert!(remove_env
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(key)));
+        }
+    }
+
+    #[test]
+    fn child_process_does_not_inherit_claude_child_session_marker() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _marker = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CODE_CHILD_SESSION", "1");
+        let (env, remove_env) = LaunchEnvironment::from_base_env(host_process_env()).into_parts();
+        #[cfg(not(windows))]
+        let mut child = {
+            let mut command = gwt_core::process::hidden_command("/bin/sh");
+            command.args(["-c", "test \"${CLAUDE_CODE_CHILD_SESSION+x}\" != x"]);
+            command
+        };
+        #[cfg(windows)]
+        let mut child = {
+            let mut command = gwt_core::process::hidden_command("cmd.exe");
+            command.args([
+                "/D",
+                "/C",
+                "if defined Claude_Code_Child_Session (exit /b 1) else (exit /b 0)",
+            ]);
+            command
+        };
+        for key in remove_env {
+            child.env_remove(key);
+        }
+        assert!(child.envs(env).status().unwrap().success());
     }
 
     #[test]

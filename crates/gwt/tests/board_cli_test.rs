@@ -16,7 +16,7 @@
 
 use std::{io::Write, path::Path, process::Stdio};
 
-use gwt_agent::{AgentId, Session};
+use gwt_agent::{AgentId, ExecutionBindingIdentity, Session, SessionExecutionBinding};
 use gwt_core::process::hidden_command;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -24,6 +24,7 @@ use tempfile::TempDir;
 fn git_init_with_origin(path: &Path) {
     assert!(hidden_command("git")
         .arg("init")
+        .args(["-b", "work/board-cli-test"])
         .arg(path)
         .status()
         .expect("git init")
@@ -52,7 +53,24 @@ fn fixture() -> Fixture {
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     git_init_with_origin(project.path());
-    let session = Session::new(project.path(), "work/board-cli-test", AgentId::Codex);
+    let mut session = Session::new(project.path(), "work/board-cli-test", AgentId::Codex);
+    session.project_state_root = Some(project.path().to_path_buf());
+    session.linked_issue_number = Some(1974);
+    session
+        .set_execution_binding(Some(SessionExecutionBinding {
+            schema_version: SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().expect("fixture repo hash"),
+            owner_kind: "spec".to_string(),
+            owner_number: 1974,
+            identity: ExecutionBindingIdentity {
+                generation_id: "board-cli-generation".to_string(),
+                binding_id: "board-cli-binding".to_string(),
+                ledger_head_hash: "board-cli-ledger".to_string(),
+            },
+            capability_generation: 1,
+        }))
+        .expect("bind fixture Session");
     let session_id = session.id.clone();
     session
         .save(&home.path().join(".gwt").join("sessions"))
@@ -167,4 +185,58 @@ fn board_post_dispatches_under_remote_provider_config_via_local_fallback() {
         r#"{"schema_version":1,"operation":"board.post","params":{"kind":"status","body":"hermetic local provider marker"}}"#,
     );
     assert_ok(&post, "board.post under isolated HOME");
+}
+
+fn recovery_report(response: &Value) -> Value {
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("recovery output string");
+    serde_json::from_str(output.trim())
+        .unwrap_or_else(|error| panic!("parse recovery report: {error}; output={output}"))
+}
+
+#[test]
+fn board_post_intent_replays_exactly_and_changed_payload_conflicts() {
+    let fixture = fixture();
+    let request = r#"{"schema_version":1,"operation":"board.post","params":{"kind":"status","body":"durable integration payload","intent_id":"board-cli-intent-1","broadcast":true}}"#;
+    let first = run_board(&fixture, request);
+    assert_ok(&first, "first recovery board.post");
+    assert_eq!(recovery_report(&first)["state"], "acknowledged");
+
+    let replay = run_board(&fixture, request);
+    assert_ok(&replay, "replayed recovery board.post");
+    assert_eq!(recovery_report(&replay)["state"], "acknowledged");
+
+    let changed = run_board(
+        &fixture,
+        r#"{"schema_version":1,"operation":"board.post","params":{"kind":"status","body":"changed integration payload","intent_id":"board-cli-intent-1","broadcast":true}}"#,
+    );
+    assert_ok(&changed, "changed recovery board.post");
+    assert_eq!(recovery_report(&changed)["state"], "conflicted");
+    assert_eq!(recovery_report(&changed)["code"], "intent_payload_changed");
+
+    let show = run_board(
+        &fixture,
+        r#"{"schema_version":1,"operation":"board.show","params":{"all":true}}"#,
+    );
+    let rendered = show["output"].as_str().unwrap_or_default();
+    assert_eq!(rendered.matches("durable integration payload").count(), 1);
+    assert!(!rendered.contains("changed integration payload"));
+}
+
+#[test]
+fn board_post_without_intent_keeps_legacy_human_output() {
+    let fixture = fixture();
+    let response = run_board(
+        &fixture,
+        r#"{"schema_version":1,"operation":"board.post","params":{"kind":"status","body":"ordinary post stays ordinary"}}"#,
+    );
+    assert_ok(&response, "ordinary board.post");
+    let output = response["output"].as_str().unwrap_or_default();
+    assert!(
+        output.starts_with("board entries: "),
+        "unexpected output: {output}"
+    );
+    assert!(serde_json::from_str::<Value>(output.trim()).is_err());
 }

@@ -1,8 +1,377 @@
 use chrono::TimeZone;
+use sha2::Digest;
 
 use crate::paths::{gwt_repo_local_work_event_shard_path, gwt_repo_local_work_events_dir};
 
 use super::*;
+
+/// Issue #4739: launch publication must repair the already-poisoned Work,
+/// not require a separate workspace.ensure before the first update.
+#[test]
+fn launch_transaction_repairs_inactive_foreign_container_before_update() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(&temp.path().join("home"));
+    let at = Utc.with_ymd_and_hms(2026, 9, 28, 0, 0, 0).unwrap();
+    for issue in [4595, 4558, 4557, 4554] {
+        let repo = temp.path().join(issue.to_string());
+        fs::create_dir_all(&repo).unwrap();
+        let branch = format!("work/issue-{issue}");
+        let work_id = canonical_work_id(&repo, Some(&branch), Some(&repo)).unwrap();
+        let old_id = "work-work-issue-2359-34a6ca7a";
+        let own = WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".into()),
+            worktree_path: Some(repo.join("old")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+        let foreign = WorkspaceExecutionContainerRef {
+            branch: Some(branch.clone()),
+            worktree_path: Some(repo.clone()),
+            ..own.clone()
+        };
+        let mut old = WorkEvent::new(WorkEventKind::Update, old_id, at);
+        old.owner = Some("Issue #2359".into());
+        old.status_category = Some(WorkspaceStatusCategory::Active);
+        old.execution_container = Some(own.clone());
+        let mut items = WorkItemsProjection::empty(at);
+        items.apply_event(old.clone());
+        old.id = Uuid::new_v4().to_string();
+        old.execution_container = Some(foreign.clone());
+        items.apply_event(old);
+        let works_path = gwt_workspace_work_items_path_for_repo_path(&repo);
+        save_workspace_work_items_projection_to_path(&works_path, &items).unwrap();
+
+        transact_workspace_state(&repo, |projection, _, _| {
+            projection.id = work_id.clone();
+            projection.owner = Some(format!("Issue #{issue}"));
+            let mut agent = assigned_agent("new-session", "codex", &work_id);
+            agent.branch = Some(branch.clone());
+            agent.worktree_path = Some(repo.clone());
+            projection.agents.push(agent);
+            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, at);
+            start.owner = projection.owner.clone();
+            start.agent_session_id = Some("new-session".into());
+            start.agent_id = Some("codex".into());
+            start.execution_container = Some(foreign.clone());
+            Ok(((), vec![start]))
+        })
+        .unwrap();
+        let saved = load_workspace_work_items_from_path(&works_path)
+            .unwrap()
+            .unwrap();
+        let old = saved
+            .work_items
+            .iter()
+            .find(|item| item.id == old_id)
+            .unwrap();
+        assert_eq!(old.execution_containers, [own], "Issue #{issue}");
+        assert_eq!(old.owner.as_deref(), Some("Issue #2359"));
+        assert!(old.is_incomplete() && !old.discarded);
+        assert!(container_detachments_path(&works_path).exists());
+
+        let target = SessionBoundWorkspaceMutationTarget {
+            project_state_root: repo.clone(),
+            work_event_root: repo.clone(),
+            session_id: "new-session".into(),
+            branch_identity: branch,
+            worktree_identity: repo,
+            work_id,
+            owner: Some(format!("Issue #{issue}")),
+            agent_id: "codex".into(),
+        };
+        t812_apply_resolved_workspace_update(
+            &target,
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: Some("first update after launch".into()),
+                progress_summary: None,
+                agent_session_id: Some("new-session".into()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+            },
+        )
+        .expect("new launch updates without an ambiguous foreign container");
+    }
+}
+
+/// Issue #4739: a repair cannot steal live authority or discarded lineage.
+#[test]
+fn launch_transaction_preserves_live_work_and_discarded_container_history() {
+    assert_launch_preserves_foreign_authority(false);
+}
+
+#[test]
+fn launch_transaction_recovery_preserves_a_newer_live_assignment() {
+    assert_launch_preserves_foreign_authority(true);
+}
+
+fn assert_launch_preserves_foreign_authority(recovering: bool) {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(&temp.path().join("home"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 9, 28, 0, 0, 0).unwrap();
+    let branch = "work/issue-4595";
+    let work_id = canonical_work_id(&repo, Some(branch), Some(&repo)).unwrap();
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some(branch.into()),
+        worktree_path: Some(repo.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
+    let mut items = WorkItemsProjection::empty(at);
+    for id in ["live", "discarded"] {
+        let mut event = WorkEvent::new(WorkEventKind::Update, id, at);
+        event.execution_container = Some(container.clone());
+        items.apply_event(event);
+    }
+    items
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == "discarded")
+        .unwrap()
+        .discarded = true;
+    let works_path = gwt_workspace_work_items_path_for_repo_path(&repo);
+    save_workspace_work_items_projection_to_path(&works_path, &items).unwrap();
+    let current_path = gwt_workspace_projection_path_for_repo_path(&repo);
+    let (_, transaction) = build_workspace_state_transaction_locked(
+        &current_path,
+        &works_path,
+        &gwt_repo_local_work_events_dir(&repo),
+        &repo,
+        |projection, _, _| {
+            if !recovering {
+                projection
+                    .agents
+                    .push(assigned_agent("live-session", "codex", "live"));
+            }
+            let mut agent = assigned_agent("new-session", "codex", &work_id);
+            agent.branch = Some(branch.into());
+            agent.worktree_path = Some(repo.clone());
+            projection.agents.push(agent);
+            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, at);
+            start.agent_session_id = Some("new-session".into());
+            start.execution_container = Some(container.clone());
+            Ok(((), vec![start]))
+        },
+    )
+    .unwrap();
+    write_pending_transaction_markers(&transaction);
+    if recovering {
+        // Only current changed after the marker: its newly-live assignment
+        // must not be judged against the transaction's stale agent snapshot.
+        let mut current = transaction.projection.clone();
+        current
+            .agents
+            .push(assigned_agent("live-session", "codex", "live"));
+        save_workspace_projection_to_path_unlocked(&current_path, &current).unwrap();
+    }
+    apply_workspace_state_transaction_locked(&current_path, &transaction, recovering).unwrap();
+    let saved = load_workspace_work_items_from_path(&works_path)
+        .unwrap()
+        .unwrap();
+    for id in ["live", "discarded"] {
+        let item = saved.work_items.iter().find(|item| item.id == id).unwrap();
+        assert_eq!(item.execution_containers, std::slice::from_ref(&container));
+    }
+    assert!(!container_detachments_path(&works_path).exists());
+    assert!(
+        validate_session_bound_work_authority_uniqueness(
+            &saved,
+            &work_id,
+            "new-session",
+            branch,
+            &repo,
+            "launch",
+        )
+        .is_err(),
+        "a live competing owner must remain fail-closed"
+    );
+}
+
+#[test]
+fn ordinary_workspace_saves_preserve_invalid_existing_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let current = tmp.path().join("current.json");
+    let works = tmp.path().join("works.json");
+    for original in [
+        b"{\"updated_at\":".as_slice(),
+        b"{\"future_schema\":true}".as_slice(),
+    ] {
+        fs::write(&current, original).unwrap();
+        fs::write(&works, original).unwrap();
+        assert!(save_workspace_projection_to_path(
+            &current,
+            &WorkspaceProjection::default_for_project(tmp.path()),
+        )
+        .is_err());
+        assert!(save_workspace_work_items_projection_to_path(
+            &works,
+            &WorkItemsProjection::empty(Utc::now()),
+        )
+        .is_err());
+        assert_eq!(fs::read(&current).unwrap(), original);
+        assert_eq!(fs::read(&works).unwrap(), original);
+    }
+}
+
+#[test]
+fn workspace_load_failures_report_the_affected_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let current = tmp.path().join("current.json");
+    let works = tmp.path().join("works.json");
+    fs::write(&current, b"{").unwrap();
+    fs::create_dir(&works).unwrap();
+    let current_error = load_workspace_projection_from_path(&current).unwrap_err();
+    let works_error = load_workspace_work_items_from_path(&works).unwrap_err();
+    assert!(current_error
+        .to_string()
+        .contains(&current.display().to_string()));
+    assert!(works_error
+        .to_string()
+        .contains(&works.display().to_string()));
+}
+
+/// Issue #4703: repairing the projection must survive replay of its source.
+#[test]
+fn detached_foreign_container_stays_detached_after_intake_and_rebuild() {
+    let _guard = lock_test_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(&tmp.path().join("home"));
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let path = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let own = WorkspaceExecutionContainerRef {
+        branch: Some("work/old".into()),
+        worktree_path: Some(repo.join("old")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
+    let foreign = WorkspaceExecutionContainerRef {
+        branch: Some("work/new".into()),
+        worktree_path: Some(repo.join("new")),
+        ..own.clone()
+    };
+    let at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(at);
+    let mut source = String::new();
+    for (id, container) in [("old", &own), ("new", &foreign), ("old", &foreign)] {
+        let mut event = WorkEvent::new(WorkEventKind::Update, id, at);
+        event.owner = Some("Issue #2359".into());
+        event.execution_container = Some(container.clone());
+        source.push_str(&serde_json::to_string(&event).unwrap());
+        source.push('\n');
+        projection.apply_event(event);
+    }
+    save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    let original_bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        detach_foreign_container_refs(&repo, "new", &["old".into()], |container| {
+            workspace_execution_container_same(container, &foreign)
+        })
+        .unwrap(),
+        ["old"]
+    );
+    let assert_detached = || {
+        let loaded = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+        let old = loaded
+            .work_items
+            .iter()
+            .find(|item| item.id == "old")
+            .unwrap();
+        assert_eq!(old.execution_containers, std::slice::from_ref(&own));
+        assert!(old.is_incomplete() && !old.discarded);
+        assert_eq!(old.owner.as_deref(), Some("Issue #2359"));
+        let new = loaded
+            .work_items
+            .iter()
+            .find(|item| item.id == "new")
+            .unwrap();
+        assert_eq!(new.execution_containers, std::slice::from_ref(&foreign));
+    };
+    assert_detached();
+    // Board milestone refresh uses this transaction even when its callback
+    // produces no event. An unprojected close event refolds retained history.
+    let detached = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+    let receipt = container_detachments_path(&path);
+    let held_receipt = receipt.with_extension("held");
+    let close = WorkEvent::new(WorkEventKind::Done, "unrelated", at);
+    fs::write(
+        path.with_file_name("work-events-closed.jsonl"),
+        format!("{}\n", serde_json::to_string(&close).unwrap()),
+    )
+    .unwrap();
+    for with_receipt in [false, true] {
+        if !with_receipt {
+            fs::rename(&receipt, &held_receipt).unwrap();
+        }
+        save_workspace_work_items_projection_to_path(&path, &detached).unwrap();
+        transact_workspace_state(&repo, |_, items, _| {
+            let old = items
+                .work_items
+                .iter()
+                .find(|item| item.id == "old")
+                .unwrap();
+            assert_eq!(
+                old.execution_containers.len(),
+                if with_receipt { 1 } else { 2 }
+            );
+            Ok(((), Vec::new()))
+        })
+        .unwrap();
+        if !with_receipt {
+            fs::rename(&held_receipt, &receipt).unwrap();
+        }
+    }
+    assert_detached();
+    // Simulate an interrupted write-ahead repair: the receipt commits, but
+    // works.json still has its old bytes. A pre-existing cache must miss even
+    // though that projection file does not change when the receipt appears.
+    fs::rename(&receipt, &held_receipt).unwrap();
+    fs::write(&path, &original_bytes).unwrap();
+    let mut cache = WorkItemsCache::new();
+    cache.load_or_synthesize(&repo).unwrap();
+    fs::rename(&held_receipt, &receipt).unwrap();
+    let cached = cache.load_or_synthesize(&repo).unwrap();
+    assert_eq!(
+        cache.parse_count, 2,
+        "receipt commit invalidates cached refs"
+    );
+    assert_eq!(
+        cached
+            .work_items
+            .iter()
+            .find(|item| item.id == "old")
+            .unwrap()
+            .execution_containers,
+        std::slice::from_ref(&own)
+    );
+    crate::work_events_intake::ingest_work_events_content(&path, &source).unwrap();
+    assert_detached();
+    // The repair must survive loss of the disposable projection too.
+    fs::remove_file(&path).unwrap();
+    crate::work_events_intake::rebuild_work_events_paths(
+        &path,
+        [&*source],
+        Some(&path.with_file_name("work-events-closed.jsonl")),
+    )
+    .unwrap();
+    assert_detached();
+    // An unreadable decision is not a corrupt projection that rebuild may drop.
+    fs::write(&receipt, b"{broken").unwrap();
+    let error =
+        crate::work_events_intake::rebuild_work_events_paths(&path, [&*source], None).unwrap_err();
+    assert!(error.to_string().contains("container detachments"));
+}
 
 #[cfg(windows)]
 fn open_directory_for_mtime(path: &std::path::Path) -> std::io::Result<std::fs::File> {
@@ -22,6 +391,313 @@ fn open_directory_for_mtime(path: &std::path::Path) -> std::io::Result<std::fs::
 #[cfg(not(windows))]
 fn open_directory_for_mtime(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
+}
+
+/// Build one Work item carrying `events` inline events, as a legacy
+/// uncompacted projection written before Issue #4508.
+fn legacy_uncompacted_work_item(
+    id: &str,
+    owner: &str,
+    events: usize,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> WorkItem {
+    let mut projection = WorkItemsProjection::empty(started_at);
+    let mut start = WorkEvent::new(WorkEventKind::Start, id, started_at);
+    start.title = Some(format!("owner {owner}"));
+    start.owner = Some(owner.to_string());
+    projection.apply_event(start);
+    for index in 1..events {
+        let mut update = WorkEvent::new(
+            WorkEventKind::Update,
+            id,
+            started_at + chrono::Duration::seconds(index as i64),
+        );
+        update.progress_summary = Some(format!("{id} update {index}"));
+        projection.apply_event(update);
+    }
+    projection.work_items.pop().expect("work item")
+}
+
+/// Issue #4508 AC-2: the projection that exists on disk today carries a fully
+/// uncompacted history. Loading it must keep every Work item and its owner.
+#[test]
+fn legacy_uncompacted_works_json_loads_with_every_work_item_and_owner_intact() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let items = (0..40)
+        .map(|index| {
+            legacy_uncompacted_work_item(
+                &format!("work-{index}"),
+                &format!("#{}", 4000 + index),
+                MAX_INLINE_WORK_EVENTS * 8,
+                started_at + chrono::Duration::hours(index as i64),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_owners = items
+        .iter()
+        .map(|item| (item.id.clone(), item.owner.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let legacy = WorkItemsProjection {
+        updated_at: started_at,
+        work_items: items,
+    };
+    // Written the pre-#4508 way so the fixture really is an uncompacted file.
+    std::fs::write(
+        &work_items_path,
+        serde_json::to_vec_pretty(&legacy).expect("serialize legacy projection"),
+    )
+    .expect("write legacy works.json");
+
+    let loaded = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load legacy works.json")
+        .expect("projection");
+
+    let loaded_owners = loaded
+        .work_items
+        .iter()
+        .map(|item| (item.id.clone(), item.owner.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        loaded_owners, expected_owners,
+        "compaction must not lose a Work item or its owner"
+    );
+    for item in &loaded.work_items {
+        assert!(
+            item.events.len() <= MAX_INLINE_WORK_EVENTS,
+            "{} kept {} inline events",
+            item.id,
+            item.events.len()
+        );
+        assert!(item.progress_summary.is_some());
+    }
+}
+
+/// Issue #4508 AC-6: the field inventory `WorkItem` carried before inline
+/// compaction shipped, read with `deny_unknown_fields` exactly as the real
+/// `WorkItem` is. It stands in for a binary that does not contain this change:
+/// on 2026-09-19 one added field in `works.json` stopped `workspace.*` across
+/// every running gwt on the host, so a compacted projection has to stay inside
+/// this inventory.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreCompactionWorkItem {
+    id: String,
+    title: serde_json::Value,
+    #[serde(default)]
+    intent: serde_json::Value,
+    #[serde(default)]
+    summary: serde_json::Value,
+    #[serde(default)]
+    progress_summary: serde_json::Value,
+    status_category: serde_json::Value,
+    #[serde(default)]
+    owner: serde_json::Value,
+    created_at: serde_json::Value,
+    updated_at: serde_json::Value,
+    #[serde(default)]
+    completed_at: serde_json::Value,
+    #[serde(default)]
+    agents: serde_json::Value,
+    #[serde(default)]
+    execution_containers: serde_json::Value,
+    #[serde(default)]
+    board_refs: serde_json::Value,
+    #[serde(default)]
+    related_work_item_ids: serde_json::Value,
+    #[serde(default)]
+    events: serde_json::Value,
+    #[serde(default)]
+    legacy_metadata_snapshot: Option<Box<PreCompactionWorkItem>>,
+    #[serde(default)]
+    legacy_metadata_authoritative: serde_json::Value,
+    #[serde(default)]
+    legacy_metadata_snapshot_at: serde_json::Value,
+    #[serde(default)]
+    duplicate_event_containers: serde_json::Value,
+    #[serde(default)]
+    discarded: serde_json::Value,
+    #[serde(default)]
+    discarded_at: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreCompactionProjection {
+    updated_at: serde_json::Value,
+    #[serde(default)]
+    work_items: Vec<PreCompactionWorkItem>,
+}
+
+/// Issue #4508 AC-6: a `works.json` written after compaction must still load
+/// in a reader that predates it. Compaction is only allowed to remove history,
+/// never to widen the schema.
+#[test]
+fn a_compacted_works_json_still_loads_in_a_reader_that_predates_compaction() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let projection = WorkItemsProjection {
+        updated_at: started_at,
+        work_items: vec![legacy_uncompacted_work_item(
+            "work-forward-compat",
+            "#4508",
+            MAX_INLINE_WORK_EVENTS * 6,
+            started_at,
+        )],
+    };
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection).expect("save");
+
+    let reloaded = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load")
+        .expect("projection");
+    let item = &reloaded.work_items[0];
+    assert_eq!(item.events.len(), MAX_INLINE_WORK_EVENTS);
+    assert!(
+        item.legacy_metadata_authoritative && item.legacy_metadata_snapshot_at.is_some(),
+        "the fixture must really have been compacted"
+    );
+
+    let written = std::fs::read_to_string(&work_items_path).expect("read works.json");
+    let legacy: PreCompactionProjection = serde_json::from_str(&written)
+        .expect("a binary that predates compaction must still read works.json");
+    assert_eq!(legacy.work_items.len(), 1);
+    assert_eq!(legacy.work_items[0].id, "work-forward-compat");
+}
+
+/// Issue #4508 AC-4: what `WorkItemsCache` keeps resident must be bounded by
+/// the inline cap, not by how many events the project ever recorded.
+#[test]
+fn work_items_cache_residency_is_bounded_by_the_inline_event_cap() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let current_path = tmp.path().join("current.json");
+    let journal_path = tmp.path().join("journal.jsonl");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let mut resident = Vec::new();
+    for (label, events_per_item) in [
+        ("small", MAX_INLINE_WORK_EVENTS * 4),
+        ("large", MAX_INLINE_WORK_EVENTS * 40),
+    ] {
+        let work_items_path = tmp.path().join(format!("{label}-works.json"));
+        let projection = WorkItemsProjection {
+            updated_at: started_at,
+            work_items: (0..4)
+                .map(|index| {
+                    legacy_uncompacted_work_item(
+                        &format!("work-{index}"),
+                        &format!("#{}", 4000 + index),
+                        events_per_item,
+                        started_at + chrono::Duration::hours(index as i64),
+                    )
+                })
+                .collect(),
+        };
+        std::fs::write(
+            &work_items_path,
+            serde_json::to_vec_pretty(&projection).expect("serialize"),
+        )
+        .expect("write works.json");
+
+        let mut cache = WorkItemsCache::new();
+        let (loaded, _) = cache
+            .load_or_synthesize_shared_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("load");
+        assert_eq!(cache.parse_count, 1);
+        assert_eq!(loaded.work_items.len(), 4);
+        resident.push(loaded.inline_event_count());
+    }
+
+    assert_eq!(
+        resident[0], resident[1],
+        "a project with ten times the history must not cost ten times the residency"
+    );
+    assert!(resident[1] <= 4 * MAX_INLINE_WORK_EVENTS);
+}
+
+/// Issue #4508 AC-1: an immutable source keeps offering events that compaction
+/// already folded away. Re-ingesting it must not re-grow the history, and must
+/// not report the projection as changed.
+#[test]
+fn reingesting_a_compacted_source_neither_regrows_history_nor_rewrites_the_projection() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let mut events = Vec::new();
+    let mut start = WorkEvent::new(WorkEventKind::Start, "work-reingest", started_at);
+    start.title = Some("Re-ingest owner".to_string());
+    start.owner = Some("#4508".to_string());
+    events.push(start);
+    for index in 1..(MAX_INLINE_WORK_EVENTS * 3) {
+        let mut update = WorkEvent::new(
+            WorkEventKind::Update,
+            "work-reingest",
+            started_at + chrono::Duration::seconds(index as i64),
+        );
+        update.progress_summary = Some(format!("update {index}"));
+        events.push(update);
+    }
+    let source = events
+        .iter()
+        .map(|event| serde_json::to_string(event).expect("encode event"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let first = crate::work_events_intake::ingest_work_events_content(&work_items_path, &source)
+        .expect("first ingest");
+    assert_eq!(first.applied, events.len());
+
+    let after_first = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load")
+        .expect("projection");
+    assert_eq!(after_first.inline_event_count(), MAX_INLINE_WORK_EVENTS);
+    let bytes_after_first = std::fs::metadata(&work_items_path).expect("stat").len();
+
+    let second = crate::work_events_intake::ingest_work_events_content(&work_items_path, &source)
+        .expect("second ingest");
+    assert_eq!(
+        second.applied, 0,
+        "a source whose events are already folded applies nothing"
+    );
+
+    let after_second = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load")
+        .expect("projection");
+    assert_eq!(after_second.inline_event_count(), MAX_INLINE_WORK_EVENTS);
+    assert_eq!(
+        std::fs::metadata(&work_items_path).expect("stat").len(),
+        bytes_after_first,
+        "re-ingesting a folded source must not rewrite works.json"
+    );
+    let item = &after_second.work_items[0];
+    assert_eq!(item.id, "work-reingest");
+    assert_eq!(item.owner.as_deref(), Some("#4508"));
+    assert_eq!(item.created_at, started_at);
 }
 
 // SPEC-2359 close-latency root fix: the works.json cache must stop
@@ -88,16 +764,96 @@ fn work_items_cache_reuses_unchanged_file_and_reparses_on_change() {
 }
 
 #[test]
+fn issue_3777_work_items_cache_evicts_a_closed_project_projection() {
+    let _guard = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&project_root);
+
+    let now = chrono::Utc::now();
+    let mut projection = super::WorkItemsProjection::empty(now);
+    projection.apply_event(sample_work_event("work-3777-evict", now));
+    super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save works.json");
+
+    let mut cache = super::WorkItemsCache::new();
+    let (loaded, _) = cache
+        .load_or_synthesize_shared(&project_root)
+        .expect("load cached projection");
+    let retained = std::sync::Arc::downgrade(&loaded);
+    drop(loaded);
+    assert!(
+        retained.upgrade().is_some(),
+        "the cache owns the parsed projection before project close"
+    );
+
+    assert!(cache.evict(&project_root));
+    assert!(
+        retained.upgrade().is_none(),
+        "eviction must release the parsed projection owned only by the cache"
+    );
+    assert!(
+        !cache.evict(&project_root),
+        "evicting an already-absent project is a no-op"
+    );
+}
+
+#[test]
+fn issue_3777_work_items_cache_does_not_attach_a_newer_signature_to_an_older_projection() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap();
+    record_workspace_work_event(&repo, sample_work_event("work-a", now))
+        .expect("seed projection A");
+
+    let writer_repo = repo.clone();
+    set_after_profiled_work_items_load(move || {
+        record_workspace_work_event(
+            &writer_repo,
+            sample_work_event("work-b", now + chrono::Duration::seconds(1)),
+        )
+        .expect("writer publishes projection B after reader releases the project lock");
+    });
+
+    let mut cache = WorkItemsCache::new();
+    let (first, first_profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("reader returns projection A");
+    assert!(!first_profile.cache_hit);
+    assert_eq!(first.work_items.len(), 1, "first reader owns projection A");
+
+    let (second, second_profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("next reader observes projection B");
+    assert!(
+        !second_profile.cache_hit,
+        "projection A must not be cached with projection B's file signature"
+    );
+    assert_eq!(
+        second.work_items.len(),
+        2,
+        "a cache miss must reload the writer's projection B"
+    );
+}
+
+#[test]
 fn work_items_loader_classifies_malformed_and_incompatible_json() {
     let temp = tempfile::tempdir().expect("tempdir");
     let malformed_path = temp.path().join("malformed.json");
     std::fs::write(&malformed_path, b"{\"work_items\":").expect("write malformed json");
     assert!(matches!(
         load_workspace_work_items_from_path(&malformed_path),
-        Err(GwtError::JsonDecode {
-            kind: JsonDecodeKind::Malformed,
+        Err(GwtError::WorkspaceStateLoad(WorkspaceStateLoadError {
+            kind: crate::WorkspaceStateLoadErrorKind::Malformed,
             ..
-        })
+        }))
     ));
 
     let incompatible_path = temp.path().join("incompatible.json");
@@ -141,10 +897,10 @@ fn work_items_loader_classifies_malformed_and_incompatible_json() {
     .expect("write incompatible json");
     assert!(matches!(
         load_workspace_work_items_from_path(&incompatible_path),
-        Err(GwtError::JsonDecode {
-            kind: JsonDecodeKind::IncompatibleSchema,
+        Err(GwtError::WorkspaceStateLoad(WorkspaceStateLoadError {
+            kind: crate::WorkspaceStateLoadErrorKind::IncompatibleSchema,
             ..
-        })
+        }))
     ));
 
     let unknown_cases = [
@@ -208,10 +964,10 @@ fn work_items_loader_classifies_malformed_and_incompatible_json() {
 
         assert!(matches!(
             load_workspace_work_items_from_path(&path),
-            Err(GwtError::JsonDecode {
-                kind: JsonDecodeKind::IncompatibleSchema,
+            Err(GwtError::WorkspaceStateLoad(WorkspaceStateLoadError {
+                kind: crate::WorkspaceStateLoadErrorKind::IncompatibleSchema,
                 ..
-            })
+            }))
         ));
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
@@ -267,6 +1023,215 @@ fn mixed_version_event_log_roundtrips_unknown_kind_and_fields_byte_exact() {
         roundtrip_values, source_values,
         "JSON values must be lossless"
     );
+}
+
+#[test]
+fn preserve_workspace_work_event_log_keeps_raw_records_visible_without_changing_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let original = format!("\t{}  ", T820_MIXED_EVENT_LOG.trim_end());
+    fs::write(&source, &original).expect("write mixed source without final newline");
+
+    let paths = crate::workspace_projection::preserve_workspace_work_event_log_as_shards(
+        &source,
+        &events_dir,
+    )
+    .expect("preserve future-compatible raw events");
+
+    assert_eq!(paths.len(), 3);
+    for (path, line) in paths.iter().zip(original.split('\n')) {
+        let value: serde_json::Value = serde_json::from_str(line).expect("source JSON");
+        assert_eq!(
+            *path,
+            gwt_work_event_shard_path(&events_dir, value["id"].as_str().unwrap())
+        );
+        assert_eq!(fs::read(path).unwrap(), format!("{line}\n").as_bytes());
+    }
+    let records = read_workspace_work_event_shard_records_from_dir(&events_dir)
+        .expect("ordinary reader sees all preserved events");
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .into_iter()
+            .filter_map(WorkEventLogRecord::into_known_event)
+            .count(),
+        2,
+        "future kind remains opaque while known events remain visible"
+    );
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_makes_flat_shard_canonical_and_is_idempotent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    fs::create_dir_all(&events_dir).unwrap();
+    let original = T820_MIXED_EVENT_LOG.lines().nth(1).unwrap().to_string() + "\n";
+    let canonical = gwt_work_event_shard_path(&events_dir, "event-known-additive");
+    let source = events_dir.join(canonical.file_name().unwrap());
+    fs::write(&source, &original).unwrap();
+
+    for input in [&source, &source, &canonical] {
+        assert_eq!(
+            preserve_workspace_work_event_log_as_shards(input, &events_dir).unwrap(),
+            vec![canonical.clone()]
+        );
+        assert_eq!(fs::read(&canonical).unwrap(), original.as_bytes());
+        assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+    }
+    assert_eq!(
+        fs::read_dir(canonical.parent().unwrap()).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn preserve_workspace_work_event_log_deduplicates_identical_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    let original = format!("{line}\n\n{line}\n");
+    fs::write(&source, &original).unwrap();
+
+    let paths = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap();
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(fs::read(&paths[0]).unwrap(), format!("{line}\n").as_bytes());
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_invalid_batch_before_publication() {
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    for invalid in [
+        "{\"id\":",
+        r#"{"id":"bad","kind":"update","work_item_id":{},"updated_at":"2026-07-22T02:00:00Z"}"#,
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source.jsonl");
+        let events_dir = temp.path().join("repo/.gwt/work/events");
+        let original = format!("{line}\n{invalid}");
+        fs::write(&source, &original).unwrap();
+
+        assert!(preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err());
+        assert!(!events_dir.exists(), "valid prefix must not be published");
+        assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+    }
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_divergent_batch_before_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    let original = format!("{line}\n{}\n", line.replace("Known title", "Changed title"));
+    fs::write(&source, &original).unwrap();
+
+    let error = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap_err();
+
+    assert!(error.to_string().contains("divergent"), "{error}");
+    assert!(!events_dir.exists());
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_existing_conflict_before_any_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+    let conflict = gwt_work_event_shard_path(&events_dir, "event-future-correction");
+    fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+    let conflicting_bytes = b"existing immutable bytes\n";
+    fs::write(&conflict, conflicting_bytes).unwrap();
+
+    let error = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap_err();
+
+    assert!(error.to_string().contains("divergent"), "{error}");
+    assert_eq!(fs::read(&conflict).unwrap(), conflicting_bytes);
+    assert!(!gwt_work_event_shard_path(&events_dir, "event-known-start").exists());
+    assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn preserve_workspace_work_event_log_rejects_symlinked_source_and_managed_parents() {
+    for linked_component in ["source", ".gwt", "work", "events"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp
+            .path()
+            .join("source-repo/.gwt/work/events/source.jsonl");
+        let events_dir = temp.path().join("destination/.gwt/work/events");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+        let indirect = if linked_component == "source" {
+            source.clone()
+        } else {
+            source
+                .ancestors()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == linked_component)
+                })
+                .unwrap()
+                .to_path_buf()
+        };
+        let external = temp.path().join("external");
+        fs::rename(&indirect, &external).unwrap();
+        std::os::unix::fs::symlink(&external, &indirect).unwrap();
+
+        assert!(
+            preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err(),
+            "must reject indirect {linked_component} source"
+        );
+        assert!(!events_dir.exists());
+        assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preserve_workspace_work_event_log_rejects_symlinked_destination_before_any_publication() {
+    for linked_component in [".gwt", "work", "events", "bucket", "shard"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source.jsonl");
+        let events_dir = temp.path().join("destination/.gwt/work/events");
+        fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+        let last = gwt_work_event_shard_path(&events_dir, "event-future-correction");
+        fs::create_dir_all(last.parent().unwrap()).unwrap();
+        let indirect = match linked_component {
+            "shard" => last.clone(),
+            "bucket" => last.parent().unwrap().to_path_buf(),
+            _ => last
+                .ancestors()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == linked_component)
+                })
+                .unwrap()
+                .to_path_buf(),
+        };
+        let external = temp.path().join("external");
+        if linked_component == "shard" {
+            fs::write(&external, b"external user bytes").unwrap();
+        } else {
+            fs::rename(&indirect, &external).unwrap();
+        }
+        std::os::unix::fs::symlink(&external, &indirect).unwrap();
+
+        assert!(
+            preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err(),
+            "must reject indirect {linked_component} destination"
+        );
+        assert!(!gwt_work_event_shard_path(&events_dir, "event-known-start").exists());
+        assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+        if linked_component == "shard" {
+            assert_eq!(fs::read(&external).unwrap(), b"external user bytes");
+        }
+    }
 }
 
 #[test]
@@ -452,6 +1417,25 @@ fn work_items_cache_never_caches_synthesized_fallback() {
 }
 
 #[test]
+fn issue_3777_profiled_cache_refuses_retired_layout_before_first_projection() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _home = ScopedHome::set(temp.path());
+    let legacy = legacy_workspace_projection_path_for_repo_path(&repo);
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let bytes = serde_json::to_vec(&WorkspaceProjection::default_for_project(&repo)).unwrap();
+    std::fs::write(&legacy, &bytes).unwrap();
+    let mut cache = WorkItemsCache::new();
+    let error = cache.load_or_synthesize_shared(&repo).unwrap_err();
+    assert!(error.to_string().contains("v9.106.0"), "{error}");
+    assert!(!gwt_workspace_projection_path_for_repo_path(&repo).exists());
+    assert!(!gwt_workspace_work_items_path_for_repo_path(&repo).exists());
+    assert_eq!(std::fs::read(legacy).unwrap(), bytes);
+}
+
+#[test]
 fn load_workspace_work_items_backfills_progress_summary_from_legacy_events() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let work_items_path = tmp.path().join("works.json");
@@ -517,68 +1501,12 @@ fn sample_work_event(work_id: &str, updated_at: chrono::DateTime<chrono::Utc>) -
     event.title = Some(format!("title {work_id}"));
     event
 }
-/// SPEC-2359 Phase W-11 (US-58 / SC-228): the one-time reset clears
-/// legacy title_summary / current_focus exactly once (version-guarded),
-/// later runs are a no-op, and agent-authored values written after the
-/// reset are preserved.
-#[test]
-fn reset_legacy_agent_identity_clears_once_and_preserves_later_values() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("current.json");
-
-    let mut projection = WorkspaceProjection::default_for_project(temp.path());
-    projection.agents.push(WorkspaceAgentSummary {
-        session_id: "sess-legacy".to_string(),
-        window_id: None,
-        agent_id: "codex".to_string(),
-        display_name: "Codex".to_string(),
-        status_category: WorkspaceStatusCategory::Active,
-        current_focus: Some("/gwt-discussion 生プロンプト focus".to_string()),
-        title_summary: Some("あなたの目的は何ですか".to_string()),
-        worktree_path: None,
-        branch: None,
-        last_board_entry_id: None,
-        last_board_entry_kind: None,
-        coordination_scope: None,
-        affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
-        workspace_id: None,
-        updated_at: Utc::now(),
-    });
-    save_workspace_projection_to_path(&current_path, &projection).expect("save");
-
-    // First reset clears the legacy values and writes the marker.
-    let applied = reset_legacy_agent_identity_at(&current_path).expect("reset");
-    assert!(applied, "first reset should run and write the marker");
-    let after = load_workspace_projection_from_path(&current_path)
-        .expect("load")
-        .expect("present");
-    assert_eq!(after.agents[0].title_summary, None);
-    assert_eq!(after.agents[0].current_focus, None);
-
-    // The agent authors a real purpose after the migration.
-    let mut authored = after;
-    authored.agents[0].title_summary = Some("Agent タイトル目的化".to_string());
-    save_workspace_projection_to_path(&current_path, &authored).expect("save authored");
-
-    // Second reset is a no-op (marker guard) and preserves the agent value.
-    let applied_again = reset_legacy_agent_identity_at(&current_path).expect("reset again");
-    assert!(!applied_again, "marker must prevent a second clear");
-    let preserved = load_workspace_projection_from_path(&current_path)
-        .expect("load")
-        .expect("present");
-    assert_eq!(
-        preserved.agents[0].title_summary.as_deref(),
-        Some("Agent タイトル目的化"),
-        "agent-authored title must survive later loads"
-    );
-}
-
 #[test]
 fn workspace_update_persists_current_summary_and_journal_entry() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_root = temp.path().join("repo");
-    let current_path = temp.path().join("workspace/current.json");
-    let journal_path = temp.path().join("workspace/journal.jsonl");
+    let current_path = temp.path().join("project-state/current.json");
+    let journal_path = temp.path().join("project-state/journal.jsonl");
 
     let entry = update_workspace_projection_with_journal_paths(
         &current_path,
@@ -864,7 +1792,7 @@ fn workspace_state_transaction_does_not_publish_current_when_event_append_fails(
 }
 
 #[test]
-fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() {
+fn workspace_state_transaction_for_work_event_root_preserves_canonical_state_and_migrates_events() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
@@ -874,21 +1802,21 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
     let now = Utc.with_ymd_and_hms(2026, 8, 1, 3, 0, 0).unwrap();
 
     let canonical_current = gwt_workspace_projection_path_for_repo_path(&project_state_root);
-    let legacy_current = legacy_workspace_projection_path_for_repo_path(&project_state_root);
+    let saved_current = gwt_workspace_projection_path_for_repo_path(&project_state_root);
     let mut current = WorkspaceProjection::default_for_project(&project_state_root);
     current.title = "Single-root current".to_string();
-    save_workspace_projection_to_path(&legacy_current, &current).expect("legacy current");
+    save_workspace_projection_to_path(&saved_current, &current).expect("canonical current");
 
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
-    let legacy_works = legacy_workspace_work_items_path_for_repo_path(&project_state_root);
+    let saved_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let linked_worktree_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
     let mut work_items = WorkItemsProjection::empty(now);
     let mut start = WorkEvent::new(WorkEventKind::Start, "work-legacy-split", now);
     start.id = "event-legacy-split".to_string();
     start.title = Some("Legacy split-root Work".to_string());
     work_items.apply_event(start.clone());
-    save_workspace_work_items_projection_to_path(&legacy_works, &work_items)
-        .expect("legacy WorkItems");
+    save_workspace_work_items_projection_to_path(&saved_works, &work_items)
+        .expect("canonical WorkItems");
 
     let single_root_events = gwt_repo_local_work_events_path(&project_state_root);
     append_workspace_work_event_to_path(&single_root_events, &start)
@@ -899,8 +1827,8 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
         "#3466: a layout root and its linked worktree resolve to one project store"
     );
     assert_ne!(single_root_events, split_root_events);
-    assert!(!canonical_current.exists());
-    assert!(!repo_global_works.exists());
+    assert!(canonical_current.exists());
+    assert!(repo_global_works.exists());
     assert!(!split_root_events.exists());
 
     transact_workspace_state_for_work_event_root(
@@ -961,18 +1889,18 @@ fn split_root_materialization_validates_managed_store_path_before_all_migrations
         std::fs::create_dir_all(&project_state_root).expect("project state root");
         std::fs::create_dir_all(&work_event_root).expect("work event root");
 
-        let legacy_current = legacy_workspace_projection_path_for_repo_path(&project_state_root);
+        let saved_current = gwt_workspace_projection_path_for_repo_path(&project_state_root);
         let mut projection = WorkspaceProjection::default_for_project(&project_state_root);
         projection.title = format!("Legacy current {case}");
-        save_workspace_projection_to_path(&legacy_current, &projection).expect("legacy current");
-        let legacy_current_before = std::fs::read(&legacy_current).expect("legacy current bytes");
+        save_workspace_projection_to_path(&saved_current, &projection).expect("canonical current");
+        let saved_current_before = std::fs::read(&saved_current).expect("canonical current bytes");
 
-        let legacy_works = legacy_workspace_work_items_path_for_repo_path(&project_state_root);
+        let saved_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
         let mut work_items = WorkItemsProjection::empty(now);
         work_items.apply_event(start_event(&format!("work-legacy-{case}"), now));
-        save_workspace_work_items_projection_to_path(&legacy_works, &work_items)
-            .expect("legacy WorkItems");
-        let legacy_works_before = std::fs::read(&legacy_works).expect("legacy WorkItems bytes");
+        save_workspace_work_items_projection_to_path(&saved_works, &work_items)
+            .expect("canonical WorkItems");
+        let saved_works_before = std::fs::read(&saved_works).expect("canonical WorkItems bytes");
 
         let home_events = gwt_workspace_work_events_path_for_repo_path(&work_event_root);
         append_workspace_work_event_to_path(
@@ -985,8 +1913,8 @@ fn split_root_materialization_validates_managed_store_path_before_all_migrations
         let canonical_current = gwt_workspace_projection_path_for_repo_path(&project_state_root);
         let canonical_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
         let repo_legacy = gwt_repo_local_work_events_path(&work_event_root);
-        assert!(!canonical_current.exists(), "cold canonical current");
-        assert!(!canonical_works.exists(), "cold canonical WorkItems");
+        assert!(canonical_current.exists());
+        assert!(canonical_works.exists());
         assert!(!repo_legacy.exists(), "cold repo legacy events");
 
         let external = temp.path().join(format!("external-split-{case}"));
@@ -1003,79 +1931,18 @@ fn split_root_materialization_validates_managed_store_path_before_all_migrations
         )
         .expect_err("split-root materialization must reject the managed parent");
 
-        assert!(!canonical_current.exists(), "current must not migrate");
-        assert!(!canonical_works.exists(), "WorkItems must not migrate");
+        assert!(canonical_current.exists());
+        assert!(canonical_works.exists());
         assert!(!repo_legacy.exists(), "events must not migrate");
         assert_eq!(
             std::fs::read_dir(&external).unwrap().count(),
             0,
             "no external mutation through {managed_parent}"
         );
-        assert_eq!(
-            std::fs::read(&legacy_current).unwrap(),
-            legacy_current_before
-        );
-        assert_eq!(std::fs::read(&legacy_works).unwrap(), legacy_works_before);
+        assert_eq!(std::fs::read(&saved_current).unwrap(), saved_current_before);
+        assert_eq!(std::fs::read(&saved_works).unwrap(), saved_works_before);
         assert_eq!(std::fs::read(&home_events).unwrap(), home_events_before);
     }
-}
-
-#[test]
-fn split_root_transaction_migrates_legacy_worktree_workspace_work_items() {
-    let _guard = lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = temp.path().join("home");
-    let _home = ScopedHome::set(&home);
-    let (project_state_root, work_event_root) =
-        init_test_workspace_home_with_linked_worktree(temp.path());
-    let now = Utc.with_ymd_and_hms(2026, 8, 1, 3, 15, 0).unwrap();
-
-    let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
-    let legacy_worktree_works = legacy_workspace_work_items_path_for_repo_path(&work_event_root);
-    let linked_worktree_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
-    let mut work_items = WorkItemsProjection::empty(now);
-    let mut start = WorkEvent::new(WorkEventKind::Start, "work-legacy-worktree", now);
-    start.id = "event-legacy-worktree".to_string();
-    start.title = Some("Legacy exact-worktree Work".to_string());
-    work_items.apply_event(start);
-    save_workspace_work_items_projection_to_path(&legacy_worktree_works, &work_items)
-        .expect("legacy exact-worktree WorkItems");
-    let legacy_bytes = std::fs::read(&legacy_worktree_works).expect("legacy exact-worktree bytes");
-
-    assert!(!repo_global_works.exists());
-    assert!(!linked_worktree_works.exists());
-    transact_workspace_state_for_work_event_root(
-        &project_state_root,
-        &work_event_root,
-        |_, existing, persisted| {
-            assert!(
-                persisted,
-                "legacy exact-worktree WorkItems are durable state"
-            );
-            assert!(existing
-                .work_items
-                .iter()
-                .any(|item| item.id == "work-legacy-worktree"));
-            Ok(((), Vec::new()))
-        },
-    )
-    .expect("migrate legacy exact-worktree WorkItems into repo-global state");
-
-    assert!(load_workspace_work_items_from_path(&repo_global_works)
-        .unwrap()
-        .unwrap()
-        .work_items
-        .iter()
-        .any(|item| item.id == "work-legacy-worktree"));
-    assert_eq!(
-        std::fs::read(&legacy_worktree_works).expect("legacy source remains immutable"),
-        legacy_bytes
-    );
-    assert_eq!(
-        materialized_work_items_sots(),
-        vec![repo_global_works.clone()],
-        "migration must not retain a second WorkItems SOT"
-    );
 }
 
 #[test]
@@ -1265,7 +2132,7 @@ fn split_root_recovery_with_pending_transaction_migrates_recovered_events() {
 }
 
 #[test]
-fn split_root_transaction_rejects_incompatible_legacy_current_without_materializing() {
+fn split_root_transaction_rejects_incompatible_canonical_current_without_materializing() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
@@ -1273,35 +2140,35 @@ fn split_root_transaction_rejects_incompatible_legacy_current_without_materializ
     let project_state_root = temp.path().join("workspace-home");
     let work_event_root = project_state_root.join("work").join("issue-3412");
     std::fs::create_dir_all(&work_event_root).expect("work event root");
-    let legacy_current = legacy_workspace_projection_path_for_repo_path(&project_state_root);
+    let saved_current = gwt_workspace_projection_path_for_repo_path(&project_state_root);
     let canonical_current = gwt_workspace_projection_path_for_repo_path(&project_state_root);
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let split_root_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
     let incompatible = br#"{"id":42,"project_root":false}"#.to_vec();
-    std::fs::create_dir_all(legacy_current.parent().expect("legacy current parent"))
-        .expect("legacy current parent");
-    std::fs::write(&legacy_current, &incompatible).expect("write incompatible legacy current");
+    std::fs::create_dir_all(saved_current.parent().expect("canonical current parent"))
+        .expect("canonical current parent");
+    std::fs::write(&saved_current, &incompatible).expect("write incompatible canonical current");
 
     let error = transact_workspace_state_for_work_event_root(
         &project_state_root,
         &work_event_root,
         |_, _, _| Ok(((), Vec::new())),
     )
-    .expect_err("incompatible legacy current must fail closed");
+    .expect_err("incompatible canonical current must fail closed");
 
-    assert!(error.to_string().contains("workspace projection json"));
+    assert!(matches!(error, GwtError::WorkspaceStateLoad(_)));
     assert_eq!(
-        std::fs::read(&legacy_current).expect("legacy current after refusal"),
+        std::fs::read(&saved_current).expect("canonical current after refusal"),
         incompatible
     );
-    assert!(!canonical_current.exists());
+    assert!(canonical_current.exists());
     assert!(!repo_global_works.exists());
     assert!(!split_root_works.exists());
     assert!(!gwt_repo_local_work_events_path(&work_event_root).exists());
 }
 
 #[test]
-fn split_root_transaction_rejects_incompatible_legacy_work_items_without_materializing() {
+fn split_root_transaction_rejects_incompatible_canonical_work_items_without_materializing() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
@@ -1309,27 +2176,27 @@ fn split_root_transaction_rejects_incompatible_legacy_work_items_without_materia
     let project_state_root = temp.path().join("workspace-home");
     let work_event_root = project_state_root.join("work").join("issue-3412");
     std::fs::create_dir_all(&work_event_root).expect("work event root");
-    let legacy_works = legacy_workspace_work_items_path_for_repo_path(&project_state_root);
+    let saved_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let split_root_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
     let incompatible = br#"{"updated_at":false,"work_items":[]}"#.to_vec();
-    std::fs::create_dir_all(legacy_works.parent().expect("legacy works parent"))
+    std::fs::create_dir_all(saved_works.parent().expect("legacy works parent"))
         .expect("legacy works parent");
-    std::fs::write(&legacy_works, &incompatible).expect("write incompatible legacy WorkItems");
+    std::fs::write(&saved_works, &incompatible).expect("write incompatible canonical WorkItems");
 
     let error = transact_workspace_state_for_work_event_root(
         &project_state_root,
         &work_event_root,
         |_, _, _| Ok(((), Vec::new())),
     )
-    .expect_err("incompatible legacy WorkItems must fail closed");
+    .expect_err("incompatible canonical WorkItems must fail closed");
 
-    assert!(error.to_string().contains("workspace work items json"));
+    assert!(matches!(error, GwtError::WorkspaceStateLoad(_)));
     assert_eq!(
-        std::fs::read(&legacy_works).expect("legacy WorkItems after refusal"),
+        std::fs::read(&saved_works).expect("canonical WorkItems after refusal"),
         incompatible
     );
-    assert!(!repo_global_works.exists());
+    assert!(repo_global_works.exists());
     assert!(!split_root_works.exists());
     assert!(!gwt_workspace_projection_path_for_repo_path(&project_state_root).exists());
     assert!(!gwt_repo_local_work_events_path(&work_event_root).exists());
@@ -1338,10 +2205,10 @@ fn split_root_transaction_rejects_incompatible_legacy_work_items_without_materia
 #[test]
 fn external_workspace_operation_lock_uses_portable_contention_detection() {
     assert!(
-        is_external_workspace_operation_lock_contended(&fs2::lock_contended_error()),
+        crate::operation_deadline::is_lock_contended(&fs2::lock_contended_error()),
         "operation lock contention must recognize fs2's platform-specific error"
     );
-    assert!(!is_external_workspace_operation_lock_contended(
+    assert!(!crate::operation_deadline::is_lock_contended(
         &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not contention")
     ));
 }
@@ -1439,6 +2306,9 @@ fn workspace_state_transaction_commit_refusal_blocks_until_explicit_rejection() 
         blocked.is_err(),
         "ordinary writers must fail closed while external commit state is unresolved"
     );
+    let error = blocked.unwrap_err().to_string();
+    assert!(error.contains("unresolved"), "{error}");
+    assert!(!error.contains("in flight"), "{error}");
     assert_eq!(
         fs::read(&current).expect("read current while blocked"),
         current_before
@@ -1507,6 +2377,9 @@ fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_com
         workspace_id: None,
         updated_at: now,
     });
+    let mut other_session = initial.agents[0].clone();
+    other_session.session_id = "session-waiting-writer".to_string();
+    initial.agents.push(other_session);
     save_workspace_projection_to_path(&current, &initial).expect("save initial current");
 
     let (commit_entered_tx, commit_entered_rx) = std::sync::mpsc::channel();
@@ -1552,6 +2425,19 @@ fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_com
         .recv()
         .expect("external commit must start");
 
+    let retry_update = || {
+        transact_workspace_state_at(&current, &works, &events, &root, |projection, _, _| {
+            let agent = projection
+                .agents
+                .iter_mut()
+                .find(|agent| agent.session_id == "session-waiting-writer")
+                .expect("same waiting Session");
+            agent.current_focus = Some("retried update".to_string());
+            Ok(((), Vec::new()))
+        })
+    };
+    let in_flight_result = retry_update();
+
     assert_eq!(
         resolve_workspace_state_external_commit_at(
             &current,
@@ -1573,6 +2459,15 @@ fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_com
         .join()
         .expect("join transaction")
         .expect("external commit and Work publication succeed");
+    let error = in_flight_result.expect_err("writer must wait").to_string();
+    assert!(error.contains("continue-operation-in-flight"), "{error}");
+    assert!(error.contains("in flight"), "{error}");
+    assert!(
+        error.contains("wait") && error.contains("retry in 5 seconds"),
+        "{error}"
+    );
+    assert!(!error.contains("unresolved"), "{error}");
+    retry_update().expect("same Session update succeeds after external commit completes");
     assert!(
         resolve_workspace_state_external_commit_at(
             &current,
@@ -1587,6 +2482,16 @@ fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_com
     let saved = load_workspace_projection_from_path(&current)
         .expect("load current")
         .expect("current exists");
+    assert_eq!(
+        saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-waiting-writer")
+            .unwrap()
+            .current_focus
+            .as_deref(),
+        Some("retried update")
+    );
     assert_eq!(
         workspace_assignment_for_session(&saved, "session-in-flight-commit"),
         WorkspaceSessionAssignment::Assigned("work-in-flight-commit".to_string())
@@ -1994,6 +2899,8 @@ fn workspace_state_transaction_reconciles_post_commit_error_without_rerunning_co
     let commit_called = std::cell::Cell::new(0_u8);
     let external_committed = std::cell::Cell::new(false);
     let event_id = "event-post-commit-error";
+    #[cfg(unix)]
+    let inherited_description = std::cell::RefCell::new(None);
 
     let result = transact_workspace_state_at_with_commit(
         &current,
@@ -2018,6 +2925,36 @@ fn workspace_state_transaction_reconciles_post_commit_error_without_rerunning_co
         || {
             commit_called.set(commit_called.get() + 1);
             external_committed.set(true);
+            #[cfg(unix)]
+            {
+                // A fork inherits this exact open file description even with
+                // CLOEXEC, until the child execs. Retain a dup deterministically
+                // instead of racing a sibling process or waiting on a clock.
+                use std::os::unix::{fs::MetadataExt, io::FromRawFd};
+                let lock_path = external_workspace_operation_lock_path(
+                    &current,
+                    &works,
+                    "continue-operation-response-lost",
+                );
+                let expected = fs::metadata(&lock_path).expect("operation lock inode");
+                let duplicate = fs::read_dir("/dev/fd")
+                    .expect("open descriptors")
+                    .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+                    .find_map(|fd| {
+                        // SAFETY: dup returns a new owned descriptor on success;
+                        // an entry closed during enumeration simply returns -1.
+                        let duplicate = unsafe { libc::dup(fd) };
+                        if duplicate < 0 {
+                            return None;
+                        }
+                        let file = unsafe { fs::File::from_raw_fd(duplicate) };
+                        let metadata = file.metadata().ok()?;
+                        (metadata.dev() == expected.dev() && metadata.ino() == expected.ino())
+                            .then_some(file)
+                    })
+                    .expect("exact operation lock descriptor");
+                *inherited_description.borrow_mut() = Some(duplicate);
+            }
             Err(GwtError::Other(
                 "external commit response was lost".to_string(),
             ))
@@ -3515,82 +4452,6 @@ fn journal_update_does_not_publish_current_when_journal_append_fails() {
         .unwrap()
         .unwrap();
     assert_eq!(saved.summary, None);
-}
-
-#[test]
-fn legacy_journal_copy_waits_for_workspace_transaction_lock() {
-    use fs2::FileExt;
-
-    let temp = tempfile::tempdir().unwrap();
-    let project_state_root = temp.path().join("project-state");
-    let work_event_root = temp.path().join("work-events");
-    let current = gwt_workspace_projection_path_for_repo_path(&project_state_root);
-    let works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
-    let legacy = legacy_workspace_journal_path_for_repo_path(&project_state_root);
-    let canonical = gwt_workspace_journal_path_for_repo_path(&project_state_root);
-    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-    let legacy_entry = WorkspaceJournalEntry {
-        id: "legacy".to_string(),
-        project_root: project_state_root.clone(),
-        title: None,
-        status_category: Some(WorkspaceStatusCategory::Active),
-        status_text: None,
-        owner: None,
-        next_action: None,
-        summary: Some("legacy journal".to_string()),
-        progress_summary: None,
-        agent_session_id: None,
-        agent_current_focus: None,
-        agent_title_summary: None,
-        updated_at: Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap(),
-    };
-    std::fs::write(
-        &legacy,
-        format!("{}\n", serde_json::to_string(&legacy_entry).unwrap()),
-    )
-    .unwrap();
-    let initial = WorkspaceProjection::default_for_project(&project_state_root);
-    save_workspace_projection_to_path(&current, &initial).unwrap();
-
-    std::fs::create_dir_all(works.parent().unwrap()).unwrap();
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(works.with_extension("lock"))
-        .unwrap();
-    lock.lock_exclusive().unwrap();
-
-    let state = project_state_root.clone();
-    let events = work_event_root.clone();
-    let handle = std::thread::spawn(move || {
-        update_workspace_projection_with_journal_for_work_event_root(
-            &state,
-            &events,
-            WorkspaceProjectionUpdate {
-                title: None,
-                status_category: None,
-                status_text: None,
-                owner: None,
-                next_action: None,
-                summary: Some("locked update".to_string()),
-                progress_summary: None,
-                agent_session_id: None,
-                agent_current_focus: None,
-                agent_title_summary: None,
-            },
-            TrackedWorkEventPolicy::Persist,
-        )
-    });
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(
-        !canonical.exists(),
-        "legacy journal migration must not run before the transaction lock"
-    );
-    FileExt::unlock(&lock).unwrap();
-    handle.join().unwrap().unwrap();
-    assert!(canonical.exists());
 }
 
 #[test]
@@ -5647,6 +6508,132 @@ fn exact_terminal_compatibility_preserves_split_root_legacy_terminal_bytes() {
 }
 
 #[test]
+fn exact_terminal_confirmation_accepts_unassigned_done_without_writes() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let target = SessionBoundWorkspaceTerminalTarget {
+        project_state_root: fixture.target.project_state_root.clone(),
+        work_event_root: fixture.target.work_event_root.clone(),
+        session_id: fixture.target.session_id.clone(),
+        branch_identity: fixture.target.branch_identity.clone(),
+        worktree_identity: fixture.target.worktree_identity.clone(),
+        owner: fixture.target.owner.clone(),
+        agent_id: fixture.target.agent_id.clone(),
+    };
+    emit_workspace_terminal_event_for_exact_resolved_work_target(
+        &target,
+        T812_TARGET_WORK_ID,
+        WorkCloseKind::Done,
+        ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+        Utc::now(),
+        |_, _| Ok(()),
+    )
+    .expect("seed canonical Done Work");
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    let agent = current
+        .latest_agent_for_session_mut(T812_SESSION_ID)
+        .expect("canonical Session");
+    agent.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
+    agent.workspace_id = None;
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("save Unassigned Session");
+    let close_path =
+        gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root);
+    let state_before = fixture.state_bytes();
+    let close_before = fs::read(&close_path).expect("snapshot close ledger");
+
+    assert_eq!(
+        emit_workspace_terminal_event_for_resolved_work_target(
+            &target,
+            WorkCloseKind::Done,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .expect("ordinary terminalization keeps Unassigned as NoTarget"),
+        WorkspaceTerminalEventOutcome::NoTarget
+    );
+    assert!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .expect("confirm exact Done Work after Session became Unassigned"),
+        WorkspaceTerminalEventOutcome::AlreadyMatching
+    );
+    assert_eq!(fixture.state_bytes(), state_before);
+    assert_eq!(
+        fs::read(&close_path).expect("read preserved close ledger"),
+        close_before
+    );
+
+    current
+        .latest_agent_for_session_mut(T812_SESSION_ID)
+        .expect("canonical Session")
+        .workspace_id = Some(T812_TARGET_WORK_ID.to_string());
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("save contradictory Unassigned Session");
+    let state_before = fixture.state_bytes();
+    assert!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .is_err()
+    );
+    assert_eq!(fixture.state_bytes(), state_before);
+
+    let agent = current
+        .latest_agent_for_session_mut(T812_SESSION_ID)
+        .expect("canonical Session");
+    agent.workspace_id = None;
+    let duplicate = agent.clone();
+    current.agents.push(duplicate);
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("save duplicate Unassigned Session");
+    let state_before = fixture.state_bytes();
+    assert!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .is_err()
+    );
+    assert_eq!(fixture.state_bytes(), state_before);
+    assert_eq!(
+        fs::read(&close_path).expect("read preserved close ledger after refusals"),
+        close_before
+    );
+}
+
+#[test]
 fn exact_terminal_confirmation_rejects_unprojected_or_unsupported_close_ledger() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
@@ -5843,6 +6830,121 @@ fn exact_terminal_confirmation_accepts_repaired_identity_and_unrelated_legacy_cl
         fs::read(&close_path).expect("read preserved pre-repair close payload"),
         close_before
     );
+}
+
+#[test]
+fn session_bound_update_copies_matching_current_pr_metadata() {
+    assert_session_bound_pr_metadata("matching", true, true, false, true);
+}
+
+#[test]
+fn session_bound_update_does_not_copy_foreign_container_pr_metadata() {
+    assert_session_bound_pr_metadata("foreign-branch", false, true, false, false);
+    assert_session_bound_pr_metadata("foreign-path", true, false, false, false);
+}
+
+#[test]
+fn session_bound_update_preserves_existing_pr_metadata_without_current_metadata() {
+    assert_session_bound_pr_metadata("existing", true, true, true, false);
+}
+
+fn assert_session_bound_pr_metadata(
+    label: &str,
+    same_branch: bool,
+    same_path: bool,
+    existing_metadata: bool,
+    expect_copy: bool,
+) {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    current.git_details = Some(GitDetails {
+        branch: Some(if same_branch {
+            T812_TARGET_BRANCH.to_string()
+        } else {
+            "work/foreign-pr".to_string()
+        }),
+        worktree_path: Some(if same_path {
+            fixture.target.worktree_identity.clone()
+        } else {
+            temp.path().join("foreign-worktree")
+        }),
+        base_branch: None,
+        pr_number: (!existing_metadata).then_some(3697),
+        pr_url: (!existing_metadata)
+            .then(|| "https://github.com/akiojin/gwt/pull/3697".to_string()),
+        pr_state: (!existing_metadata).then(|| "OPEN".to_string()),
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: Utc::now(),
+    });
+    save_workspace_projection_to_path(&fixture.current_path, &current).expect("save PR details");
+    if existing_metadata {
+        let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+            .expect("load target")
+            .expect("target");
+        let container = &mut work_items.work_items[0].execution_containers[0];
+        container.pr_number = Some(3697);
+        container.pr_url = Some("https://github.com/akiojin/gwt/pull/3697".to_string());
+        container.pr_state = Some("OPEN".to_string());
+        save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+            .expect("save existing PR metadata");
+    }
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: Some("PR status checked".to_string()),
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("session-bound update");
+
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load updated Work")
+        .expect("updated Work");
+    let item = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work");
+    let event = item.events.last().expect("update event");
+    assert_eq!(event.kind, WorkEventKind::Update);
+    let expected = expect_copy || existing_metadata;
+    for container in [
+        event.execution_container.as_ref().expect("event container"),
+        &item.execution_containers[0],
+    ] {
+        assert_eq!(container.branch.as_deref(), Some(T812_TARGET_BRANCH));
+        assert_eq!(
+            container.worktree_path.as_deref(),
+            Some(fixture.target.worktree_identity.as_path())
+        );
+        assert_eq!(container.pr_number, expected.then_some(3697), "{label}");
+        assert_eq!(
+            container.pr_url.as_deref(),
+            expected.then_some("https://github.com/akiojin/gwt/pull/3697"),
+            "{label}"
+        );
+        assert_eq!(
+            container.pr_state.as_deref(),
+            expected.then_some("OPEN"),
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -6081,6 +7183,61 @@ fn session_bound_update_rejects_explicit_owner_conflict_without_mutation() {
     let after = fixture.state_bytes();
 
     t812_assert_rejected_without_mutation(&result, &before, &after, "explicit owner conflict");
+}
+
+/// Issue #4443: a Work item routinely carries execution containers recorded on
+/// another host, and those paths do not resolve here. Treating an absent path
+/// as an I/O failure aborted the whole Session-bound transaction before
+/// `revalidate` ever ran, which reached the agent as a `transaction_conflict`
+/// that no retry, `workspace.ensure`, or `execution.continue` could clear.
+#[test]
+fn session_bound_update_ignores_execution_container_recorded_on_another_host() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+
+    let foreign_worktree = temp.path().join("another-host").join("work").join("target");
+    assert!(
+        !foreign_worktree.exists(),
+        "precondition: the other host's worktree does not exist here"
+    );
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems projection");
+    work_items
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work")
+        .execution_containers
+        .push(WorkspaceExecutionContainerRef {
+            branch: Some(T812_TARGET_BRANCH.to_string()),
+            worktree_path: Some(foreign_worktree),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+    save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+        .expect("seed the other host's execution container");
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Active),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("another host's container must not block this one".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("an execution container from another host must not fail the transaction");
 }
 
 #[test]
@@ -6490,9 +7647,9 @@ fn skip_tracked_policy_leaves_committed_events_log_untouched() {
 fn workspace_work_items_synthesize_from_legacy_current_and_journal_without_rewrite() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_root = temp.path().join("repo");
-    let current_path = temp.path().join("workspace/current.json");
-    let journal_path = temp.path().join("workspace/journal.jsonl");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let journal_path = temp.path().join("project-state/journal.jsonl");
+    let work_items_path = temp.path().join("project-state/works.json");
     let first_at = Utc.with_ymd_and_hms(2026, 5, 11, 2, 0, 0).unwrap();
     let second_at = Utc.with_ymd_and_hms(2026, 5, 11, 2, 5, 0).unwrap();
 
@@ -6504,6 +7661,14 @@ fn workspace_work_items_synthesize_from_legacy_current_and_journal_without_rewri
     projection.summary = Some("Legacy current state remains readable.".to_string());
     projection.owner = Some("SPEC-2359".to_string());
     projection.board_refs.push("board-legacy-1".to_string());
+    let mut foreign_agent = assigned_agent("session-foreign", "codex", "workspace-other");
+    foreign_agent.status_category = WorkspaceStatusCategory::Blocked;
+    foreign_agent.updated_at = second_at;
+    let mut stale_agent = foreign_agent.clone();
+    stale_agent.workspace_id = Some(projection.id.clone());
+    stale_agent.updated_at = first_at;
+    projection.agents.push(stale_agent);
+    projection.agents.push(foreign_agent);
     save_workspace_projection_to_path(&current_path, &projection).expect("save legacy projection");
 
     append_workspace_journal_entry_to_path(
@@ -6559,6 +7724,8 @@ fn workspace_work_items_synthesize_from_legacy_current_and_journal_without_rewri
     assert_eq!(item.title, "Work WorkItem history");
     assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
     assert_eq!(item.owner.as_deref(), Some("SPEC-2359"));
+    assert_eq!(item.agents.len(), 1);
+    assert_eq!(item.agents[0].session_id, "session-legacy");
     assert_eq!(item.board_refs, vec!["board-legacy-1".to_string()]);
     assert_eq!(item.events.len(), 2);
     assert_eq!(
@@ -6634,8 +7801,8 @@ fn workspace_update_persists_agent_title_summary_separately_from_focus() {
 fn recent_workspace_journal_entries_load_newest_first_with_limit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_root = temp.path().join("repo");
-    let current_path = temp.path().join("workspace/current.json");
-    let journal_path = temp.path().join("workspace/journal.jsonl");
+    let current_path = temp.path().join("project-state/current.json");
+    let journal_path = temp.path().join("project-state/journal.jsonl");
     let first_at = Utc.with_ymd_and_hms(2026, 5, 7, 1, 0, 0).unwrap();
     let second_at = Utc.with_ymd_and_hms(2026, 5, 7, 1, 5, 0).unwrap();
 
@@ -6713,7 +7880,7 @@ fn unassigned_agent(session_id: &str, agent_id: &str) -> WorkspaceAgentSummary {
     a
 }
 
-fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+fn lock_test_env() -> crate::test_support::EnvLockGuard {
     crate::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6953,7 +8120,8 @@ fn classify_workspace_projections_deletes_empty_default_projection() {
         &WorkspaceRetentionConfig::default(),
         Utc::now(),
         |_| false,
-    );
+    )
+    .expect("classify projections");
 
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].workspace_id, projection.id);
@@ -6978,7 +8146,8 @@ fn classify_workspace_projections_deletes_empty_projection_with_agent_stub() {
         &WorkspaceRetentionConfig::default(),
         Utc::now(),
         |_| false,
-    );
+    )
+    .expect("classify projections");
 
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].stale_reason, Some(StaleReason::EmptyProjection));
@@ -7003,7 +8172,8 @@ fn classify_workspace_projections_keeps_projection_with_agent_worktree() {
         &WorkspaceRetentionConfig::default(),
         Utc::now(),
         |_| false,
-    );
+    )
+    .expect("classify projections");
 
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].stale_reason, None);
@@ -7030,7 +8200,8 @@ fn apply_prune_plan_removes_empty_project_dir_after_projection_delete() {
         &WorkspaceRetentionConfig::default(),
         Utc::now(),
         |_| false,
-    );
+    )
+    .expect("classify projections");
 
     let summary = apply_prune_plan(&plan, false).expect("apply prune");
 
@@ -7046,7 +8217,7 @@ fn apply_prune_plan_removes_empty_project_dir_after_projection_delete() {
 #[test]
 fn auto_done_emit_helper_appends_single_done_event_and_marks_work_item_done() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
     let done_at = Utc.with_ymd_and_hms(2026, 5, 13, 2, 0, 0).unwrap();
@@ -7086,7 +8257,7 @@ fn auto_done_emit_helper_appends_single_done_event_and_marks_work_item_done() {
 #[test]
 fn auto_done_emit_helper_is_idempotent_per_work_item_id() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
     let first_done_at = Utc.with_ymd_and_hms(2026, 5, 13, 2, 0, 0).unwrap();
@@ -7132,8 +8303,8 @@ fn auto_done_emit_helper_is_idempotent_per_work_item_id() {
 #[test]
 fn terminal_emit_does_not_create_a_missing_work_item() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/works.json");
-    let events_path = temp.path().join("workspace/work-events-closed.jsonl");
+    let work_items_path = temp.path().join("project-state/works.json");
+    let events_path = temp.path().join("project-state/work-events-closed.jsonl");
     save_workspace_work_items_projection_to_path(
         &work_items_path,
         &WorkItemsProjection::empty(Utc::now()),
@@ -7161,7 +8332,7 @@ fn terminal_retry_recovers_durable_event_without_appending_a_second_close() {
         (WorkEventKind::Discard, "discard"),
     ] {
         let temp = tempfile::tempdir().expect("tempdir");
-        let work_items_path = temp.path().join("workspace/works.json");
+        let work_items_path = temp.path().join("project-state/works.json");
         let shared_events_path = temp.path().join("shared/events.jsonl");
         let close_events_path = temp.path().join("local/work-events-closed.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
@@ -7221,7 +8392,7 @@ fn terminal_retry_refolds_durable_close_before_a_later_saved_heartbeat() {
         (WorkEventKind::Discard, "discard"),
     ] {
         let temp = tempfile::tempdir().expect("tempdir");
-        let work_items_path = temp.path().join("workspace/works.json");
+        let work_items_path = temp.path().join("project-state/works.json");
         let shared_events_path = temp.path().join("shared/events.jsonl");
         let close_events_path = temp.path().join("local/work-events-closed.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
@@ -7312,7 +8483,7 @@ fn terminal_retry_rejects_unknown_or_additive_machine_local_event_schema() {
 
     for (label, body) in cases {
         let temp = tempfile::tempdir().expect("tempdir");
-        let work_items_path = temp.path().join("workspace/works.json");
+        let work_items_path = temp.path().join("project-state/works.json");
         let shared_events_path = temp.path().join("shared/events.jsonl");
         let close_events_path = temp.path().join("local/work-events-closed.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 7, 22, 1, 0, 0).unwrap();
@@ -7357,7 +8528,7 @@ fn terminal_retry_repairs_partial_durable_lifecycle_tail_before_strict_replay() 
         (WorkEventKind::Discard, "discard"),
     ] {
         let temp = tempfile::tempdir().expect("tempdir");
-        let work_items_path = temp.path().join("workspace/works.json");
+        let work_items_path = temp.path().join("project-state/works.json");
         let shared_events_path = temp.path().join("shared/events.jsonl");
         let close_events_path = temp.path().join("local/work-events-closed.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 7, 16, 7, 0, 0).unwrap();
@@ -7428,7 +8599,7 @@ fn terminal_emit_waiting_for_lock_does_not_recreate_a_removed_target() {
     use fs2::FileExt;
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/works.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let shared_events_path = temp.path().join("shared/events.jsonl");
     let close_events_path = temp.path().join("local/work-events-closed.jsonl");
     let now = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
@@ -7478,7 +8649,7 @@ fn session_terminal_resolution_waits_for_lock_and_uses_latest_assignment() {
     use fs2::FileExt;
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let state_dir = temp.path().join("workspace");
+    let state_dir = temp.path().join("project-state");
     let current_path = state_dir.join("current.json");
     let work_items_path = state_dir.join("works.json");
     let shared_events_path = temp.path().join("shared/events.jsonl");
@@ -7640,7 +8811,7 @@ fn session_terminal_resolution_waits_for_split_current_assignment_lock() {
 }
 
 #[test]
-fn session_terminal_wrappers_migrate_legacy_work_items_before_first_close() {
+fn session_terminal_wrappers_close_canonical_work_items() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
@@ -7655,7 +8826,7 @@ fn session_terminal_wrappers_migrate_legacy_work_items_before_first_close() {
         let repo = temp.path().join(format!("repo-{label}"));
         std::fs::create_dir_all(&repo).unwrap();
         let canonical = gwt_workspace_work_items_path_for_repo_path(&repo);
-        let legacy = legacy_workspace_work_items_path_for_repo_path(&repo);
+        let legacy = gwt_workspace_work_items_path_for_repo_path(&repo);
         let close_events = gwt_workspace_work_events_closed_path_for_repo_path(&repo);
         let work_id = format!("work-legacy-first-{label}");
         let session_id = format!("session-legacy-first-{label}");
@@ -7665,7 +8836,7 @@ fn session_terminal_wrappers_migrate_legacy_work_items_before_first_close() {
         start.status_category = Some(WorkspaceStatusCategory::Active);
         projection.apply_event(start);
         save_workspace_work_items_projection_to_path(&legacy, &projection).unwrap();
-        assert!(!canonical.exists(), "fixture must be legacy-only");
+        assert!(canonical.exists());
 
         let emitted = match kind {
             WorkEventKind::Done => emit_workspace_done_event_for_session(
@@ -7686,10 +8857,10 @@ fn session_terminal_wrappers_migrate_legacy_work_items_before_first_close() {
         }
         .unwrap();
 
-        assert!(emitted, "first {label} call must close the migrated Work");
+        assert!(emitted, "first {label} call must close the canonical Work");
         let migrated = load_workspace_work_items_from_path(&canonical)
             .unwrap()
-            .expect("legacy Work must migrate to canonical state");
+            .expect("canonical Work must remain");
         let item = migrated
             .work_items
             .iter()
@@ -7816,8 +8987,8 @@ fn concurrent_done_and_discard_append_only_one_terminal_event() {
     use std::sync::{Arc, Barrier};
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/works.json");
-    let events_path = temp.path().join("workspace/work-events-closed.jsonl");
+    let work_items_path = temp.path().join("project-state/works.json");
+    let events_path = temp.path().join("project-state/work-events-closed.jsonl");
     let started_at = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
     let closed_at = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
     let mut start = WorkEvent::new(WorkEventKind::Start, "work-racing-close", started_at);
@@ -7882,8 +9053,8 @@ fn concurrent_done_and_discard_append_only_one_terminal_event() {
 #[test]
 fn work_event_batch_appends_and_projects_pause_with_all_board_refs() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/works.json");
-    let events_path = temp.path().join("workspace/work-events-closed.jsonl");
+    let work_items_path = temp.path().join("project-state/works.json");
+    let events_path = temp.path().join("project-state/work-events-closed.jsonl");
     let now = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
     let mut pause = WorkEvent::new(WorkEventKind::Pause, "work-batch", now);
     pause.id = "evt-pause-batch".to_string();
@@ -7925,7 +9096,7 @@ fn work_event_batch_appends_and_projects_pause_with_all_board_refs() {
 #[test]
 fn rejected_pause_rejects_the_entire_board_reference_batch() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/works.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let shared_events_path = temp.path().join("shared/events.jsonl");
     let close_events_path = temp.path().join("local/work-events-closed.jsonl");
     let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
@@ -7982,7 +9153,7 @@ fn rejected_pause_rejects_the_entire_board_reference_batch() {
 #[test]
 fn auto_done_emit_helper_appends_once_after_explicit_reopen() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let started_at = Utc.with_ymd_and_hms(2026, 7, 15, 1, 0, 0).unwrap();
     let first_done_at = Utc.with_ymd_and_hms(2026, 7, 15, 2, 0, 0).unwrap();
@@ -8041,8 +9212,8 @@ fn auto_done_emit_helper_appends_once_after_explicit_reopen() {
 #[test]
 fn retroactive_auto_done_scan_marks_eligible_merged_work_branch_workitems() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("workspace/current.json");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
     let now = Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap();
@@ -8125,8 +9296,8 @@ fn retroactive_auto_done_scan_marks_eligible_merged_work_branch_workitems() {
 #[test]
 fn retroactive_auto_done_scan_is_idempotent_across_invocations() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("workspace/current.json");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
     let first_run = Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap();
@@ -8167,8 +9338,8 @@ fn retroactive_auto_done_scan_is_idempotent_across_invocations() {
 #[test]
 fn emit_workspace_done_event_for_branch_emits_done_when_branch_matches() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("workspace/current.json");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
     let project_root = temp.path().join("repo");
@@ -8222,8 +9393,8 @@ fn emit_workspace_done_event_for_branch_emits_done_when_branch_matches() {
 #[test]
 fn emit_workspace_done_event_for_branch_is_noop_when_branch_does_not_match() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("workspace/current.json");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
     let project_root = temp.path().join("repo");
@@ -8278,8 +9449,8 @@ fn emit_workspace_done_event_for_branch_is_noop_when_branch_does_not_match() {
 #[test]
 fn retroactive_auto_done_scan_returns_zero_when_work_items_file_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("workspace/current.json");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
 
@@ -8300,8 +9471,8 @@ fn retroactive_auto_done_scan_returns_zero_when_work_items_file_missing() {
 #[test]
 fn retroactive_auto_done_scan_emits_done_from_current_projection_when_work_items_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("workspace/current.json");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
     let project_root = temp.path().join("repo");
@@ -8353,8 +9524,8 @@ fn retroactive_auto_done_scan_emits_done_from_current_projection_when_work_items
 #[test]
 fn retroactive_auto_done_scan_skips_current_projection_without_start_work_flag() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let current_path = temp.path().join("workspace/current.json");
-    let work_items_path = temp.path().join("workspace/work_items.json");
+    let current_path = temp.path().join("project-state/current.json");
+    let work_items_path = temp.path().join("project-state/works.json");
     let events_path = temp.path().join("workspace/work_events.jsonl");
     let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
     let project_root = temp.path().join("repo");
@@ -8536,6 +9707,37 @@ fn make_classify_projection(
 }
 
 #[test]
+fn classify_workspace_projections_rejects_invalid_canonical_before_legacy() {
+    for unreadable_directory in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        let canonical = project_dir.join("project-state/current.json");
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        if unreadable_directory {
+            std::fs::create_dir(&canonical).unwrap();
+        } else {
+            std::fs::write(&canonical, b"{broken canonical").unwrap();
+        }
+        let legacy = project_dir.join("workspace/current.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            serde_json::to_vec(&WorkspaceProjection::default_for_project(&project_dir)).unwrap(),
+        )
+        .unwrap();
+
+        let error = classify_workspace_projections(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            Utc::now(),
+            |_| false,
+        )
+        .expect_err("an existing invalid canonical file must not be skipped or replaced by legacy");
+        assert!(matches!(error, GwtError::WorkspaceStateLoad(error) if error.path == canonical));
+    }
+}
+
+#[test]
 fn classify_workspace_projections_returns_empty_for_missing_scan_root() {
     let scan_root = PathBuf::from("/nonexistent/projects/scan-root-xyz");
     let now = Utc::now();
@@ -8544,7 +9746,8 @@ fn classify_workspace_projections_returns_empty_for_missing_scan_root() {
         &WorkspaceRetentionConfig::default(),
         now,
         |_| false,
-    );
+    )
+    .expect("classify projections");
     assert!(result.is_empty());
 }
 
@@ -8553,7 +9756,7 @@ fn classify_workspace_projections_classifies_stale_active_as_archive() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let scan_root = tmp.path().to_path_buf();
     let project_dir = scan_root.join("abc123");
-    let workspace_dir = project_dir.join("workspace");
+    let workspace_dir = project_dir.join("project-state");
     let now = Utc::now();
     let projection = make_classify_projection(
         "ws-archive-me",
@@ -8568,7 +9771,8 @@ fn classify_workspace_projections_classifies_stale_active_as_archive() {
         &WorkspaceRetentionConfig::default(),
         now,
         |_| false,
-    );
+    )
+    .expect("classify projections");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].workspace_id, "ws-archive-me");
     assert_eq!(result[0].action, PruneAction::Archive);
@@ -8580,7 +9784,7 @@ fn classify_workspace_projections_classifies_archived_beyond_threshold_as_delete
     let tmp = tempfile::tempdir().expect("tempdir");
     let scan_root = tmp.path().to_path_buf();
     let project_dir = scan_root.join("def456");
-    let workspace_dir = project_dir.join("workspace");
+    let workspace_dir = project_dir.join("project-state");
     let now = Utc::now();
     let projection = make_classify_projection(
         "ws-delete-me",
@@ -8595,7 +9799,8 @@ fn classify_workspace_projections_classifies_archived_beyond_threshold_as_delete
         &WorkspaceRetentionConfig::default(),
         now,
         |_| false,
-    );
+    )
+    .expect("classify projections");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].action, PruneAction::Delete);
 }
@@ -8605,7 +9810,7 @@ fn classify_workspace_projections_skips_archived_too_soon() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let scan_root = tmp.path().to_path_buf();
     let project_dir = scan_root.join("ghi789");
-    let workspace_dir = project_dir.join("workspace");
+    let workspace_dir = project_dir.join("project-state");
     let now = Utc::now();
     let projection = make_classify_projection(
         "ws-keep-archived",
@@ -8620,7 +9825,8 @@ fn classify_workspace_projections_skips_archived_too_soon() {
         &WorkspaceRetentionConfig::default(),
         now,
         |_| false,
-    );
+    )
+    .expect("classify projections");
     assert_eq!(result.len(), 1);
     assert_eq!(
         result[0].action,
@@ -8635,7 +9841,7 @@ fn classify_workspace_projections_skips_active_session() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let scan_root = tmp.path().to_path_buf();
     let project_dir = scan_root.join("jkl012");
-    let workspace_dir = project_dir.join("workspace");
+    let workspace_dir = project_dir.join("project-state");
     let now = Utc::now();
     let projection = make_classify_projection(
         "ws-active",
@@ -8650,7 +9856,8 @@ fn classify_workspace_projections_skips_active_session() {
         &WorkspaceRetentionConfig::default(),
         now,
         |_| true, // every workspace has an active session
-    );
+    )
+    .expect("classify projections");
     assert_eq!(result.len(), 1);
     assert_eq!(
         result[0].action,
@@ -8661,11 +9868,43 @@ fn classify_workspace_projections_skips_active_session() {
 }
 
 #[test]
+fn apply_prune_plan_refuses_corrupt_state_after_planning() {
+    for action in [PruneAction::Archive, PruneAction::Delete] {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        let state_dir = project_dir.join("project-state");
+        write_projection_at(
+            &state_dir,
+            &WorkspaceProjection::default_for_project(&project_dir),
+        );
+        let mut plan = classify_workspace_projections(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            Utc::now(),
+            |_| false,
+        )
+        .unwrap();
+        plan[0].action = action;
+        let current = state_dir.join("current.json");
+        let before = std::fs::read(&current).unwrap();
+        let works = state_dir.join("works.json");
+        let broken = b"{broken works after classification";
+        std::fs::write(&works, broken).unwrap();
+
+        let error =
+            apply_prune_plan(&plan, false).expect_err("prune must revalidate before writing");
+        assert!(matches!(error, GwtError::WorkspaceStateLoad(error) if error.path == works));
+        assert_eq!(std::fs::read(&current).unwrap(), before);
+        assert_eq!(std::fs::read(&works).unwrap(), broken);
+    }
+}
+
+#[test]
 fn apply_prune_plan_dry_run_counts_without_filesystem_change() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let scan_root = tmp.path().to_path_buf();
     let project_dir = scan_root.join("dry-run-test");
-    let workspace_dir = project_dir.join("workspace");
+    let workspace_dir = project_dir.join("project-state");
     let now = Utc::now();
     let projection = make_classify_projection(
         "ws-dry",
@@ -8680,7 +9919,8 @@ fn apply_prune_plan_dry_run_counts_without_filesystem_change() {
         &WorkspaceRetentionConfig::default(),
         now,
         |_| false,
-    );
+    )
+    .expect("classify projections");
     let summary = apply_prune_plan(&plan, true).expect("dry run summary");
     assert_eq!(summary.archived, 1);
     assert_eq!(summary.deleted, 0);
@@ -8702,7 +9942,7 @@ fn apply_prune_plan_archives_then_deletes() {
     let scan_root = tmp.path().to_path_buf();
 
     let now = Utc::now();
-    let archive_dir = scan_root.join("archive-target").join("workspace");
+    let archive_dir = scan_root.join("archive-target").join("project-state");
     let archive_projection = make_classify_projection(
         "ws-arch",
         &scan_root.join("archive-target"),
@@ -8711,7 +9951,7 @@ fn apply_prune_plan_archives_then_deletes() {
     );
     write_projection_at(&archive_dir, &archive_projection);
 
-    let delete_dir = scan_root.join("delete-target").join("workspace");
+    let delete_dir = scan_root.join("delete-target").join("project-state");
     let delete_projection = make_classify_projection(
         "ws-del",
         &scan_root.join("delete-target"),
@@ -8725,7 +9965,8 @@ fn apply_prune_plan_archives_then_deletes() {
         &WorkspaceRetentionConfig::default(),
         now,
         |_| false,
-    );
+    )
+    .expect("classify projections");
     let summary = apply_prune_plan(&plan, false).expect("apply prune");
     assert_eq!(summary.archived, 1);
     assert_eq!(summary.deleted, 1);
@@ -9035,6 +10276,119 @@ fn record_workspace_work_paused_event_retains_incomplete_history_item() {
         .any(|event| event.kind == WorkEventKind::Pause));
 }
 
+#[test]
+fn delayed_pause_recorded_after_newer_resume_does_not_regress_active_work() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("works.json");
+    let events_path = temp.path().join("work-events.jsonl");
+    let t0 = Utc::now();
+    let t1 = t0 + chrono::Duration::seconds(1);
+    let t2 = t0 + chrono::Duration::seconds(2);
+    let work_id = "work-session-delayed-close";
+
+    let mut start = WorkEvent::new(WorkEventKind::Start, work_id, t0);
+    start.status_category = Some(WorkspaceStatusCategory::Active);
+    start.agent_session_id = Some("delayed-close".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, start)
+        .expect("record initial Work");
+
+    let mut resume = WorkEvent::new(WorkEventKind::Resume, work_id, t2);
+    resume.status_category = Some(WorkspaceStatusCategory::Active);
+    resume.agent_session_id = Some("delayed-close".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, resume)
+        .expect("record newer Resume");
+
+    // The close worker acquired the Work lock only after Resume landed, but
+    // its event time is the close acceptance time. Re-folding by that time
+    // must keep the newer generation Active.
+    super::record_workspace_work_paused_event_paths(
+        &work_items_path,
+        &events_path,
+        work_id,
+        Some("Delayed close"),
+        None,
+        None,
+        &[],
+        None,
+        Some("delayed-close"),
+        t1,
+    )
+    .expect("record delayed Pause");
+
+    let projection = super::load_workspace_work_items_from_path(&work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems present");
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("Work item");
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+    assert_eq!(item.updated_at, t2);
+}
+
+#[test]
+fn delayed_pause_batch_keeps_unrelated_newer_update_for_same_work() {
+    // PR #3787 review: the superseded-Pause guard keys by Work item, so a
+    // batch carrying a genuinely newer Update next to the late Pause must
+    // still fold that Update. Only the Pause itself and the Board-ref
+    // Updates stamped with it may be dropped from the stored projection.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("works.json");
+    let events_path = temp.path().join("work-events.jsonl");
+    let t0 = Utc::now();
+    let t1 = t0 + chrono::Duration::seconds(1);
+    let t2 = t0 + chrono::Duration::seconds(2);
+    let t3 = t0 + chrono::Duration::seconds(3);
+    let work_id = "work-session-delayed-close-batch";
+
+    let mut start = WorkEvent::new(WorkEventKind::Start, work_id, t0);
+    start.status_category = Some(WorkspaceStatusCategory::Active);
+    start.agent_session_id = Some("delayed-close-batch".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, start)
+        .expect("record initial Work");
+
+    let mut resume = WorkEvent::new(WorkEventKind::Resume, work_id, t2);
+    resume.status_category = Some(WorkspaceStatusCategory::Active);
+    resume.agent_session_id = Some("delayed-close-batch".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, resume)
+        .expect("record newer Resume");
+
+    let mut board_ref_update = WorkEvent::new(WorkEventKind::Update, work_id, t1);
+    board_ref_update.board_entry_id = Some("board-entry-late-close".to_string());
+    board_ref_update.agent_session_id = Some("delayed-close-batch".to_string());
+    let mut pause = WorkEvent::new(WorkEventKind::Pause, work_id, t1);
+    pause.agent_session_id = Some("delayed-close-batch".to_string());
+    let mut newer_update = WorkEvent::new(WorkEventKind::Update, work_id, t3);
+    newer_update.title = Some("Newer focus".to_string());
+    newer_update.agent_session_id = Some("delayed-close-batch".to_string());
+    super::record_workspace_work_events_paths(
+        &work_items_path,
+        &events_path,
+        vec![board_ref_update, pause, newer_update],
+    )
+    .expect("record mixed late-Pause batch");
+
+    let projection = super::load_workspace_work_items_from_path(&work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems present");
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("Work item");
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+    assert_eq!(item.updated_at, t3, "the newer Update must fold");
+    assert_eq!(item.title.as_str(), "Newer focus");
+    assert!(
+        !item
+            .board_refs
+            .iter()
+            .any(|board_ref| board_ref == "board-entry-late-close"),
+        "the Board-ref Update stamped with the superseded Pause is skipped"
+    );
+}
+
 /// Issue #3524 (folded into #3606): two views of the same origin can each hold a
 /// worktree on the same branch name. A pre-#3466 store split kept them in
 /// separate stores, so they never met; consolidating the stores makes both
@@ -9188,178 +10542,11 @@ impl ScopedHome {
 }
 
 #[test]
-fn legacy_work_items_migration_waits_for_project_lock_and_preserves_canonical_writer() {
-    use fs2::FileExt;
-
-    let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("home");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let _home = ScopedHome::set(&home);
-    let canonical = gwt_workspace_work_items_path_for_repo_path(&repo);
-    let legacy = legacy_workspace_work_items_path_for_repo_path(&repo);
-    let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
-    let t1 = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
-    let mut legacy_projection = WorkItemsProjection::empty(t0);
-    legacy_projection.apply_event(sample_work_event("work-legacy", t0));
-    save_workspace_work_items_projection_to_path(&legacy, &legacy_projection).unwrap();
-
-    std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(canonical.with_extension("lock"))
-        .unwrap();
-    lock.lock_exclusive().unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let thread_home = home.clone();
-    let thread_repo = repo.clone();
-    let thread_canonical = canonical.clone();
-    let handle = std::thread::spawn(move || {
-        let _home = ScopedHome::set(&thread_home);
-        tx.send(migrate_legacy_workspace_work_items(
-            &thread_repo,
-            &thread_canonical,
-        ))
-        .unwrap();
-    });
-    let early = rx.recv_timeout(std::time::Duration::from_millis(100)).ok();
-
-    let mut writer_projection = WorkItemsProjection::empty(t1);
-    writer_projection.apply_event(sample_work_event("work-writer", t1));
-    save_workspace_work_items_projection_to_path(&canonical, &writer_projection).unwrap();
-    FileExt::unlock(&lock).unwrap();
-    let completed_while_locked = early.is_some();
-    let migrated = early
-        .unwrap_or_else(|| rx.recv().unwrap())
-        .unwrap()
-        .unwrap();
-    handle.join().unwrap();
-
-    assert!(
-        !completed_while_locked,
-        "migration must not enter while the canonical project lock is held"
-    );
-    assert!(migrated
-        .work_items
-        .iter()
-        .any(|item| item.id == "work-writer"));
-    let canonical_projection = load_workspace_work_items_from_path(&canonical)
-        .unwrap()
-        .unwrap();
-    assert!(canonical_projection
-        .work_items
-        .iter()
-        .any(|item| item.id == "work-writer"));
-    assert!(!canonical_projection
-        .work_items
-        .iter()
-        .any(|item| item.id == "work-legacy"));
-}
-
-#[test]
-fn legacy_current_migration_waits_for_project_lock_and_preserves_canonical_writer() {
-    use fs2::FileExt;
-
-    let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("home");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let _home = ScopedHome::set(&home);
-    let canonical = gwt_workspace_projection_path_for_repo_path(&repo);
-    let legacy = legacy_workspace_projection_path_for_repo_path(&repo);
-    let mut legacy_projection = WorkspaceProjection::default_for_project(&repo);
-    legacy_projection.title = "Legacy current".to_string();
-    save_workspace_projection_to_path(&legacy, &legacy_projection).unwrap();
-
-    std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(canonical.with_file_name("works.lock"))
-        .unwrap();
-    lock.lock_exclusive().unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let thread_home = home.clone();
-    let thread_repo = repo.clone();
-    let thread_canonical = canonical.clone();
-    let handle = std::thread::spawn(move || {
-        let _home = ScopedHome::set(&thread_home);
-        tx.send(migrate_legacy_workspace_projection(
-            &thread_repo,
-            &thread_canonical,
-        ))
-        .unwrap();
-    });
-    let early = rx.recv_timeout(std::time::Duration::from_millis(100)).ok();
-
-    let mut writer_projection = WorkspaceProjection::default_for_project(&repo);
-    writer_projection.title = "Canonical writer".to_string();
-    save_workspace_projection_to_path_unlocked(&canonical, &writer_projection).unwrap();
-    FileExt::unlock(&lock).unwrap();
-    let completed_while_locked = early.is_some();
-    let migrated = early
-        .unwrap_or_else(|| rx.recv().unwrap())
-        .unwrap()
-        .unwrap();
-    handle.join().unwrap();
-
-    assert!(
-        !completed_while_locked,
-        "legacy current migration must serialize before checking canonical existence"
-    );
-    assert_eq!(migrated.title, "Canonical writer");
-    assert_eq!(
-        load_workspace_projection_from_path(&canonical)
-            .unwrap()
-            .unwrap()
-            .title,
-        "Canonical writer"
-    );
-}
-
-#[test]
-fn existing_projection_mutation_migrates_legacy_current_before_updating() {
-    let _guard = lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("home");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let _home = ScopedHome::set(&home);
-    let canonical = gwt_workspace_projection_path_for_repo_path(&repo);
-    let legacy = legacy_workspace_projection_path_for_repo_path(&repo);
-    let mut projection = WorkspaceProjection::default_for_project(&repo);
-    projection.title = "Legacy current".to_string();
-    save_workspace_projection_to_path(&legacy, &projection).unwrap();
-
-    let result = mutate_existing_workspace_projection(&repo, |projection| {
-        projection.summary = Some("Updated after migration".to_string());
-        Ok(projection.id.clone())
-    })
-    .unwrap();
-
-    assert_eq!(result, Some(projection.id));
-    let saved = load_workspace_projection_from_path(&canonical)
-        .unwrap()
-        .expect("legacy current must be migrated before mutation");
-    assert_eq!(saved.title, "Legacy current");
-    assert_eq!(saved.summary.as_deref(), Some("Updated after migration"));
-}
-
-#[test]
 fn current_update_locks_before_read_and_preserves_a_waiting_writer() {
     use fs2::FileExt;
 
     let temp = tempfile::tempdir().unwrap();
-    let state_dir = temp.path().join("workspace");
+    let state_dir = temp.path().join("project-state");
     let current = state_dir.join("current.json");
     let journal = state_dir.join("journal.jsonl");
     let project_root = temp.path().join("repo");
@@ -10885,8 +12072,12 @@ fn assert_cold_manual_rebuild_invalid_shard_is_zero_mutation(kind: ColdInvalidSh
     let legacy_work_items = legacy_workspace_work_items_path_for_repo_path(&repo);
     let mut legacy_projection = WorkItemsProjection::empty(now);
     legacy_projection.apply_event(start_event("work-legacy-projection", now));
-    save_workspace_work_items_projection_to_path(&legacy_work_items, &legacy_projection)
-        .expect("seed legacy WorkItems");
+    std::fs::create_dir_all(legacy_work_items.parent().unwrap()).unwrap();
+    std::fs::write(
+        &legacy_work_items,
+        serde_json::to_vec(&legacy_projection).unwrap(),
+    )
+    .unwrap();
     let legacy_work_items_before =
         std::fs::read(&legacy_work_items).expect("legacy WorkItems bytes");
 
@@ -11342,6 +12533,57 @@ fn backfill_records_work_item_for_worktree_without_record() {
         event.status_category, None,
         "backfill must not carry an explicit status so apply_event terminal \
              preservation keeps closed items closed when the event is re-ingested"
+    );
+    assert_eq!(
+        item.owner, None,
+        "a branch that names no Issue stays ownerless"
+    );
+}
+
+/// Issue #4479 AC-1/AC-4: the worktree scan is the only path that materializes
+/// a Work from nothing, and it used to leave `owner: null` even when the
+/// container already named the Issue branch. `workspace.ensure` then refused
+/// that record as an owner mismatch with `stored=<none>` and no route back.
+/// The regression is pinned on the exact reported shape: one Backfill event,
+/// `created_at == updated_at`, and an Issue branch.
+#[test]
+fn backfill_owns_the_work_when_the_worktree_branch_names_an_issue() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_root = temp.path().join("repo");
+    let worktree = temp.path().join("work-issue-4477");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    let work_items_path = temp.path().join("works.json");
+    let now = Utc.with_ymd_and_hms(2026, 9, 16, 11, 37, 7).unwrap();
+
+    let backfilled = reconcile_worktree_work_items_paths(
+        &work_items_path,
+        &project_root,
+        &[backfill_source(Some("work/issue-4477"), &worktree)],
+        now,
+    )
+    .expect("reconcile");
+    assert_eq!(backfilled, 1);
+
+    let projection = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load works")
+        .expect("projection exists");
+    let item = &projection.work_items[0];
+    assert_eq!(
+        item.owner.as_deref(),
+        Some("Issue #4477"),
+        "a Work whose container points at an Issue branch must carry that owner \
+         from the instant it is created"
+    );
+    assert_eq!(
+        item.created_at, item.updated_at,
+        "the reported record was never updated after creation; the owner has to \
+         be right at creation, not repaired later"
+    );
+    assert_eq!(
+        item.events.last().expect("backfill event").owner.as_deref(),
+        Some("Issue #4477"),
+        "the owner travels on the event, so a re-ingested copy on another \
+         machine folds to the same owner"
     );
 }
 
@@ -11884,6 +13126,147 @@ fn find_work_item_for_container_matches_branch_worktree_and_id() {
 }
 
 #[test]
+fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() {
+    let project_root = Path::new("/repo");
+    let worktree = Path::new("/wt/issue-4074");
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let predecessor_id =
+        canonical_work_id(project_root, Some("work/issue-4074"), Some(worktree)).unwrap();
+    let successor_id = format!(
+        "work-successor-{}",
+        hex::encode(sha2::Sha256::digest(predecessor_id.as_bytes()))
+    );
+    let mut projection = WorkItemsProjection::empty(now);
+    let mut start = sample_work_event(&predecessor_id, now);
+    start.owner = Some("Issue #4074".to_string());
+    start.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-4074".to_string()),
+        worktree_path: Some(worktree.to_path_buf()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    projection.apply_event(start.clone());
+    projection.apply_event(WorkEvent::new(
+        WorkEventKind::Discard,
+        &predecessor_id,
+        now + chrono::Duration::seconds(1),
+    ));
+    let mut successor = start;
+    successor.id = "successor-start".to_string();
+    successor.work_item_id = successor_id.clone();
+    successor.related_work_item_id = Some(predecessor_id.clone());
+    successor.updated_at = now + chrono::Duration::seconds(2);
+    projection.apply_event(successor);
+    let mut predecessor_owner_upgrade = WorkEvent::new(
+        WorkEventKind::Update,
+        &predecessor_id,
+        now + chrono::Duration::seconds(3),
+    );
+    predecessor_owner_upgrade.owner = Some("SPEC-4074".to_string());
+    projection.apply_event(predecessor_owner_upgrade);
+    assert_eq!(
+        find_work_item_for_container(
+            &projection,
+            project_root,
+            Some("work/issue-4074"),
+            Some(worktree),
+        )
+        .expect("predecessor owner normalization must not break the successor link")
+        .id,
+        successor_id
+    );
+    let mut owner_upgrade = WorkEvent::new(
+        WorkEventKind::Update,
+        &successor_id,
+        now + chrono::Duration::seconds(4),
+    );
+    owner_upgrade.owner = Some("SPEC-4074".to_string());
+    projection.apply_event(owner_upgrade);
+    projection.apply_event(WorkEvent::new(
+        WorkEventKind::Update,
+        &predecessor_id,
+        now + chrono::Duration::seconds(5),
+    ));
+    assert_eq!(projection.work_items[0].id, predecessor_id);
+    assert!(projection.work_items[0].discarded);
+    assert_eq!(projection.work_items[0].owner.as_deref(), Some("SPEC-4074"));
+
+    let current = find_work_item_for_container(
+        &projection,
+        project_root,
+        Some("work/issue-4074"),
+        Some(worktree),
+    )
+    .expect("the successor owns the current container");
+    assert_eq!(current.id, successor_id);
+    assert_eq!(current.owner.as_deref(), Some("SPEC-4074"));
+    assert_eq!(
+        workspace_group_key_for_item(project_root, current),
+        predecessor_id
+    );
+}
+
+#[test]
+fn find_work_item_for_container_rejects_invalid_successor_authority() {
+    let project_root = Path::new("/repo");
+    let worktree = Path::new("/wt/issue-4074");
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let predecessor_id =
+        canonical_work_id(project_root, Some("work/issue-4074"), Some(worktree)).unwrap();
+    let successor_id = format!(
+        "work-successor-{}",
+        hex::encode(sha2::Sha256::digest(predecessor_id.as_bytes()))
+    );
+    for invalid in ["owner", "container", "link"] {
+        let mut projection = WorkItemsProjection::empty(now);
+        let mut start = sample_work_event(&predecessor_id, now);
+        start.owner = Some("Issue #4074".to_string());
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-4074".to_string()),
+            worktree_path: Some(worktree.to_path_buf()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        projection.apply_event(start.clone());
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Discard,
+            &predecessor_id,
+            now + chrono::Duration::seconds(1),
+        ));
+        let mut successor = start;
+        successor.id = "invalid-successor-start".to_string();
+        successor.work_item_id = successor_id.clone();
+        successor.related_work_item_id = Some(predecessor_id.clone());
+        successor.updated_at = now + chrono::Duration::seconds(2);
+        match invalid {
+            "owner" => successor.owner = Some("Issue #4313".to_string()),
+            "container" => {
+                successor
+                    .execution_container
+                    .as_mut()
+                    .unwrap()
+                    .worktree_path = Some(PathBuf::from("/wt/other"));
+            }
+            "link" => successor.related_work_item_id = Some("work-unrelated".to_string()),
+            _ => unreachable!(),
+        }
+        projection.apply_event(successor);
+
+        let current = find_work_item_for_container(
+            &projection,
+            project_root,
+            Some("work/issue-4074"),
+            Some(worktree),
+        )
+        .expect("invalid successor must leave its predecessor authoritative");
+        assert_eq!(current.id, predecessor_id, "invalid successor {invalid}");
+        assert!(current.discarded);
+    }
+}
+
+#[test]
 fn work_item_latest_next_action_reads_most_recent_event() {
     let now = Utc.timestamp_opt(9_100, 0).unwrap();
     let later = Utc.timestamp_opt(9_200, 0).unwrap();
@@ -12010,6 +13393,9 @@ fn repair_resume_owner_bleed_sanitizes_cross_item_stamp() {
     // must still clear the identity.
     current.next_action = Some("Check Board for latest updates".to_string());
     current.status_text = "883 active agents".to_string();
+    current
+        .agents
+        .push(bleed_test_agent("sess-1", "work-work-b-00000001"));
     for seq in 0..5 {
         current.agents.push(bleed_test_agent(
             &format!("dead-{seq}"),
@@ -12059,7 +13445,8 @@ fn repair_resume_owner_bleed_sanitizes_cross_item_stamp() {
         .expect("current exists");
     assert_eq!(repaired_current.owner, None);
     assert_eq!(repaired_current.next_action, None);
-    assert!(repaired_current.agents.is_empty(), "dead agents purged");
+    assert_eq!(repaired_current.agents.len(), 1, "unbacked agents purged");
+    assert_eq!(repaired_current.agents[0].session_id, "sess-1");
 
     let second = repair_resume_owner_bleed_paths(&work_items_path, &current_path, now)
         .expect("repair rerun");
@@ -12099,6 +13486,40 @@ fn repair_resume_owner_bleed_keeps_legitimate_duplicates_below_threshold() {
             .iter()
             .all(|item| item.owner.as_deref() == Some("SPEC-2359")),
         "below-threshold duplicates keep their owner"
+    );
+}
+
+#[test]
+fn repair_resume_owner_bleed_preserves_other_work_session_assignment_after_reload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let works_path = temp.path().join("works.json");
+    let current_path = temp.path().join("current.json");
+    let now = Utc.timestamp_opt(31_000, 0).unwrap();
+    let mut works = WorkItemsProjection::empty(now);
+    let mut current = WorkspaceProjection::default_for_project("/repo");
+    current.id = "work-a".to_string();
+    for (work_id, session_id) in [("work-a", "session-a"), ("work-b", "session-b")] {
+        let mut event = WorkEvent::new(WorkEventKind::Start, work_id, now);
+        event.agent_session_id = Some(session_id.to_string());
+        works.apply_event(event);
+        current.agents.push(bleed_test_agent(session_id, work_id));
+    }
+    save_workspace_work_items_projection_to_path(&works_path, &works).unwrap();
+    save_workspace_projection_to_path(&current_path, &current).unwrap();
+    drop(current);
+    drop(works);
+
+    repair_resume_owner_bleed_paths(&works_path, &current_path, now).unwrap();
+
+    let reloaded = load_workspace_projection_from_path(&current_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reloaded
+            .latest_agent_for_session("session-b")
+            .and_then(|agent| agent.workspace_id.as_deref()),
+        Some("work-b"),
+        "restart/intake repair must preserve another Work's canonical Session assignment"
     );
 }
 
@@ -12696,4 +14117,501 @@ fn session_bound_board_store_rejects_reassignment_then_update_authority_escalati
         after == before,
         "rejected in-closure reassignment must preserve current/work/event/journal bytes"
     );
+}
+
+#[test]
+fn issue_3777_runtime_hook_shared_cache_hit_does_not_deep_clone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let current_path = tmp.path().join("current.json");
+    let journal_path = tmp.path().join("journal.jsonl");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let now = chrono::Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    projection.apply_event(sample_work_event("work-3777", now));
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save works.json");
+    let mut cache = WorkItemsCache::new();
+
+    let (first, first_profile) = cache
+        .load_or_synthesize_shared_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            &project_root,
+        )
+        .expect("first shared load");
+    let (second, second_profile) = cache
+        .load_or_synthesize_shared_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            &project_root,
+        )
+        .expect("second shared load");
+
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    assert!(!first_profile.cache_hit);
+    assert!(second_profile.cache_hit);
+}
+
+#[test]
+fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4504),
+        pr_url: Some("https://github.com/example/repo/pull/4504".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut start = WorkEvent::new(WorkEventKind::Start, "delivery-work", now);
+    start.owner = Some("Issue #42".into());
+    start.agent_session_id = Some("delivery-session".into());
+    let mut original = container.clone();
+    original.pr_number = None;
+    original.pr_url = None;
+    original.pr_state = None;
+    start.execution_container = Some(original);
+    projection.apply_event(start);
+    projection.apply_event(WorkEvent::new(WorkEventKind::Done, "delivery-work", now));
+    let mut history = projection.work_items[0].clone();
+    history.id = "removed-worktree".into();
+    history.agents.clear();
+    history.execution_containers[0].worktree_path = Some(tmp.path().join("removed"));
+    projection.work_items.push(history);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let write = |owner: &str, session: &str| {
+        record_workspace_pr_metadata_for_execution_at(&works, &events, owner, session, &container)
+    };
+    assert!(write("Issue #99", "delivery-session").is_err());
+    assert!(write("Issue #42", "foreign-session").is_err());
+    write("Issue #42", "delivery-session").unwrap();
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = saved
+        .work_items
+        .iter()
+        .find(|item| item.id == "delivery-work")
+        .unwrap();
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+    assert_eq!(item.execution_containers, vec![container.clone()]);
+    assert_eq!(item.events.last().unwrap().kind, WorkEventKind::Pr);
+    assert_eq!(
+        item.events.last().unwrap().execution_container.as_ref(),
+        Some(&container)
+    );
+    assert!(gwt_work_event_shard_path(&events, &item.events.last().unwrap().id).is_file());
+    write("Issue #42", "delivery-session").unwrap();
+    assert_eq!(
+        load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    let mut ambiguous = saved.clone();
+    let mut duplicate = item.clone();
+    duplicate.id = "duplicate-delivery-work".into();
+    ambiguous.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
+    assert!(write("Issue #42", "delivery-session").is_err());
+}
+
+#[test]
+fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3403".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4605),
+        pr_url: Some("https://github.com/example/repo/pull/4605".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut original = container.clone();
+    original.pr_number = None;
+    original.pr_url = None;
+    original.pr_state = None;
+    let mut start = WorkEvent::new(WorkEventKind::Start, "live-work", now);
+    start.owner = Some("Issue #3403".into());
+    start.agent_session_id = Some("live-session".into());
+    start.execution_container = Some(original.clone());
+    projection.apply_event(start);
+    let live = projection.work_items[0].clone();
+    for n in 0..2 {
+        let mut discarded = live.clone();
+        discarded.id = format!("discarded-work-{n}");
+        discarded.owner = None;
+        discarded.discarded = true;
+        projection.work_items.push(discarded);
+    }
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let write = || {
+        record_workspace_pr_metadata_for_execution_at(
+            &works,
+            &events,
+            "Issue #3403",
+            "live-session",
+            &container,
+        )
+    };
+
+    write().expect("discarded rows must not make the live row ambiguous");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = |id: &str| saved.work_items.iter().find(|item| item.id == id).unwrap();
+    assert_eq!(
+        item("live-work").execution_containers,
+        vec![container.clone()]
+    );
+    assert_eq!(
+        item("discarded-work-0").execution_containers,
+        vec![original.clone()]
+    );
+
+    let mut two_live = saved.clone();
+    let mut duplicate = item("live-work").clone();
+    duplicate.id = "second-live-work".into();
+    two_live.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &two_live).unwrap();
+    assert!(
+        write().is_err(),
+        "two live rows stay ambiguous even when discarded rows are excluded"
+    );
+}
+
+/// SPEC #3590 FR-020 / FR-025: a stale Work left on the same branch and
+/// worktree by an earlier Session under another owner spelling must not make
+/// the delivering Session's own PR record ambiguous. Only the Work that this
+/// owner and Session hold is a candidate.
+#[test]
+fn execution_pr_metadata_ignores_a_stale_work_of_another_owner_and_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4661),
+        pr_url: Some("https://github.com/example/repo/pull/4661".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut bare = container.clone();
+    bare.pr_number = None;
+    bare.pr_url = None;
+    bare.pr_state = None;
+    for (id, owner, session) in [
+        ("current-work", "SPEC-42", "current-session"),
+        ("stale-work", "Issue #42", "stale-session"),
+    ] {
+        let mut start = WorkEvent::new(WorkEventKind::Start, id, now);
+        start.owner = Some(owner.into());
+        start.agent_session_id = Some(session.into());
+        start.execution_container = Some(bare.clone());
+        projection.apply_event(start);
+    }
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+
+    record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "SPEC-42",
+        "current-session",
+        &container,
+    )
+    .expect("the owned Work is the only candidate");
+
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let containers = |id: &str| {
+        saved
+            .work_items
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap()
+            .execution_containers
+            .clone()
+    };
+    assert_eq!(containers("current-work"), vec![container]);
+    assert_eq!(containers("stale-work"), vec![bare]);
+}
+
+#[test]
+fn retired_layout_blocks_default_save_and_rebuild_but_allows_canonical_residue() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_test_git_repo(&repo);
+    let current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let works = current.with_file_name("works.json");
+    let journal = current.with_file_name("journal.jsonl");
+    let legacy = gwt_project_dir_for_repo_path(&repo).join("workspace/journal.jsonl");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"retained history\n").unwrap();
+    let projection = WorkspaceProjection::default_for_project(&repo);
+    let items = WorkItemsProjection::empty(Utc::now());
+    let event = sample_work_event("retired-event-import", Utc::now());
+    let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
+    std::fs::create_dir_all(home_events.parent().unwrap()).unwrap();
+    let event_bytes = format!("{}\n", serde_json::to_string(&event).unwrap());
+    std::fs::write(&home_events, event_bytes.as_bytes()).unwrap();
+    let repo_events = gwt_repo_local_work_events_path(&repo);
+    let pending = pending_workspace_state_transaction_path(&current);
+    let pending_bytes = b"{unreadable pending marker";
+    std::fs::write(&pending, pending_bytes).unwrap();
+    let event_root = temp.path().join("other-repo");
+    init_test_git_repo(&event_root);
+    let other_home_events = gwt_workspace_work_events_path_for_repo_path(&event_root);
+    std::fs::create_dir_all(other_home_events.parent().unwrap()).unwrap();
+    std::fs::write(&other_home_events, event_bytes.as_bytes()).unwrap();
+    for result in [
+        load_or_default_workspace_projection_from_path(&current, temp.path()).map(|_| ()),
+        load_workspace_work_items_from_path(&works).map(|_| ()),
+        load_recent_workspace_journal_entries_from_path(&journal, 10).map(|_| ()),
+        save_workspace_projection_to_path(&current, &projection),
+        save_workspace_work_items_projection_to_path(&works, &items),
+        save_workspace_work_items_projection_after_rebuild(&works, &items),
+        transact_workspace_state(&repo, |_, _, _| Ok(((), Vec::new()))),
+        record_workspace_work_event(&repo, event),
+        rebuild_work_items_from_events_for_repo(&repo).map(|_| ()),
+        update_workspace_projection_with_journal_for_work_event_root(
+            &repo,
+            &event_root,
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                progress_summary: None,
+                agent_session_id: None,
+                agent_current_focus: None,
+                agent_title_summary: None,
+            },
+            TrackedWorkEventPolicy::Persist,
+        )
+        .map(|_| ()),
+    ] {
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("v9.106.0"), "{error}");
+    }
+    assert_eq!(
+        std::fs::read(&pending).unwrap(),
+        pending_bytes,
+        "retired admission must precede pending-marker quarantine"
+    );
+    assert!(!current.exists());
+    assert!(!works.exists());
+    assert!(!journal.exists());
+    assert!(
+        !repo_events.exists(),
+        "retired admission must precede HOME event copy"
+    );
+    assert!(!gwt_repo_local_work_events_dir(&repo).exists());
+    assert!(!gwt_repo_local_work_events_path(&event_root).exists());
+    assert!(!gwt_repo_local_work_events_dir(&event_root).exists());
+    assert!(!event_root.join(".gitattributes").exists());
+    assert_eq!(
+        std::fs::read(&other_home_events).unwrap(),
+        event_bytes.as_bytes()
+    );
+    assert!(!repo.join(".gitattributes").exists());
+    assert_eq!(std::fs::read(&home_events).unwrap(), event_bytes.as_bytes());
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"retained history\n");
+
+    // Simulate operator recovery and the relay release completing migration.
+    std::fs::remove_file(&pending).unwrap();
+    std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+    std::fs::write(&current, serde_json::to_vec(&projection).unwrap()).unwrap();
+    std::fs::write(&works, serde_json::to_vec(&items).unwrap()).unwrap();
+    std::fs::write(&journal, b"").unwrap();
+    load_or_default_workspace_projection_from_path(&current, temp.path()).unwrap();
+    save_workspace_projection_to_path(&current, &projection).unwrap();
+    save_workspace_work_items_projection_after_rebuild(&works, &items).unwrap();
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"retained history\n");
+}
+
+#[test]
+fn retired_layout_transaction_refuses_before_markers_receipts_or_events() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(temp.path());
+    let current = temp.path().join("workspace/current.json");
+    let works = current.with_file_name("work_items.json");
+    let events = temp.path().join("events.jsonl");
+    let operation_id = "retired-operation";
+    let now = Utc::now();
+    let transaction = PendingWorkspaceStateTransaction {
+        version: 3,
+        transaction_id: Some("retired-transaction".to_string()),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        current_precondition: Some("missing".to_string()),
+        work_items_precondition: Some("missing".to_string()),
+        projection: WorkspaceProjection::default_for_project(temp.path()),
+        work_items: Some(WorkItemsProjection::empty(now)),
+        events_path: Some(events.clone()),
+        events: vec![sample_work_event("retired-replay", now)],
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: Some(ExternalWorkspaceCommit {
+            operation_id: operation_id.to_string(),
+            phase: ExternalWorkspaceCommitPhase::Committed,
+            reconciliation_work_items_path: None,
+        }),
+    };
+    let receipt = ExternalWorkspaceCommitReceipt {
+        version: EXTERNAL_WORKSPACE_COMMIT_RECEIPT_VERSION,
+        operation_id: operation_id.to_string(),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        transaction_id: transaction.transaction_id.clone().unwrap(),
+        transaction_payload_hash: external_workspace_transaction_payload_hash(&transaction)
+            .unwrap(),
+        resolution: ExternalWorkspaceCommitResolution::Committed,
+    };
+    let receipt_path = external_workspace_commit_receipt_path(&current, &works, operation_id);
+    let receipt_bytes = serde_json::to_vec(&receipt).unwrap();
+    std::fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    std::fs::write(&receipt_path, &receipt_bytes).unwrap();
+
+    // A committed receipt with no pending marker used to replay the callback
+    // without ever entering the projection writers or transaction apply path.
+    let mut callback_ran = false;
+    let result = resolve_workspace_state_external_commit_at_locked_with_commit_hook(
+        &current,
+        &works,
+        operation_id,
+        ExternalWorkspaceCommitDecision::Commit,
+        &[],
+        None,
+        |_| {
+            callback_ran = true;
+            Ok(())
+        },
+    );
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("v9.106.0"), "{error}");
+    assert!(!callback_ran);
+    assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt_bytes);
+
+    // The same refusal applies while the committed transaction is still pending.
+    let marker = pending_workspace_state_transaction_path(&current);
+    let marker_bytes = serde_json::to_vec(&transaction).unwrap();
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, &marker_bytes).unwrap();
+    let error = resolve_workspace_state_external_commit_at(
+        &current,
+        &works,
+        operation_id,
+        ExternalWorkspaceCommitDecision::Commit,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("v9.106.0"), "{error}");
+    assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt_bytes);
+    assert_eq!(std::fs::read(&marker).unwrap(), marker_bytes);
+    assert!(!current.exists());
+    assert!(!works.exists());
+    assert!(!events.exists());
+
+    // Saving current.json locks a synthetic workspace/works.json target.
+    let malformed = b"{unreadable legacy pending marker";
+    std::fs::write(&marker, malformed).unwrap();
+    let error = save_workspace_projection_to_path(&current, &transaction.projection).unwrap_err();
+    assert!(error.to_string().contains("v9.106.0"), "{error}");
+    assert_eq!(std::fs::read(&marker).unwrap(), malformed);
+}
+
+/// The CI flake behind `session_bound_board_origin_without_target_container_remains_board_only`:
+/// another transaction's coordinator in the shared global directory was being
+/// deleted while a second handle still had it open. Windows keeps such a file
+/// listed but delete-pending, every open fails with os error 5, and the scan
+/// used to abort an unrelated Work write with `PermissionDenied`.
+#[cfg(windows)]
+#[test]
+fn coordinator_scan_waits_out_a_foreign_marker_pending_delete() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = crate::test_support::ScopedGwtHome::set(temp.path().join("home"));
+    let coordinator_dir =
+        crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+    fs::create_dir_all(&coordinator_dir).expect("create global coordinator dir");
+    let marker = coordinator_dir.join("foreign-transaction.json");
+    fs::write(&marker, br#"{"foreign":true}"#).expect("seed foreign coordinator");
+
+    // Delete the marker with classic (non-POSIX) disposition through a handle
+    // that stays open: Windows keeps it listed but delete-pending until that
+    // handle closes, exactly the state the CI scan met.
+    let holder = delete_pending_marker_handle(&marker);
+    let direct = fs::read(&marker).expect_err("a delete-pending marker cannot be opened");
+    assert_eq!(direct.raw_os_error(), Some(5), "{direct:?}");
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let released_by_hook = released.clone();
+    coordinator_read_retry_hook::set(move || {
+        drop(holder);
+        released_by_hook.set(true);
+    });
+
+    let found = discover_pending_workspace_state_transaction_coordinators(&[temp
+        .path()
+        .join("state/works.json")])
+    .expect("a marker mid-removal must not fail the scan");
+
+    assert!(
+        found.is_empty(),
+        "a removed foreign marker is absent: {found:?}"
+    );
+    assert!(
+        released.get(),
+        "the scan must have met the delete-pending marker and retried"
+    );
+    assert!(
+        !marker.exists(),
+        "the marker is gone once its last handle closes"
+    );
+}
+
+#[cfg(windows)]
+fn delete_pending_marker_handle(path: &Path) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{GENERIC_READ, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let file = fs::OpenOptions::new()
+        .access_mode(DELETE.0 | GENERIC_READ.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .open(path)
+        .expect("open marker for deletion");
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: the handle is owned by `file`, which outlives the call, and the
+    // buffer is a correctly sized FILE_DISPOSITION_INFO.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileDispositionInfo,
+            std::ptr::from_ref(&disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    }
+    .expect("mark marker delete-pending");
+    file
 }
