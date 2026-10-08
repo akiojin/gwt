@@ -583,7 +583,7 @@ fn derive_pre_pr_for_host_excluding(
             plan.commands.push(command.clone());
         }
     }
-    plan.surfaces.push("ci-delegated(rust-tests->Test (Rust);workspace-clippy,rustdoc,markdown,coverage90/80->Clippy & Rustfmt)".into());
+    plan.surfaces.push("ci-delegated(rust-tests->Test (Rust);workspace-clippy,rustdoc,markdown->Clippy & Rustfmt;coverage90/80->coverage / Rust Coverage)".into());
     Ok(plan)
 }
 
@@ -600,7 +600,11 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
             ))
         }
     };
-    for context in ["Test (Rust)", "Clippy & Rustfmt"] {
+    for context in [
+        "Test (Rust)",
+        "Clippy & Rustfmt",
+        "coverage / Rust Coverage",
+    ] {
         require(
             required.iter().any(|name| name == context),
             &format!("required context {context}"),
@@ -663,12 +667,9 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
     let lint_gate = &lint["jobs"]["lint"];
     require(
         lint_gate["name"].as_str() == Some("Clippy & Rustfmt")
-            && depends(lint_gate, "coverage")
-            && lint_gate["if"].as_str() == Some("${{ !cancelled() }}")
-            && contains(lint_gate, "test \"$COVERAGE_RESULT\" = success")
-            && lint_gate["steps"][0]["env"]["COVERAGE_RESULT"].as_str()
-                == Some("${{ needs.coverage.result }}"),
-        "Clippy & Rustfmt coverage failure propagation",
+            && lint_gate.get("needs").is_none()
+            && lint_gate.get("if").is_none(),
+        "independent Clippy & Rustfmt job",
     )?;
     require(
         contains(lint_gate, CI_CLIPPY_GATE)
@@ -707,6 +708,14 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
         "required reusable coverage job",
     )?;
     let coverage_job = &coverage["jobs"]["rust-coverage"];
+    require(
+        lint["jobs"]["coverage"]["name"]
+            .as_str()
+            .unwrap_or("coverage")
+            == "coverage"
+            && coverage_job["name"].as_str() == Some("Rust Coverage"),
+        "coverage / Rust Coverage check name",
+    )?;
     for command in ["node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope \"crates/(gwt-core|gwt)/\"", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude \"crates/(gwt-core|gwt)/\""] {
         require(contains(coverage_job, command), &format!("required coverage command {command}"))?;
     }
@@ -975,10 +984,30 @@ mod tests {
     }
 
     #[test]
+    fn pre_pr_refuses_coverage_without_its_own_required_context() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let result = validate_pre_pr_ci(
+            dir.path(),
+            &["Test (Rust)".into(), "Clippy & Rustfmt".into()],
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("required context coverage / Rust Coverage"),
+            "optional coverage must not permit delegating the threshold checks"
+        );
+    }
+
+    #[test]
     fn pre_pr_delegates_only_to_required_contexts_and_keeps_ac_and_local_checks() {
         let dir = tempfile::tempdir().unwrap();
         pre_pr_fixture(dir.path());
-        let required = vec!["Test (Rust)".to_string(), "Clippy & Rustfmt".to_string()];
+        let required = vec![
+            "Test (Rust)".to_string(),
+            "Clippy & Rustfmt".to_string(),
+            "coverage / Rust Coverage".to_string(),
+        ];
         let ac = "cargo test -p gwt --test ci_pre_pr_contract_test".to_string();
         let local = "bash scripts/local-only-check.sh".to_string();
         let plan = derive_pre_pr_for_host(
@@ -998,10 +1027,9 @@ mod tests {
         assert!(!plan.commands.iter().any(|c| c.starts_with("RUSTDOCFLAGS=")
             || c == "cargo test -p gwt --all-features"
             || c == CI_CLIPPY_GATE));
-        assert!(plan
-            .surfaces
-            .iter()
-            .any(|s| s.contains("Test (Rust)") && s.contains("Clippy & Rustfmt")));
+        assert!(plan.surfaces.iter().any(|s| s.contains("Test (Rust)")
+            && s.contains("Clippy & Rustfmt")
+            && s.contains("coverage90/80->coverage / Rust Coverage")));
         assert!(derive_pre_pr_for_host(
             dir.path(),
             VerificationHost::Other,
@@ -1041,7 +1069,11 @@ mod tests {
     fn pre_pr_workspace_job_accepts_only_the_cancellation_status_guard() {
         let dir = tempfile::tempdir().unwrap();
         pre_pr_fixture(dir.path());
-        let required = vec!["Test (Rust)".into(), "Clippy & Rustfmt".into()];
+        let required = vec![
+            "Test (Rust)".into(),
+            "Clippy & Rustfmt".into(),
+            "coverage / Rust Coverage".into(),
+        ];
         let original =
             std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
         let guarded = "  test:\n    name: Test (Rust workspace)\n    if: ${{ !cancelled() }}\n";
@@ -1067,15 +1099,22 @@ mod tests {
     }
 
     #[test]
-    fn pre_pr_refuses_removed_ci_jobs_or_failure_propagation() {
+    fn pre_pr_refuses_removed_ci_jobs_or_serial_lint() {
         let dir = tempfile::tempdir().unwrap();
         pre_pr_fixture(dir.path());
-        let required = vec!["Test (Rust)".into(), "Clippy & Rustfmt".into()];
+        let required = vec![
+            "Test (Rust)".into(),
+            "Clippy & Rustfmt".into(),
+            "coverage / Rust Coverage".into(),
+        ];
         let original =
             std::fs::read_to_string(dir.path().join(".github/workflows/lint.yml")).unwrap();
         for mutation in [
             original.replace("  coverage:\n", "  optional-coverage:\n"),
-            original.replace("test \"$COVERAGE_RESULT\" = success", "true"),
+            original.replace(
+                "    name: Clippy & Rustfmt\n",
+                "    name: Clippy & Rustfmt\n    needs: coverage\n",
+            ),
             original.replace("Clippy & Rustfmt", "Optional lint"),
         ] {
             write(dir.path(), ".github/workflows/lint.yml", &mutation);
@@ -1127,7 +1166,11 @@ mod tests {
         let result = derive_pre_pr_for_host(
             dir.path(),
             VerificationHost::Other,
-            &["Test (Rust)".into(), "Clippy & Rustfmt".into()],
+            &[
+                "Test (Rust)".into(),
+                "Clippy & Rustfmt".into(),
+                "coverage / Rust Coverage".into(),
+            ],
             &["cargo test -p gwt --test ci_pre_pr_contract_test".into()],
             &[],
         );
