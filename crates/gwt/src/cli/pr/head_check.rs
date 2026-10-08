@@ -54,6 +54,144 @@ pub(crate) fn from_body(body: &str) -> Option<HeadCheck> {
     serde_json::from_str(json).ok()
 }
 
+/// Diagnose a canonical run against the live remote independently of Ready
+/// admission. Base-sync classification never refreshes verification evidence.
+pub(super) fn read<E: crate::cli::CliEnv>(
+    env: &mut E,
+    base: &str,
+    head: Option<&str>,
+    out: &mut String,
+) -> Result<i32, gwt_github::SpecOpsError> {
+    use crate::cli::verification_record as verification;
+
+    let repo = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let record = match verification::load(&repo) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return unprovable(
+                out,
+                "missing",
+                "No canonical verification record exists in this worktree.",
+                None,
+            )
+        }
+        Err(error) => return unprovable(out, "unreadable", &error.to_string(), None),
+    };
+    if record.content_hash.is_empty() || !verification::integrity_ok(&record) {
+        return unprovable(
+            out,
+            "integrity_failed",
+            "The canonical run has no valid integrity hash.",
+            Some(&record),
+        );
+    }
+    if record.lifecycle.is_some() {
+        return unprovable(
+            out,
+            "incomplete",
+            "The canonical verification run is unfinished.",
+            Some(&record),
+        );
+    }
+    if !record.all_passed
+        || record
+            .commands
+            .iter()
+            .any(|command| command.exit_code != 0 || command.terminated_by_signal.is_some())
+    {
+        return unprovable(
+            out,
+            "failed",
+            "The canonical verification run has non-passing commands.",
+            Some(&record),
+        );
+    }
+    let Some(verified) = record
+        .verified_head
+        .as_deref()
+        .filter(|head| !head.trim().is_empty())
+    else {
+        return unprovable(
+            out,
+            "missing_verified_head",
+            "The canonical record has no verified HEAD provenance.",
+            Some(&record),
+        );
+    };
+    let plan = match verification::load_plan(&repo) {
+        Ok(plan) => plan,
+        Err(error) => return unprovable(out, "unreadable", &error.to_string(), Some(&record)),
+    };
+    let evidence = verification::evaluate_evidence_snapshot(
+        &repo,
+        &record.session_id,
+        record.owner_number,
+        plan.as_ref(),
+        &record,
+    );
+    if matches!(
+        evidence,
+        verification::EvidenceStatus::Tampered | verification::EvidenceStatus::Unreadable
+    ) {
+        return unprovable(out, "integrity_failed", &evidence.describe(), Some(&record));
+    }
+    let local_head = match git_text(&repo, &["rev-parse", "HEAD"]) {
+        Ok(head) => head,
+        Err(error) => return unprovable(out, "passed", &error.to_string(), Some(&record)),
+    };
+    let mut check = match env.inspect_pr_head(base, head, verified) {
+        Ok(Some(check)) => check,
+        Ok(None) => {
+            return unprovable(
+                out,
+                "passed",
+                "The remote head comparison is unavailable.",
+                Some(&record),
+            )
+        }
+        Err(error) => return unprovable(out, "passed", &error.to_string(), Some(&record)),
+    };
+    check.record_id = Some(record.record_id.clone());
+    let mut report = serde_json::to_value(check)
+        .map_err(|error| gwt_github::client::ApiError::Unexpected(error.to_string()))?;
+    report["schema_version"] = serde_json::json!(1);
+    report["diagnostic_only"] = serde_json::json!(true);
+    report["canonical_record_state"] = serde_json::json!("passed");
+    report["compared_head"] = serde_json::json!("remote_head");
+    report["local_head"] = serde_json::json!(local_head);
+    report["local_verification_fresh"] = serde_json::json!(matches!(
+        evidence,
+        verification::EvidenceStatus::Fresh | verification::EvidenceStatus::FreshWithQuarantine
+    ));
+    report["local_verification_reason"] = serde_json::json!(evidence.describe());
+    out.push_str(&report.to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn unprovable(
+    out: &mut String,
+    state: &str,
+    diagnostic: &str,
+    record: Option<&crate::cli::verification_record::VerificationRunRecord>,
+) -> Result<i32, gwt_github::SpecOpsError> {
+    out.push_str(
+        &serde_json::json!({
+            "schema_version": 1,
+            "diagnostic_only": true,
+            "canonical_record_state": state,
+            "record_id": record.map(|record| &record.record_id),
+            "verified_head": record.and_then(|record| record.verified_head.as_deref()),
+            "classification": "unprovable",
+            "local_verification_fresh": false,
+            "diagnostic": diagnostic,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(2)
+}
+
 fn git(repo: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
     let output = gwt_core::process::hidden_command("git")
         .args(args)

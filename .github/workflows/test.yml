@@ -12,17 +12,48 @@ on:
   merge_group:
     types: [checks_requested]
 
-# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
-# update-branch `synchronize` starts a fresh run, and without this group the
-# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
-# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
-# only this PR's older run of this workflow. Pinned by
-# crates/gwt/tests/ci_concurrency_contract_test.rs.
+# Issue #5059: workflow-level cancellation happens before any Git comparison,
+# so it cannot distinguish a product push from base-only synchronization. Give
+# each run its own group, then bound each workload to one running/one pending
+# job per PR below. A proven product push replaces running jobs (#4119); a
+# base sync replaces only pending jobs and lets the running measurement finish.
+# Unknown history preserves running work rather than guessing the cause.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
+  source-sync:
+    name: Classify CI synchronization
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-source-sync
+      cancel-in-progress: true
+    outputs:
+      base_only: ${{ steps.relation.outputs.base_only }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Run the classifier from the CI tree so older PR branches can use a
+          # classifier newly added to base; it compares explicit event SHAs.
+          fetch-depth: 0
+          filter: blob:none
+      - name: Read this PR's Test run history
+        if: github.event.pull_request.number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: gh api --method GET "repos/$REPO/actions/workflows/test.yml/runs" -f branch="$PR_BRANCH" -f event=pull_request -f per_page=100 --paginate --slurp > "$RUNNER_TEMP/ci-runs.json"
+      - name: Distinguish base synchronization from PR changes
+        id: relation
+        run: python3 scripts/ci_sync_relation.py --event-file "$GITHUB_EVENT_PATH" --runs-file "$RUNNER_TEMP/ci-runs.json" > "$RUNNER_TEMP/ci-source-relation.json"
+
   # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
   # cannot affect skip instead of queueing a Windows runner. Only jobs that are
   # NOT a develop required status check may depend on this job: GitHub reports
@@ -33,6 +64,9 @@ jobs:
   # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
   changes:
     name: Classify changed files
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-changes
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
@@ -120,6 +154,11 @@ jobs:
 
   test:
     name: Test (Rust workspace)
+    if: ${{ !cancelled() }}
+    needs: source-sync
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     # Issue #4055 / #4191: the step budgets below are the operative limits;
     # this cap only bounds the job as a whole and must cover their sum
@@ -231,6 +270,11 @@ jobs:
   # Issue #4821: infrastructure regressions run beside the workspace suite.
   test-linux-infrastructure:
     name: Test (Linux infrastructure)
+    if: ${{ !cancelled() }}
+    needs: source-sync
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-linux-infrastructure
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -282,8 +326,11 @@ jobs:
   # always() makes failure, cancellation and skipped dependencies fail closed.
   test-rust-required:
     name: Test (Rust)
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-rust-required
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
-    needs: [test, test-linux-infrastructure, test-windows-verify-timings]
+    needs: [test, test-linux-infrastructure, test-windows-verify-timings, source-sync]
     if: ${{ !cancelled() }}
     steps:
       - name: Require Rust verification and paired evidence
@@ -295,8 +342,8 @@ jobs:
           echo "Rust workspace: $RUST_RESULT; Linux infrastructure: $INFRA_RESULT"
           test "$RUST_RESULT" = success
           test "$INFRA_RESULT" = success
-          # This job skips only when the classifier explicitly reports no
-          # measurement surface. Classification failure runs it (fail closed).
+          # No measurement surface succeeds through cheap concurrency admission.
+          # Classification failure still measures on Windows (fail closed).
           case "$TIMINGS_RESULT" in success|skipped) ;; *) exit 1 ;; esac
 
   # SPEC #4551 T-055 / AC-6: one green run says nothing about a test whose
@@ -311,7 +358,10 @@ jobs:
   # crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
   flake-detection:
     name: Flake detection (changed test targets)
-    needs: changes
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-flake-detection
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    needs: [changes, source-sync]
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.flake_targets != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -344,12 +394,19 @@ jobs:
 
   test-python-runner:
     name: Test (Python runner)
+    if: ${{ !cancelled() }}
+    needs: source-sync
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-python-runner
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
+      - name: Check CI source classification and paired evidence
+        run: python -m unittest discover -s scripts -p 'test_ci_*.py'
       - name: Install runtime deps
         run: |
           python -m pip install --upgrade pip
@@ -363,6 +420,10 @@ jobs:
 
   test-index-e2e:
     name: Test (e5 e2e, optional)
+    needs: source-sync
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-index-e2e
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
     if: ${{ github.event.pull_request.draft == false }}
     steps:
@@ -397,35 +458,47 @@ jobs:
   # in one Windows job. This is not the #4877 dev-host wall-clock measurement.
   test-windows-verify-timings:
     name: Windows derived verification timings (paired)
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.verify_timings != 'false' }}
-    runs-on: windows-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-verify-timings
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    needs: [changes, source-sync]
+    # Admission must cancel obsolete paired work on a product push even when
+    # the new PR no longer needs measurement. That case uses a cheap Ubuntu job.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
+        if: ${{ needs.changes.outputs.verify_timings != 'false' }}
         with:
           fetch-depth: 0
       - uses: actions/setup-python@v7
+        if: ${{ needs.changes.outputs.verify_timings != 'false' }}
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ needs.changes.outputs.verify_timings != 'false' }}
       - uses: taiki-e/install-action@v2
+        if: ${{ needs.changes.outputs.verify_timings != 'false' }}
         with:
           tool: cargo-nextest@0.9.146
       - uses: Swatinem/rust-cache@v2
+        if: ${{ needs.changes.outputs.verify_timings != 'false' }}
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: windows-workspace
         continue-on-error: true
       - name: Check paired evidence comparison
+        if: ${{ needs.changes.outputs.verify_timings != 'false' }}
         run: python -m unittest discover -s scripts -p test_ci_verify_timings.py
       - name: Measure serial and grouped derived gwt-lib schedules
+        if: ${{ needs.changes.outputs.verify_timings != 'false' }}
         env:
           GWT_TIMING_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python scripts/ci_verify_timings.py --output target/verify-timings
         timeout-minutes: 90
       - name: Upload both measurements even on failure
-        if: always()
+        if: ${{ always() && needs.changes.outputs.verify_timings != 'false' }}
         uses: actions/upload-artifact@v7
         with:
           name: windows-verify-timings-${{ github.run_id }}-${{ github.run_attempt }}
@@ -433,12 +506,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
         timeout-minutes: 5
+      - name: Report no paired measurement required
+        if: ${{ needs.changes.outputs.verify_timings == 'false' }}
+        run: echo 'No paired measurement required for this source; concurrency admission supersedes obsolete product runs.' >> "$GITHUB_STEP_SUMMARY"
 
   # SPEC #4740 AC-8: AC-7 separated process readiness from fixture deadlines.
   # Prove the complete core suite is stable at native Windows default
   # parallelism; keep the selective regression runner below unchanged.
   test-windows-core-stability:
     name: Windows core stability (five runs)
+    if: ${{ !cancelled() }}
+    needs: source-sync
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-core-stability
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -466,7 +547,10 @@ jobs:
 
   test-windows-rust:
     name: Test (Rust, Windows)
-    needs: test-windows-core-stability
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-rust
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    needs: [test-windows-core-stability, source-sync]
     if: ${{ always() }}
     runs-on: windows-latest
     steps:
@@ -579,6 +663,9 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_lease:: -- --test-threads=1
         timeout-minutes: 15
+      - name: Run Windows verification driver relink regression
+        run: node scripts/ci-windows-tests.mjs run gwt test verification_driver_cli_test -- --test-threads=1
+        timeout-minutes: 15
       # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
       # can tell the Issue Monitor its silence is a wait rather than a stall.
       # Both the acceptance of a declaration and its durable prefs fallback are
@@ -621,7 +708,10 @@ jobs:
   # develop rather than of one pull request.
   test-windows-agent-launch-e2e:
     name: Test (Windows agent launch)
-    needs: changes
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-agent-launch-e2e
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    needs: [changes, source-sync]
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     steps:
@@ -668,7 +758,10 @@ jobs:
 
   test-frontend:
     name: Test (Frontend + WebView E2E)
-    needs: changes
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-frontend
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    needs: [changes, source-sync]
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:

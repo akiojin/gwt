@@ -461,15 +461,7 @@ pub(super) fn managed_hook_health_view_for_worktree(
         .iter()
         .map(|session| {
             let path = gwt_agent::runtime_state_path(sessions_dir, &session.session_id);
-            let updated_at = std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| {
-                    value
-                        .get("updated_at")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                });
+            let updated_at = hook_failures.runtime_state_updated_at(&path);
             (updated_at, session.session_id.as_str(), path)
         })
         .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
@@ -2899,7 +2891,7 @@ pub(super) fn save_start_work_workspace_projection(
     linked_issue_number: Option<u64>,
     canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
-    live_session_ids: &std::collections::HashSet<String>,
+    live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
     if workspace_resume_context.is_none() && linked_issue_number.is_none() {
         let now = chrono::Utc::now();
@@ -2932,7 +2924,7 @@ pub(super) fn save_resumed_workspace_projection(
     base_branch: Option<&str>,
     linked_issue_number: Option<u64>,
     workspace_resume_context: &WorkspaceResumeContext,
-    live_session_ids: &std::collections::HashSet<String>,
+    live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
     save_workspace_launch_projection(
         project_root,

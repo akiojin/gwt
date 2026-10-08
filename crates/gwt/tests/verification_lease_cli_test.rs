@@ -3,13 +3,17 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use gwt_core::process::hidden_command;
 use tempfile::TempDir;
 
 fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
+    collect_gwtd(spawn_gwtd(home, cwd, envelope))
+}
+
+fn spawn_gwtd(home: &Path, cwd: &Path, envelope: &str) -> Child {
     let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     for key in [
         "GWT_BIN_PATH",
@@ -21,12 +25,17 @@ fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
         "GWT_SESSION_KIND",
         "GWT_SESSION_RUNTIME_PATH",
         "GWT_WORKTREE_HASH",
+        "GWT_AUTONOMOUS_ISSUE",
+        "GWT_AUTONOMOUS_EXECUTION",
+        "GWT_HOOK_FORWARD_URL",
+        "GWT_HOOK_FORWARD_TOKEN",
     ] {
         command.env_remove(key);
     }
     let mut child = command
         .env("HOME", home)
         .env("USERPROFILE", home)
+        .env("GWT_SESSION_ID", "session-lease-cli-test")
         // Issue #4409: this suite is about the lease surface, not about where
         // verification is hosted. Declaring the host keeps the result from
         // depending on the priority the test runner happened to inherit.
@@ -43,6 +52,10 @@ fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
         .expect("gwtd stdin")
         .write_all(envelope.as_bytes())
         .expect("write envelope");
+    child
+}
+
+fn collect_gwtd(child: Child) -> (bool, String) {
     let output = child.wait_with_output().expect("await gwtd");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -58,6 +71,18 @@ fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
         })
         .unwrap_or(stdout);
     (output.status.success(), format!("{payload}{stderr}"))
+}
+
+/// Own only the spawned fixture process, including on an assertion failure.
+struct WaitingRun(Option<Child>);
+
+impl Drop for WaitingRun {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// Read one `key: value` line out of the operation output.
@@ -325,4 +350,221 @@ fn status_reports_the_verification_holders_remaining_commands() {
 
     drop(lease);
     guard.complete(JobOutcome::Completed).unwrap();
+}
+
+/// Issue #4969: cross-process admission must preserve the same arrival during
+/// polling, after a Windows status-probe lock, and across deferred resubmission.
+fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
+    use gwt_core::index_coordinator::{
+        verification_coordinator_root_from, JobAdmission, JobOutcome, JobPriority, TargetKey,
+    };
+
+    let arena = Arena::new();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "init",
+        ],
+    ] {
+        assert!(hidden_command("git")
+            .args(args)
+            .current_dir(arena.worktree.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let coordinator = gwt_core::index_coordinator::IndexCoordinator::open(
+        verification_coordinator_root_from(&arena.home.path().join(".gwt")),
+    )
+    .unwrap();
+    let project = gwt_core::paths::project_scope_hash(arena.worktree.path());
+    let holder = TargetKey::verification(project.as_str(), "holder");
+    let JobAdmission::Owner(guard) = coordinator
+        .request_job(&holder, JobPriority::ManualRebuild, Duration::ZERO)
+        .unwrap()
+    else {
+        panic!("private fixture holder must own its target");
+    };
+    let lease = guard
+        .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(3600))
+        .unwrap();
+    let request = |wait| {
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "verify.run",
+            "params": {"commands": ["git --version"], "max_wait_secs": wait}
+        })
+        .to_string()
+    };
+    let (ok, initial) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
+    assert!(!ok && initial.contains("deferred"), "{initial}");
+    assert!(initial.contains("next_turn_reserved: yes"), "{initial}");
+    let early = coordinator.heavy_lease_status().unwrap().queue[0].clone();
+    let key = TargetKey::verification(
+        project.as_str(),
+        gwt_core::worktree_hash::compute_worktree_hash(arena.worktree.path())
+            .unwrap()
+            .as_str(),
+    );
+    assert_eq!(early.target.as_deref(), Some(key.file_stem().as_str()));
+    let later = TargetKey::verification(project.as_str(), "later");
+    coordinator
+        .reserve_heavy(
+            &later,
+            JobPriority::ManualRebuild,
+            Duration::from_secs(max_wait_secs + 60),
+            Some("later same-priority fixture"),
+        )
+        .unwrap();
+
+    #[cfg(windows)]
+    {
+        // Reproduce the real status sweep's mandatory probe lock. A fresh
+        // gwtd process must treat this read as unknown, never as no reservation.
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(coordinator.heavy_reservation_path(&key))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&probe).unwrap();
+        let (ok, contended) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
+        fs2::FileExt::unlock(&probe).unwrap();
+        assert!(!ok && contended.contains("deferred"), "{contended}");
+        assert!(
+            contended.contains("next_turn_reserved: unknown"),
+            "{contended}"
+        );
+        assert!(!contended.contains("next_turn_reserved: no"), "{contended}");
+        let queue = coordinator.heavy_lease_status().unwrap().queue;
+        assert_eq!(queue[0].target, early.target, "{queue:?}");
+        assert_eq!(queue[0].queued_at_ms, early.queued_at_ms, "{queue:?}");
+    }
+
+    let started = Instant::now();
+    let mut waiting = WaitingRun(Some(spawn_gwtd(
+        arena.home.path(),
+        arena.worktree.path(),
+        &request(max_wait_secs),
+    )));
+    loop {
+        assert!(started.elapsed() < Duration::from_secs(max_wait_secs + 60));
+        // A concurrent status probe can briefly make a registration unreadable
+        // on Windows. Observe the next complete snapshot, as admission does.
+        let Ok(status) = coordinator.heavy_lease_status() else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        assert_eq!(status.lease_id.as_deref(), Some(lease.id()));
+        assert_eq!(status.queue[0].target, early.target, "{status:?}");
+        assert_eq!(
+            status.queue[0].queued_at_ms, early.queued_at_ms,
+            "{status:?}"
+        );
+        assert_eq!(
+            status.queue[1].target.as_deref(),
+            Some(later.file_stem().as_str())
+        );
+        if waiting.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (ok, deferred) = collect_gwtd(waiting.0.take().unwrap());
+    assert!(!ok && deferred.contains("deferred"), "{deferred}");
+    assert!(started.elapsed() >= Duration::from_secs(max_wait_secs));
+    assert!(deferred.contains("next_turn_reserved: yes"), "{deferred}");
+    assert!(deferred.contains("queue_position: 1"), "{deferred}");
+    let status = arena.run(STATUS);
+    assert_eq!(field(&status, "lease_id"), lease.id());
+    assert_eq!(field(&status, "holder_intervention"), "forbidden");
+    assert_eq!(field_u64(&status, "pending"), 2);
+    let queue = coordinator.heavy_lease_status().unwrap().queue;
+    for (position, entry) in queue.iter().enumerate() {
+        assert!(
+            field(&status, &format!("queue[{position}]")).starts_with(&format!(
+                "target={} priority=manual-rebuild queued_at_ms={} ",
+                entry.target.as_deref().unwrap(),
+                entry.queued_at_ms
+            )),
+            "{status}"
+        );
+    }
+
+    // A different fixture target takes the host while this claimant remains
+    // queued. Handoff sweeps must not assign the claimant a new arrival.
+    lease.release().unwrap();
+    guard.complete(JobOutcome::Completed).unwrap();
+    let successor = TargetKey::verification(project.as_str(), "successor-holder");
+    let JobAdmission::Owner(guard) = coordinator
+        .request_job(&successor, JobPriority::InteractiveSearch, Duration::ZERO)
+        .unwrap()
+    else {
+        panic!("successor fixture must own its target");
+    };
+    let lease = guard.acquire_heavy(Duration::ZERO).unwrap();
+    let mixed_request = serde_json::json!({
+        "schema_version": 1,
+        "operation": "verify.run",
+        "params": {
+            "commands": [format!("\"{}\" fmt --version", env!("CARGO")), "git --version".to_string()],
+            "max_wait_secs": 0
+        }
+    }).to_string();
+    let (ok, mixed) = gwtd(arena.home.path(), arena.worktree.path(), &mixed_request);
+    assert!(!ok && mixed.contains("next_turn_reserved: yes"), "{mixed}");
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            arena
+                .worktree
+                .path()
+                .join(".gwt/skill-state/verification-run.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["commands"][0]["exit_code"], 0, "{record}");
+    assert!(record["commands"][0]["admission"].is_null(), "{record}");
+    let queue = coordinator.heavy_lease_status().unwrap().queue;
+    assert_eq!(queue[0].target, early.target);
+    assert_eq!(queue[0].queued_at_ms, early.queued_at_ms);
+
+    // Another process is materialized after the first one has returned.
+    let (ok, resubmitted) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
+    assert!(!ok && resubmitted.contains("deferred"), "{resubmitted}");
+    assert!(
+        resubmitted.contains("next_turn_reserved: yes"),
+        "{resubmitted}"
+    );
+    assert!(resubmitted.contains("queue_position: 1"), "{resubmitted}");
+    let queue = coordinator.heavy_lease_status().unwrap().queue;
+    assert_eq!(queue[0].target, early.target);
+    assert_eq!(queue[0].queued_at_ms, early.queued_at_ms);
+    assert_eq!(queue[1].target.as_deref(), Some(later.file_stem().as_str()));
+
+    // Only the owning fixture releases the holder. The early target takes the
+    // free host while the later reservation remains queued behind it.
+    lease.release().unwrap();
+    guard.complete(JobOutcome::Completed).unwrap();
+    let (ok, admitted) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
+    assert!(ok && admitted.contains("verify: PASS"), "{admitted}");
+    assert!(!coordinator.heavy_reservation_path(&key).exists());
+    assert!(coordinator.heavy_reservation_path(&later).exists());
+}
+
+#[test]
+fn deferred_fifo_survives_status_read_contention_and_new_processes() {
+    assert_deferred_fifo_across_processes(6);
+}
+
+#[test]
+#[ignore = "Issue #4969 acceptance: actual 1500-second holder-busy admission"]
+fn deferred_fifo_survives_actual_1500_second_wait_and_new_processes() {
+    assert_deferred_fifo_across_processes(1500);
 }

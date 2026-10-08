@@ -1606,13 +1606,80 @@ mod tests {
                     options,
                     Vec::new(),
                 );
+                state.mark_runtime_context_unresolved();
+                state.apply(LaunchWizardAction::UseStartMethod {
+                    method: LaunchWizardStartMethodKind::ConfigureAndStart,
+                });
                 state.set_agent_id(agent);
+                let setup_detail = state.view().agent_setup.unwrap().detail;
+                if available {
+                    assert!(setup_detail.contains("background"));
+                    assert!(setup_detail.contains("updated version here"));
+                } else {
+                    assert!(setup_detail.contains("host shell pane"));
+                    assert!(setup_detail.contains("Restart gwt"));
+                }
+                let draft = (
+                    state.model.clone(),
+                    state.reasoning.clone(),
+                    state.runtime_target,
+                );
                 state.apply(LaunchWizardAction::RunAgentSetup);
-                let Some(LaunchWizardCompletion::Launch(request)) = state.completion else {
-                    panic!("expected setup launch for {agent}");
-                };
-                let LaunchWizardLaunchRequest::Shell(config) = *request else {
-                    panic!("shell");
+                if available {
+                    assert_eq!(
+                        state.launch_target,
+                        LaunchTargetKind::Agent,
+                        "a CLI update must preserve the Agent Settings draft"
+                    );
+                }
+                let config = match state.completion.take().expect("setup completion") {
+                    LaunchWizardCompletion::UpdateAgent { agent_id, config } if available => {
+                        assert_eq!(agent_id, agent);
+                        assert!(state.agent_update_pending());
+                        assert!(!state.view().primary_action_enabled);
+                        assert!(state
+                            .view()
+                            .agent_setup
+                            .unwrap()
+                            .status
+                            .unwrap()
+                            .contains("Updating"));
+                        let mut detected = state.selected_agent().unwrap().clone();
+                        detected.installed_version = Some("9.9.9".to_string());
+                        state.finish_agent_update(Ok(detected));
+                        assert!(!state.agent_update_pending());
+                        assert!(state
+                            .view()
+                            .agent_setup
+                            .unwrap()
+                            .status
+                            .unwrap()
+                            .contains("9.9.9"));
+                        assert_eq!(
+                            (
+                                state.model.clone(),
+                                state.reasoning.clone(),
+                                state.runtime_target
+                            ),
+                            draft
+                        );
+                        state.apply(LaunchWizardAction::RunAgentSetup);
+                        state.completion.take();
+                        state.finish_agent_update(Err("installer failed".to_string()));
+                        assert!(state
+                            .view()
+                            .agent_setup
+                            .unwrap()
+                            .status
+                            .unwrap()
+                            .contains("installer failed"));
+                        config
+                    }
+                    LaunchWizardCompletion::Launch(request) if !available => match *request {
+                        LaunchWizardLaunchRequest::Shell(config) => config,
+                        _ => panic!("expected installer shell"),
+                    },
+                    other => panic!("unexpected setup completion: {other:?}"),
                 };
                 let args = config.command_args_override.unwrap();
                 if agent == "codex" {

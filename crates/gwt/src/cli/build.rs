@@ -2042,11 +2042,13 @@ format_version: Some(1),
                 lease_id: None,
                 worktree_fingerprint: plan.worktree_fingerprint.clone(),
                 verified_head: None,
+                driver: None,
                 commands: vec![crate::cli::verification_record::VerificationCommandResult {
                     admission: None,
                     headed_e2e: None,
                     nextest: None,
                     terminated_by_signal: None,
+                    output_streams: Vec::new(),
                     command: command.clone(),
                     exit_code: 101,
                     output_tail: format!(

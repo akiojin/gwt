@@ -1360,6 +1360,13 @@ a time), and neither lane waits for the other.
 
 ### PR head verification
 
+Use `pr.head_check` with `params.base` (for example, `develop`) and optional
+`params.head` to compare a canonical passing verification record with the live
+remote head without creating or editing a PR. The JSON diagnostic reports the
+record ID, verified/remote/base SHAs, product commits/files, and whether local
+verification is still fresh. A base-only comparison does not refresh stale
+evidence; missing, incomplete, failed, or corrupt records are unprovable.
+
 Before creating a Ready PR, `pr.create` compares the live remote branch with
 the HEAD recorded by `verify.run`. Its response and the PR body preserve both
 SHAs, the base SHA, and the comparison result. Bookkeeping under `.gwt/` and
