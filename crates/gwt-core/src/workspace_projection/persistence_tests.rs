@@ -4730,7 +4730,16 @@ fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
         workspace_id: Some(T812_TARGET_WORK_ID.to_string()),
         updated_at: seeded_at,
     });
-    save_workspace_projection(&project_state_root, &current).expect("seed shared current");
+    // Seed private inputs without durable publication; each scenario still uses
+    // the real transaction writers for the behavior it asserts.
+    let current_path = gwt_workspace_projection_path_for_repo_path(&project_state_root);
+    fs::create_dir_all(current_path.parent().expect("current directory")).unwrap();
+    fs::write(
+        &current_path,
+        serde_json::to_vec_pretty(&current).expect("current fixture JSON"),
+    )
+    .expect("seed shared current");
+    fs::write(current_path.with_file_name("works.lock"), []).expect("seed current lock");
 
     let target_container = WorkspaceExecutionContainerRef {
         branch: Some(T812_TARGET_BRANCH.to_string()),
@@ -4760,36 +4769,51 @@ fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
         WorkEventApplyOutcome::Applied
     );
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
-    save_workspace_work_items_projection_to_path(&work_items_path, &work_items)
-        .expect("seed target Work");
+    fs::write(
+        &work_items_path,
+        serde_json::to_vec_pretty(&work_items).expect("Work fixture JSON"),
+    )
+    .expect("seed target Work");
 
     let events_path =
         repo_local_work_events_path_with_migration(&work_event_root).expect("resolve event log");
-    append_workspace_work_event_to_path(&events_path, &target_start).expect("seed target event");
+    fs::create_dir_all(events_path.parent().expect("event directory")).unwrap();
+    fs::write(
+        &events_path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&target_start).expect("event fixture JSON")
+        ),
+    )
+    .expect("seed target event");
 
     let journal_path = gwt_workspace_journal_path_for_repo_path(&project_state_root);
-    append_workspace_journal_entry_to_path(
+    let journal = WorkspaceJournalEntry {
+        id: "journal-foreign-shared-current".to_string(),
+        project_root: project_state_root.clone(),
+        title: Some(T812_FOREIGN_TITLE.to_string()),
+        status_category: Some(WorkspaceStatusCategory::Blocked),
+        status_text: Some("Foreign shared-current blocked status".to_string()),
+        owner: Some(T812_FOREIGN_OWNER.to_string()),
+        next_action: Some("Foreign shared-current next action".to_string()),
+        summary: Some(T812_FOREIGN_SUMMARY.to_string()),
+        progress_summary: Some(T812_FOREIGN_PROGRESS.to_string()),
+        agent_session_id: None,
+        agent_current_focus: None,
+        agent_title_summary: None,
+        updated_at: seeded_at,
+    };
+    fs::write(
         &journal_path,
-        &WorkspaceJournalEntry {
-            id: "journal-foreign-shared-current".to_string(),
-            project_root: project_state_root.clone(),
-            title: Some(T812_FOREIGN_TITLE.to_string()),
-            status_category: Some(WorkspaceStatusCategory::Blocked),
-            status_text: Some("Foreign shared-current blocked status".to_string()),
-            owner: Some(T812_FOREIGN_OWNER.to_string()),
-            next_action: Some("Foreign shared-current next action".to_string()),
-            summary: Some(T812_FOREIGN_SUMMARY.to_string()),
-            progress_summary: Some(T812_FOREIGN_PROGRESS.to_string()),
-            agent_session_id: None,
-            agent_current_focus: None,
-            agent_title_summary: None,
-            updated_at: seeded_at,
-        },
+        format!(
+            "{}\n",
+            serde_json::to_string(&journal).expect("journal fixture JSON")
+        ),
     )
     .expect("seed shared-current journal");
 
     T812Fixture {
-        current_path: gwt_workspace_projection_path_for_repo_path(&project_state_root),
+        current_path,
         target: T812ResolvedMutationTarget {
             project_state_root,
             work_event_root: work_event_root.clone(),
@@ -10999,15 +11023,14 @@ fn init_test_git_repo(path: &Path) {
 }
 
 fn configure_test_git_identity(path: &Path) {
-    for args in [
-        ["config", "user.email", "test@example.com"],
-        ["config", "user.name", "Test User"],
-    ] {
-        let mut cmd = crate::process::hidden_command("git");
-        cmd.args(args).current_dir(path);
-        crate::process::scrub_git_env(&mut cmd);
-        assert!(cmd.output().expect("git config").status.success());
-    }
+    // All callers use fresh normal repositories. Preserve Git's generated
+    // core/remote configuration and avoid two child processes for fixed inputs.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path.join(".git/config"))
+        .expect("open fixture Git config")
+        .write_all(b"\n[user]\n\temail = test@example.com\n\tname = Test User\n")
+        .expect("seed fixture Git identity");
 }
 
 fn test_git_output(path: &Path, args: &[&str]) -> std::process::Output {
