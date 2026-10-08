@@ -353,8 +353,12 @@ jobs:
   # parallelism (#4023 and #4182 reproduce only when the suite competes with
   # itself), and fails when the outcome changes between runs.
   #
-  # It depends on `changes`, so its name must stay off the develop required
-  # status checks: branch protection reads a skipped job as Success. Pinned by
+  # Flake detection is a required status check on develop (Issue #5171).
+  # Its target filter is the exception to the optional-job filter above.
+  # No changed test targets intentionally means there is nothing to compare.
+  # Libraries run twice; integration targets run up to 20 times within the
+  # 600s test execution budget. Compile is excluded, and the minimum two-run
+  # comparison takes precedence over the budget. Pinned by
   # crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
   flake-detection:
     name: Flake detection (changed test targets)
