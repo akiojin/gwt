@@ -3228,7 +3228,7 @@ pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
 
 /// Keep recovery (including failures) in the deferred admission diagnostic,
 /// without presenting unexecuted commands as passing verification evidence.
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn restore_gwtd_after_deferral(
     worktree: &Path,
     host: &VerificationHost,
