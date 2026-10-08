@@ -642,6 +642,8 @@ fn recovery_center_projects_only_active_project_records_without_rewriting_sessio
         )
         .expect("prepare foreign");
 
+    // One unreadable ledger entry must not hide the valid recovery records.
+    fs::write(runtime.sessions_dir.join("broken.toml"), "id = [").unwrap();
     let events = runtime.handle_frontend_event(
         "client-recovery".to_string(),
         FrontendEvent::LoadRecoveryCenter {
@@ -2303,7 +2305,7 @@ fn save_assigned_workspace_projection_for_test(
         None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
-        &live,
+        Some(&live),
     )
 }
 
@@ -2357,7 +2359,9 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
         Some(3412),
         None,
         None,
-        &std::collections::HashSet::from([session.session_id.clone()]),
+        Some(&std::collections::HashSet::from([session
+            .session_id
+            .clone()])),
     )
     .expect("Start Work launch publication");
 
@@ -2512,7 +2516,9 @@ fn start_work_projection_prefers_canonical_execution_owner_over_resume_context()
             number: 1921,
         }),
         Some(&context),
-        &std::collections::HashSet::from([session.session_id.clone()]),
+        Some(&std::collections::HashSet::from([session
+            .session_id
+            .clone()])),
     )
     .expect("Start Work launch publication");
 
@@ -2682,7 +2688,7 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
         None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
-        &live,
+        Some(&live),
     )
     .expect("save launch projection");
 
@@ -3921,7 +3927,8 @@ fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkP
     }
 }
 
-fn wait_for_scheduled_scan_completion(
+fn run_scheduled_scan_to_completion(
+    tasks: &BlockingTestTaskQueue,
     events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> (
     PathBuf,
@@ -3929,44 +3936,44 @@ fn wait_for_scheduled_scan_completion(
     String,
     Result<ScheduledIssueMonitorScanOutcome, String>,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(event) = {
-            let mut events = events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            events
-                .iter()
-                .position(|event| {
-                    matches!(
-                        recorded_project_payload(event),
-                        UserEvent::IssueMonitorScheduledScanComplete { .. }
-                    )
-                })
-                .map(|index| events.remove(index))
-        } {
-            assert!(
-                matches!(&event, UserEvent::ProjectCompletion { .. }),
-                "scan worker completion must carry its project generation"
-            );
-            let UserEvent::IssueMonitorScheduledScanComplete {
-                project_root,
-                prefs_path,
-                now,
-                outcome,
-                vanished_window_failures: _,
-            } = into_recorded_project_payload(event)
-            else {
-                unreachable!("matched scheduled completion")
-            };
-            return (project_root, prefs_path, now, outcome);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "scheduled scan worker did not emit completion"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    let task = {
+        let mut tasks = tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(tasks.len(), 1, "the tick enqueues one scheduled scan");
+        tasks.remove(0)
+    };
+    task();
+    let event = {
+        let mut events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorScheduledScanComplete { .. }
+                )
+            })
+            .expect("the completed scan worker emitted its completion");
+        events.remove(index)
+    };
+    assert!(
+        matches!(&event, UserEvent::ProjectCompletion { .. }),
+        "scan worker completion must carry its project generation"
+    );
+    let UserEvent::IssueMonitorScheduledScanComplete {
+        project_root,
+        prefs_path,
+        now,
+        outcome,
+        vanished_window_failures: _,
+    } = into_recorded_project_payload(event)
+    else {
+        unreachable!("matched scheduled completion")
+    };
+    (project_root, prefs_path, now, outcome)
 }
 
 /// portable-pty falls back to `$HOME` as the child's cwd when no cwd is given
@@ -4234,7 +4241,9 @@ fn sample_runtime_with_events(
         LaunchWizardMemoryCache::load_with_agent_options(&sessions_dir, sample_agent_options());
     let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
     let blocking_tasks = BlockingTaskSpawner::thread();
-    let persist_dispatcher = super::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
+    let persist_dispatcher = Arc::new(super::persist_dispatcher::PersistDispatcher::new(
+        &blocking_tasks,
+    ));
     let (project_tab_incarnations, next_project_incarnation) =
         initial_project_tab_incarnations(&tabs);
     let mut runtime = AppRuntime {
@@ -4275,6 +4284,8 @@ fn sample_runtime_with_events(
         deferred_issue_monitor_launches: None,
         startup_worktree_inventories: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
+        pending_launch_delivery_acks: HashMap::new(),
+        pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
@@ -4291,6 +4302,7 @@ fn sample_runtime_with_events(
         daemon_supervisor: Arc::new(gwt::daemon_supervisor::DaemonSupervisor::disabled()),
         pending_continue_work: HashMap::new(),
         pending_fresh_execution_launches: HashMap::new(),
+        pending_fresh_execution_finalizations: HashMap::new(),
 
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_restore_log: None,
@@ -4308,6 +4320,7 @@ fn sample_runtime_with_events(
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
+        work_merge_status_cache: Default::default(),
         work_cleanup_ready_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
@@ -5543,7 +5556,7 @@ fn exact_close_finalizer_holds_handoff_through_generation_gated_cleanup() {
         None,
         None,
         WorkspaceLaunchProjectionKind::StartWork,
-        &HashSet::from([session_id.to_string()]),
+        Some(&HashSet::from([session_id.to_string()])),
     )
     .expect("seed predecessor Workspace projection");
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
@@ -5580,7 +5593,7 @@ fn exact_close_finalizer_holds_handoff_through_generation_gated_cleanup() {
             None,
             None,
             WorkspaceLaunchProjectionKind::StartWork,
-            &HashSet::from([session_id.to_string()]),
+            Some(&HashSet::from([session_id.to_string()])),
         )
         .expect("materialize same Session/window successor projection");
     });
@@ -8323,16 +8336,6 @@ fn resolve_launch_wizard_runtime_confirmation(
     assert_eq!(resolved_events.len(), 1);
 }
 
-fn wait_for_path(label: &str, path: &Path) {
-    for _ in 0..800 {
-        if path.exists() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!("timed out waiting for {label}: {}", path.display());
-}
-
 #[test]
 fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
     let temp = tempdir().expect("tempdir");
@@ -10061,7 +10064,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
             _ => unreachable!("matched above"),
         }
     };
-    runtime.handle_launch_complete(failed_window_id, *failed_result);
+    runtime.handle_launch_complete_and_drain(failed_window_id, *failed_result);
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
             &repo,
@@ -12585,7 +12588,7 @@ fn take_project_navigation_completion(
     }
 }
 
-fn drain_queued_blocking_tasks(tasks: &BlockingTestTaskQueue) {
+pub(super) fn drain_queued_blocking_tasks(tasks: &BlockingTestTaskQueue) {
     loop {
         let task = tasks.lock().expect("blocking task queue").pop();
         let Some(task) = task else {
@@ -13611,7 +13614,7 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     session.reasoning_level = Some("high".to_string());
     session.tool_version = Some("latest".to_string());
     session.session_mode = gwt_agent::SessionMode::Continue;
-    session.skip_permissions = true;
+    session.skip_permissions = false;
     session.codex_fast_mode = true;
     session.save(&sessions_dir).expect("save session");
 
@@ -13641,11 +13644,11 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     assert_eq!(view.selected_model, "gpt-5.5");
     assert_eq!(view.selected_reasoning, "high");
     assert_eq!(view.selected_execution_mode, "continue");
-    // Issue #3462: Continue inherits the persisted Skip Permissions preference.
+    // L2 interprets the legacy permission preference as the fixed value.
     assert!(view.skip_permissions);
-    // Toggle visibility still follows the manual-setup launch path.
+    // Launch choices remain hidden.
     assert!(!view.show_skip_permissions);
-    assert!(view.fast_mode);
+    assert!(!view.fast_mode);
 }
 
 #[test]
@@ -14711,6 +14714,67 @@ fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
 }
 
 #[test]
+fn app_runtime_supported_agents_lists_catalog_and_distinguishes_missing_versions() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let options = vec![
+        gwt::AgentOption {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            available: true,
+            installed_version: Some(" 2.1.0 ".into()),
+            custom_agent: None,
+        },
+        gwt::AgentOption {
+            id: "codex".into(),
+            name: "Codex".into(),
+            available: true,
+            installed_version: None,
+            custom_agent: None,
+        },
+    ];
+    runtime.launch_wizard_cache =
+        LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, options);
+    let request: FrontendEvent = serde_json::from_str(r#"{"kind":"list_supported_agents"}"#)
+        .expect("L3 Settings must support the read-only list request");
+    let immediate = runtime.handle_frontend_event("settings-client".into(), request);
+    assert!(
+        immediate.is_empty(),
+        "detection cache reads run off the GUI loop"
+    );
+    wait_for_recorded_event("supported agent list", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(event, UserEvent::Dispatch(outbound) if outbound.iter().any(|reply|
+                serde_json::to_value(&reply.event).unwrap()["kind"] == "supported_agent_list"))
+        })
+    });
+    let events = recorded_events.lock().expect("events lock");
+    let payload = events
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(outbound) => Some(outbound),
+            _ => None,
+        })
+        .flatten()
+        .map(|reply| serde_json::to_value(&reply.event).unwrap())
+        .find(|value| value["kind"] == "supported_agent_list")
+        .expect("supported agent reply");
+    let rows = payload["agents"].as_array().expect("agent rows");
+    assert_eq!(rows.len(), gwt_agent::builtin_agent_descriptors().len());
+    for (row, descriptor) in rows.iter().zip(gwt_agent::builtin_agent_descriptors()) {
+        assert_eq!(row["id"], descriptor.command);
+        assert_eq!(row["name"], descriptor.display_name);
+    }
+    assert_eq!(rows[0]["installed"], true);
+    assert_eq!(rows[0]["installed_version"], "2.1.0");
+    assert_eq!(rows[1]["installed"], true);
+    assert!(rows[1]["installed_version"].is_null());
+    assert_eq!(rows[2]["installed"], false);
+    assert!(rows[2]["installed_version"].is_null());
+}
+
+#[test]
 fn issue_monitor_error_notification_keeps_project_in_ledger() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -14952,7 +15016,7 @@ fn app_runtime_agent_launch_completion_failure_emits_structured_error_log() {
     let window_id = combined_window_id("tab-1", "agent-1");
 
     let events = capture_tracing_events(|| {
-        let _ = runtime.handle_launch_complete(
+        let _ = runtime.handle_launch_complete_and_drain(
             window_id.clone(),
             Err("launch failed before process spawn".to_string()),
         );
@@ -14992,7 +15056,7 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Err("launch failed before process spawn".to_string()),
     );
@@ -15072,7 +15136,7 @@ fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
         },
     );
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Err("stale preparation failure".to_string()),
     );
@@ -15239,7 +15303,7 @@ fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
         },
     );
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         review_window_id.clone(),
         Ok(issue_monitor_review_launch_completion(
             &repo,
@@ -15354,7 +15418,7 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
         .window_hook_states
         .insert(window_id.clone(), WindowProcessStatus::Running);
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok((
             ProcessLaunch {
@@ -15432,6 +15496,20 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
 
 #[test]
 fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
+    assert_genesis_receipt_cleanup_failure(false, false);
+}
+
+#[test]
+fn genesis_receipt_cleanup_failure_evicts_cached_session_after_window_close() {
+    assert_genesis_receipt_cleanup_failure(false, true);
+}
+
+#[test]
+fn genesis_receipt_cleanup_failure_evicts_cached_session_when_window_already_closed() {
+    assert_genesis_receipt_cleanup_failure(true, false);
+}
+
+fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_before_apply: bool) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -15470,7 +15548,9 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     session.id = session_id.to_string();
     session.project_state_root = Some(repo.clone());
@@ -15490,6 +15570,8 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
     session
         .save(&runtime.sessions_dir)
         .expect("save genesis Session");
+    // Resolve a previously visible Session before its launch gains a recovery receipt.
+    runtime.launch_wizard_cache.record_session(session.clone());
     persist_durable_launch_recovery(
         &runtime.sessions_dir,
         DurableLaunchRecoveryKind::Genesis,
@@ -15501,13 +15583,20 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         Some(&gwt_agent::AgentId::Codex),
     )
     .expect("persist exact genesis recovery receipt");
-    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     let receipt_path = runtime
         .sessions_dir
         .join("execution-launch-recovery")
         .join(format!("{session_id}.json"));
     fs::remove_file(&receipt_path).expect("remove receipt file");
     fs::create_dir(&receipt_path).expect("create receipt cleanup blocker");
+    assert!(
+        runtime
+            .launch_wizard_cache
+            .quick_start_entries(&repo, "work/issue-2359")
+            .iter()
+            .any(|entry| entry.session_id == session_id),
+        "the failed genesis starts visible in the warm cache",
+    );
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.pending_workspace_resume_contexts.insert(
         window_id.clone(),
@@ -15535,52 +15624,72 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         )
     };
 
-    let events = runtime.handle_launch_complete(
-        window_id.clone(),
-        Ok((
-            ProcessLaunch {
-                initial_prompt_file: None,
-                command,
-                args,
-                env: HashMap::new(),
-                remove_env: Vec::new(),
-                cwd: Some(repo.clone()),
-                resource_policy: None,
-            },
-            session_id.to_string(),
-            "work/issue-2359".to_string(),
-            "Codex".to_string(),
-            repo.clone(),
-            gwt_agent::AgentId::Codex,
-            Some(owner.number),
-            Some("origin/develop".to_string()),
-            gwt_agent::LaunchRuntimeTarget::Host,
-            gwt_agent::SessionMode::Normal,
-            false,
-            repo.display().to_string().into(),
-        )),
-    );
-
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::TerminalStatus {
-            status: WindowProcessStatus::Error,
-            ..
-        }
-    )));
+    if close_before_enqueue {
+        assert!(runtime.close_window_outcome(&window_id).closed);
+    }
+    assert!(runtime
+        .handle_launch_complete(
+            window_id.clone(),
+            Ok((
+                ProcessLaunch {
+                    initial_prompt_file: None,
+                    command,
+                    args,
+                    env: HashMap::new(),
+                    remove_env: Vec::new(),
+                    cwd: Some(repo.clone()),
+                    resource_policy: None,
+                },
+                session_id.to_string(),
+                "work/issue-2359".to_string(),
+                "Codex".to_string(),
+                repo.clone(),
+                gwt_agent::AgentId::Codex,
+                Some(owner.number),
+                Some("origin/develop".to_string()),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                gwt_agent::SessionMode::Normal,
+                false,
+                repo.display().to_string().into(),
+            )),
+        )
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    if close_before_apply {
+        assert!(runtime.close_window_outcome(&window_id).closed);
+        assert!(!runtime.pending_launch_completions.contains_key(&window_id));
+    }
+    let events = runtime.handle_agent_launch_prepared(prepared);
+    if close_before_apply {
+        assert!(
+            events.is_empty(),
+            "stale failure must not update a closed window"
+        );
+    } else if !close_before_enqueue {
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Error,
+                ..
+            }
+        )));
+    }
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
-    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
-        .expect("read compensated Workspace")
-        .expect("compensated Workspace projection");
-    assert!(projection.latest_agent_for_session(session_id).is_none());
-    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-        .expect("read compensated WorkItems")
-        .expect("compensated WorkItems projection");
-    assert_eq!(work_items.work_items.len(), 1);
-    assert!(
-        work_items.work_items[0].is_terminal() && work_items.work_items[0].discarded,
-        "the published Work must be discarded when readiness cannot commit",
-    );
+    if !close_before_enqueue {
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("read compensated Workspace")
+            .expect("compensated Workspace projection");
+        assert!(projection.latest_agent_for_session(session_id).is_none());
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("read compensated WorkItems")
+            .expect("compensated WorkItems projection");
+        assert_eq!(work_items.work_items.len(), 1);
+        assert!(
+            work_items.work_items[0].is_terminal() && work_items.work_items[0].discarded,
+            "the published Work must be discarded when readiness cannot commit",
+        );
+    }
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&repo, owner)
             .expect("read terminal genesis ledger")
@@ -15591,6 +15700,13 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
     assert!(
         receipt_path.is_dir(),
         "the injected cleanup blocker must remain"
+    );
+    assert!(
+        !runtime
+            .sessions_dir
+            .join(format!("{session_id}.toml"))
+            .exists(),
+        "exact Session removal must precede the pending receipt cleanup",
     );
     assert!(
         runtime
@@ -15663,7 +15779,7 @@ fn ordinary_blocked_transition_is_not_genesis_failure_compensation_authority() {
         None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
-        &HashSet::from([session.session_id.clone()]),
+        Some(&HashSet::from([session.session_id.clone()])),
     )
     .expect("publish Work");
     assert!(matches!(
@@ -15773,7 +15889,7 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
         None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
-        &HashSet::from([session.session_id.clone()]),
+        Some(&HashSet::from([session.session_id.clone()])),
     )
     .expect("publish split-root Work");
     gwt::cli::execution_state::block_uncommitted_genesis_launch(
@@ -15900,7 +16016,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
-        &HashSet::from([prior.session_id.clone()]),
+        Some(&HashSet::from([prior.session_id.clone()])),
     )
     .expect("publish existing Work");
     let existing = gwt_core::workspace_projection::load_workspace_work_items(&repo)
@@ -15934,7 +16050,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         None,
         Some(owner.number),
         &context,
-        &HashSet::from([failed.session_id.clone()]),
+        Some(&HashSet::from([failed.session_id.clone()])),
     )
     .expect("publish failed resume attempt");
     gwt::cli::execution_state::block_uncommitted_genesis_launch(
@@ -16101,7 +16217,7 @@ fn terminalized_genesis_compensation_retries_after_discard_before_agent_cleanup(
         None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
-        &HashSet::from([session.session_id.clone()]),
+        Some(&HashSet::from([session.session_id.clone()])),
     )
     .expect("publish failed new Work");
     let published_projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
@@ -16573,14 +16689,19 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
     ));
 }
 
-#[test]
-fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
+struct ContinueWorkLaunchFailureFixture {
+    runtime: AppRuntime,
+    repo: PathBuf,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    window_id: String,
+    selected_work_id: &'static str,
+    candidate_session_id: &'static str,
+    candidate_session: gwt_agent::Session,
+    candidate_runtime_path: PathBuf,
+}
+
+fn continue_work_launch_failure_fixture(temp_root: &Path) -> ContinueWorkLaunchFailureFixture {
+    let repo = temp_root.join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
 
@@ -16623,7 +16744,7 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut runtime = sample_runtime(temp_root, vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
     let mut active = sample_active_agent_session("tab-1", &window_id);
     active.session_id = candidate_session_id.to_string();
@@ -16732,6 +16853,36 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
         },
     );
 
+    ContinueWorkLaunchFailureFixture {
+        runtime,
+        repo,
+        owner,
+        window_id,
+        selected_work_id,
+        candidate_session_id,
+        candidate_session,
+        candidate_runtime_path,
+    }
+}
+
+#[test]
+fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let ContinueWorkLaunchFailureFixture {
+        mut runtime,
+        repo,
+        owner,
+        window_id,
+        selected_work_id,
+        candidate_session_id,
+        candidate_session,
+        candidate_runtime_path,
+    } = continue_work_launch_failure_fixture(temp.path());
+
     let candidate_path = runtime
         .sessions_dir
         .join(format!("{candidate_session_id}.toml"));
@@ -16747,7 +16898,7 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
-    let rejected = runtime.handle_launch_complete(
+    let rejected = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Err("candidate replacement race".to_string()),
     );
@@ -16780,7 +16931,7 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
         let missing_target = runtime.sessions_dir.join("missing-live-continue-candidate");
         symlink(&missing_target, &candidate_path).expect("create dangling live Continue candidate");
 
-        let dangling = runtime.handle_launch_complete(
+        let dangling = runtime.handle_launch_complete_and_drain(
             window_id.clone(),
             Err("dangling candidate replacement race".to_string()),
         );
@@ -16815,8 +16966,10 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
         .save(&runtime.sessions_dir)
         .expect("restore exact candidate after race");
 
-    let events = runtime
-        .handle_launch_complete(window_id.clone(), Err("candidate spawn failed".to_string()));
+    let events = runtime.handle_launch_complete_and_drain(
+        window_id.clone(),
+        Err("candidate spawn failed".to_string()),
+    );
 
     assert!(
         events.iter().any(|event| matches!(
@@ -17452,9 +17605,10 @@ fn continue_work_ready_timeout_late_session_start_still_activates_after_a_handof
             .contains_key(&fixture.window_id),
         "the handoff must leave a diagnostic a reconnecting client can replay",
     );
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(
         !events.is_empty(),
@@ -17571,23 +17725,30 @@ fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
         "Continue work readiness timeout must not start before async launch preparation"
     );
 
-    let launch_complete_start = source
-        .find("pub(crate) fn handle_launch_complete(")
-        .expect("launch completion handler");
-    let pty_spawn_start = source[launch_complete_start..]
-        .find("pub(crate) fn spawn_process_window_with_console_kind(")
-        .map(|offset| launch_complete_start + offset)
-        .expect("PTY spawn function");
-    let launch_complete = &source[launch_complete_start..pty_spawn_start];
-    let pty_handoff = launch_complete
-        .find("PTY handoff complete")
-        .expect("successful PTY handoff marker");
-    let last_ready_timeout = launch_complete
+    let apply_start = source
+        .find("pub(crate) fn handle_agent_launch_prepared(")
+        .expect("prepared launch apply");
+    let apply_end = source[apply_start..]
+        .find("pub(super) fn launch_error_events_with_continue_work(")
+        .map(|offset| apply_start + offset)
+        .expect("launch failure boundary");
+    let apply = &source[apply_start..apply_end];
+    let pty_install = apply
+        .find("self.install_process_window(")
+        .expect("prepared PTY install");
+    let last_ready_timeout = apply
         .rfind("arm_continue_work_readiness_deadline")
         .expect("readiness timeout scheduling");
     assert!(
-        last_ready_timeout > pty_handoff,
-        "Continue work readiness timeout must be armed after successful PTY handoff"
+        last_ready_timeout > pty_install,
+        "Continue work readiness timeout must be armed after successful PTY installation"
+    );
+    let enqueue_start = source
+        .find("pub(crate) fn handle_launch_complete(")
+        .expect("enqueue handler");
+    assert!(
+        !source[enqueue_start..apply_start].contains("arm_continue_work_readiness_deadline"),
+        "worker preparation cannot start the readiness deadline"
     );
 }
 
@@ -19851,7 +20012,7 @@ fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_st
         .map(|(window_id, _)| window_id.clone())
         .expect("projection fallback must prepare candidate");
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id,
         Err("simulated projection-only spawn failure".to_string()),
     );
@@ -21959,6 +22120,74 @@ fn continue_work_activated_successor_recovery_case(
             },
         ));
     }
+    if capability_generation == 1
+        && !mutate_candidate_after_repair
+        && !mutate_candidate_before_work_commit
+        && !same_generation_takeover
+        && !substitute_candidate_agent
+        && !substitute_live_agent
+        && !candidate_only_durable_fallback
+    {
+        let current_path = work_items_path.with_file_name("current.json");
+        let lock_path = gwt_core::workspace_projection::external_workspace_operation_lock_path(
+            &current_path,
+            &work_items_path,
+            operation_id,
+        );
+        let legacy_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open staged operation lock");
+        legacy_lock
+            .try_lock_exclusive()
+            .expect("hold operation lock without holder metadata");
+        let holder_path = lock_path.with_extension("lock.holder.json");
+        match fs::remove_file(holder_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove operation holder metadata: {error}"),
+        }
+        let busy_events = restarted_runtime.continue_work_events(
+            &restarted_runtime.test_context(),
+            "client-busy-retry",
+            operation_id.to_string(),
+            work_id.to_string(),
+            canvas_bounds(),
+        );
+        let message = busy_events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ContinueWorkOutcome {
+                    error_code: Some(code),
+                    message: Some(message),
+                    retryable: true,
+                    ..
+                } if code == "continuation_reconciliation_required" => Some(message),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("operation contention must remain retryable: {busy_events:#?}")
+            });
+        assert!(message.contains(operation_id), "{message}");
+        assert!(
+            message.contains(&lock_path.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("holder_unknown_reason=file_absent"),
+            "{message}"
+        );
+        assert!(
+            message.contains("OS lock") && message.contains("release"),
+            "{message}"
+        );
+        assert!(
+            message.contains("same operation") && message.contains("retry"),
+            "{message}"
+        );
+        FileExt::unlock(&legacy_lock).expect("release operation lock before retry");
+    }
     let events = restarted_runtime.continue_work_events(
         &restarted_runtime.test_context(),
         "client-retry",
@@ -22948,7 +23177,7 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         Some(owner),
         None,
         WorkspaceLaunchProjectionKind::StartWork,
-        &HashSet::from([predecessor_session_id.to_string()]),
+        Some(&HashSet::from([predecessor_session_id.to_string()])),
     )
     .expect("publish predecessor Work");
     let predecessor_work =
@@ -23065,7 +23294,10 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
     session_start.continuation_readiness_nonce = Some(readiness_nonce.to_string());
     session_start.project_root = Some(repo.display().to_string());
     session_start.branch = Some("work/issue-2359".to_string());
-    let events = runtime.handle_runtime_hook_event(session_start);
+    let (spawner, _) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut events = runtime.handle_runtime_hook_event(session_start);
+    events.extend(commit_pending_fresh_execution(&mut runtime));
 
     assert!(
         !events.is_empty(),
@@ -23137,7 +23369,7 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         WorkspaceLaunchProjectionKind::Resume {
             created_by_start_work: true,
         },
-        &HashSet::from([candidate_session_id.to_string()]),
+        Some(&HashSet::from([candidate_session_id.to_string()])),
     )
     .expect("retry must reuse the same successor Work");
     assert!(
@@ -23151,7 +23383,7 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
             WorkspaceLaunchProjectionKind::Resume {
                 created_by_start_work: true
             },
-            &HashSet::from([predecessor_session_id.to_string()]),
+            Some(&HashSet::from([predecessor_session_id.to_string()])),
         )
         .is_err(),
         "a discarded predecessor Session cannot be moved to its successor"
@@ -23400,6 +23632,20 @@ fn pending_fresh_execution_fixture_with_owner_kind(
     operation_id: &str,
     owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
 ) -> PendingFreshExecutionFixture {
+    pending_fresh_execution_fixture_with_predecessor_status(
+        temp_root,
+        operation_id,
+        owner_kind,
+        false,
+    )
+}
+
+fn pending_fresh_execution_fixture_with_predecessor_status(
+    temp_root: &Path,
+    operation_id: &str,
+    owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
+    completed: bool,
+) -> PendingFreshExecutionFixture {
     let repo = temp_root.join(format!("repo-{operation_id}"));
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -23422,9 +23668,13 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         gwt::cli::execution_state::settle(
             &repo,
             &predecessor_session_id,
-            gwt::cli::execution_state::ExecutionSettlement::Blocked {
-                reason: "legacy terminal blocker".to_string(),
-                missing_verification: Some("legacy evidence gap".to_string()),
+            if completed {
+                gwt::cli::execution_state::ExecutionSettlement::Completed
+            } else {
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "legacy terminal blocker".to_string(),
+                    missing_verification: Some("legacy evidence gap".to_string()),
+                }
             },
         )
         .expect("settle Blocked predecessor"),
@@ -23443,14 +23693,25 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         operation_id: operation_id.to_string(),
         principal_id: "gwt-host-launch".to_string(),
         work_id: None,
-        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        source: if completed {
+            gwt::cli::execution_state::MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+        } else {
+            gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE
+        }
+        .to_string(),
         session_binding_id: format!("binding-{operation_id}"),
         initial_session_id: candidate_session_id.clone(),
         entrypoint: "$gwt-execute #2359".to_string(),
         requested_at: Utc::now(),
     };
-    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(&repo, owner, &request)
-        .expect("prepare fresh successor");
+    if completed {
+        gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+    } else {
+        gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+            &repo, owner, &request,
+        )
+    }
+    .expect("prepare fresh successor");
     let planned =
         gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
             .expect("derive prepared binding");
@@ -23472,6 +23733,8 @@ fn pending_fresh_execution_fixture_with_owner_kind(
     );
     let runtime_root = temp_root.join(".gwt");
     let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let (spawner, _) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let window_id = combined_window_id("tab-1", "agent-1");
     let mut candidate =
         gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
@@ -23552,6 +23815,383 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         issuer,
         token,
     }
+}
+
+fn take_fresh_execution_finalization(
+    runtime: &AppRuntime,
+) -> super::continuation::FreshExecutionFinalization {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("fresh execution test needs a queued worker");
+    };
+    drain_queued_blocking_tasks(tasks);
+    let AppEventProxy::Stub(events) = &runtime.proxy else {
+        panic!("fresh execution test needs a stub proxy");
+    };
+    let mut events = events.lock().expect("fresh execution completions");
+    let index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::FreshExecutionFinalized(_)
+            )
+        })
+        .expect("fresh execution worker completion");
+    let event = events.remove(index);
+    drop(events);
+    match into_recorded_project_payload(event) {
+        UserEvent::FreshExecutionFinalized(completion) => *completion,
+        _ => unreachable!("matched fresh execution finalization"),
+    }
+}
+
+fn commit_pending_fresh_execution(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let completion = take_fresh_execution_finalization(runtime);
+    runtime.handle_fresh_execution_finalized(completion)
+}
+
+#[test]
+fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-worker-readiness");
+    let (spawner, queue) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+        .readiness_nonce
+        .clone();
+
+    for _ in 0..2 {
+        let events = fixture
+            .runtime
+            .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+        assert!(
+            events.is_empty(),
+            "readiness dispatch must return before I/O"
+        );
+    }
+    assert!(fixture
+        .issuer
+        .prepared_token_is_current(&fixture.token, &fixture.binding));
+    assert_eq!(
+        queue.lock().expect("worker queue").len(),
+        1,
+        "duplicate authenticated readiness must schedule one transaction"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.predecessor_binding.clone())
+    );
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
+    assert!(!events.is_empty());
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.generations.len(), 2);
+    let work_events = load_tracked_work_events(&fixture.repo);
+    assert_eq!(
+        work_events
+            .iter()
+            .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
+            .count(),
+        1,
+        "duplicate readiness must publish one Work start"
+    );
+    let queued_after_completion = queue.lock().unwrap().len();
+    assert!(fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce))
+        .is_empty());
+    assert_eq!(queue.lock().unwrap().len(), queued_after_completion);
+    assert_eq!(load_tracked_work_events(&fixture.repo), work_events);
+}
+
+#[test]
+fn fresh_execution_finalization_rejects_replaced_window_pending_and_token() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    for replacement in ["window", "pending", "token"] {
+        let mut fixture = pending_fresh_execution_fixture(temp.path(), replacement);
+        let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+            .readiness_nonce
+            .clone();
+        fixture
+            .runtime
+            .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+        let completion = take_fresh_execution_finalization(&fixture.runtime);
+        let work_events = load_tracked_work_events(&fixture.repo);
+        match replacement {
+            "window" => {
+                fixture
+                    .runtime
+                    .window_lifecycle_generations
+                    .lock()
+                    .unwrap()
+                    .insert(fixture.window_id.clone(), u64::MAX);
+            }
+            "pending" => {
+                fixture
+                    .runtime
+                    .pending_fresh_execution_launches
+                    .get_mut(&fixture.window_id)
+                    .unwrap()
+                    .operation_id = "replacement-operation".to_string();
+            }
+            "token" => {
+                fixture
+                    .runtime
+                    .agent_capability_tokens
+                    .insert(fixture.window_id.clone(), "replacement-token".to_string());
+            }
+            _ => unreachable!(),
+        }
+        let current_token = fixture.runtime.agent_capability_tokens[&fixture.window_id].clone();
+        assert!(
+            fixture
+                .runtime
+                .handle_fresh_execution_finalized(completion)
+                .is_empty(),
+            "{replacement} replacement must fence GUI completion"
+        );
+        assert!(fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&fixture.window_id));
+        assert_eq!(
+            fixture.runtime.active_agent_sessions[&fixture.window_id].session_id,
+            fixture.candidate_session_id
+        );
+        assert_eq!(
+            fixture.runtime.agent_capability_tokens[&fixture.window_id],
+            current_token
+        );
+        assert_eq!(load_tracked_work_events(&fixture.repo), work_events);
+    }
+}
+
+#[test]
+fn fresh_execution_queued_readiness_cannot_revive_an_exact_rollback() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-worker-rollback");
+    let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+        .readiness_nonce
+        .clone();
+    fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+    fixture.runtime.handle_launch_complete_and_drain(
+        fixture.window_id.clone(),
+        Err("spawn failed before readiness worker".to_string()),
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_finalizations
+        .contains_key(&fixture.window_id));
+    assert!(commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+    assert!(load_tracked_work_events(&fixture.repo).is_empty());
+}
+
+#[test]
+fn fresh_execution_queued_session_start_rejects_foreign_identity() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-early-readiness");
+    let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+        .readiness_nonce
+        .clone();
+    let mut early = runtime_hook_state_for_event("Working", "SessionStart", "foreign-session");
+    early.agent_session_id = Some(fixture.candidate_session_id.clone());
+    early.continuation_readiness_nonce = Some(nonce);
+    early.project_root = Some(fixture.repo.display().to_string());
+    early.branch = Some("work/issue-2359".to_string());
+    fixture.runtime.handle_runtime_hook_event(early.clone());
+    let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+        unreachable!();
+    };
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "foreign identity cannot authenticate readiness"
+    );
+    early.gwt_session_id = Some(fixture.candidate_session_id.clone());
+    fixture.runtime.handle_runtime_hook_event(early);
+    assert!(fixture
+        .issuer
+        .prepared_token_is_current(&fixture.token, &fixture.binding));
+    assert!(!commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.binding.identity)
+    );
+}
+
+#[test]
+fn fresh_execution_queued_readiness_rolls_back_after_pane_or_project_close() {
+    for (operation, project_close, close_worker_first) in [
+        ("pane-readiness-first", false, false),
+        ("pane-close-first", false, true),
+        ("project-close-first", true, true),
+    ] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let mut fixture = pending_fresh_execution_fixture(temp.path(), operation);
+        insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+        let generation = fixture.runtime.runtimes[&fixture.window_id].incarnation;
+        fixture
+            .runtime
+            .window_lifecycle_generations
+            .lock()
+            .unwrap()
+            .insert(fixture.window_id.clone(), generation);
+        let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+            .readiness_nonce
+            .clone();
+        fixture
+            .runtime
+            .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+        let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+            unreachable!();
+        };
+        let tasks = tasks.clone();
+        if project_close {
+            fixture.runtime.close_project_tab_events("tab-1");
+        } else {
+            fixture.runtime.close_window_events(&fixture.window_id);
+        }
+        assert!(
+            !fixture
+                .runtime
+                .pending_fresh_execution_finalizations
+                .contains_key(&fixture.window_id),
+            "{operation}: close must forget its in-flight entry"
+        );
+        if !close_worker_first {
+            // Run readiness while the closing generation is still present.
+            let readiness = tasks.lock().unwrap().remove(0);
+            readiness();
+        }
+        // The queued test spawner drains last-in first-out, so otherwise
+        // detached close completes before the earlier readiness transaction.
+        assert!(commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner,)
+                .unwrap(),
+            Some(fixture.predecessor_binding.clone()),
+            "{operation}"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &fixture.repo,
+                fixture.owner,
+                &fixture.operation_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
+            "{operation}: a closed Prepared candidate must release its owner fence"
+        );
+        assert!(
+            !fixture
+                .runtime
+                .sessions_dir
+                .join(format!("{}.toml", fixture.candidate_session_id))
+                .exists(),
+            "{operation}"
+        );
+        assert!(
+            !durable_launch_recovery_exists(
+                &fixture.runtime.sessions_dir,
+                &fixture.candidate_session_id,
+            ),
+            "{operation}"
+        );
+        assert!(
+            load_tracked_work_events(&fixture.repo).is_empty(),
+            "{operation}"
+        );
+    }
+}
+
+#[test]
+fn fresh_execution_completed_predecessor_survives_terminal_grace_and_activates_once() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture_with_predecessor_status(
+        temp.path(),
+        "completed-requeue",
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        true,
+    );
+    let snapshots = fixture.runtime.terminal_window_snapshots();
+    assert!(
+        snapshots.is_empty(),
+        "a Prepared candidate must not be observed as its Completed predecessor: {snapshots:?}"
+    );
+    let observations = super::terminal_convergence::observe_terminal_windows_in_background(
+        &fixture.runtime.sessions_dir,
+        snapshots,
+        Duration::from_secs(60),
+    );
+    let now = Instant::now();
+    fixture.runtime.terminal_convergence_observed_events_at(
+        Duration::from_secs(60),
+        observations,
+        now,
+    );
+    fixture
+        .runtime
+        .close_expired_terminal_window_candidates_at(now + Duration::from_secs(61));
+    assert!(
+        fixture
+            .runtime
+            .window_lookup
+            .contains_key(&fixture.window_id),
+        "the Completed predecessor must not close its Prepared successor before Ready"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.predecessor_binding.clone()),
+    );
+    let nonce = format!("readiness-{}", fixture.operation_id);
+    fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+    commit_pending_fresh_execution(&mut fixture.runtime);
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert_eq!(
+        fixture.runtime.terminal_window_snapshots().len(),
+        1,
+        "the activated pane must return to normal terminal observation"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.binding.identity.clone()),
+        "one authenticated Ready must activate the fresh generation",
+    );
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.generations.len(), 2);
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+    );
 }
 
 #[test]
@@ -23703,7 +24343,11 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
     session_start.continuation_readiness_nonce = Some(readiness_nonce);
     session_start.project_root = Some(fixture.repo.display().to_string());
     session_start.branch = Some("work/issue-2359".to_string());
+    let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = ack_spawner;
     fixture.runtime.handle_runtime_hook_event(session_start);
+    commit_pending_fresh_execution(&mut fixture.runtime);
+    fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
 
     let active_prefs =
         gwt::load_issue_monitor_prefs(&active_prefs_path).expect("reload active project prefs");
@@ -23921,14 +24565,18 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
-    let events = fixture
+    let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = ack_spawner;
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(
         !events.is_empty(),
         "an authenticated SessionStart must complete the fresh launch"
     );
+    fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
     let projection = gwt_core::workspace_projection::load_workspace_projection(&fixture.repo)
         .expect("load fresh current projection")
         .expect("fresh current projection");
@@ -23977,9 +24625,10 @@ fn fresh_execution_session_start_preserves_spec_owner_kind_in_work_projection() 
         .readiness_nonce
         .clone();
 
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(!events.is_empty(), "SPEC launch must complete");
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
@@ -24021,9 +24670,10 @@ fn fresh_execution_session_start_overrides_mis_kinded_resume_context_owner() {
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(!events.is_empty(), "SPEC successor must complete");
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
@@ -24091,9 +24741,10 @@ fn fresh_execution_session_replacement_before_work_commit_preserves_predecessor_
         .expect("pending fresh launch")
         .readiness_nonce
         .clone();
-    let events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(
         events.is_empty(),
@@ -24219,6 +24870,7 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
                 );
             }
         }
+        fixture.runtime.finish_queued_delivery_acks(&queued_tasks);
         assert_eq!(repaired, activated);
         let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert!(
@@ -24392,12 +25044,16 @@ fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_ackno
         )
         .unwrap();
     let output = child.wait_with_output().unwrap();
+    let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = ack_spawner;
     let forwarded = std::mem::take(&mut *events.lock().unwrap());
     for event in forwarded {
         if let UserEvent::RuntimeHook(event) = event {
             fixture.runtime.handle_runtime_hook_event(event);
         }
     }
+    commit_pending_fresh_execution(&mut fixture.runtime);
+    fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
     server.shutdown();
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
@@ -24499,10 +25155,53 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
                 reply,
             }) = event
             {
-                let (result, _) = fixture
+                let prepared = grant.principal().prepared_execution_binding().is_some();
+                let (ready_reply, ready_result) = std::sync::mpsc::channel();
+                fixture
                     .runtime
-                    .resend_fresh_execution_ready(&grant, &request);
-                reply.send(result).unwrap();
+                    .resend_fresh_execution_ready(&grant, &request, ready_reply);
+                if prepared {
+                    assert!(
+                        matches!(
+                            ready_result.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ),
+                        "the same request must wait for its queued finalization"
+                    );
+                    let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks else {
+                        unreachable!();
+                    };
+                    let worker = tasks.lock().unwrap().remove(0);
+                    worker();
+                    let (active_reply, active_result) = std::sync::mpsc::channel();
+                    fixture.runtime.resend_fresh_execution_ready(
+                        &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
+                        &gwt::AgentExecutionContinuationRequest {
+                            schema_version: 1,
+                            operation_id: "active-inflight-retry".to_string(),
+                            readiness_nonce: None,
+                        },
+                        active_reply,
+                    );
+                    assert!(
+                        matches!(
+                            active_result.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ),
+                        "Active resend must join the pending GUI completion"
+                    );
+                    commit_pending_fresh_execution(&mut fixture.runtime);
+                    let active_receipt = active_result.try_recv().unwrap().unwrap().unwrap();
+                    assert_eq!(active_receipt.operation_id, "active-inflight-retry");
+                    assert_eq!(active_receipt.execution_binding, fixture.binding.identity);
+                }
+                reply
+                    .send(
+                        ready_result
+                            .try_recv()
+                            .expect("readiness completion must reply"),
+                    )
+                    .unwrap();
                 break;
             }
             assert!(
@@ -24598,15 +25297,19 @@ fn fresh_execution_continue_repairs_activated_response_loss_before_acknowledging
         &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
     );
     leave_fresh_execution_activated_before_projection_commit(&mut fixture);
-    let (result, _) = fixture.runtime.resend_fresh_execution_ready(
+    let (reply, response) = std::sync::mpsc::channel();
+    fixture.runtime.resend_fresh_execution_ready(
         &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
         &gwt::AgentExecutionContinuationRequest {
             schema_version: 1,
             operation_id: "retry-ready-request".to_string(),
             readiness_nonce: None,
         },
+        reply,
     );
-    assert!(result
+    assert!(response
+        .try_recv()
+        .unwrap()
         .expect("Active capability retry must repair the matching pending fresh coordinator")
         .is_some());
     assert!(!fixture
@@ -24650,15 +25353,17 @@ fn fresh_execution_continue_refuses_wrong_nonce_without_mutation() {
         diagnosis.recovery_hint.as_deref(),
         Some("prepared_launch_readiness_required")
     );
-    let (result, events) = fixture.runtime.resend_fresh_execution_ready(
+    let (reply, response) = std::sync::mpsc::channel();
+    let events = fixture.runtime.resend_fresh_execution_ready(
         &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
         &gwt::AgentExecutionContinuationRequest {
             schema_version: 1,
             operation_id: "continue-ready-request".to_string(),
             readiness_nonce: Some("wrong-nonce".to_string()),
         },
+        reply,
     );
-    assert!(result.is_err());
+    assert!(response.try_recv().unwrap().is_err());
     assert!(events.is_empty());
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner).unwrap(),
@@ -24681,13 +25386,25 @@ fn fresh_execution_wrong_session_start_nonce_aborts_candidate_and_preserves_bloc
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-wrong-nonce");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    let pane = Arc::clone(&fixture.runtime.runtimes[&fixture.window_id].pane);
     let mut session_start =
         runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
     session_start.continuation_readiness_nonce = Some("wrong-readiness".to_string());
     session_start.project_root = Some(fixture.repo.display().to_string());
     session_start.branch = Some("work/issue-2359".to_string());
 
-    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+    let mut events = fixture.runtime.handle_runtime_hook_event(session_start);
+    events.extend(commit_pending_fresh_execution(&mut fixture.runtime));
+    let detached_teardown = Arc::strong_count(&pane) > 1;
+    if let BlockingTaskSpawner::Queued(tasks) = &fixture.runtime.blocking_tasks {
+        drain_queued_blocking_tasks(tasks);
+    }
+    assert!(
+        detached_teardown,
+        "rollback GUI apply must hand PTY ownership to the detached close finalizer"
+    );
+    assert!(load_tracked_work_events(&fixture.repo).is_empty());
 
     assert!(
         events.iter().any(|event| matches!(
@@ -24714,7 +25431,8 @@ fn fresh_execution_missing_session_start_nonce_aborts_candidate_and_preserves_bl
     session_start.project_root = Some(fixture.repo.display().to_string());
     session_start.branch = Some("work/issue-2359".to_string());
 
-    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+    let mut events = fixture.runtime.handle_runtime_hook_event(session_start);
+    events.extend(commit_pending_fresh_execution(&mut fixture.runtime));
 
     assert!(
         events.iter().any(|event| matches!(
@@ -24762,7 +25480,8 @@ fn fresh_execution_session_start_via_daemon_fanout_preserves_readiness_nonce() {
         panic!("expected runtime hook fanout");
     };
 
-    let events = fixture.runtime.handle_daemon_runtime_hook_event(event);
+    let mut events = fixture.runtime.handle_daemon_runtime_hook_event(event);
+    events.extend(commit_pending_fresh_execution(&mut fixture.runtime));
 
     assert!(
         !events.is_empty(),
@@ -24832,6 +25551,154 @@ fn fresh_execution_session_start_requires_gwt_session_identity_before_nonce_vali
 }
 
 #[test]
+fn fresh_execution_worker_spawn_failure_aborts_its_reconstructed_candidate() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, mut completion, _) =
+        queued_fresh_execution_completion_fixture(temp.path(), "fresh-worker-spawn-failure");
+    completion.0.command = temp
+        .path()
+        .join("missing-agent-program")
+        .display()
+        .to_string();
+    completion.0.args.clear();
+    fixture
+        .runtime
+        .handle_launch_complete(fixture.window_id.clone(), Ok(completion));
+    drain_queued_blocking_tasks(&tasks);
+    let events = fixture
+        .runtime
+        .handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    drain_queued_blocking_tasks(&tasks);
+    assert!(
+        !events.is_empty(),
+        "the physical spawn failure remains visible"
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn fresh_execution_worker_dropped_completion_aborts_exact_prepared_candidate() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, completion, _) =
+        queued_fresh_execution_completion_fixture(temp.path(), "fresh-worker-dropped");
+    fixture
+        .runtime
+        .handle_launch_complete(fixture.window_id.clone(), Ok(completion));
+    drain_queued_blocking_tasks(&tasks);
+    drop(take_prepared_agent_launch(&recorded));
+    drain_queued_blocking_tasks(&tasks);
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn fresh_execution_worker_stale_completion_preserves_activated_generation() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, completion, pending) =
+        queued_fresh_execution_completion_fixture(temp.path(), "fresh-worker-activated");
+    fixture
+        .runtime
+        .handle_launch_complete(fixture.window_id.clone(), Ok(completion));
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    gwt::cli::execution_state::activate_successor(&fixture.repo, fixture.owner, &pending.request)
+        .expect("activate exact fresh candidate before stale completion");
+    fixture.runtime.close_window_events(&fixture.window_id);
+    fixture.runtime.handle_agent_launch_prepared(prepared);
+    drain_queued_blocking_tasks(&tasks);
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read activated generation"),
+        Some(fixture.binding.identity.clone()),
+    );
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read activated attempt")
+        .expect("activated attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Activated,
+    );
+    let session = gwt_agent::Session::load(
+        &fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id)),
+    )
+    .expect("activated candidate remains discoverable");
+    assert_eq!(session.execution_binding.as_ref(), Some(&fixture.binding));
+    assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!session.restore_window_on_startup);
+}
+
+fn queued_fresh_execution_completion_fixture(
+    temp_root: &Path,
+    operation_id: &str,
+) -> (
+    PendingFreshExecutionFixture,
+    Arc<Mutex<Vec<UserEvent>>>,
+    BlockingTestTaskQueue,
+    AgentLaunchCompletion,
+    PendingFreshExecutionLaunch,
+) {
+    let mut fixture = pending_fresh_execution_fixture(temp_root, operation_id);
+    let pending = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .remove(&fixture.window_id)
+        .expect("fresh candidate is only durable before worker handoff");
+    fixture
+        .runtime
+        .active_agent_sessions
+        .remove(&fixture.window_id);
+    fixture
+        .runtime
+        .agent_capability_tokens
+        .remove(&fixture.window_id);
+    fixture
+        .runtime
+        .launch_wizard_cache
+        .forget_session(&fixture.candidate_session_id);
+    let (proxy, recorded) = AppEventProxy::stub();
+    fixture.runtime.proxy = proxy;
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec!["/d".into(), "/s".into(), "/c".into(), "exit /b 0".into()],
+        )
+    } else {
+        ("/bin/sh".to_string(), vec!["-c".into(), "exit 0".into()])
+    };
+    let mut completion = bound_runtime_launch_completion(
+        &fixture.repo,
+        &fixture.candidate_session_id,
+        pending.session_identity.clone(),
+        command,
+        args,
+    );
+    completion.0.env.insert(
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.into(),
+        fixture.token.clone(),
+    );
+    completion.0.env.insert(
+        gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.into(),
+        pending.readiness_nonce.clone(),
+    );
+    completion.2 = "work/issue-2359".into();
+    completion.6 = Some(fixture.owner.number);
+    completion.7 = Some("origin/develop".into());
+    completion.9 = gwt_agent::SessionMode::Normal;
+    (fixture, recorded, tasks, completion, pending)
+}
+
+#[test]
 fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predecessor() {
     let _env_guard = env_test_lock()
         .lock()
@@ -24840,13 +25707,237 @@ fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predeces
     let _home = ScopedGwtHome::set(temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-spawn-operation");
 
-    let events = fixture.runtime.handle_launch_complete(
+    let events = fixture.runtime.handle_launch_complete_and_drain(
         fixture.window_id.clone(),
         Err("candidate spawn failed".to_string()),
     );
 
     assert!(!events.is_empty());
     assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn fresh_execution_generic_close_aborts_candidate_in_background() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture_with_predecessor_status(
+        temp.path(),
+        "fresh-generic-close",
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        true,
+    );
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let mut pending = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id].clone();
+    let mut candidate = gwt_agent::Session::load(
+        &fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id)),
+    )
+    .expect("candidate seed");
+    let mut active = fixture.runtime.active_agent_sessions[&fixture.window_id].clone();
+    let baseline = fixture.runtime.window_scoped_state_entry_count()
+        - fixture
+            .runtime
+            .window_scoped_state_residue(&fixture.window_id)
+            .len();
+    let root_pid = sysinfo::Pid::from_u32(std::process::id());
+    let mut system = sysinfo::System::new();
+    let mut rss_bytes = Vec::new();
+
+    // AC-2/AC-3: the same host runtime must accept the next attempt without
+    // retaining the failed candidate, PTY, writer, or window buffers.
+    for round in 0..5 {
+        if round > 0 {
+            let runtime = &mut fixture.runtime;
+            pending.operation_id = format!("fresh-generic-close-{round}");
+            candidate
+                .set_execution_binding(None)
+                .expect("clear previous launch seed binding");
+            candidate.id = format!("candidate-{}", pending.operation_id);
+            pending.request.operation_id = pending.operation_id.clone();
+            pending.request.initial_session_id = candidate.id.clone();
+            pending.request.session_binding_id = format!("binding-{}", pending.operation_id);
+            pending.request.requested_at = Utc::now();
+            gwt::cli::execution_state::prepare_successor(
+                &fixture.repo,
+                fixture.owner,
+                &pending.request,
+            )
+            .expect("prepare next launch after failed close");
+            pending.binding.identity =
+                gwt::cli::execution_state::prepared_successor_execution_binding(
+                    &fixture.repo,
+                    fixture.owner,
+                    &pending.request,
+                )
+                .expect("next candidate binding");
+            pending.binding.session_id = candidate.id.clone();
+            candidate
+                .set_execution_binding(Some(pending.binding.clone()))
+                .expect("bind next candidate");
+            candidate
+                .save(&runtime.sessions_dir)
+                .expect("save next candidate");
+            pending.session_identity =
+                gwt_agent::SessionExecutionIdentity::for_binding(&candidate, &pending.binding)
+                    .expect("next candidate identity");
+            persist_durable_launch_recovery(
+                &runtime.sessions_dir,
+                DurableLaunchRecoveryKind::FreshSuccessor {
+                    operation_id: pending.operation_id.clone(),
+                },
+                &candidate.id,
+                &fixture.repo,
+                &fixture.repo,
+                fixture.owner,
+                Some(&pending.binding),
+                Some(&gwt_agent::AgentId::Codex),
+            )
+            .expect("persist next recovery receipt");
+            let capability = fixture
+                .issuer
+                .issue_prepared(&fixture.repo, &candidate.id, pending.binding.clone())
+                .expect("issue next Prepared capability");
+            let raw_id = runtime
+                .tab_mut("tab-1")
+                .unwrap()
+                .workspace
+                .add_window(WindowPreset::Agent, canvas_bounds())
+                .id;
+            runtime.register_window("tab-1", &raw_id);
+            fixture.window_id = combined_window_id("tab-1", &raw_id);
+            fixture.operation_id = pending.operation_id.clone();
+            fixture.candidate_session_id = candidate.id.clone();
+            fixture.binding = pending.binding.clone();
+            fixture.token = capability.token.clone();
+            active.window_id = fixture.window_id.clone();
+            active.session_id = candidate.id.clone();
+            runtime
+                .active_agent_sessions
+                .insert(fixture.window_id.clone(), active.clone());
+            runtime
+                .agent_capability_tokens
+                .insert(fixture.window_id.clone(), capability.token);
+            runtime
+                .pending_fresh_execution_launches
+                .insert(fixture.window_id.clone(), pending.clone());
+            runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+        }
+        insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+        let pty = fixture.runtime.runtimes[&fixture.window_id].pty.clone();
+        let closed = fixture.runtime.close_window_outcome(&fixture.window_id);
+        assert!(closed.closed);
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &fixture.repo,
+                fixture.owner,
+                &fixture.operation_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+            "close acceptance must not perform durable rollback",
+        );
+        assert!(pty.try_wait().expect("probe live child").is_none());
+        for task in std::mem::take(&mut *tasks.lock().expect("queued finalizers")) {
+            task();
+        }
+        assert!(pty.try_wait().expect("probe reaped child").is_some());
+        drop(pty);
+        assert_pending_fresh_execution_was_rolled_back(&fixture);
+        assert_eq!(fixture.runtime.window_scoped_state_entry_count(), baseline);
+        assert!(fixture.runtime.pty_writers.read().unwrap().is_empty());
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[root_pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        rss_bytes.push(
+            system
+                .process(root_pid)
+                .expect("measured host process")
+                .memory(),
+        );
+    }
+    eprintln!(
+        "Issue #4959 AC-3: {}",
+        serde_json::json!({
+            "failed_launches": 5,
+            "host_rss_bytes_after_cleanup": rss_bytes,
+            "retained_window_entries": fixture.runtime.window_scoped_state_entry_count(),
+            "retained_pty_writers": fixture.runtime.pty_writers.read().unwrap().len(),
+        })
+    );
+}
+
+#[test]
+fn fresh_execution_generic_close_preserves_activated_or_replaced_candidate() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    for activated in [false, true] {
+        let operation = if activated {
+            "close-activated"
+        } else {
+            "close-replaced"
+        };
+        let mut fixture = pending_fresh_execution_fixture(temp.path(), operation);
+        let request = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+            .request
+            .clone();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        fixture.runtime.blocking_tasks = spawner;
+        let closed = fixture.runtime.close_window_outcome(&fixture.window_id);
+        assert!(closed.closed);
+        if activated {
+            gwt::cli::execution_state::activate_successor(&fixture.repo, fixture.owner, &request)
+                .expect("activation wins before finalizer");
+        } else {
+            replace_fresh_candidate_session_incarnation(
+                &fixture.runtime.sessions_dir,
+                &fixture.candidate_session_id,
+            );
+        }
+        let candidate_path = fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id));
+        let before = fs::read(&candidate_path).expect("candidate before finalizer");
+        for task in std::mem::take(&mut *tasks.lock().expect("queued finalizers")) {
+            task();
+        }
+        assert_eq!(
+            fs::read(&candidate_path).expect("retained candidate"),
+            before
+        );
+        assert!(durable_launch_recovery_exists(
+            &fixture.runtime.sessions_dir,
+            &fixture.candidate_session_id
+        ));
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &fixture.repo,
+                fixture.owner,
+                &fixture.operation_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status,
+            if activated {
+                gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+            } else {
+                gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
+            },
+        );
+    }
 }
 
 #[test]
@@ -25037,7 +26128,7 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
         .expect("authenticate activated successor capability");
     assert!(grant.principal().authorizes_producing_mutation());
 
-    let events = runtime.handle_launch_complete(window_id.clone(), Ok(completion));
+    let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
     assert!(events.iter().all(|event| !matches!(
         &event.event,
         BackendEvent::TerminalStatus {
@@ -25314,7 +26405,7 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
     let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
     runtime.agent_capability_issuer = Some(issuer);
     let window_id = combined_window_id("tab-1", "agent-manual-terminal");
-    let launch_events = runtime.handle_launch_complete(window_id.clone(), Ok(completion));
+    let launch_events = runtime.handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
     let runtime_incarnation = runtime
         .runtimes
         .get(&window_id)
@@ -25345,8 +26436,12 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
             if detail == "Waiting for authenticated SessionStart..."
     )));
     let candidate_binding = pending.binding.identity.clone();
-    let ready_events =
+    let (spawner, _) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let queued_events =
         runtime.finalize_fresh_execution_launch_session_start(&window_id, Some(&readiness_nonce));
+    assert!(queued_events.is_empty());
+    let ready_events = commit_pending_fresh_execution(&mut runtime);
     assert!(
         !ready_events.is_empty(),
         "authenticated readiness must finish the manual successor"
@@ -25738,9 +26833,10 @@ fn fresh_execution_prevalidation_conflict_leaves_work_writable_and_retains_candi
         .readiness_nonce
         .clone();
 
-    let _events = fixture
+    fixture
         .runtime
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+    let _events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     let attempt = gwt::cli::execution_state::continuation_attempt_for_operation(
         &fixture.repo,
@@ -26446,7 +27542,7 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
         None,
         Some(&old_work_context),
         WorkspaceLaunchProjectionKind::StartWork,
-        &HashSet::from([session_id.to_string()]),
+        Some(&HashSet::from([session_id.to_string()])),
     )
     .expect("publish old genesis Work");
     let old_work_id = gwt_core::workspace_projection::load_workspace_work_items(&repo)
@@ -27934,7 +29030,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
             vec!["-lc".to_string(), "sleep 30".to_string()],
         )
     };
-    let events = fixture.runtime.handle_launch_complete(
+    let events = fixture.runtime.handle_launch_complete_and_drain(
         fixture.window_id.clone(),
         Ok((
             ProcessLaunch {
@@ -28406,7 +29502,8 @@ fn app_runtime_antigravity_missing_binary_launch_error_is_actionable() {
 No viable candidates found in PATH \
 \"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
 
-    let events = runtime.handle_launch_complete(window_id.clone(), Err(raw_error.to_string()));
+    let events =
+        runtime.handle_launch_complete_and_drain(window_id.clone(), Err(raw_error.to_string()));
 
     let detail = events
         .iter()
@@ -28502,7 +29599,8 @@ fn app_runtime_opencode_missing_binary_launch_error_is_actionable() {
 No viable candidates found in PATH \
 \"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
 
-    let events = runtime.handle_launch_complete(window_id.clone(), Err(raw_error.to_string()));
+    let events =
+        runtime.handle_launch_complete_and_drain(window_id.clone(), Err(raw_error.to_string()));
 
     let detail = events
         .iter()
@@ -28744,7 +29842,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
         )
     };
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok((
             ProcessLaunch {
@@ -28959,7 +30057,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             vec!["-lc".to_string(), "exit 0".to_string()],
         )
     };
-    let _ = runtime.handle_launch_complete(
+    let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok((
             ProcessLaunch {
@@ -29254,7 +30352,7 @@ fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_r
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
-    let _ = runtime.handle_launch_complete(
+    let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Err("launch failed before process spawn".to_string()),
     );
@@ -29416,7 +30514,7 @@ fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
     assert!(tab.workspace.close_window(&address.raw_id));
 
     let completion_events =
-        runtime.handle_launch_complete(window_id, Err("Window not found".to_string()));
+        runtime.handle_launch_complete_and_drain(window_id, Err("Window not found".to_string()));
 
     assert!(completion_events.iter().any(|event| {
         matches!(
@@ -29468,7 +30566,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
         )
     };
 
-    let _events = runtime.handle_launch_complete(
+    let _events = runtime.handle_launch_complete_and_drain(
         window_id,
         Ok((
             ProcessLaunch {
@@ -29560,7 +30658,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
         )
     };
 
-    let _events = runtime.handle_launch_complete(
+    let _events = runtime.handle_launch_complete_and_drain(
         window_id,
         Ok((
             ProcessLaunch {
@@ -29663,7 +30761,7 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
         )
     };
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok((
             ProcessLaunch {
@@ -29777,7 +30875,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
         )
     };
 
-    let _events = runtime.handle_launch_complete(
+    let _events = runtime.handle_launch_complete_and_drain(
         window_id,
         Ok((
             ProcessLaunch {
@@ -29875,7 +30973,7 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
         )
     };
 
-    let _events = runtime.handle_launch_complete(
+    let _events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok((
             ProcessLaunch {
@@ -29983,7 +31081,7 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
         )
     };
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok((
             ProcessLaunch {
@@ -30225,7 +31323,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
         )
     };
 
-    let _events = runtime.handle_launch_complete(
+    let _events = runtime.handle_launch_complete_and_drain(
         window_id,
         Ok((
             ProcessLaunch {
@@ -30269,6 +31367,852 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
         item.execution_containers[0].branch.as_deref(),
         Some("work/issue-3096")
     );
+}
+
+impl AppRuntime {
+    fn finish_queued_delivery_acks(&mut self, tasks: &BlockingTestTaskQueue) -> Vec<OutboundEvent> {
+        drain_queued_blocking_tasks(tasks);
+        let AppEventProxy::Stub(recorded) = &self.proxy else {
+            panic!("recording proxy required")
+        };
+        let recorded = recorded.clone();
+        let mut outbound = Vec::new();
+        loop {
+            let acknowledged = {
+                let mut events = recorded.lock().unwrap();
+                events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            recorded_project_payload(event),
+                            UserEvent::IssueMonitorLaunchDeliveryAcknowledged(_)
+                        )
+                    })
+                    .map(|index| into_recorded_project_payload(events.remove(index)))
+            };
+            let Some(UserEvent::IssueMonitorLaunchDeliveryAcknowledged(ack)) = acknowledged else {
+                break;
+            };
+            outbound.extend(self.handle_issue_monitor_launch_delivery_ack(*ack));
+        }
+        outbound
+    }
+
+    fn issue_monitor_launch_succeeded_and_drain(
+        &mut self,
+        root: &Path,
+        issue_number: u64,
+        window_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        let previous = std::mem::replace(&mut self.blocking_tasks, spawner);
+        let mut events = self.issue_monitor_launch_succeeded_events(root, issue_number, window_id);
+        events.extend(self.finish_queued_delivery_acks(&tasks));
+        self.blocking_tasks = previous;
+        events
+    }
+
+    /// Drive the same queued preparation and GUI completion used in production.
+    pub(crate) fn handle_launch_complete_and_drain(
+        &mut self,
+        window_id: String,
+        result: AgentLaunchResult,
+    ) -> Vec<OutboundEvent> {
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        let previous_spawner = std::mem::replace(&mut self.blocking_tasks, spawner);
+        fn recording(proxy: &AppEventProxy) -> Arc<Mutex<Vec<UserEvent>>> {
+            match proxy {
+                AppEventProxy::Stub(events) => events.clone(),
+                AppEventProxy::Project { inner, .. } => recording(inner),
+                AppEventProxy::Real(_) => panic!("test launch must use a recording proxy"),
+            }
+        }
+        let recorded = recording(&self.proxy);
+        let mut outbound = self.handle_launch_complete(window_id, result);
+        loop {
+            drain_queued_blocking_tasks(&tasks);
+            let completion = {
+                let mut events = recorded.lock().expect("event log");
+                events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            recorded_project_payload(event),
+                            UserEvent::AgentLaunchPrepared(_)
+                                | UserEvent::IssueMonitorLaunchDeliveryAcknowledged(_)
+                                | UserEvent::RuntimeHook(_)
+                                | UserEvent::DaemonRuntimeHook(_)
+                        )
+                    })
+                    .map(|index| into_recorded_project_payload(events.remove(index)))
+            };
+            match completion {
+                Some(UserEvent::AgentLaunchPrepared(prepared)) => {
+                    outbound.extend(self.handle_agent_launch_prepared(*prepared))
+                }
+                Some(UserEvent::IssueMonitorLaunchDeliveryAcknowledged(prepared)) => {
+                    outbound.extend(self.handle_issue_monitor_launch_delivery_ack(*prepared))
+                }
+                Some(UserEvent::RuntimeHook(event)) => {
+                    outbound.extend(self.handle_runtime_hook_event(event))
+                }
+                Some(UserEvent::DaemonRuntimeHook(event)) => {
+                    outbound.extend(self.handle_daemon_runtime_hook_event(event))
+                }
+                _ => break,
+            }
+        }
+        self.blocking_tasks = previous_spawner;
+        outbound
+    }
+}
+
+pub(super) fn queued_agent_completion_fixture(
+    temp_root: &Path,
+) -> (
+    AppRuntime,
+    Arc<Mutex<Vec<UserEvent>>>,
+    BlockingTestTaskQueue,
+    String,
+    AgentLaunchResult,
+) {
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp_root.into(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let window_id = combined_window_id("tab-1", &tab.workspace.persisted().windows[0].id);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp_root, vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let session = gwt_agent::Session::new(temp_root, "feature/test", gwt_agent::AgentId::Codex);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("persist launch Session");
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), "exit 0".to_string()],
+        )
+    };
+    let result = Ok((
+        ProcessLaunch {
+            initial_prompt_file: None,
+            command,
+            args,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: Some(temp_root.into()),
+            resource_policy: None,
+        },
+        session.id,
+        "feature/test".into(),
+        "Agent".into(),
+        temp_root.into(),
+        gwt_agent::AgentId::Codex,
+        None,
+        None,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        gwt_agent::SessionMode::Normal,
+        false,
+        temp_root.display().to_string().into(),
+    ));
+    (runtime, recorded, tasks, window_id, result)
+}
+
+fn take_prepared_agent_launch(recorded: &Arc<Mutex<Vec<UserEvent>>>) -> super::PreparedAgentLaunch {
+    let mut events = recorded.lock().expect("event log");
+    let index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::AgentLaunchPrepared(_)
+            )
+        })
+        .expect("agent launch preparation completion");
+    match into_recorded_project_payload(events.remove(index)) {
+        UserEvent::AgentLaunchPrepared(prepared) => *prepared,
+        _ => unreachable!("matched agent launch preparation"),
+    }
+}
+
+#[test]
+fn launch_complete_replays_session_start_received_before_pane_install() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    assert!(runtime
+        .handle_launch_complete(window_id.clone(), result)
+        .is_empty());
+    assert!(runtime
+        .handle_runtime_hook_event(runtime_hook_state_for_event(
+            "Waiting",
+            "SessionStart",
+            &session_id
+        ))
+        .is_empty());
+    assert_eq!(
+        runtime.pending_launch_completions[&window_id]
+            .early_hooks
+            .len(),
+        1
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    runtime.handle_agent_launch_prepared(prepared);
+    assert_eq!(
+        runtime.active_agent_sessions[&window_id].session_id,
+        session_id
+    );
+    assert!(
+        !runtime.window_hook_states.contains_key(&window_id),
+        "apply only requeues early readiness"
+    );
+    let hook = {
+        let mut events = recorded.lock().expect("event log");
+        let index = events
+            .iter()
+            .position(|event| matches!(recorded_project_payload(event), UserEvent::RuntimeHook(_)))
+            .expect("requeued SessionStart");
+        into_recorded_project_payload(events.remove(index))
+    };
+    if let UserEvent::RuntimeHook(event) = hook {
+        runtime.handle_runtime_hook_event(event);
+    }
+    assert_eq!(
+        runtime.window_hook_states[&window_id],
+        WindowProcessStatus::Idle
+    );
+    assert!(runtime.pending_launch_completions.is_empty());
+    drain_queued_blocking_tasks(&tasks);
+}
+
+#[test]
+fn launch_complete_replayed_session_start_precedes_later_queued_hook() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    runtime.handle_launch_complete(window_id.clone(), result);
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Waiting",
+        "SessionStart",
+        &session_id,
+    ));
+    drain_queued_blocking_tasks(&tasks);
+    // The worker completion is already queued when the child's later hook
+    // arrives. Applying the completion must replay SessionStart before it.
+    recorded
+        .lock()
+        .expect("event log")
+        .push(UserEvent::RuntimeHook(runtime_hook_state_for_event(
+            "Running",
+            "PreToolUse",
+            &session_id,
+        )));
+    runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    let mut hooks = Vec::new();
+    loop {
+        let hook = {
+            let mut events = recorded.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| {
+                    matches!(recorded_project_payload(event), UserEvent::RuntimeHook(_))
+                })
+                .map(|index| into_recorded_project_payload(events.remove(index)))
+        };
+        let Some(UserEvent::RuntimeHook(event)) = hook else {
+            break;
+        };
+        hooks.push(event.source_event.clone());
+        runtime.handle_runtime_hook_event(event);
+    }
+    assert_eq!(
+        hooks,
+        [Some("SessionStart".into()), Some("PreToolUse".into())],
+        "early readiness must keep its order relative to the existing queue"
+    );
+    assert_eq!(
+        runtime.window_hook_states[&window_id],
+        WindowProcessStatus::Running
+    );
+    drain_queued_blocking_tasks(&tasks);
+}
+
+#[test]
+fn continue_work_launch_complete_canceled_before_pty_aborts_exact_candidate() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, result) =
+        queued_continue_work_completion_fixture(temp.path());
+    let pending = fixture.runtime.pending_continue_work[&fixture.window_id].clone();
+    fixture
+        .runtime
+        .handle_launch_complete(fixture.window_id.clone(), result);
+    fixture.runtime.close_window_events(&fixture.window_id);
+    drain_queued_blocking_tasks(&tasks);
+    fixture
+        .runtime
+        .handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    drain_queued_blocking_tasks(&tasks);
+    assert_aborted_continue_work_launch(&fixture, &pending);
+}
+
+#[test]
+fn continue_work_launch_complete_stale_after_pty_aborts_exact_candidate() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, result) =
+        queued_continue_work_completion_fixture(temp.path());
+    let pending = fixture.runtime.pending_continue_work[&fixture.window_id].clone();
+    fixture
+        .runtime
+        .handle_launch_complete(fixture.window_id.clone(), result);
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    fixture.runtime.close_window_events(&fixture.window_id);
+    fixture.runtime.handle_agent_launch_prepared(prepared);
+    drain_queued_blocking_tasks(&tasks);
+    assert_aborted_continue_work_launch(&fixture, &pending);
+}
+
+#[test]
+fn continue_work_launch_complete_stale_preserves_activated_generation() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, result) =
+        queued_continue_work_completion_fixture(temp.path());
+    let pending = fixture.runtime.pending_continue_work[&fixture.window_id].clone();
+    fixture
+        .runtime
+        .handle_launch_complete(fixture.window_id.clone(), result);
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    let PendingContinueWorkExecution::Successor(request) = &pending.execution else {
+        unreachable!("fixture prepares a successor")
+    };
+    gwt::cli::execution_state::activate_successor(&fixture.repo, fixture.owner, request)
+        .expect("activate candidate before completion is discarded");
+    fixture.runtime.close_window_events(&fixture.window_id);
+    fixture.runtime.handle_agent_launch_prepared(prepared);
+    drain_queued_blocking_tasks(&tasks);
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read committed generation"),
+        Some(pending.binding.identity.clone()),
+    );
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &pending.operation_id,
+        )
+        .expect("read committed attempt")
+        .expect("committed attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Activated,
+    );
+    let retained = gwt_agent::Session::load(
+        &fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id)),
+    )
+    .expect("activated Session remains discoverable");
+    assert_eq!(retained.execution_binding.as_ref(), Some(&pending.binding));
+}
+
+fn queued_continue_work_completion_fixture(
+    temp_root: &Path,
+) -> (
+    ContinueWorkLaunchFailureFixture,
+    Arc<Mutex<Vec<UserEvent>>>,
+    BlockingTestTaskQueue,
+    AgentLaunchResult,
+) {
+    let mut fixture = continue_work_launch_failure_fixture(temp_root);
+    // The prepared candidate has not yet installed a GUI runtime/session entry.
+    fixture.runtime.active_agent_sessions.clear();
+    let (proxy, recorded) = AppEventProxy::stub();
+    fixture.runtime.proxy = proxy;
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec!["/d".into(), "/s".into(), "/c".into(), "exit /b 0".into()],
+        )
+    } else {
+        ("/bin/sh".to_string(), vec!["-c".into(), "exit 0".into()])
+    };
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&fixture.candidate_session)
+        .expect("candidate identity")
+        .expect("bound candidate");
+    let mut result = bound_runtime_launch_completion(
+        &fixture.repo,
+        fixture.candidate_session_id,
+        identity,
+        command,
+        args,
+    );
+    result.2 = "work/issue-2359".into();
+    result.6 = Some(fixture.owner.number);
+    (fixture, recorded, tasks, Ok(result))
+}
+
+#[test]
+fn launch_failure_status_preserves_worker_profile_and_uses_background_snapshot_order() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = &result.as_ref().expect("fixture launch").1;
+    let mut session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("fixture Session");
+    session.model = Some("worker-profile".into());
+    runtime.launch_wizard_cache.record_session(session.clone());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), issue_monitor_feedback(42));
+    assert!(runtime
+        .handle_launch_complete(window_id, Err("binary missing".into()))
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    session.model = Some("gui-profile".into());
+    session.updated_at += chrono::Duration::seconds(1);
+    runtime.launch_wizard_cache.record_session(session);
+
+    let outbound = runtime.handle_agent_launch_prepared(prepared);
+    assert!(outbound.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::IssueMonitorLaunchFailed {
+            issue_number: 42,
+            ..
+        }
+    )));
+    assert!(
+        !outbound
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })),
+        "prepared apply must leave the single status broadcast to the background route"
+    );
+    let snapshots = recorded
+        .lock()
+        .expect("event log")
+        .iter()
+        .filter_map(|event| match recorded_project_payload(event) {
+            UserEvent::IssueMonitorDaemonStatus { status, .. } => {
+                Some(("status", Some(status.launch_profile_summary.clone())))
+            }
+            UserEvent::IssueMonitorDaemonInbox { .. } => Some(("inbox", None)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].0, "status");
+    assert_eq!(snapshots[1], ("inbox", None));
+    let summary = snapshots[0].1.as_ref().expect("prepared profile summary");
+    assert!(summary.contains("worker-profile"));
+    assert!(!summary.contains("gui-profile"));
+}
+
+#[test]
+fn launch_failure_dispatch_uses_worker_receipt_when_owner_ledger_is_unreadable() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, recorded, tasks, _) = queued_continue_work_completion_fixture(temp.path());
+    let pending = fixture.runtime.pending_continue_work[&fixture.window_id].clone();
+    assert!(fixture
+        .runtime
+        .handle_launch_complete(
+            fixture.window_id.clone(),
+            Err("candidate spawn failed".into()),
+        )
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    assert_aborted_continue_work_launch(&fixture, &pending);
+    let prepared = take_prepared_agent_launch(&recorded);
+    let artifacts = exact_continue_authority_artifacts(&fixture.repo, fixture.owner);
+    fs::write(
+        artifacts.last().expect("owner ledger"),
+        b"invalid owner ledger",
+    )
+    .expect("make post-worker ledger unreadable");
+    let authority_before = snapshot_optional_files(&artifacts);
+    let work_before = tracked_work_event_store_snapshot(&fixture.repo);
+    let events = fixture.runtime.handle_agent_launch_prepared(prepared);
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                ..
+            } if code == "launch_failed"
+        )),
+        "GUI failure apply must use the committed worker receipt"
+    );
+    assert!(!fixture
+        .runtime
+        .pending_continue_work
+        .contains_key(&fixture.window_id));
+    assert_optional_files_unchanged(&authority_before);
+    assert_eq!(
+        tracked_work_event_store_snapshot(&fixture.repo),
+        work_before
+    );
+}
+
+#[test]
+fn launch_failure_dispatch_admission_rejection_retains_authority() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut fixture, _, _, _) = queued_continue_work_completion_fixture(temp.path());
+    fixture.runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    fixture.runtime.pending_launch_feedback_contexts.insert(
+        fixture.window_id.clone(),
+        issue_monitor_feedback(fixture.owner.number),
+    );
+    fixture
+        .runtime
+        .agent_capability_tokens
+        .insert(fixture.window_id.clone(), "admission-capability".into());
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let candidate_before = fs::read(&candidate_path).expect("candidate Session");
+    let work_before = tracked_work_event_store_snapshot(&fixture.repo);
+    let events = fixture.runtime.handle_launch_complete(
+        fixture.window_id.clone(),
+        Err("candidate spawn failed".into()),
+    );
+    assert!(
+        fixture
+            .runtime
+            .pending_launch_feedback_contexts
+            .contains_key(&fixture.window_id),
+        "admission rejection must retain launch feedback for recovery"
+    );
+    assert!(fixture
+        .runtime
+        .pending_continue_work
+        .contains_key(&fixture.window_id));
+    assert_eq!(
+        fixture
+            .runtime
+            .agent_capability_tokens
+            .get(&fixture.window_id)
+            .map(String::as_str),
+        Some("admission-capability")
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert_eq!(
+        fs::read(candidate_path).expect("retained candidate"),
+        candidate_before
+    );
+    assert_optional_files_unchanged(&authority_before);
+    assert_eq!(
+        tracked_work_event_store_snapshot(&fixture.repo),
+        work_before
+    );
+}
+
+fn assert_aborted_continue_work_launch(
+    fixture: &ContinueWorkLaunchFailureFixture,
+    pending: &PendingContinueWork,
+) {
+    assert!(
+        !fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id))
+            .exists(),
+        "a canceled prepared continuation must not remain restorable",
+    );
+    assert!(!fixture.candidate_runtime_path.exists());
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &pending.operation_id,
+        )
+        .expect("read canceled attempt")
+        .expect("canceled attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read predecessor generation"),
+        Some(pending.predecessor_binding.clone()),
+    );
+    let work = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
+        .expect("read unchanged Work")
+        .expect("selected Work");
+    assert!(work
+        .work_items
+        .iter()
+        .all(|item| { item.id != format!("work-session-{}", fixture.candidate_session_id) }));
+    assert_eq!(
+        work.work_items
+            .iter()
+            .find(|item| item.id == fixture.selected_work_id)
+            .expect("selected Work remains")
+            .status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+    );
+}
+
+#[test]
+fn launch_complete_manual_spawn_failure_keeps_session_for_restart() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, mut result) =
+        queued_agent_completion_fixture(temp.path());
+    let completion = result.as_mut().expect("prepared launch");
+    let session_id = completion.1.clone();
+    let custom_agent = gwt_agent::AgentId::Custom("missing-restart-fixture".into());
+    completion.0.command = temp
+        .path()
+        .join("missing-agent-program")
+        .display()
+        .to_string();
+    completion.0.args.clear();
+    completion.5 = custom_agent.clone();
+    gwt_agent::update_session(&runtime.sessions_dir, &session_id, |session| {
+        session.agent_id = custom_agent;
+        Ok(())
+    })
+    .expect("save isolated custom-agent identity");
+    runtime.handle_launch_complete(window_id.clone(), result);
+    drain_queued_blocking_tasks(&tasks);
+    runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    drain_queued_blocking_tasks(&tasks);
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Error)
+    );
+    let address = runtime.window_lookup[&window_id].clone();
+    assert_eq!(
+        runtime
+            .tab(&address.tab_id)
+            .unwrap()
+            .workspace
+            .window(&address.raw_id)
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some(session_id.as_str()),
+        "a retained manual error pane needs its Session for Restart",
+    );
+    // The unconfigured custom agent cannot launch a provider; this assertion
+    // verifies Restart admitted the retained Session and reserved its retry.
+    let events = runtime.restart_window_events(&window_id);
+    assert!(!events.is_empty());
+    assert!(runtime
+        .pending_auto_resume_sources
+        .values()
+        .any(|source| source == &session_id));
+    drain_queued_blocking_tasks(&tasks);
+}
+
+#[test]
+fn launch_complete_rejects_closed_window_and_defers_pty_cleanup() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    runtime.handle_launch_complete(window_id.clone(), result);
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    let address = runtime
+        .window_lookup
+        .remove(&window_id)
+        .expect("window address");
+    runtime
+        .tab_mut(&address.tab_id)
+        .unwrap()
+        .workspace
+        .close_window(&address.raw_id);
+    assert!(runtime.handle_agent_launch_prepared(prepared).is_empty());
+    assert!(!runtime.runtimes.contains_key(&window_id));
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "PTY cleanup must run off the GUI thread"
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("closed Session");
+    assert!(
+        !session.restore_window_on_startup,
+        "stale completion must not restore a closed pane"
+    );
+    assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+}
+
+#[test]
+fn launch_complete_workers_preserve_other_launches_when_finishing_out_of_order() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, first_window, mut first_result) =
+        queued_agent_completion_fixture(temp.path());
+    first_result.as_mut().unwrap().7 = Some("develop".into());
+    let second_window = runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    let second_window = combined_window_id("tab-1", &second_window.id);
+    runtime.rebuild_window_lookup();
+    let mut second_result = first_result.clone();
+    let second_session =
+        gwt_agent::Session::new(temp.path(), "feature/test", gwt_agent::AgentId::Codex);
+    second_session
+        .save(&runtime.sessions_dir)
+        .expect("persist second Session");
+    let first_session_id = first_result.as_ref().unwrap().1.clone();
+    second_result.as_mut().unwrap().1 = second_session.id.clone();
+    let context = WorkspaceResumeContext {
+        title: None,
+        owner: None,
+        summary: None,
+        next_action: None,
+    };
+    runtime
+        .pending_workspace_resume_contexts
+        .insert(first_window.clone(), context.clone());
+    runtime
+        .pending_workspace_resume_contexts
+        .insert(second_window.clone(), context);
+    runtime.handle_launch_complete(first_window, first_result);
+    runtime.handle_launch_complete(second_window, second_result);
+    // The queued spawner deliberately executes B before A, with both inputs
+    // captured before either new Session is installed in the GUI registry.
+    drain_queued_blocking_tasks(&tasks);
+    for _ in 0..2 {
+        runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    }
+    let projection = gwt_core::workspace_projection::load_workspace_projection(temp.path())
+        .expect("load Work projection")
+        .expect("Work projection exists");
+    let sessions = projection
+        .agents
+        .iter()
+        .map(|agent| agent.session_id.as_str())
+        .collect::<HashSet<_>>();
+    assert!(sessions.contains(first_session_id.as_str()));
+    assert!(
+        sessions.contains(second_session.id.as_str()),
+        "worker A must preserve worker B's published agent"
+    );
+    drain_queued_blocking_tasks(&tasks);
+}
+
+#[test]
+fn launch_complete_dropped_prepared_handoff_defers_exact_cleanup() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    runtime.handle_launch_complete(window_id, result);
+    drain_queued_blocking_tasks(&tasks);
+    // An already accepted event can be discarded when its delivery queue closes.
+    // Its one-shot owner must still settle the uninstalled pane off the GUI thread.
+    drop(take_prepared_agent_launch(&recorded));
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "lost handoff queues cleanup"
+    );
+    assert!(runtime.runtimes.is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("settled uninstalled Session");
+    assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!session.restore_window_on_startup);
+}
+
+#[test]
+fn launch_complete_defers_all_session_and_pty_work() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().into(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let window_id = combined_window_id("tab-1", &tab.workspace.persisted().windows[0].id);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let events = runtime.handle_launch_complete(
+        window_id,
+        Ok((
+            ProcessLaunch {
+                initial_prompt_file: None,
+                command: "nonexistent-launch-complete-regression".into(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: None,
+                resource_policy: None,
+            },
+            "session-missing".into(),
+            "work/test".into(),
+            "Agent".into(),
+            temp.path().into(),
+            gwt_agent::AgentId::Codex,
+            None,
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            gwt_agent::SessionMode::Normal,
+            false,
+            temp.path().display().to_string().into(),
+        )),
+    );
+    assert!(events.is_empty(), "dispatch must only enqueue preparation");
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    assert!(runtime.active_agent_sessions.is_empty());
+    assert!(runtime.runtimes.is_empty());
 }
 
 #[test]
@@ -30336,7 +32280,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         }
     };
 
-    let _first_events = runtime.handle_launch_complete(
+    let _first_events = runtime.handle_launch_complete_and_drain(
         combined_window_id("tab-1", "agent-1"),
         Ok((
             launch(worktree_one.clone()),
@@ -30353,7 +32297,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             worktree_one.display().to_string().into(),
         )),
     );
-    let second_events = runtime.handle_launch_complete(
+    let second_events = runtime.handle_launch_complete_and_drain(
         combined_window_id("tab-1", "agent-2"),
         Ok((
             launch(worktree_two.clone()),
@@ -30608,6 +32552,87 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
     .expect("managed hook health");
 
     assert_eq!(health.last_event.as_deref(), Some("UserPromptSubmit"));
+    // The selection timestamp must also reuse the unchanged runtime snapshot,
+    // even when another session has a valid but older timestamp.
+    let latest = gwt_agent::runtime_state_path(&sessions_dir, &second.session_id);
+    let metadata = fs::metadata(&latest).unwrap();
+    fs::write(&latest, vec![b'x'; metadata.len() as usize]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&latest)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+        .unwrap();
+    let reused = super::workspace_views::managed_hook_health_view_for_worktree(
+        &worktree,
+        &sessions_dir,
+        &[&first, &second],
+        &gwt::cli::hook::health::ManagedHookFailureSnapshot::read(),
+    )
+    .expect("cached hook health");
+    assert_eq!(reused.last_event.as_deref(), Some("UserPromptSubmit"));
+}
+
+#[test]
+fn managed_hook_health_for_one_hundred_forty_rows_reuses_session_json_within_one_second() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let _hook_bin = ScopedEnvVar::unset("GWT_HOOK_BIN");
+    let sessions_dir = temp.path().join("sessions");
+    let sessions = (0..140)
+        .map(|index| {
+            let mut session =
+                sample_active_agent_session("tab-1", &format!("tab-1::agent-{index}"));
+            session.session_id = format!("session-{index}");
+            session.worktree_path = temp.path().join(format!("work-{index}"));
+            // Keep health visible without unrelated Git/config audits in fixture setup.
+            gwt::cli::hook::health::record_managed_hook_self_healed(&session.worktree_path)
+                .unwrap();
+            let path = gwt_agent::runtime_state_path(&sessions_dir, &session.session_id);
+            gwt::cli::hook::runtime_state::write_for_event(&path, "PreToolUse").unwrap();
+            session
+        })
+        .collect::<Vec<_>>();
+    let project = || {
+        let snapshot = gwt::cli::hook::health::ManagedHookFailureSnapshot::default();
+        for session in &sessions {
+            let health = super::workspace_views::managed_hook_health_view_for_worktree(
+                &session.worktree_path,
+                &sessions_dir,
+                &[session],
+                &snapshot,
+            )
+            .expect("Work row hook health");
+            assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
+        }
+    };
+    project(); // Populate the existing surface cache outside the runtime budget.
+               // Replacing bytes while retaining each stamp proves every runtime is reused.
+    for session in &sessions {
+        let path = gwt_agent::runtime_state_path(&sessions_dir, &session.session_id);
+        let metadata = fs::metadata(&path).unwrap();
+        fs::write(&path, vec![b'x'; metadata.len() as usize]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+            .unwrap();
+    }
+    let started = std::time::Instant::now();
+    project();
+    let elapsed = started.elapsed();
+    eprintln!(
+        "Work hook health: 140 rows, unchanged runtime JSON, {}ms",
+        elapsed.as_millis()
+    );
+    assert!(
+        elapsed <= std::time::Duration::from_secs(1),
+        "140 rows took {elapsed:?}"
+    );
 }
 
 fn managed_hook_inspection_text(rendered: &str) -> String {
@@ -33165,7 +35190,7 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     let window_id = combined_window_id("tab-1", "agent-1");
 
     let events = capture_tracing_events(|| {
-        let _ = runtime.handle_launch_complete(
+        let _ = runtime.handle_launch_complete_and_drain(
                 window_id,
                 Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".to_string()),
             );
@@ -33452,7 +35477,7 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
     let mut completion =
         bound_runtime_launch_completion(&repo, session_id, identity.clone(), command, args);
     completion.11.active_launch_handshake = Some(handshake);
-    let events = runtime.handle_launch_complete(window_id.clone(), Ok(completion));
+    let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
 
     assert!(events.iter().all(|event| !matches!(
         &event.event,
@@ -33800,7 +35825,7 @@ fn production_bound_agent_launch_rejects_replaced_identity_without_runtime_sidec
         )
     };
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok(bound_runtime_launch_completion(
             &repo, session_id, identity, command, args,
@@ -33863,7 +35888,7 @@ fn production_bound_agent_spawn_failure_never_publishes_exact_runtime_proof() {
         "/definitely/missing/gwt-pty-start-gate",
     ));
 
-    let events = runtime.handle_launch_complete(
+    let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Ok(bound_runtime_launch_completion(
             &repo,
@@ -34862,6 +36887,7 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     let gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider,
         resets_at,
+        evidence,
         ..
     } = failure.clone().expect("a quota notice is a typed failure")
     else {
@@ -34871,6 +36897,14 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     assert!(
         resets_at.is_some(),
         "the notice states when access returns; dropping it forces the PM to guess"
+    );
+    let evidence = evidence.expect("native message fallback retains its refusal evidence");
+    assert_eq!(evidence.source, "failure_notice");
+    assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
+    assert_eq!(evidence.screen_region.as_deref(), Some("provider_response"));
+    assert_eq!(
+        evidence.matched_pattern.as_deref(),
+        Some("codex_usage_limit")
     );
 
     let payload = AppRuntime::issue_monitor_agent_failed_payload_with_failure(
@@ -35527,8 +37561,11 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
 
     // The exact Claude wording observed on 2026-08-17, printed by a child that
     // then stays alive and unresponsive — the shape the exit path cannot see.
+    // Issue #5178: require acknowledgement between writes to force a partial
+    // PTY read without relying on the child or parent being scheduled first.
     let script = "printf '\\n> read the file\\n\\n'; \
          printf \"You've hit your weekly limit \\302\\267 resets Aug 20 at 6am (Asia/Tokyo)\\n\"; \
+         read -r release; \
          printf '/usage-credits to finish what you are working on.\\n'; \
          sleep 30";
     let pane = Pane::new(
@@ -35555,6 +37592,8 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
         .reader()
         .expect("pty reader");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let first = instant("2026-08-17T09:20:00Z");
+    let mut released = false;
     let mut rendered = false;
     let mut buffer = [0_u8; 4096];
     while std::time::Instant::now() < deadline {
@@ -35562,19 +37601,34 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
         if read == 0 {
             break;
         }
-        let mut locked = pane.lock().expect("pane lock");
-        locked.process_bytes(&buffer[..read]);
-        if locked.screen().contents().contains("weekly limit") {
+        let screen = {
+            let mut locked = pane.lock().expect("pane lock");
+            locked.process_bytes(&buffer[..read]);
+            locked.screen().contents()
+        };
+        if !released && screen.contains("weekly limit") {
+            let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, first);
+            assert!(
+                !runtime.provider_quota_candidates.contains_key(&window_id)
+                    && !runtime.provider_quota_holds.contains_key(&window_id),
+                "a heading without its native refusal footer must not form a quota candidate or hold"
+            );
+            pane.lock()
+                .expect("pane lock")
+                .write_input(b"\n")
+                .expect("release quota notice footer");
+            released = true;
+        }
+        if screen.contains("/usage-credits to finish what you are working on.") {
             rendered = true;
             break;
         }
     }
     assert!(
         rendered,
-        "precondition: the child's notice must reach the vt100 screen"
+        "precondition: the child's complete notice must reach the vt100 screen"
     );
 
-    let first = instant("2026-08-17T09:20:00Z");
     let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, first);
     assert!(
         !runtime.provider_quota_holds.contains_key(&window_id),
@@ -35587,7 +37641,8 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
     assert_eq!(
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Waiting),
-        "a real pane showing a real notice must render as waiting, not idle"
+        "a real pane showing a real notice must render as waiting, not idle; screen: {:?}",
+        pane.lock().expect("pane lock").screen().contents()
     );
     let hold = runtime
         .provider_quota_holds
@@ -37924,6 +39979,75 @@ fn worktree_listings_on_this_thread() -> u64 {
     WORKTREE_LISTINGS.with(std::cell::Cell::get)
 }
 
+/// Issue #5116 AC-2: an ordinary ingest tick shares one worktree listing
+/// between intake and reconcile, just as the startup path already does.
+#[test]
+fn work_events_ingest_tick_lists_worktrees_once() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let mut seed = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-session-ingest-tick",
+        chrono::Utc::now(),
+    );
+    seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+    seed.title = Some("existing tick work".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
+        .expect("seed existing work");
+    let project_key = gwt_core::paths::resolve_project_scope(&repo).hash;
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path(&project_key);
+    let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
+    let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
+    let before = worktree_listings_on_this_thread();
+
+    let event = AppRuntime::prepare_work_events_ingest(
+        repo,
+        &work_items_path,
+        &state_path,
+        &projection_path,
+        None,
+    );
+
+    assert!(matches!(
+        event,
+        Some(UserEvent::WorkEventsIngested {
+            local_branches: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        worktree_listings_on_this_thread() - before,
+        1,
+        "intake and reconcile must share the same tick's worktree listing"
+    );
+
+    // The grouped store writes index.json; state_path names its legacy file.
+    // A failed next listing preserves existing bytes or an absent cursor.
+    let intake_index_path = state_path.with_extension("").join("index.json");
+    let work_items = fs::read(&work_items_path).ok();
+    assert!(
+        work_items.is_some(),
+        "fixture must contain durable Work history"
+    );
+    let intake_state = fs::read(&intake_index_path).ok();
+    let unavailable_repo = temp.path().join("not-a-repo");
+    fs::create_dir_all(&unavailable_repo).expect("unavailable repository dir");
+    let before = worktree_listings_on_this_thread();
+    assert!(AppRuntime::prepare_work_events_ingest(
+        unavailable_repo,
+        &work_items_path,
+        &state_path,
+        &projection_path,
+        None,
+    )
+    .is_none());
+    assert_eq!(worktree_listings_on_this_thread() - before, 1);
+    assert_eq!(fs::read(&work_items_path).ok(), work_items);
+    assert_eq!(fs::read(&intake_index_path).ok(), intake_state);
+}
+
 /// Issue #4378 AC-1: bootstrap lists each project's worktrees once on the
 /// startup path. The orphan intake prune plan used to list them a second time
 /// on the GUI thread; the ingest and reconcile reuse is pinned above.
@@ -38819,6 +40943,83 @@ fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() 
         gwt_agent::Session::CURRENT_SCHEMA_VERSION
     );
     assert_eq!(persisted.status, gwt_agent::AgentStatus::Interrupted);
+}
+
+/// Issue #5025 AC-3: startup uses shared classification and failed-read caching.
+#[test]
+fn app_runtime_startup_recovery_classifies_preferences_and_caches_failed_candidates() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    // Resolve the setup's empty background load before writing failures; it
+    // must not prime the shared failure cache outside the tracing capture.
+    let _ = runtime.launch_wizard_cache.agent_preferences();
+    let mut session =
+        gwt_agent::Session::new(temp.path(), "work/startup", gwt_agent::AgentId::Codex);
+    session.id = "valid-startup".to_string();
+    session.status = gwt_agent::AgentStatus::Stopped;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save valid Session");
+    for (name, content) in [
+        ("window-state.toml", "display_mode = 'grid'\n"),
+        ("legacy-launch-prefs.toml", "last_branch = 'main'\n"),
+        (".writer-temporary.toml", "not = [valid toml"),
+        ("malformed-session.toml", "not = [valid toml"),
+    ] {
+        fs::write(runtime.sessions_dir.join(name), content).expect("write ledger fixture");
+    }
+    let mut missing_agent = toml::Value::try_from(&session).expect("Session TOML value");
+    let table = missing_agent.as_table_mut().expect("Session table");
+    table.insert("id".to_string(), "missing-agent".into());
+    table.remove("agent_id");
+    fs::write(
+        runtime.sessions_dir.join("missing-agent.toml"),
+        toml::to_string(&missing_agent).expect("serialize missing-agent fixture"),
+    )
+    .expect("write missing-agent fixture");
+
+    let events = capture_tracing_events(|| {
+        for _ in 0..2 {
+            let loaded = runtime.load_recovery_sessions();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].id, session.id);
+        }
+    });
+    let warnings = events
+        .iter()
+        .filter(|event| {
+            event
+                .fields
+                .get("message")
+                .is_some_and(|message| message.starts_with("Cannot load session"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        warnings.len() <= 2,
+        "preferences/hidden temporary must not reach typed Session reads, and unchanged failed candidates must not flood warnings; captured={events:?}"
+    );
+    // Other background readers can emit a failure outside this thread-local
+    // capture. Candidate parse-count tests prove unchanged failures are not
+    // reread; every diagnostic captured here must still belong to a bad file.
+    assert!(warnings
+        .iter()
+        .all(|event| event.fields.get("path").is_some_and(|path| {
+            path.ends_with("malformed-session.toml") || path.ends_with("missing-agent.toml")
+        })));
+    for name in ["malformed-session.toml", "missing-agent.toml"] {
+        assert!(
+            warnings
+                .iter()
+                .filter(|event| event
+                    .fields
+                    .get("path")
+                    .is_some_and(|path| path.ends_with(name)))
+                .count()
+                <= 1,
+            "failed candidate {name} must not warn repeatedly across startup reads"
+        );
+    }
 }
 
 /// Issue #4377 (AC-1 / AC-3): startup reads only the Sessions it may restore.
@@ -40639,7 +42840,7 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
         None,
         None,
         None,
-        &std::collections::HashSet::new(),
+        Some(&std::collections::HashSet::new()),
     )
     .expect("save projection");
 
@@ -48206,6 +50407,99 @@ fn app_runtime_allowed_labels_fallback_persists_without_changing_mode() {
     }
 }
 
+#[test]
+fn app_runtime_allowed_labels_rejection_returns_a_correlated_failure() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            allowed_labels: vec!["Server".to_string()],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open prefs lock");
+    lock.lock_exclusive().expect("hold prefs lock");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_monitor_fallback_commit_timeout = Duration::from_millis(100);
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "set_issue_monitor_allowed_labels", "allowed_labels": ["Tools"], "request_id": 41,
+    }))
+    .expect("label command");
+    let events = runtime.handle_frontend_event("client-1".to_string(), event);
+    FileExt::unlock(&lock).expect("release prefs lock");
+    let failure = events
+        .iter()
+        .map(|event| serde_json::to_value(&event.event).expect("event wire shape"))
+        .find(|event| event["kind"] == "issue_monitor_allowed_labels_write_failed")
+        .expect("a rejected save returns a correlated failure to its editor");
+    assert_eq!(failure["request_id"], 41);
+    assert_eq!(failure["outcome_unknown"], false);
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+    )));
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("saved prefs")
+            .allowed_labels,
+        ["Server"]
+    );
+}
+
+#[test]
+fn app_runtime_allowed_labels_failure_distinguishes_busy_from_unknown() {
+    use gwt::runtime_daemon_events::IssueMonitorControlPublishError;
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").expect("project context");
+    for (error, outcome_unknown) in [
+        (
+            IssueMonitorControlPublishError::Busy("admission full".to_string()),
+            false,
+        ),
+        (
+            IssueMonitorControlPublishError::OutcomeUnknown("control timed out".to_string()),
+            true,
+        ),
+    ] {
+        let events = runtime.issue_monitor_allowed_labels_result_events(
+            &context,
+            "client-1",
+            Err(error),
+            vec!["Tools".to_string()],
+            Some(41),
+        );
+        assert!(events.iter().all(|event| matches!(&event.target,
+            DispatchTarget::Client(client) if client == "client-1")));
+        assert!(events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, .. } if level == "error")));
+        assert!(events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorAllowedLabelsWriteFailed { request_id: 41, outcome_unknown: actual }
+                if *actual == outcome_unknown)));
+        assert!(events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+        )));
+    }
+}
+
 // SPEC #3165 TQ-9: the row's "Add to queue" action is the user's way to put an
 // Issue into this terminal's implementation queue. It is the requested feature's
 // main direction — "remove" is only its counterpart — so the GUI must reach
@@ -50887,6 +53181,25 @@ fn app_runtime_agent_failed_after_migration_keeps_new_same_failure() {
 
 #[test]
 fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_failure() {
+    struct PrefsLockContentionLayer {
+        sender: Mutex<Option<mpsc::Sender<()>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for PrefsLockContentionLayer {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = CaptureTracingVisitor::default();
+            event.record(&mut visitor);
+            if visitor.fields.get("operation").map(String::as_str) != Some("issue_monitor_prefs")
+                || visitor.fields.get("error").map(String::as_str) != Some("file lock contended")
+            {
+                return;
+            }
+            if let Some(sender) = self.sender.lock().expect("contention sender").take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -50897,11 +53210,9 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let fake_gh = write_fake_gh_issue_list(temp.path());
-    let gh_marker = temp.path().join("gh-started");
     let _path = prepend_fake_gh_to_path(&fake_gh);
     let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
-    let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &gh_marker);
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -50946,58 +53257,72 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         .expect("open issue monitor prefs lock");
     lock.lock_exclusive()
         .expect("hold issue monitor prefs lock");
+    let (contention_tx, contention_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let writer_window = window_id.clone();
     let writer_failure = failure.clone();
     let writer_repo = repo.clone();
     let writer = thread::spawn(move || {
-        let events = runtime.issue_monitor_agent_failed_result_events(
-            &writer_window,
-            &writer_failure,
-            Some(43),
-            Err(
-                gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-                    format!("deterministic local fallback for {}", writer_repo.display()),
+        let subscriber = tracing_subscriber::registry().with(PrefsLockContentionLayer {
+            sender: Mutex::new(Some(contention_tx)),
+        });
+        let events = tracing::subscriber::with_default(subscriber, || {
+            runtime.issue_monitor_agent_failed_result_events(
+                &writer_window,
+                &writer_failure,
+                Some(43),
+                Err(
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                        format!("deterministic local fallback for {}", writer_repo.display()),
+                    ),
                 ),
-            ),
-        );
+            )
+        });
         done_tx.send(events).expect("return GUI events");
     });
 
-    wait_for_path("GUI reached the fake live fetch", &gh_marker);
-    assert!(
-        done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
-        "GUI writer must not complete while the transaction lock remains held"
-    );
+    let coordinated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        gwt_core::test_support::recv_event(&contention_rx, "GUI writer contended on prefs lock");
+        assert!(
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "GUI writer must not complete while the transaction lock remains held"
+        );
 
-    let profile = sample_issue_monitor_launch_profile();
-    let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
-    let implementing = issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 1);
-    let migrated = gwt::IssueMonitorPrefs {
-        enabled: true,
-        max_active_agents: 4,
-        priority_order: vec![99, 42],
-        launch_profile: Some(profile.clone()),
-        merged_issues: vec![88],
-        autonomous_mode: true,
-        autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
-            max_attempts: 9,
-            ..gwt::issue_monitor::AutonomousTuning::default()
-        },
-        autonomous_records: vec![reviewing.clone(), implementing.clone()],
-        ..gwt::IssueMonitorPrefs::default()
-    };
-    fs::write(
-        &prefs_path,
-        serde_json::to_vec_pretty(&migrated).expect("serialize migrated prefs"),
-    )
-    .expect("commit daemon migration while GUI waits");
-    FileExt::unlock(&lock).expect("release issue monitor prefs lock");
-
+        let profile = sample_issue_monitor_launch_profile();
+        let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
+        let implementing =
+            issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 1);
+        let migrated = gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 4,
+            priority_order: vec![99, 42],
+            launch_profile: Some(profile.clone()),
+            merged_issues: vec![88],
+            autonomous_mode: true,
+            autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
+                max_attempts: 9,
+                ..gwt::issue_monitor::AutonomousTuning::default()
+            },
+            autonomous_records: vec![reviewing.clone(), implementing.clone()],
+            ..gwt::IssueMonitorPrefs::default()
+        };
+        fs::write(
+            &prefs_path,
+            serde_json::to_vec_pretty(&migrated).expect("serialize migrated prefs"),
+        )
+        .expect("commit daemon migration while GUI waits");
+        (profile, reviewing, implementing)
+    }));
+    let unlocked = FileExt::unlock(&lock);
+    drop(lock);
+    let joined = writer.join();
+    let (profile, reviewing, implementing) =
+        coordinated.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    unlocked.expect("release issue monitor prefs lock");
+    joined.expect("GUI writer thread");
     let events = done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("GUI writer completes after unlock");
-    writer.join().expect("GUI writer thread");
+        .try_recv()
+        .expect("joined GUI writer returned events after unlock");
     let inbox = events
         .iter()
         .find_map(|event| match &event.event {
@@ -51767,18 +54092,209 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
             .materializer_window_id
             .clone()
             .expect("bound window id");
+    let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = ack_spawner;
+    assert!(runtime.persist_dispatcher.wait_idle(Duration::from_secs(5)));
+    let disk_before_ack = gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap();
+    let writes_before_ack = runtime.persist_dispatcher.enqueued_count();
+    let durable_writes_before_ack = runtime.persist_dispatcher.durable_write_count();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let pending_before_ack = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     let _ = runtime.issue_monitor_launch_completed_delivery_events(
         &repo,
         3165,
         &bound_window_id,
         Some("launch:effect-3165"),
     );
+    assert_eq!(
+        ack_tasks.lock().unwrap().len(),
+        1,
+        "delivery ACK must be a worker transaction"
+    );
+    assert_eq!(
+        runtime.persist_dispatcher.enqueued_count(),
+        writes_before_ack + 1,
+        "the GUI only reserves ordering metadata; the ACK worker authorizes the write"
+    );
+    let newer_window = runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    runtime.register_window("tab-1", &newer_window.id);
+    runtime.persist().unwrap();
+    assert_eq!(
+        runtime.persist_dispatcher.durable_write_count(),
+        durable_writes_before_ack,
+        "a reserved but unmaterialized ACK must perform zero durable writes"
+    );
+    assert_eq!(
+        gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap(),
+        disk_before_ack,
+        "neither the reserved barrier nor newer pending state may write before materialization"
+    );
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        pending_before_ack
+    );
+    let ack_task = ack_tasks.lock().unwrap().pop().unwrap();
+    ack_task();
+    assert!(runtime.persist_dispatcher.wait_idle(Duration::from_secs(5)));
+    assert!(
+        gwt::load_workspace_state(&gwt::workspace_state_path(&repo))
+            .unwrap()
+            .windows
+            .iter()
+            .any(|window| window.id == newer_window.id),
+        "a delayed ACK must preserve windows added after its snapshot was captured"
+    );
+    let ack = {
+        let mut events = _recorded_events.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| matches!(event, UserEvent::IssueMonitorLaunchDeliveryAcknowledged(_)))
+            .unwrap();
+        let UserEvent::IssueMonitorLaunchDeliveryAcknowledged(ack) = events.remove(index) else {
+            unreachable!()
+        };
+        ack
+    };
+    runtime.handle_issue_monitor_launch_delivery_ack(*ack);
     assert!(
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
             .expect("reload prefs")
             .pending_launch_deliveries
             .is_empty()
     );
+
+    // A same-id replacement cancels the old transaction before it can ACK.
+    gwt::save_issue_monitor_prefs(&prefs_path, &pending_before_ack).unwrap();
+    runtime.issue_monitor_launch_completed_delivery_events(
+        &repo,
+        3165,
+        &bound_window_id,
+        Some("launch:effect-3165"),
+    );
+    let old_address = runtime.window_lookup[&bound_window_id].clone();
+    runtime.register_window(&old_address.tab_id, &old_address.raw_id);
+    let writes_before_cancelled_ack = runtime.persist_dispatcher.enqueued_count();
+    let durable_writes_before_cancelled_ack = runtime.persist_dispatcher.durable_write_count();
+    ack_tasks.lock().unwrap().pop().unwrap()();
+    assert!(
+        runtime.persist_dispatcher.wait_idle(Duration::from_secs(5)),
+        "dropping a stale ACK gate must release the reserved generation"
+    );
+    assert_eq!(
+        runtime.persist_dispatcher.enqueued_count(),
+        writes_before_cancelled_ack
+    );
+    assert_eq!(
+        runtime.persist_dispatcher.durable_write_count(),
+        durable_writes_before_cancelled_ack
+    );
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        pending_before_ack,
+        "a stale launch must leave the delivery unacknowledged"
+    );
+}
+
+fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_existing_id: bool) {
+    let repo = test_root.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_without_origin(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent, WindowPreset::Agent],
+    );
+    let failed_raw_id = tab.workspace.persisted().windows[1].id.clone();
+    let launched_id = combined_window_id("tab-1", &tab.workspace.persisted().windows[0].id);
+    let failed_id = combined_window_id("tab-1", &failed_raw_id);
+    let (mut runtime, recorded) = sample_runtime_with_events(test_root, vec![tab], Some("tab-1"));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+                issue_number: 42,
+                claimed_at: None,
+            }],
+            failed_issues: vec![gwt::IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "previous pane failed".into(),
+                window_id: Some(failed_id.clone()),
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // A prepared worker may mint its runtime before ACK enqueue, then install
+    // it later. Numeric runtime age alone cannot authorize stale-pane cleanup.
+    let replacement_runtime = restart_existing_id.then(|| {
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::new(Mutex::new(long_running_test_pane(&failed_id))),
+        )
+    });
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.issue_monitor_launch_succeeded_delivery_events(&repo, 42, &launched_id, None);
+    tasks.lock().unwrap().pop().expect("ACK worker")();
+    let completion = {
+        let mut events = recorded.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorLaunchDeliveryAcknowledged(_)
+                )
+            })
+            .expect("ACK completion");
+        into_recorded_project_payload(events.remove(index))
+    };
+    if let Some(replacement_runtime) = replacement_runtime {
+        runtime
+            .runtimes
+            .insert(failed_id.clone(), replacement_runtime);
+    } else {
+        runtime.close_window_events(&failed_id);
+        let replacement = runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .add_window(WindowPreset::Agent, canvas_bounds());
+        assert_eq!(replacement.id, failed_raw_id, "closed highest ID is reused");
+        runtime.register_window("tab-1", &replacement.id);
+    }
+    let UserEvent::IssueMonitorLaunchDeliveryAcknowledged(ack) = completion else {
+        unreachable!()
+    };
+    runtime.handle_issue_monitor_launch_delivery_ack(*ack);
+    let replacement_survived = runtime.tracked_window_exists(&failed_id);
+    runtime.stop_window_runtime_without_session_projection(&failed_id);
+    drain_queued_blocking_tasks(&tasks);
+    assert!(
+        replacement_survived,
+        "ACK cleanup must preserve a replacement failed-window ID"
+    );
+    assert!(runtime.tracked_window_exists(&launched_id));
+}
+
+#[test]
+fn issue_monitor_ack_preserves_reused_failed_window_id() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_ack_preserves_failed_window_replacement(temp.path(), false);
+}
+
+#[test]
+fn issue_monitor_ack_preserves_failed_window_runtime_installed_after_enqueue() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_ack_preserves_failed_window_replacement(temp.path(), true);
 }
 
 /// Issue #4802 AC-2: a launch into a worktree that already has a live agent
@@ -51860,13 +54376,16 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
         }
         assert_eq!(runtime.window_status(&live_window_id), Some(pane_status));
 
-        let events = runtime.auto_launch_issue_monitor_delivery_events(
+        let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = ack_spawner;
+        let mut events = runtime.auto_launch_issue_monitor_delivery_events(
             &runtime.test_context(),
             3165,
             LinkedIssueKind::Spec,
             Some("launch:effect-3165".to_string()),
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
+        events.extend(runtime.finish_queued_delivery_acks(&ack_tasks));
         let agent_windows = runtime.tabs[0]
             .workspace
             .persisted()
@@ -52314,14 +54833,15 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         .materializer_window_id
         .clone()
         .expect("bound window id");
-    assert!(first_runtime
-        .mark_issue_monitor_launch_delivery_materialized(
-            &repo,
-            3165,
-            "launch:effect-3165",
-            &bound_window_id,
-        )
-        .expect("mark exact delivery materialized"));
+    assert!(AppRuntime::mark_issue_monitor_launch_delivery_materialized(
+        &repo,
+        &first_runtime.issue_monitor_materializer_id,
+        first_runtime.issue_monitor_fallback_commit_timeout,
+        3165,
+        "launch:effect-3165",
+        &bound_window_id,
+    )
+    .expect("mark exact delivery materialized"));
     first_runtime
         .persist_issue_monitor_delivery_workspace(&repo, &bound_window_id)
         .expect("persist exact delivery window");
@@ -52352,6 +54872,8 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
     let (mut restarted, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![restored_tab], Some("tab-1"));
     restarted.issue_monitor_materializer_id = "restarted-gui".to_string();
+    let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
+    restarted.blocking_tasks = ack_spawner;
 
     let events = restarted.auto_launch_issue_monitor_delivery_events(
         &restarted.test_context(),
@@ -52373,6 +54895,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
             .count(),
         1
     );
+    restarted.finish_queued_delivery_acks(&ack_tasks);
     assert!(gwt::load_issue_monitor_prefs(&prefs_path)
         .expect("reload ACKed prefs")
         .pending_launch_deliveries
@@ -53884,9 +56407,10 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         "the semantic receipt must not publish an undurable window before the physical callback"
     );
 
-    let completion_events = fixture
+    let mut completion_events = fixture
         .runtime
         .handle_issue_monitor_answer_delivery_complete(delivery);
+    completion_events.extend(fixture.runtime.finish_queued_delivery_acks(&queued_tasks));
     let settled = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -54233,7 +56757,9 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
         ];
         process.args.extend(provider_args);
     }
-    fixture.runtime.handle_launch_complete(window_id, result);
+    fixture
+        .runtime
+        .handle_launch_complete_and_drain(window_id, result);
     let awaiting_receipt = gwt::load_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
     )
@@ -54369,7 +56895,9 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
     let process = &mut result.as_mut().expect("prepared exact Resume").0;
     process.command = "/definitely/missing/gwt-answered-resume".to_string();
     process.cwd = Some(fixture.worktree.clone());
-    fixture.runtime.handle_launch_complete(window_id, result);
+    fixture
+        .runtime
+        .handle_launch_complete_and_drain(window_id, result);
 
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
@@ -55506,12 +58034,17 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_frontend_event(
+    runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::IssueMonitorConfigureIssue {
             issue_number: 3165,
             linked_issue_kind: Some(LinkedIssueKind::Spec),
         },
+    );
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::SetFastMode { enabled: true },
+        None,
     );
     let view = events
         .iter()
@@ -55522,6 +58055,10 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
             _ => None,
         })
         .expect("launch wizard view");
+    assert!(
+        view.fast_mode,
+        "profile editing honors its own Fast preference"
+    );
     let impact = view
         .issue_monitor_pool_impact
         .as_ref()
@@ -55573,6 +58110,7 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
     let saved_summary =
         gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
             .status_view()
@@ -55852,6 +58390,108 @@ fn open_agent_settings_sets(
         FrontendEvent::IssueMonitorConfigureProfile,
     );
     (runtime, recorded_events, events)
+}
+
+#[test]
+fn app_runtime_agent_settings_update_preserves_the_saved_profile_and_wizard() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let profile = codex_issue_monitor_launch_profile();
+    let (mut runtime, recorded, opened) =
+        open_agent_settings_sets(temp.path(), &repo, vec![profile]);
+    let before = agent_settings_view(&opened);
+    assert_eq!(before.selected_launch_target, "agent");
+    assert!(before.error.is_none());
+    let model = before.selected_model.clone();
+    let reasoning = before.selected_reasoning.clone();
+    // The update must never run the host's real package manager in a test.
+    let bin = write_fixture_runners(temp.path(), &["npm", "codex"]);
+    let mut settings = Settings::default();
+    pin_launch_agents(&mut settings, &bin);
+    let _path = ScopedEnvVar::set(
+        "PATH",
+        &settings.profiles.get("default").unwrap().env_vars["PATH"],
+    );
+    write_profile_config(runtime.profile_config_path.as_ref().unwrap(), &settings);
+    let context = runtime.test_context();
+    let wizard_id = runtime
+        .launch_wizard_for(&context)
+        .unwrap()
+        .wizard_id
+        .clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs_before = fs::read(&prefs_path).unwrap();
+
+    let events =
+        runtime.handle_launch_wizard_action(&context, LaunchWizardAction::RunAgentSetup, None);
+    let updated = agent_settings_view(&events);
+    assert!(updated.error.is_none(), "{:?}", updated.error);
+    assert_eq!(updated.selected_launch_target, "agent");
+    assert_eq!(updated.selected_model, model);
+    assert_eq!(updated.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert!(runtime.runtimes.is_empty());
+    assert!(updated.agent_setup.as_ref().unwrap().pending);
+    wait_for_recorded_event("CLI update result", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchWizardAgentUpdated { .. }
+            )
+        })
+    });
+    let (result_id, result) = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::LaunchWizardAgentUpdated { wizard_id, result } => {
+                Some((wizard_id.clone(), result.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(result_id, wizard_id);
+    let completed = runtime.handle_launch_wizard_agent_updated(result_id, *result);
+    let view = agent_settings_view(&completed);
+    assert!(!view.agent_setup.as_ref().unwrap().pending);
+    assert!(view
+        .agent_setup
+        .as_ref()
+        .unwrap()
+        .status
+        .as_ref()
+        .unwrap()
+        .contains("1.2.3"));
+    assert_eq!(view.selected_model, model);
+    assert_eq!(view.selected_reasoning, reasoning);
+    assert_eq!(
+        runtime.launch_wizard_for(&context).unwrap().wizard_id,
+        wizard_id
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    assert_eq!(
+        runtime
+            .launch_wizard_cache
+            .agent_options()
+            .into_iter()
+            .find(|agent| agent.id == "codex")
+            .unwrap()
+            .installed_version
+            .as_deref(),
+        Some("1.2.3")
+    );
 }
 
 fn agent_settings_view(events: &[OutboundEvent]) -> &gwt::LaunchWizardView {
@@ -58148,7 +60788,7 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     // Issue #3783 keeps this watcher path cache-only on purpose: it merges the
     // already-loaded payload into the last materialized view instead of
@@ -58250,6 +60890,166 @@ fn apply_title_sync_sample_projection(
     projection
 }
 
+fn commit_workspace_watcher_update(
+    runtime: &mut AppRuntime,
+    repo: &Path,
+    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+) -> Vec<OutboundEvent> {
+    let (proxy, recorded) = AppEventProxy::stub();
+    let old_proxy = std::mem::replace(&mut runtime.proxy, proxy);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    let old_spawner = std::mem::replace(&mut runtime.blocking_tasks, spawner);
+    let mut events = runtime.handle_workspace_projection_changed_events(repo, projection);
+    std::thread::spawn(move || drain_queued_blocking_tasks(&tasks))
+        .join()
+        .unwrap();
+    loop {
+        let next = {
+            let mut recorded = recorded.lock().unwrap();
+            if recorded.is_empty() {
+                None
+            } else {
+                Some(recorded.remove(0))
+            }
+        };
+        let Some(next) = next else {
+            break;
+        };
+        match into_recorded_project_payload(next) {
+            UserEvent::WorkspaceProjectionPatchPrepared(prepared) => {
+                if let Some(dispatch) = runtime.apply_workspace_projection_patch(*prepared) {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&dispatch.payload).unwrap();
+                    events.push(OutboundEvent::project(
+                        dispatch.context.project_key,
+                        BackendEvent::ActiveWorkProjectionPatch {
+                            projection: Box::new(
+                                serde_json::from_value(payload["projection"].clone()).unwrap(),
+                            ),
+                        },
+                    ));
+                }
+            }
+            UserEvent::ProjectDispatch {
+                events: dispatched, ..
+            } => events.extend(dispatched),
+            other => panic!("unexpected watcher event: {other:?}"),
+        }
+    }
+    runtime.proxy = old_proxy;
+    runtime.blocking_tasks = old_spawner;
+    events
+}
+
+#[test]
+fn workspace_watcher_defers_membership_and_titles_until_worker_completion() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let projection = apply_title_sync_sample_projection(
+        &repo,
+        &window_id,
+        Some("Prepared watcher title"),
+        Some("Prepared watcher focus"),
+    );
+
+    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+
+    assert!(
+        events.is_empty(),
+        "Tao must only schedule the watcher preparation"
+    );
+    assert_eq!(tasks.lock().expect("queued tasks").len(), 1);
+    assert!(runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow()
+        .is_empty());
+    assert!(runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .window("agent-1")
+        .unwrap()
+        .dynamic_title
+        .is_none());
+}
+
+#[test]
+fn workspace_watcher_rejects_superseded_and_closed_pane_patches() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut projection =
+        apply_title_sync_sample_projection(&repo, &window_id, Some("Old watcher title"), None);
+    runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    projection.agents[0].title_summary = Some("Latest watcher title".into());
+    runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let run_next = || tasks.lock().unwrap().remove(0)();
+    let take_prepared = || match into_recorded_project_payload(recorded.lock().unwrap().remove(0)) {
+        UserEvent::WorkspaceProjectionPatchPrepared(prepared) => *prepared,
+        event => panic!("unexpected event: {event:?}"),
+    };
+    run_next();
+    assert!(runtime
+        .apply_workspace_projection_patch(take_prepared())
+        .is_none());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "an older result must not spawn another reload"
+    );
+    run_next();
+    assert!(runtime
+        .apply_workspace_projection_patch(take_prepared())
+        .is_some());
+    assert_eq!(
+        runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .window("agent-1")
+            .unwrap()
+            .dynamic_title
+            .as_deref(),
+        Some("Latest watcher title")
+    );
+    recorded.lock().unwrap().clear();
+
+    projection.agents[0].title_summary = Some("Stale close title".into());
+    runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    run_next();
+    let stale = take_prepared();
+    runtime.active_agent_sessions.clear();
+    assert!(runtime.close_window_outcome(&window_id).closed);
+    assert!(runtime.apply_workspace_projection_patch(stale).is_none());
+    let state = runtime.project_state_for_tab("tab-1").unwrap();
+    assert_eq!(
+        state
+            .active_work_projection_cache
+            .borrow()
+            .get("tab-1")
+            .unwrap()
+            .agents[0]
+            .title_summary
+            .as_deref(),
+        Some("Latest watcher title")
+    );
+}
+
 #[test]
 fn workspace_projection_changed_uses_supplied_snapshot_instead_of_rereading_disk() {
     let _env_lock = env_test_lock()
@@ -58277,7 +61077,7 @@ fn workspace_projection_changed_uses_supplied_snapshot_instead_of_rereading_disk
     gwt_core::workspace_projection::save_workspace_projection(&repo, &stale_disk)
         .expect("save stale projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &supplied);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &supplied);
 
     assert!(events
         .iter()
@@ -58411,7 +61211,7 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         .expect("save projection");
 
     super::workspace_views::reset_full_active_work_projection_builds();
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     let active_work = events
         .iter()
@@ -58516,7 +61316,7 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
     projection.agents[0].session_id = "session-added".to_string();
     projection.agents[0].window_id = Some("tab-1::added".to_string());
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     let active_work = events
         .iter()
@@ -58793,7 +61593,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     // The original handler returned only ActiveWorkProjection. Phase
     // U-2 promotes it to also broadcast WindowCanvasState in one batch so
@@ -58851,7 +61651,7 @@ fn handle_workspace_projection_changed_events_syncs_title_from_canonical_project
     gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
         .expect("save projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&project_root, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &project_root, &projection);
 
     assert!(
         events
@@ -64642,7 +67442,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     );
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.spawn_work_merge_status_scan(repo.clone());
 
     wait_for_recorded_event("gwt-write work merge status", &events, |events| {
@@ -64680,6 +67480,24 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         "a change-free branch whose only diff is gwt's own writes stays cleanup-ready: \
          {cleanup_ready_branches:?}"
     );
+    // The worker must warm the persistent cache, not a private per-scan copy.
+    let tips = gwt_git::refs::branch_tip_snapshot(&repo).expect("tips");
+    let caches = runtime.work_merge_status_cache.borrow();
+    let mut cache = caches
+        .get(&repo)
+        .expect("project merge cache")
+        .lock()
+        .unwrap();
+    let before = gwt_core::process::thread_git_spawn_count();
+    assert!(cache
+        .base_target(&repo, "work/gwt-writes", &tips)
+        .unwrap()
+        .is_some());
+    assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
+    drop(cache);
+    drop(caches);
+    runtime.invalidate_project_caches(&repo);
+    assert!(!runtime.work_merge_status_cache.borrow().contains_key(&repo));
 }
 
 #[test]
@@ -66544,11 +69362,17 @@ fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
     };
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
 
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
     let (mut runtime, _recorded) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.issue_monitor_launch_succeeded_events(&repo, 42, "tab-1::agent-1");
+    let events = runtime.issue_monitor_launch_succeeded_and_drain(&repo, 42, "tab-1::agent-1");
 
     // The ACK may scan for a fresh snapshot, but must NOT claim/launch: no
     // settings-required wizard, no "launch requested" toast.
@@ -66834,7 +69658,7 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
     runtime.register_window("tab-1", &fresh.id);
     runtime.set_window_status("tab-1", &fresh.id, WindowProcessStatus::Running);
     let window_id = combined_window_id("tab-1", &fresh.id);
-    runtime.issue_monitor_launch_succeeded_events(&repo, 4258, &window_id);
+    runtime.issue_monitor_launch_succeeded_and_drain(&repo, 4258, &window_id);
     let before = gwt::load_issue_monitor_prefs(&prefs_path).expect("ACKed prefs");
     assert_eq!(
         before.launched_issues.len(),
@@ -66998,7 +69822,8 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
         Some("project-b"),
         "daemon launch/review routing resolves the owner tab without switching active tabs"
     );
-    let events = runtime.issue_monitor_launch_succeeded_events(&repo_b, 42, "project-b::agent-1");
+    let events =
+        runtime.issue_monitor_launch_succeeded_and_drain(&repo_b, 42, "project-b::agent-1");
 
     assert!(
         events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &runtime.project_context("project-b").expect("owner context").project_key)),
@@ -70501,7 +73326,7 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
                 .expect("load restored Session");
         assert_eq!(successor.launch_route, expected_route, "{origin:?}");
         drop(recorded);
-        runtime.handle_launch_complete(window_id, result);
+        runtime.handle_launch_complete_and_drain(window_id, result);
         let successor =
             gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", successor.id)))
                 .expect("load completed restore provenance");
@@ -72974,7 +75799,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
 
 /// Repo with an enabled Issue Monitor, a registered PM whose pane is live,
 /// and a second non-PM pane that the wake must never reach.
-fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
+pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -73039,6 +75864,34 @@ fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     .expect("seed registration");
 
     (repo, runtime, pm_window_id)
+}
+
+fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("PM wake fixture must use queued workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("PM wake fixture must record completions");
+    };
+    let completions = Arc::clone(completions);
+    loop {
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        if queued.is_empty() {
+            break;
+        }
+        for task in queued {
+            task();
+        }
+        let completed = std::mem::take(&mut *completions.lock().unwrap());
+        for event in completed {
+            if let Some(UserEvent::PmWakeDeliveryComplete(delivery)) =
+                runtime.accept_project_completion(event)
+            {
+                runtime.pm_wake_delivery_complete(delivery);
+            }
+        }
+    }
 }
 
 /// T-093 (FR-012): a parked PM is woken by a NeedsHuman transition, the wake
@@ -73880,7 +76733,7 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
         .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(monitor_prefs_path.clone());
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &monitor_prefs_path,
         "2026-08-10T01:00:00Z",
@@ -73948,7 +76801,7 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
@@ -74299,7 +77152,7 @@ fn seed_quiet_standing_supervision(repo: &Path) {
 
 /// Own the fixture's child independently of runtime/finalizer Arc clones.
 /// Drain output as well as input: an unread macOS PTY can stall child exit.
-struct TestPaneGuard {
+pub(super) struct TestPaneGuard {
     pty: Arc<gwt_terminal::PtyHandle>,
     reader: Option<thread::JoinHandle<()>>,
 }
@@ -74351,7 +77204,8 @@ impl Drop for TestPaneGuard {
     }
 }
 
-fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> TestPaneGuard {
+pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> TestPaneGuard {
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let (command, args) = if cfg!(windows) {
         (
             "powershell",
@@ -74505,6 +77359,7 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
     let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
 
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     let pty = runtime
         .runtimes
         .get(&pm_window_id)
@@ -74580,6 +77435,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
     );
 
     let _ = runtime.terminal_input_events(&pm_window_id, "ますか？\r");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
         runtime
             .project_state(&runtime.test_context())
@@ -74632,6 +77488,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
     );
 
     let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
         runtime
             .project_state(&runtime.test_context())
@@ -74679,6 +77536,9 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
         },
     )
     .expect("seed disabled prefs");
+    let (spawner, scan_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let disabled_prefs = fs::read(&prefs_path).expect("disabled prefs before scan");
     super::reset_local_issue_monitor_fallback_commit_count();
     let events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-10T01:00:00Z");
     assert!(
@@ -74686,10 +77546,14 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
         "the Tao tick only schedules background work"
     );
     let (completed_root, completed_prefs, completed_at, outcome) =
-        wait_for_scheduled_scan_completion(&recorded);
+        run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    assert!(matches!(
+        &outcome,
+        Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon)
+    ));
     assert!(
         runtime
-            .issue_monitor_scheduled_scan_complete_events(
+            .complete_scheduled_scan_for_test(
                 &completed_root,
                 &completed_prefs,
                 &completed_at,
@@ -74699,6 +77563,11 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
         "a disabled monitor produces no projection events"
     );
     assert_eq!(super::local_issue_monitor_fallback_commit_count(), 0);
+    assert_eq!(
+        fs::read(&prefs_path).expect("disabled prefs after scan"),
+        disabled_prefs,
+        "the disabled worker commits no scan effects"
+    );
 
     // Enabled: the tick drives the local monitor commit path.
     gwt::save_issue_monitor_prefs(
@@ -74715,8 +77584,8 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
         "the tao tick only schedules background work"
     );
     let (completed_root, completed_prefs, completed_at, outcome) =
-        wait_for_scheduled_scan_completion(&recorded);
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+        run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
         &completed_at,
@@ -75198,6 +78067,51 @@ fn scheduled_tick_spawn_failure_is_observable_and_releases_single_flight() {
 }
 
 #[test]
+fn scheduled_scan_completion_defers_projection_until_worker_runs() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("prefs");
+    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+
+    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+        &repo,
+        &prefs_path,
+        "2026-08-10T01:00:00Z",
+        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(monitor))),
+    );
+    assert!(
+        events.is_empty(),
+        "GUI ingress must not prepare the snapshot"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "one worker prepares the result"
+    );
+}
+
+#[test]
 fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
     let _env_lock = env_test_lock()
         .lock()
@@ -75228,21 +78142,49 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
         priority_order: vec![43],
         ..queued_issue_monitor_prefs(&[43])
     };
-    gwt::save_issue_monitor_prefs(&prefs_path, &latest).expect("concurrent controls");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (proxy, completions) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     runtime
         .project_state_mut(&runtime.test_context())
         .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
-        &repo,
-        &prefs_path,
-        "2026-08-10T01:00:00Z",
-        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(scanned))),
+    assert!(runtime
+        .issue_monitor_scheduled_scan_complete_events(
+            &repo,
+            &prefs_path,
+            "2026-08-10T01:00:00Z",
+            Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(scanned))),
+        )
+        .is_empty());
+    tasks.lock().unwrap().remove(0)();
+    let UserEvent::IssueMonitorScheduledScanPrepared(stale) =
+        into_recorded_project_payload(completions.lock().unwrap().remove(0))
+    else {
+        panic!("prepared completion")
+    };
+    // Controls can change after preparation but before the GUI applies it.
+    gwt::save_issue_monitor_prefs(&prefs_path, &latest).expect("concurrent controls");
+    assert!(runtime
+        .issue_monitor_scheduled_scan_prepared_events(*stale)
+        .is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "stale projection is reprepared"
     );
+    tasks.lock().unwrap().remove(0)();
+    let UserEvent::IssueMonitorScheduledScanPrepared(current) =
+        into_recorded_project_payload(completions.lock().unwrap().remove(0))
+    else {
+        panic!("reprepared completion")
+    };
+    let events = runtime.issue_monitor_scheduled_scan_prepared_events(*current);
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -75291,7 +78233,7 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
     assert!(runtime
-        .issue_monitor_scheduled_scan_complete_events(
+        .complete_scheduled_scan_for_test(
             &repo,
             &prefs_path,
             "2026-08-10T01:00:00Z",
@@ -75309,7 +78251,7 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
         .insert(prefs_path.clone());
     runtime.tabs.clear();
     assert!(runtime
-        .issue_monitor_scheduled_scan_complete_events(
+        .complete_scheduled_scan_for_test(
             &repo,
             &prefs_path,
             "2026-08-10T01:01:00Z",
@@ -75839,17 +78781,19 @@ fn scheduled_scan_defers_to_live_daemon_without_remote_io_or_launch() {
             .expect("live daemon authority");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, scan_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     assert!(runtime
         .issue_monitor_scheduled_tick_events_at("2026-08-10T01:00:00Z")
         .is_empty());
     let (completed_root, completed_prefs, completed_at, outcome) =
-        wait_for_scheduled_scan_completion(&recorded);
+        run_scheduled_scan_to_completion(&scan_tasks, &recorded);
     assert!(matches!(
         &outcome,
         Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon)
     ));
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
         &completed_at,
@@ -75905,7 +78849,7 @@ fn scheduled_scan_defer_still_rearms_periodic_wake_for_durable_standing_work() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
@@ -75964,7 +78908,7 @@ fn scheduled_scan_reload_error_rearms_periodic_wake_from_the_worker_snapshot() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
@@ -76026,24 +78970,28 @@ fn scheduled_scan_discards_scanned_state_when_authority_appears_before_commit() 
     });
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, scan_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     runtime.issue_monitor_scheduled_tick_events_at("2026-08-10T01:00:00Z");
     let (completed_root, completed_prefs, completed_at, outcome) =
-        wait_for_scheduled_scan_completion(&recorded);
+        run_scheduled_scan_to_completion(&scan_tasks, &recorded);
 
     assert!(marker.exists(), "the side-effect-free scan completed first");
     assert!(matches!(
         &outcome,
         Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon)
     ));
-    assert!(runtime
-        .issue_monitor_scheduled_scan_complete_events(
-            &completed_root,
-            &completed_prefs,
-            &completed_at,
-            outcome,
-        )
-        .is_empty());
+    assert!(
+        runtime
+            .complete_scheduled_scan_for_test(
+                &completed_root,
+                &completed_prefs,
+                &completed_at,
+                outcome,
+            )
+            .is_empty()
+    );
     assert_eq!(
         fs::read(&prefs_path).expect("prefs after deferred commit"),
         before,
@@ -76089,6 +79037,8 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let fake_client = Arc::new(FakeIssueClient::new());
+    let (spawner, scan_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     fake_client.seed(sample_issue_snapshot(
         43,
         "Refreshed issue",
@@ -76107,8 +79057,8 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     let events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-10T01:00:00Z");
     assert!(events.is_empty(), "the tick returns before the remote scan");
     let (completed_root, completed_prefs, completed_at, outcome) =
-        wait_for_scheduled_scan_completion(&recorded);
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+        run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
         &completed_at,
@@ -77896,6 +80846,9 @@ fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence
     assert_eq!(evidence.source, "screen_notice");
     assert_eq!(evidence.recorded_at, "2026-09-02T09:00:00.000Z");
     assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
+    let provenance = serde_json::to_value(evidence).expect("evidence JSON");
+    assert_eq!(provenance["screen_region"], "provider_response");
+    assert_eq!(provenance["matched_pattern"], "codex_usage_limit");
     assert!(
         evidence
             .screen_text
@@ -77913,6 +80866,61 @@ fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence
             used_percent: 100,
         }]
     );
+
+    // Issue #5037: an exit detail can contain the refusal while the pane still
+    // shows startup output. Retain the text that actually authenticated it.
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime.runtimes[&window_id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"Starting provider CLI\r\n");
+    runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
+        true,
+    );
+    let exit_hold = serde_json::to_value(&runtime.provider_quota_holds[&window_id])
+        .expect("exit evidence JSON");
+    assert_eq!(exit_hold["evidence"]["screen_region"], "provider_response");
+    assert_eq!(
+        exit_hold["evidence"]["matched_pattern"],
+        "codex_usage_limit"
+    );
+}
+
+/// Issue #5037: neither full usage nor persistence authenticates a quotation
+/// (including the incident's Claude wording printed by a Codex agent).
+#[test]
+fn quoted_or_other_provider_notices_never_hold_a_codex_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    for screen in [
+        r#"{"body":"旧 Claude PM pane: You've hit your weekly limit · resets Oct 8, 6am"}"#,
+        "```text\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n  to purchase more credits or try again at Oct 8, 2026 6am.\n```",
+        CLAUDE_USAGE_LIMIT_SCREEN,
+    ] {
+        let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+        runtime.set_provider_usage_accounts(vec![codex_usage_account(100.0, true)]);
+        for now in ["2026-10-05T05:31:32Z", "2026-10-05T05:36:32Z"] {
+            runtime.observe_provider_quota_notice(&window_id, Some(screen), instant(now));
+            assert!(!runtime.provider_quota_holds.contains_key(&window_id), "{screen}");
+            assert!(!runtime.provider_quota_candidates.contains_key(&window_id), "{screen}");
+        }
+        runtime.handle_runtime_status_with_exit_confirmation(
+            window_id.clone(),
+            WindowProcessStatus::Stopped,
+            Some(screen.to_string()),
+            true,
+        );
+        assert!(!runtime.provider_quota_holds.contains_key(&window_id),
+            "a terminal status must not authenticate the quotation: {screen}");
+    }
 }
 
 // Issue #3927 (SPEC #3340 T-624 / AS-40〜42 / FR-045〜046): the Tao thread
@@ -79498,7 +82506,7 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
             .expect("pending restore")
             .clone();
         let completed = capture_tracing_events(|| {
-            runtime.handle_launch_complete(
+            runtime.handle_launch_complete_and_drain(
                 window_id.clone(),
                 Err("restore preparation failed".to_string()),
             );
@@ -80507,7 +83515,7 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
         .restore_launch_windows
         .insert(window_id.clone(), Some("session-restore".to_string()));
 
-    let _ = runtime.handle_launch_complete(
+    let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Err("PTY creation failed: too many open files".to_string()),
     );
@@ -80557,7 +83565,7 @@ fn user_started_launch_failure_before_pty_keeps_the_error_window() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
 
-    let _ = runtime.handle_launch_complete(
+    let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
         Err("PTY creation failed: too many open files".to_string()),
     );
@@ -80613,7 +83621,7 @@ fn restore_launch_failures_do_not_accumulate_error_windows_across_generations() 
             .restore_launch_windows
             .insert(window_id.clone(), None);
 
-        let _ = runtime.handle_launch_complete(
+        let _ = runtime.handle_launch_complete_and_drain(
             window_id,
             Err(format!("PTY creation failed in generation {generation}")),
         );
@@ -80880,7 +83888,7 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
     );
 
     for window_id in &restored {
-        let _ = runtime.handle_launch_complete(
+        let _ = runtime.handle_launch_complete_and_drain(
             window_id.clone(),
             Err("PTY creation failed: Too many open files (os error 24)".to_string()),
         );
@@ -81047,7 +84055,7 @@ fn assert_pm_delivery_refused(
     }
 }
 
-fn seed_pm_session_escalation(repo: &Path, session: &gwt_agent::Session, body: &str) {
+pub(super) fn seed_pm_session_escalation(repo: &Path, session: &gwt_agent::Session, body: &str) {
     session
         .save(&gwt_core::paths::gwt_sessions_dir())
         .expect("save subject session");
@@ -81161,6 +84169,7 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
         "a held wake must render current subjects at delivery time"
     );
     runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(runtime
         .project_state(&runtime.test_context())
         .unwrap()

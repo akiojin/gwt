@@ -1445,19 +1445,11 @@ mod tests {
             "expected release command to use the canonical issue.comment JSON operation"
         );
         assert!(
-            release_command.contains("\"operation\":\"pr.current\"")
-                || release_command.contains("\"operation\": \"pr.current\""),
-            "expected release command to use the canonical pr.current JSON operation"
-        );
-        assert!(
-            release_command.contains("\"operation\":\"pr.create\"")
-                || release_command.contains("\"operation\": \"pr.create\""),
-            "expected release command to use the canonical pr.create JSON operation"
-        );
-        assert!(
-            release_command.contains("\"operation\":\"pr.edit\"")
-                || release_command.contains("\"operation\": \"pr.edit\""),
-            "expected release command to use the canonical pr.edit JSON operation"
+            release_command.contains("\"operation\":\"release.status\"")
+                && release_command.contains("\"release_branch\":\"release/v{NEW_VERSION}\"")
+                && release_command.contains("\"base_branch\":\"main\"")
+                && release_command.contains("\"ensure_release_pr\":true"),
+            "expected release command to recover the explicit frozen snapshot through release.status"
         );
         assert!(
             !release_command.contains("gh issue comment"),
@@ -2285,6 +2277,31 @@ mod tests {
                 content.contains("merge-base") && content.contains("origin/develop"),
                 "{relative} must specify the merge-base HEAD..origin/develop baseline"
             );
+        }
+    }
+
+    #[test]
+    fn materialized_pre_pr_guidance_requires_required_ci_contexts_and_ac_tests() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let content = std::fs::read_to_string(
+                materialized
+                    .path()
+                    .join(provider)
+                    .join("skills/gwt-verify/SKILL.md"),
+            )
+            .unwrap();
+            for phrase in [
+                "acceptance_commands",
+                "required_status_checks.contexts",
+                "\"mode\":\"pre-pr\"",
+            ] {
+                assert!(
+                    content.contains(phrase),
+                    "{provider} pre-pr guidance is missing {phrase}"
+                );
+            }
         }
     }
 

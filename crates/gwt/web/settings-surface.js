@@ -39,6 +39,64 @@ function linkSettingsPanel(panel, windowId, tabId) {
   panel.setAttribute("aria-labelledby", settingsTabId(windowId, tabId));
 }
 
+// SPEC #1921 L3: a read-only view of the existing built-in detection snapshot.
+function renderSupportedAgentsPanel(panel, agents) {
+  const document = panel.ownerDocument;
+  panel.replaceChildren();
+  if (agents === null) {
+    const loading = document.createElement("p");
+    loading.className = "settings-help";
+    loading.setAttribute("role", "status");
+    loading.textContent = "Loading agent detection…";
+    panel.appendChild(loading);
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "settings-supported-agents";
+  table.setAttribute("aria-label", "Supported agents and installed versions");
+  const head = document.createElement("thead");
+  const header = document.createElement("tr");
+  head.appendChild(header);
+  table.appendChild(head);
+  for (const label of ["Agent", "Status", "Installed version"]) {
+    const cell = document.createElement("th");
+    cell.setAttribute("scope", "col");
+    cell.textContent = label;
+    header.appendChild(cell);
+  }
+  const body = document.createElement("tbody");
+  table.appendChild(body);
+  for (const agent of agents) {
+    const row = document.createElement("tr");
+    body.appendChild(row);
+    row.dataset.agentId = agent.id;
+    const version = agent.installed_version?.trim();
+    const values = [
+      agent.name,
+      agent.installed ? "Installed" : "Not installed",
+      agent.installed
+        ? version || "Unknown (version unavailable)"
+        : "Not installed",
+    ];
+    for (const value of values) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.appendChild(cell);
+    }
+  }
+  panel.appendChild(table);
+}
+
+function scopeSettingsControlIds(panel) {
+  for (const control of panel.querySelectorAll("input[id], select[id]")) {
+    const id = control.id;
+    control.id = `${panel.id}-${id}`;
+    for (const label of panel.querySelectorAll("label[for]")) {
+      if (label.getAttribute("for") === id) label.setAttribute("for", control.id);
+    }
+  }
+}
+
 export function mountProjectManagerSettingsPanel(
   document,
   parent,
@@ -301,6 +359,16 @@ export function createSettingsSurface({
         statusKind: "",
       };
       const settingsWindowBodies = new Set();
+      let supportedAgents = null;
+
+      function applySupportedAgentList(event) {
+        supportedAgents = event.agents;
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) {
+          const panel = body.querySelector("[data-settings-panel='supported-agents']");
+          if (panel) renderSupportedAgentsPanel(panel, supportedAgents);
+        }
+      }
       let pendingAddFromPreset = null;
       let editingCustomAgentId = null;
 
@@ -339,6 +407,9 @@ export function createSettingsSurface({
         tabs.setAttribute("role", "tablist");
         tabs.appendChild(buildSettingsTab("system", "System", true, windowData.id));
         tabs.appendChild(
+          buildSettingsTab("supported-agents", "Supported Agents", false, windowData.id),
+        );
+        tabs.appendChild(
           buildSettingsTab(
             "project-manager",
             "Project Manager",
@@ -372,6 +443,12 @@ export function createSettingsSurface({
         panelSystem.dataset.settingsPanel = "system";
         linkSettingsPanel(panelSystem, windowData.id, "system");
 
+        const panelSupportedAgents = document.createElement("section");
+        panelSupportedAgents.className = "settings-panel hidden";
+        panelSupportedAgents.setAttribute("role", "tabpanel");
+        panelSupportedAgents.dataset.settingsPanel = "supported-agents";
+        linkSettingsPanel(panelSupportedAgents, windowData.id, "supported-agents");
+
         const panelAgents = document.createElement("section");
         panelAgents.className = "settings-panel hidden";
         panelAgents.setAttribute("role", "tabpanel");
@@ -396,6 +473,7 @@ export function createSettingsSurface({
         panelUsage.dataset.role = "settings-scroll";
 
         bodyEl.appendChild(panelSystem);
+        bodyEl.appendChild(panelSupportedAgents);
         mountProjectManagerSettingsPanel(
           document,
           bodyEl,
@@ -430,6 +508,8 @@ export function createSettingsSurface({
         settingsWindowBodies.add(body);
 
         renderSystemPanel(panelSystem);
+        renderSupportedAgentsPanel(panelSupportedAgents, supportedAgents);
+        send({ kind: "list_supported_agents" });
         renderUsagePanel(panelUsage);
         // Always request fresh system settings on open so the dropdown
         // reflects the on-disk config, even if the user changed it from a
@@ -1280,6 +1360,7 @@ export function createSettingsSurface({
         panel.appendChild(resourceSection);
         panel.appendChild(boardSection);
         panel.appendChild(autostartSection);
+        scopeSettingsControlIds(panel);
         renderSystemPanelStatus(panel);
       }
 
@@ -1542,6 +1623,7 @@ export function createSettingsSurface({
         applyAutostartError,
         applyCustomAgentDeleted,
         applyCustomAgentError,
+        applySupportedAgentList,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,

@@ -114,9 +114,10 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 目的・進捗を保持します。`agent_identity.migration.json` は既存の内容を変更せず、
 未作成なら新たに作成しません。
 
-組み込みフロントエンドは現行の Fast mode フィールドを使用し、cleanup リクエストには
-operation ID を必須とします。更新前から開いているタブは再読み込みしてください。
-保存済みの Fast mode 設定は保持します。
+組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
+更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
+Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
+Issue Monitor のプロファイルと直接の Session Resume は従来の設定を維持します。
 
 ## 前提
 
@@ -1074,6 +1075,15 @@ Logs サーフェスの **Project** でそのプロジェクトのイベント�
 - プロジェクト単位のワークスペース状態:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### セッション履歴
+
+gwt は最近の Session 履歴を `~/.gwt/sessions/` に保持します。台帳の初回表示時と
+以後24時間以上の間隔でバックグラウンド整理を行い、起動時の復元が無効な停止済み履歴を
+30日間の非活動後に削除します。保存窓、実行中の処理、復旧、未完了の作業が必要とする
+Session は保護します。古い書き込み一時ファイルの残骸も整理します。
+保持方針と読めない記録の扱いは
+[Issue #5025](https://github.com/akiojin/gwt/issues/5025) に記載しています。
+
 ### macOS のファイルシステム負荷と Spotlight
 
 worktree の index watcher は、自身の macOS FSEvents stream から直下の
@@ -1166,7 +1176,17 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
-### 重量級検証の直列化
+### フロントエンドの共有状態（SPEC-5016）
+
+移行したフロントエンド domain は `web/ui-state-store.js` で immutable なデータを保持します。
+受信ハンドラはモデルを更新し、各面は selector を購読して確定した snapshot を描画します。
+取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
+通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
+共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
+Markdown 描画を選びます。移行対象と受け入れ条件は
+[SPEC-5016](https://github.com/akiojin/gwt/issues/5016) を参照してください。
+
+### 重量級検証の容量制御
 
 ホスト全体の verification lease を取得するのは canonical `verify.run`
 だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
@@ -1182,7 +1202,25 @@ execution authority・plan content hash・source fingerprint・要求コマン�
 引き続き `verify.plan` の再登録が必要です。再開した証跡は不変の先行記録を id/hash で参照し、
 元の開始時刻とコマンドごとの headed E2E・nextest・admission 証跡を保持します。
 行列全体と必要な headed Chromium の dark/light 証跡が成功するまでは Overall PASS や Ready にはなりません。
-再試行前に保持者を確認してください。
+独立した worktree とビルド directory の Heavy Cargo コマンドは、上限付きの
+ホスト共通 pool を利用します。既定容量は論理 CPU 8 個あたり 1 slot と
+メモリ 16 GiB あたり 1 slot の小さい方で、最低 1、最大 4 です。
+`~/.gwt/config.toml` で上書きできます。
+
+```toml
+[verification]
+slots = 4
+```
+
+同じ worktree または実効 Cargo target directory の実行は直列化します。
+共有資源を特定できない wrapper と旧 binary は全体排他を使います。
+各子プロセスの一時 directory を分離し、target と一時 directory の volume ごとに
+GC の空き容量閾値を残してディスク容量を予約します。
+`verification.disk_budget_bytes` で実測に基づく run 単位の予算を上書きできます。
+既定の予約量は各 volume で 5,904,433,337 bytes（約 5.5 GiB）です。
+target と一時領域の実測増分に 20% の余裕を加えて算出しています。
+`verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
+共通 FIFO queue を表示します。再試行前に確認してください。
 
 ```bash
 gwtd <<'JSON'
@@ -1245,6 +1283,12 @@ runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### PR HEAD の検証
 
+`pr.head_check` に `params.base`（例: `develop`）と任意の `params.head` を渡すと、
+PR の作成・編集をせずに、正本の PASS 済み検証記録と live remote HEAD を比較できます。
+JSON の診断には record ID、検証済み/remote/base の SHA、product commit/file、local
+検証の freshness が含まれます。base 同期のみと判定されても stale な証跡は更新しません。
+記録が欠落・未完了・失敗・破損している場合は unprovable を返します。
+
 Ready PR の作成前に、`pr.create` は live remote branch と `verify.run` に記録された
 HEAD を比較します。応答と PR 本文には、両方の SHA、base の SHA、比較結果が残ります。
 `.gwt/` 内の bookkeeping と base 同期のみの先行は許可します。検証済み履歴と対象
@@ -1305,14 +1349,15 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 
 リリースは GitHub Actions の **Prepare Release** ワークフロー（Actions →
 `Prepare Release` → `Run workflow`）で起動します。CI が `develop` を対象に
-バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
-を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
+バージョン更新・`CHANGELOG` 再生成後、その develop commit を固定した
+`release/vX.Y.Z → main` の Release PR を作成します。以降 develop へ着地しても
+release head とその CI は変わりません。ローカルで `develop` に切り替えずにどのブランチからでも
 リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
 `auto` がメジャーになることはありません。コミットの breaking marker は
 Release PR 本文に列挙されるだけで、メジャー昇格は `major` を明示した場合のみです。
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
-ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+ます。リリース復旧手順は `.claude/commands/release.md` にあります。
 
 Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
 closing keyword は書きません。`main` は default branch なので、そこに

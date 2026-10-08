@@ -5,8 +5,34 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
+const liveUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+
 test.describe("Provider usage status summary", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
+  test.beforeEach(async ({ page }, info) => {
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
+      info.project.name.includes("light") ? "light" : "dark");
+  });
+
+  test("mounted Usage setting follows snapshots without replacing its focused control", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page, true);
+    await page.goto(liveUrl || APP_URL);
+    await page.getByRole("tab", { name: "Usage & Limits" }).click();
+    const checkbox = page.getByRole("checkbox", { name: "Show Claude Code account usage" });
+    await expect(checkbox).toBeChecked();
+    await checkbox.focus();
+    await emitProviderUsage(page, [{ provider: "claude_code", windows: [], state: { kind: "disabled" } }]);
+    await expect(checkbox).not.toBeChecked();
+    await expect(checkbox).toBeFocused();
+    await emitProviderUsage(page, [{ provider: "claude_code", windows: [], state: { kind: "ok" } }]);
+    await expect(checkbox).toBeChecked();
+    await expect(checkbox).toBeFocused();
+    expect(errors).toEqual([]);
+  });
 
   test("labels providers, exposes severity, and opens one complete popover", async ({
     page,
@@ -18,9 +44,9 @@ test.describe("Provider usage status summary", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    await installEmbeddedRoutes(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(liveUrl || APP_URL);
 
     const expectedTheme = testInfo.project.name.includes("light") ? "light" : "dark";
     await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
@@ -149,9 +175,9 @@ test.describe("Provider usage status summary", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    await installEmbeddedRoutes(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(liveUrl || APP_URL);
 
     const strip = page.locator("#op-strip-usage");
     await expect(strip).toBeVisible({ timeout: 10_000 });
@@ -182,6 +208,56 @@ test.describe("Provider usage status summary", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  test("keeps weekly 100% separate from a provider refusal (Issue #5037)", async ({
+    page,
+  }, testInfo) => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
+    const baseURL = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const projectKey = process.env.GWT_PLAYWRIGHT_PROJECT_KEY;
+    const liveURL = baseURL && projectKey
+      ? new URL(`/p/${projectKey}`, baseURL).href
+      : null;
+    if (!liveURL) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    await page.goto(liveURL ?? APP_URL);
+
+    const expectedTheme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
+
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    const account = {
+      provider: "codex",
+      plan: "pro",
+      windows: [{ kind: "weekly", used_percent: 100, window_minutes: 10080 }],
+      limit_reached: false,
+      state: { kind: "ok" },
+    };
+    await emitProviderUsage(page, [account]);
+    await expect(strip).toContainText("CX 100%");
+
+    await strip.hover();
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeVisible();
+    const codex = popover.locator('.op-usage-card[data-provider="codex"]');
+    await expect(codex).toContainText(/Weekly\s*100%/);
+    await expect(codex.locator(".op-usage-card__limit")).toHaveCount(0);
+
+    await emitProviderUsage(page, [{ ...account, limit_reached: true }]);
+    await expect(strip).toContainText("CX 100%");
+    await expect(codex).toContainText(/Weekly\s*100%/);
+    await expect(codex.locator(".op-usage-card__limit")).toBeVisible();
+    await expect(codex.locator(".op-usage-card__limit")).toHaveText("Limit reached");
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
+  });
+
   test("keeps a stable width and compacts three providers to the critical one", async ({
     page,
   }) => {
@@ -192,9 +268,9 @@ test.describe("Provider usage status summary", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    await installEmbeddedRoutes(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(liveUrl || APP_URL);
 
     const strip = page.locator("#op-strip-usage");
     await expect(strip).toBeVisible({ timeout: 10_000 });
@@ -310,8 +386,8 @@ async function emitProviderUsage(page: any, accounts: unknown[]): Promise<void> 
   }, accounts);
 }
 
-async function installProviderUsageBackend(page: any): Promise<void> {
-  await page.addInitScript(() => {
+async function installProviderUsageBackend(page: any, withSettings = false): Promise<void> {
+  await page.addInitScript(withSettings => {
     try {
       window.sessionStorage.setItem("gwt:ui:briefing", "1");
     } catch {
@@ -327,10 +403,13 @@ async function installProviderUsageBackend(page: any): Promise<void> {
             id: "tab-1",
             title: "Usage Fixture",
             project_root: "/fixture",
+            project_key: location.pathname.split("/")[2],
             kind: "git",
             workspace: {
               viewport: { x: 0, y: 0, zoom: 1 },
-              windows: [],
+              windows: withSettings ? [{ id: "tab-1::settings", title: "Settings", preset: "settings",
+                geometry: { x: 40, y: 40, width: 1100, height: 750 }, z_index: 1,
+                status: "running", persist: true, minimized: false, maximized: false }] : [],
             },
           },
         ],
@@ -465,5 +544,5 @@ async function installProviderUsageBackend(page: any): Promise<void> {
       configurable: true,
       value: FixtureWebSocket,
     });
-  });
+  }, withSettings);
 }

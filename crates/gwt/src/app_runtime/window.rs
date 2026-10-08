@@ -108,8 +108,11 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, board_all_view_windows);
         $visit!($runtime, $id, pending_workspace_resume_contexts);
         $visit!($runtime, $id, pending_launch_feedback_contexts);
+        $visit!($runtime, $id, pending_launch_completions);
+        $visit!($runtime, $id, pending_launch_delivery_acks);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
+        $visit!($runtime, $id, pending_fresh_execution_finalizations);
         $visit!($runtime, $id, pending_auto_resume_sources);
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
@@ -693,6 +696,7 @@ impl AppRuntime {
             };
         }
         // Issue #4084: the review-dispatch marker dies with its window.
+        self.invalidate_workspace_projection_patch(&context.tab_id);
         self.issue_monitor_review_dispatch_windows.remove(id);
         // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
         // in-flight restore marker must not outlive its window.
@@ -733,6 +737,8 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
     ) {
+        self.invalidate_launch_delivery_ack(id);
+        self.pending_launch_completions.remove(id);
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
         // intentional stop and clears the durable PM registration below.
@@ -776,6 +782,7 @@ impl AppRuntime {
             self_close_ticket,
             closing_window_generation,
         );
+        self.pending_fresh_execution_finalizations.remove(id);
         self.profile_selections.remove(id);
     }
 

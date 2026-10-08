@@ -128,6 +128,16 @@ struct ObservedLockHolder {
 }
 
 impl NamedFileLock {
+    /// Describe an already-observed contention without acquiring the OS lock.
+    /// Holder metadata is observational and may be missing or stale.
+    pub fn contention_error(path: &Path, operation: &str) -> io::Error {
+        named_lock_error(
+            &named_lock_holder_path(path),
+            operation,
+            io::Error::new(io::ErrorKind::WouldBlock, "file lock contended"),
+        )
+    }
+
     /// Wait for ownership using the ambient operation deadline.
     pub fn acquire(path: &Path, operation: &str) -> io::Result<Self> {
         Self::acquire_observed(path, operation, || {})

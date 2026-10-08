@@ -23,6 +23,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  coverage:
+    uses: ./.github/workflows/coverage.yml
   audit:
     name: Cargo Deny (advisories + sources)
     runs-on: ubuntu-latest
@@ -37,6 +39,8 @@ jobs:
         run: cargo deny check advisories sources
   lint:
     name: Clippy & Rustfmt
+    # Issue #5173: coverage / Rust Coverage is required independently, so
+    # Clippy can start alongside coverage without weakening its thresholds.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
