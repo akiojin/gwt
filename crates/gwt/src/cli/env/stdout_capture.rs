@@ -93,14 +93,24 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
         self.inner.fetch_pr_head_sha(number)
     }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.inner.fetch_completion_pr(number)
+    }
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
     ) -> io::Result<PrStatus> {
-        self.inner.edit_pr(number, title, body, add_labels)
+        self.inner.edit_pr(number, base, title, body, add_labels)
+    }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        self.inner.close_pr(number, comment)
     }
 
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
@@ -174,6 +184,14 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
         self.inner.rerun_actions(target)
+    }
+
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        self.inner.cancel_actions(run_id)
+    }
+
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        self.inner.fetch_queued_actions()
     }
 
     fn run_internal_command(

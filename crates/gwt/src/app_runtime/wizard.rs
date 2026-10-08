@@ -148,8 +148,9 @@ fn manual_generation_operation_id(
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     binding: &gwt_agent::ExecutionBindingIdentity,
     predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+    attempts: &[gwt::cli::execution_state::ContinuationAttempt],
 ) -> String {
-    manual_holder_operation_id(
+    let base = manual_holder_operation_id(
         &format!(
             "{}:{}:{}:{}",
             owner.kind.as_str(),
@@ -158,7 +159,22 @@ fn manual_generation_operation_id(
             binding.ledger_head_hash
         ),
         predecessor_kind,
-    )
+    );
+    let mut operation_id = base.clone();
+    // A new user launch advances only past a durably cancelled operation.
+    // Deriving its identity from that candidate preserves retries across Host
+    // restarts; Prepared/Activated operations still replay their exact request.
+    while let Some(attempt) = attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == operation_id)
+    {
+        if attempt.status != gwt::cli::execution_state::ContinuationAttemptStatus::Aborted {
+            break;
+        }
+        operation_id = format!("{base}:retry:{}", attempt.candidate_generation_id);
+    }
+    operation_id
 }
 
 fn manual_successor_stable_component(prefix: &str, operation_id: &str) -> String {
@@ -3308,12 +3324,17 @@ impl AppRuntime {
             .filter(|window| window.preset == WindowPreset::Agent)
             .map(|window| (combined_window_id(tab_id, &window.id), window))
             .find(|(window_id, window)| {
-                let linked_issue = window.linked_issue_number.or_else(|| {
-                    let session_id = window.session_id.as_deref()?;
-                    self.launch_wizard_cache
-                        .session_by_id(session_id)
-                        .and_then(|session| session.linked_issue_number)
-                });
+                let pending =
+                    self.issue_monitor_pending_feedback_for_window(window_id, &tab.project_root);
+                let linked_issue = pending
+                    .and_then(|context| context.issue_monitor_issue_number)
+                    .or(window.linked_issue_number)
+                    .or_else(|| {
+                        let session_id = window.session_id.as_deref()?;
+                        self.launch_wizard_cache
+                            .session_by_id(session_id)
+                            .and_then(|session| session.linked_issue_number)
+                    });
                 let in_issue_worktree =
                     self.active_agent_sessions
                         .get(window_id)
@@ -3321,6 +3342,7 @@ impl AppRuntime {
                             normalize_branch_name(&active.branch_name) == target_branch
                         });
                 (linked_issue == Some(issue_number) || in_issue_worktree)
+                    && !pending.is_some_and(|context| context.issue_monitor_review_dispatch)
                     && !self
                         .issue_monitor_review_dispatch_windows
                         .contains(window_id)
@@ -3529,11 +3551,24 @@ impl AppRuntime {
             )
         };
         if let Some(delivery_id) = delivery_id.as_deref() {
+            // Claim the existing pane when adopting it: a proposed new ID
+            // would incorrectly ask for another slot at a saturated cap.
+            let claim_window_id = review_prompt
+                .is_none()
+                .then(|| {
+                    self.live_issue_agent_window(
+                        &tab_id,
+                        issue_number,
+                        &knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
+                    )
+                })
+                .flatten()
+                .unwrap_or_else(|| proposed_window_id.clone());
             match self.claim_issue_monitor_launch_delivery(
                 &project_root,
                 issue_number,
                 delivery_id,
-                &proposed_window_id,
+                &claim_window_id,
             ) {
                 Ok(true) => {}
                 Ok(false) => return Ok(Some(Vec::new())),
@@ -4665,7 +4700,12 @@ impl AppRuntime {
             return Ok(super::ManualLaunchGenerationDisposition::Prepare(
                 super::ManualLaunchPreparation {
                     owner,
-                    operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+                    operation_id: manual_generation_operation_id(
+                        owner,
+                        &current,
+                        predecessor_kind,
+                        &ledger.continuation_attempts,
+                    ),
                     expected_binding: current,
                     expected_session: None,
                     expected_runtime: None,
@@ -4762,7 +4802,12 @@ impl AppRuntime {
         };
         let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
         let intent = super::ManualLaunchHolderIntent {
-            operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+            operation_id: manual_generation_operation_id(
+                owner,
+                &current,
+                predecessor_kind,
+                &ledger.continuation_attempts,
+            ),
             fingerprint,
             owner,
             predecessor,
@@ -6214,11 +6259,13 @@ mod manual_successor_identity_tests {
             owner,
             &binding,
             gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+            &[],
         );
         let after_runtime_replacement = manual_generation_operation_id(
             owner,
             &binding,
             gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+            &[],
         );
 
         assert_eq!(before_runtime_replacement, after_runtime_replacement);

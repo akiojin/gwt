@@ -114,7 +114,7 @@ fn print_help() {
     println!("Commands:");
     println!("  issue       Manage GitHub Issues and SPEC sections");
     println!("  pr          Manage pull requests, reviews, checks, threads");
-    println!("  actions     Fetch GitHub Actions run/job logs");
+    println!("  actions     Read logs, re-run failures, and cancel GitHub Actions runs");
     println!("  board       Read/write the coordination Board (SPEC-1974)");
     println!("  hook        Dispatch Claude Code / Codex hook events");
     println!("  index       Manage the local search index");
@@ -385,11 +385,13 @@ fn format_pr_help() -> String {
         "",
         "Operations:",
         "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
-        "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
+        "  pr.create | pr.edit | pr.ready | pr.draft | pr.close | pr.comment",
         "  pr.update_branch | pr.review_threads.reply_and_resolve",
         "",
         "Key params:",
-        "  number, base, head, title, body, labels, add_labels, draft",
+        "  number, base, head, title, body, labels, add_labels, draft, comment",
+        "  pr.edit: base alone is a valid update; existing edit authority applies.",
+        "  pr.close: number and optional comment; preserves the branch.",
         "",
     ]
     .join("\n")
@@ -397,7 +399,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "actions.* — Read GitHub Actions run/job logs and re-run failures via JSON envelope.",
+        "actions.* — Read GitHub Actions logs and manage runs via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -408,6 +410,8 @@ fn format_actions_help() -> String {
         "  actions.logs                            Print raw run logs",
         "  actions.job_logs                        Print job logs (ANSI stripped; failed_only, context_lines)",
         "  actions.rerun                           Re-run a failed run or a single failed job",
+        "  actions.cancel                          Request cancellation of a queued or in-progress run",
+        "  actions.queued                          List queued runs without jobs, with elapsed age_seconds",
         "",
         "Key params:",
         "  run_id, job_id",
@@ -415,6 +419,8 @@ fn format_actions_help() -> String {
         "",
         "Notes:",
         "  actions.rerun refuses a run_id/job_id the current repository does not own.",
+        "  actions.cancel refuses completed runs and a run_id the current repository does not own.",
+        "  actions.queued takes no params.",
         "  Prefer job_id so one flaky check does not re-run every job in the run.",
         "",
     ]
@@ -656,7 +662,11 @@ fn format_verify_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  verify.plan | verify.run | verify.adjudicate",
+        "  verify.plan | verify.run | verify.status | verify.cancel | verify.adjudicate",
+        "  verify.status inspects the latest caller attempt, or params.attempt_id.",
+        "  verify.cancel requires params.attempt_id and params.reason; only the",
+        "  same session/worktree/execution authority can cancel its own attempt.",
+        "  Cancellation retains Interrupted state and clears its reservation immediately.",
         "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
         "  verify.lease.status",
         "",
@@ -1079,6 +1089,17 @@ mod tests {
     fn actions_family_help_documents_rerun() {
         let help = family_help("actions").expect("actions family help");
         for expected in ["actions.rerun", "run_id", "job_id", "failed_only"] {
+            assert!(
+                help.contains(expected),
+                "actions help must mention {expected}, got:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_4188_actions_family_help_lists_cancel_and_queued() {
+        let help = family_help("actions").expect("actions family help");
+        for expected in ["actions.cancel", "actions.queued", "run_id", "age_seconds"] {
             assert!(
                 help.contains(expected),
                 "actions help must mention {expected}, got:\n{help}"
