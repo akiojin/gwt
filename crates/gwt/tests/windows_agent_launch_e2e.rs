@@ -191,7 +191,17 @@ fn windows_official_provider_launch_uses_installed_direct_runner() {
         );
     }
 
-    assert_public_ws_agent_route_boundary(temp.path(), provider, &fixture, &launch_env);
+    // Issue #5102 AC-2: independent launches on the same tree must retain the
+    // exact persisted identity assertion on every run, not pass by retrying.
+    for repetition in 1..=3 {
+        eprintln!("public Board installed identity {provider:?} repetition {repetition}/3");
+        assert_public_ws_agent_route_boundary(
+            &temp.path().join(format!("public-repeat-{repetition}")),
+            provider,
+            &fixture,
+            &launch_env,
+        );
+    }
 
     assert_eq!(
         fixture.requests().len(),
@@ -671,7 +681,7 @@ async fn assert_public_ws_conpty_boundary_async(
         || receipt["npm_exec_identity"] != serde_json::Value::Null
     {
         return Err(format!(
-            "public Board route Session did not commit authenticated installed identity: {persisted:?}"
+            "public Board route Session did not commit authenticated installed identity: {persisted:?}; receipt={receipt}"
         ));
     }
     let capture_before_focus = std::fs::read(&capture)

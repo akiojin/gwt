@@ -571,6 +571,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn successful_issue_rebuild_stays_ready_for_crlf_cache_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let issue = cache.join("7");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&issue).unwrap();
+        fs::create_dir_all(repo.join("issues")).unwrap();
+        fs::write(
+            issue.join("meta.json"),
+            r#"{"title":"newlines","state":"open","labels":["bug"]}"#,
+        )
+        .unwrap();
+        // The runner's Path.read_text normalizes newlines before its 2000-character limit.
+        let body = format!("before\nafter\n{}", "line\n".repeat(500));
+        fs::write(issue.join("body.md"), &body).unwrap();
+        let source = crate::issue_cache::issue_cache_source_fingerprint(&cache)
+            .unwrap()
+            .unwrap();
+        fs::write(
+            repo.join("issues/meta.json"),
+            serde_json::to_vec(&json!({
+                "document_count": 1,
+                "source_cache_fingerprint": source.fingerprint,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(issue.join("body.md"), body.replace('\n', "\r\n")).unwrap();
+
+        let status = issues_status(&repo, &cache);
+        assert_eq!(
+            status["reason"], "ready",
+            "successful rebuild must not appear stale"
+        );
+        assert_eq!(status["repair_required"], false);
+
+        fs::write(issue.join("body.md"), "changed content").unwrap();
+        assert_eq!(
+            issues_status(&repo, &cache)["reason"],
+            "source_cache_changed"
+        );
+    }
+
+    #[test]
     fn issues_projection_exposes_cancelled_repair_and_build_mode() {
         let tmp = tempfile::tempdir().unwrap();
         let issues = tmp.path().join("issues");

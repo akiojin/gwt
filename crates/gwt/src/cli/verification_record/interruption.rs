@@ -114,8 +114,13 @@ pub(super) struct Watchdog {
 impl Watchdog {
     /// Used by the real gwtd entrypoint; unit-level in-process runs have no
     /// gwtd executable and exercise the record transitions directly instead.
-    pub(super) fn start(worktree: &Path, record_id: &str, token: &str) -> io::Result<Self> {
-        let mut child = gwt_core::process::hidden_command(std::env::current_exe()?)
+    pub(super) fn start(
+        worktree: &Path,
+        record_id: &str,
+        token: &str,
+        executable: &Path,
+    ) -> io::Result<Self> {
+        let mut child = gwt_core::process::hidden_command(executable)
             .arg(WATCHDOG_ARG)
             .arg(worktree)
             .arg(record_id)
@@ -405,7 +410,11 @@ mod tests {
         settle_interrupted(dir.path(), &running.record_id, token, false).unwrap();
         let interrupted = load(dir.path()).unwrap().unwrap();
         assert_eq!(
-            interrupted.lifecycle.unwrap().external_terminations,
+            interrupted
+                .lifecycle
+                .as_ref()
+                .unwrap()
+                .external_terminations,
             Some(2)
         );
         assert!(crate::cli::trusted_store::with_write_lease(dir.path(), || {

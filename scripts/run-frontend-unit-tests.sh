@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bash scripts/run-node-tests-with-linkedom.sh \
+bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/close-project.test.mjs \
   crates/gwt/web/__tests__/socket-project-scope.test.mjs \
   crates/gwt/web/__tests__/frontend-route.test.mjs \
@@ -71,6 +71,9 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/launch-wizard-model-fallback.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-pool-impact.test.mjs \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
+  crates/gwt/web/__tests__/ui-state-store.test.mjs \
+  crates/gwt/web/__tests__/ui-content.test.mjs \
+  crates/gwt/web/__tests__/pull-render-contract.test.mjs \
   crates/gwt/web/__tests__/issue-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \
   crates/gwt/web/__tests__/workspace-state-notice.test.mjs \

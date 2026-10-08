@@ -34,12 +34,13 @@ GWTD = CHECKOUT / "target/debug/gwtd"
 GUARD_ERROR_CODE = "real_gh_spawn_blocked_in_tests"
 RESTORE_COMMAND = ["cargo", "build", "-p", "gwt", "--bin", "gwtd"]
 DEFERRED_RESTORE_COMMAND = RESTORE_COMMAND + ["--target-dir", "target"]
+METADATA_ARGS = ["metadata", "--offline", "--no-deps", "--format-version", "1"]
 # An integration test needs the gwtd bin built, and --all-features builds it
 # with the guard armed. Only used when the artifact is not already armed.
 ARM_COMMAND = [
     "cargo", "test", "-p", "gwt", "--all-features",
-    "--test", "gwtd_cli_test",
-    "gwtd_help_describes_the_headless_cli_surface", "--", "--exact",
+    "--test", "cli_contracts",
+    "gwtd_cli_test::gwtd_help_describes_the_headless_cli_surface", "--", "--exact",
 ]
 
 
@@ -58,7 +59,7 @@ def probe_github_read(root):
         directory.mkdir()
     calls = root / "gh-calls.jsonl"
     fake_gh = bin_dir / "gh"
-    fake_gh.write_text(
+    fake_gh_source = (
         f"#!{sys.executable}\n"
         "import json, sys\n"
         f"with open({str(calls)!r}, 'a') as log:\n"
@@ -70,10 +71,19 @@ def probe_github_read(root):
         "    print(json.dumps([{'name': 'artifact-check', 'state': 'COMPLETED', "
         "'conclusion': 'SUCCESS'}]))\n"
         "else:\n"
-        "    raise SystemExit('Unexpected gh call: ' + repr(sys.argv))\n",
-        encoding="utf-8",
+        "    raise SystemExit('Unexpected gh call: ' + repr(sys.argv))\n"
     )
-    fake_gh.chmod(0o755)
+    # Sibling forks must never inherit a writable fixture FD (Issue #5028).
+    subprocess.run(
+        [sys.executable, "-c",
+         "from pathlib import Path; import sys; path = Path(sys.argv[1]); "
+         "path.write_text(sys.stdin.buffer.read().decode('utf-8'), encoding='utf-8'); "
+         "path.chmod(0o755)",
+         str(fake_gh)],
+        input=fake_gh_source,
+        encoding="utf-8",
+        check=True,
+    )
     # No sandbox or live-opt-in marker, and no launch or Git context: an armed
     # artifact must refuse before it ever reaches the PATH fixture.
     env = {
@@ -139,8 +149,9 @@ def deferred_restore():
             "import json, os, subprocess, sys\n"
             f"with open({str(calls)!r}, 'a') as log:\n"
             "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-            f"assert sys.argv[1:] == {DEFERRED_RESTORE_COMMAND[1:]!r}, sys.argv\n"
-            "assert 'CARGO_TARGET_DIR' not in os.environ, 'recovery must target the checkout artifact'\n"
+            f"assert sys.argv[1:] in [{METADATA_ARGS!r}, {DEFERRED_RESTORE_COMMAND[1:]!r}], sys.argv\n"
+            f"if sys.argv[1:] == {DEFERRED_RESTORE_COMMAND[1:]!r}:\n"
+            "    assert 'CARGO_TARGET_DIR' not in os.environ, 'recovery must target the checkout artifact'\n"
             f"raise SystemExit(subprocess.call([{shutil.which('cargo')!r}, "
             f"*sys.argv[1:]], cwd={str(CHECKOUT)!r}))\n",
             encoding="utf-8",
@@ -183,8 +194,12 @@ def deferred_restore():
         ok, after, github_calls = probe("after deferred verify.run")
         assert ok and GUARD_ERROR_CODE not in after, after
         assert github_calls == [["pr", "view"], ["pr", "checks"]], github_calls
-        assert reached == [DEFERRED_RESTORE_COMMAND[1:]], (
-            f"deferred verification must only restore, never run its test matrix: {reached}\n{output}"
+        # Admission and GC coordination resolve Cargo's effective target with
+        # read-only metadata. Only the final restoration may build anything.
+        assert reached and reached[-1] == DEFERRED_RESTORE_COMMAND[1:] and all(
+            arguments == METADATA_ARGS for arguments in reached[:-1]
+        ), (
+            f"deferred verification may resolve targets and restore once, never run its test matrix: {reached}\n{output}"
         )
         assert "gwtd artifact restoration: restored" in output, output
         assert not (repo / ".gwt/skill-state/verification-run.json").exists(), (

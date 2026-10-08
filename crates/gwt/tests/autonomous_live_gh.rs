@@ -6,8 +6,7 @@
 //! coverage in `cli::daemon::server`; this test keeps the cross-crate subprocess
 //! pipeline (spawn → gh → parse → gate → proposal → arm) live and observable.
 //!
-//! Both scenarios live in ONE test: PATH + mock env are process-global, so a
-//! single sequential test avoids cross-thread env races.
+//! PATH + mock env are process-global; hold the shared environment lock.
 
 #![cfg(unix)]
 
@@ -113,6 +112,9 @@ fn init_repo_with_default_branch(repo: &Path) {
 
 #[test]
 fn autonomous_merge_pipeline_executes_through_mock_gh() {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = std::env::temp_dir().join(format!("gwt-mockgh-{}", std::process::id()));
     let bin = tmp.join("bin");
     fs::create_dir_all(&bin).expect("mkdir mock bin");
@@ -124,11 +126,14 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     init_repo_with_default_branch(&repo);
 
     let orig_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin.display(), orig_path));
-    std::env::set_var("GWT_MOCK_GH_LOG", &merge_log);
+    let _path = gwt_core::test_support::ScopedEnvVar::set(
+        "PATH",
+        format!("{}:{}", bin.display(), orig_path),
+    );
+    let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_MOCK_GH_LOG", &merge_log);
     // Issue #3675: mark the mock as installed so the unsandboxed-gh spawn
     // guard lets the pipeline's gh spawns through.
-    std::env::set_var("GWT_TEST_GH_SANDBOX", "1");
+    let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
 
     let now = "2026-06-29T00:10:00Z";
     let issues = [auto_issue()];
@@ -226,12 +231,9 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
         Some(&gwt::IssueMonitorLaunchSessionStrategy::FreshRequired),
     );
 
-    cleanup(&tmp, &orig_path);
+    cleanup(&tmp);
 }
 
-fn cleanup(tmp: &Path, orig_path: &str) {
-    std::env::set_var("PATH", orig_path);
-    std::env::remove_var("GWT_MOCK_GH_LOG");
-    std::env::remove_var("GWT_TEST_GH_SANDBOX");
+fn cleanup(tmp: &Path) {
     let _ = fs::remove_dir_all(tmp);
 }

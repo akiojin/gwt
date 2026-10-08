@@ -56,6 +56,12 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Current)
         }
+        Some("head-check") => {
+            let base = it.next().ok_or(CliParseError::MissingFlag("base"))?.clone();
+            let head = it.next().cloned();
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::HeadCheck { base, head })
+        }
         Some("list") => parse_pr_list_args(it.collect::<Vec<_>>().as_slice()),
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
@@ -362,11 +368,24 @@ fn ready_verification(
             completion,
         )
         .map_err(|error| {
+            if let status @ verification::EvidenceStatus::UnsupportedFormat { .. } =
+                verification::evaluate_evidence(worktree, session_id, Some(*owner_number))
+            {
+                return format!("PR handoff refused: {}", status.describe());
+            }
             format!("{recovery} completion verification evidence is not current: {error}")
         })?
     } else {
         verification::load(worktree)
-            .map_err(|error| format!("{recovery} Record read failed: {error}"))?
+            .map_err(|error| {
+                if matches!(
+                    verification::evidence_read_error(&error),
+                    verification::EvidenceStatus::UnsupportedFormat { .. }
+                ) {
+                    return format!("PR handoff refused: {error}");
+                }
+                format!("{recovery} Record read failed: {error}")
+            })?
             .ok_or_else(|| recovery.to_string())?
     };
     if ui_surface && !record.headed_e2e_passed() {
@@ -390,8 +409,15 @@ fn ready_verification(
                 Err(status)
             }
         };
-        evidence
-            .map_err(|status| format!("{recovery} Current evidence: {}.", status.describe()))?;
+        evidence.map_err(|status| {
+            if matches!(
+                status,
+                verification::EvidenceStatus::UnsupportedFormat { .. }
+            ) {
+                return format!("PR handoff refused: {}", status.describe());
+            }
+            format!("{recovery} Current evidence: {}.", status.describe())
+        })?;
     }
     Ok(Some(record))
 }
@@ -633,6 +659,7 @@ pub(super) fn run<E: CliEnv>(
     }
     let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
+        PrCommand::HeadCheck { base, head } => head_check::read(env, &base, head.as_deref(), out)?,
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
                 Some(pr) => {
@@ -704,7 +731,7 @@ pub(super) fn run<E: CliEnv>(
                                 .as_ref()
                                 .and_then(|record| record.verified_head.as_deref()),
                         )? {
-                            check.record_id = record.map(|record| record.record_id);
+                            check.record_id = record.map(|record| record.record_id.clone());
                             let report = check.report()?;
                             crate::cli::trusted_store::write(
                                 worktree,
@@ -818,7 +845,7 @@ pub(super) fn run<E: CliEnv>(
                                 .flatten()
                                 .is_some_and(|current| current.number == number)
                         })
-                        .and_then(|record| record.verified_head)
+                        .and_then(|record| record.verified_head.clone())
                 });
             if let Some(verified) = verified {
                 match env.fetch_pr_head_sha(number) {
@@ -1563,6 +1590,9 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
             if let Some(queue) = &item.merge_queue {
                 row["merge_queue"] = serde_json::json!(queue);
             }
+            if let Some(strict) = item.required_status_checks_strict {
+                row["required_status_checks_strict"] = serde_json::json!(strict);
+            }
             row
         })
         .collect();
@@ -1736,6 +1766,7 @@ mod tests {
             age_hours: None,
             auto_merge_enabled: false,
             merge_queue: None,
+            required_status_checks_strict: None,
             check_counts: None,
             conflict: None,
             unresolved_review_threads: None,
@@ -1831,19 +1862,22 @@ mod tests {
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "remote-head-session");
         crate::cli::verification_record::save_plan(
             &repo,
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "remote-head-session".to_string(),
-                owner_number: Some(42),
-                execution_binding: Some(identity),
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                worktree_fingerprint: String::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "remote-head-session".to_string(),
+                    owner_number: Some(42),
+                    execution_binding: Some(identity),
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    worktree_fingerprint: String::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .unwrap();
         let (record, _) = crate::cli::verification_record::run_verification(
@@ -2368,19 +2402,22 @@ mod tests {
 
         crate::cli::verification_record::save_plan(
             worktree.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "session-current".to_string(),
-                owner_number: Some(42),
-                execution_binding: Some(identity),
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                worktree_fingerprint: String::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "session-current".to_string(),
+                    owner_number: Some(42),
+                    execution_binding: Some(identity),
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    worktree_fingerprint: String::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .expect("save generation-bound verification plan");
         crate::cli::verification_record::run_verification(
@@ -2574,19 +2611,22 @@ mod tests {
         );
         crate::cli::verification_record::save_plan(
             worktree.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "session-receipt".to_string(),
-                owner_number: Some(42),
-                execution_binding: Some(identity),
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "session-receipt".to_string(),
+                    owner_number: Some(42),
+                    execution_binding: Some(identity),
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .expect("save receipt plan");
         let (verification, _) = crate::cli::verification_record::run_verification(
@@ -2661,19 +2701,22 @@ mod tests {
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
         crate::cli::verification_record::save_plan(
             worktree.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: session_id.to_string(),
-                owner_number: Some(42),
-                execution_binding: Some(identity),
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: session_id.to_string(),
+                    owner_number: Some(42),
+                    execution_binding: Some(identity),
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .unwrap();
         let (original, _) = crate::cli::verification_record::run_verification(
@@ -2729,19 +2772,22 @@ mod tests {
         let identity = initialize_pr_generation_authority(worktree.path(), "session-guard");
         crate::cli::verification_record::save_plan(
             worktree.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "session-guard".to_string(),
-                owner_number: Some(42),
-                execution_binding: Some(identity),
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "session-guard".to_string(),
+                    owner_number: Some(42),
+                    execution_binding: Some(identity),
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .unwrap();
         let (original, _) = crate::cli::verification_record::run_verification(
@@ -2818,6 +2864,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        // Shard delivery evidence is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-pr-shard-delivery";
@@ -3100,6 +3154,14 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        // Lifecycle receipt acceptance is independent of the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-completed-settled-handoff";
@@ -3257,6 +3319,14 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        // Receipt independence is unrelated to the host's free disk space.
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .expect("fixture disk admission");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         seed_remote_pr_base(&fixture.repo);
         let session_id = "session-receipt-independent-pr";
@@ -3487,19 +3557,22 @@ mod tests {
         // Fresh evidence (plan + covering run) unlocks the Ready handoff.
         crate::cli::verification_record::save_plan(
             tmp.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "sess-pr".to_string(),
-                owner_number: Some(42),
-                execution_binding: None,
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "sess-pr".to_string(),
+                    owner_number: Some(42),
+                    execution_binding: None,
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .unwrap();
         crate::cli::verification_record::run_verification(
@@ -3597,19 +3670,22 @@ mod tests {
         let second_command = "git still-not-a-subcommand".to_string();
         crate::cli::verification_record::save_plan(
             tmp.path(),
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "sess-pr".to_string(),
-                owner_number: Some(42),
-                execution_binding: None,
-                commands: vec![command.clone(), second_command.clone()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "sess-pr".to_string(),
+                    owner_number: Some(42),
+                    execution_binding: None,
+                    commands: vec![command.clone(), second_command.clone()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
         )
         .unwrap();
         let (record, _) = crate::cli::verification_record::run_verification(
@@ -3704,7 +3780,7 @@ mod tests {
         let code = crate::cli::verification_record::run(
             &mut env,
             crate::cli::verification_record::VerifyCommand::Adjudicate {
-                record_id: record.record_id,
+                record_id: record.record_id.clone(),
                 command: second_command.clone(),
                 board_entry_id: second_decision_id.clone(),
             },
@@ -4022,6 +4098,7 @@ mod tests {
         assert!(!out.contains("CLI family split body"), "{out}");
         assert!(!out.contains("deferred_user_verification"), "{out}");
         assert!(!out.contains("merge_queue"), "{out}");
+        assert!(!out.contains("required_status_checks_strict"), "{out}");
         // Issue #3891 AC-1 / AC-4: where the rows came from and what the read
         // cost are part of every answer, so a throttled or cached read is
         // observable by the PM.
@@ -4063,6 +4140,7 @@ mod tests {
     #[test]
     fn pr_list_renders_the_merge_queue_state_of_a_probed_row() {
         let mut item = seeded_inventory_item();
+        item.required_status_checks_strict = Some(false);
         item.merge_queue = Some(gwt_git::PrMergeQueueState {
             enabled: true,
             position: Some(2),
@@ -4085,6 +4163,10 @@ mod tests {
         assert_eq!(
             payload["pull_requests"][0]["merge_queue"],
             serde_json::json!({"enabled": true, "position": 2, "state": "AWAITING_CHECKS"})
+        );
+        assert_eq!(
+            payload["pull_requests"][0]["required_status_checks_strict"],
+            false
         );
     }
 
@@ -4378,7 +4460,8 @@ mod tests {
         use crate::cli::verification_record as verification;
         verification::save_plan(
             tmp.path(),
-            &verification::VerificationPlanRecord {
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
                 session_id: session_id.to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -4390,7 +4473,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         verification::run_verification(tmp.path(), session_id, &["git --version".to_string()])
@@ -4421,6 +4504,47 @@ mod tests {
         .expect("run pr create");
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_create_call_log.len(), 1);
+    }
+
+    #[test]
+    fn autonomous_ready_format_skew_does_not_request_reverification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(tmp.path());
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success());
+        let document = serde_json::json!({
+            "format_version": 999,
+            "commands": "future representation"
+        });
+        crate::cli::trusted_store::write(
+            tmp.path(),
+            "verification-run.json",
+            &serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let body = format!(
+            "{} {}\n",
+            gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+            gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT
+        );
+        for is_ready in [false, true] {
+            let error = ready_verification(tmp.path(), None, &body, is_ready).unwrap_err();
+            assert!(
+                error.contains("format version 999") && error.contains("upgrade"),
+                "{error}"
+            );
+            assert!(
+                !error.contains("verify.run")
+                    && !error.contains("verify.plan")
+                    && !error.contains("tamper"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -4467,7 +4591,8 @@ mod tests {
         use crate::cli::verification_record as verification;
         verification::save_plan(
             repo.path(),
-            &verification::VerificationPlanRecord {
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
                 session_id: session_id.to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -4479,7 +4604,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (mut record, _) =
@@ -4631,7 +4756,8 @@ mod tests {
         );
         verification::save_plan(
             repo.path(),
-            &verification::VerificationPlanRecord {
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
                 session_id: session_id.to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -4643,7 +4769,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, _) =
@@ -4729,7 +4855,8 @@ mod tests {
         );
         verification::save_plan(
             repo.path(),
-            &verification::VerificationPlanRecord {
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
                 session_id: session_id.to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -4741,7 +4868,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, _) =
@@ -5175,6 +5302,14 @@ mod tests {
         }
         if detached_delivery {
             if let PrCommand::Ready { number } = &command {
+                // Ready metadata delivery is independent of the host's free disk space.
+                gwt_config::Settings::update_global(|settings| {
+                    settings.verification.disk_budget_bytes = Some(0);
+                    settings.build_artifact_gc.below_bytes = 0;
+                    settings.build_artifact_gc.below_percent = 0;
+                    Ok(())
+                })
+                .expect("fixture disk admission");
                 env.pr_quarantine_contexts.insert(
                     *number,
                     PrQuarantineContext {
@@ -5556,6 +5691,47 @@ mod tests {
     }
 
     #[test]
+    fn issue_5108_pr_checks_pending_details_override_green_rollup() {
+        for mode in ["checks-pending", "checks-pending-fallback"] {
+            with_fake_gh(mode, |repo_path| {
+                let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12)
+                    .expect("pending exit code is a successful checks read");
+                assert_eq!(checks.ci_status, "PENDING");
+                assert!(checks
+                    .summary
+                    .contains("CI: PENDING (5 unfinished, 3 required)"));
+                assert_eq!(checks.merge_status, "BLOCKED");
+                let data = serde_json::to_value(&checks).unwrap();
+                assert_eq!(data["check_counts"]["in_progress"], 5);
+                assert_eq!(data["check_counts"]["failure"], 1);
+                assert_eq!(data["required_pending_count"], 3);
+                assert_eq!(data["ci_status"], "PENDING");
+                assert_eq!(data["merge_status"], "BLOCKED");
+            });
+        }
+    }
+
+    #[test]
+    fn issue_5108_pr_checks_do_not_infer_unknown_required_membership() {
+        with_fake_gh("checks-pending-partial-required", |repo_path| {
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).unwrap();
+            assert!(checks.summary.contains("CI: PENDING (1 unfinished)"));
+            assert_eq!(checks.required_pending_count, None);
+        });
+    }
+
+    #[test]
+    fn issue_5108_pr_checks_preserve_github_merge_state() {
+        for state in ["BLOCKED", "BEHIND", "UNSTABLE"] {
+            with_fake_gh(&format!("checks-merge-{state}"), |repo_path| {
+                let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).unwrap();
+                assert_eq!(checks.merge_status, state);
+                assert!(checks.summary.contains(&format!("Merge: {state}")));
+            });
+        }
+    }
+
+    #[test]
     fn pr_checks_response_returns_error_when_gh_fails() {
         let err = parse_pr_checks_items_response("", "auth failed", false).unwrap_err();
         assert!(
@@ -5690,6 +5866,8 @@ mod tests {
 
         with_fake_gh("checks-fallback", |repo_path| {
             let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert_eq!(checks.ci_status, "SUCCESS");
+            assert_eq!(checks.required_pending_count, None);
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].workflow, "coverage");
             assert_eq!(checks.checks[0].url, "https://example.test/checks/12");

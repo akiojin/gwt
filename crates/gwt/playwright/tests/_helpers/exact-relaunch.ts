@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -95,16 +95,23 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   console.log('GWT_FAKE_PROVIDER_READY ' + native);
 });
 `;
-  await writeFile(join(bin, "codex"), provider);
-  await chmod(join(bin, "codex"), 0o755);
+  // Only the child holds writable fixture FDs, and exits before any spawn.
+  // Issue #5028: awaiting writeFile cannot prevent sibling fork inheritance.
+  const writeExecutable = (file: string, contents: string) => {
+    const result = spawnSync(process.execPath, ["-e",
+      "const fs = require('node:fs'); fs.writeFileSync(process.argv[1], fs.readFileSync(0)); fs.chmodSync(process.argv[1], 0o755);",
+      file], { input: contents, encoding: "utf8" });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`Fixture executable writer failed: ${result.stderr}`);
+  };
+  writeExecutable(join(bin, "codex"), provider);
   // Hooks resolve `gwtd` through PATH when GWT_BIN_PATH is absent; it must be
   // the checkout build under test, never an installed binary.
   await symlink(gwtd, join(bin, "gwtd"));
   // An accidentally selected package runner must never contact a registry or
   // bypass the fixture's provider. Installed Codex is the intended test route.
   for (const runner of ["bunx", "npx", "npm"]) {
-    await writeFile(join(bin, runner), "#!/bin/sh\necho 'Exact relaunch fixture requires installed Codex' >&2\nexit 64\n");
-    await chmod(join(bin, runner), 0o755);
+    writeExecutable(join(bin, runner), "#!/bin/sh\necho 'Exact relaunch fixture requires installed Codex' >&2\nexit 64\n");
   }
   try {
     const runtime = join(homedir(), ".gwt/runtime");

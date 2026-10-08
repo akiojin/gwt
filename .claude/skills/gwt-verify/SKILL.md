@@ -68,7 +68,7 @@ the generic matrix in this skill. The matrix here is the fallback frame.
 |---|---|---|
 | `--mode quick` (default) | TDD loop, narrow check during implementation | Only surfaces touched by uncommitted / working-tree changes; the narrowest representative command per runner (e.g. single-package test invocation). Skip heavy integration / E2E / visual unless the diff explicitly touches them. |
 | `--mode full` | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface is in scope — by the diff, or by acceptance-aware escalation (`references/surface-taxonomy.md`). User Verification Handoff is required (see below). |
-| `--mode pre-pr` | gwt-manage-pr before PR create / update | `full` matrix + release-flow tests when a release surface changed; visual / UI regression always included if any UI surface is in scope by diff or by acceptance-aware escalation. User Verification Handoff is required. |
+| `--mode pre-pr` | gwt-manage-pr before PR create / update | Use the approved CI-backed local subset when the project supports it; otherwise use the `full` matrix. Keep acceptance tests, checks absent from required CI, and all existing visual / user-verification gates. |
 | `--headed` (flag) | Manual UI / design verification | When supplied alongside any mode that runs a browser-based test runner (Playwright / Cypress / Selenium / WinAppDriver / Unity Editor headed), launch the runner in headed mode so the user can watch. Default is headless to match CI. |
 
 Additional flag:
@@ -78,6 +78,34 @@ Additional flag:
   Default is **off**; `--mode full` and `--mode pre-pr` require user
   verification unless this flag is set. The reason is recorded in the
   evidence bundle as `User Verification: skipped(--skip-user-check)`.
+
+## CI-backed pre-PR verification
+
+A project's approved delivery policy may delegate heavyweight checks to CI.
+Only checks covered by `required_status_checks.contexts` may leave the local
+matrix. A job merely running in CI is insufficient: optional failures do not
+prevent auto-merge. Preserve the existing Ready, review, freshness, integrity,
+and Agent Visual Check gates.
+
+For the gwt repository, register the explicit policy with:
+
+```json
+{"schema_version":1,"operation":"verify.plan","params":{"derive":true,"mode":"pre-pr","acceptance_commands":["cargo test -p gwt --test ci_contracts ci_pre_pr_contract_test::"],"commands":[]}}
+```
+
+Replace the example acceptance test with the tests that fix the current
+Issue's AC. `acceptance_commands` is mandatory for a nontrivial gwt change.
+`commands` adds checks that required CI does not cover, including nominated
+headed E2E for UI changes. Nothing in those explicit lists is discarded.
+Run the entire returned matrix through `verify.run`.
+
+The local subset keeps formatting, changed-crate clippy, the AC tests, and
+checks absent from required CI. Derivation reads live branch protection and
+validates the local workflow-to-required-context correspondence. Missing
+contexts, workflow jobs, or failure propagation refuse delegation with a
+specific diagnostic. Repair the CI contract, or register `mode: full` and run
+the complete local matrix. Other projects retain full derivation. A reduced
+local PASS means the pre-PR gate passed; delivery still waits for required CI.
 
 ## Launch mode (autonomous vs interactive)
 
@@ -201,6 +229,15 @@ canonical wrapper, and rerun `verify.run` for fresh headed evidence. A local
 argument-repair wrapper does not establish that the canonical defect is fixed.
 
 ## Invocation Sequence
+
+Canonical Heavy Cargo admission uses a bounded host slot pool (#5082).
+Independent worktrees and effective Cargo target directories may run
+concurrently, subject to CPU/memory capacity and disk reservations. Set
+`[verification] slots` or `disk_budget_bytes` in the global config to override
+the defaults. The same worktree or target remains serialized; unknown wrappers
+and older exclusive holders serialize against the entire pool. Children use
+isolated temporary directories. `verify.lease.status` lists capacity,
+running/available slots, every holder's ETA, and the shared FIFO queue.
 
 ```text
 agent → /gwt:gwt-verify [--mode quick|full|pre-pr] [--headed] [--skip-user-check]

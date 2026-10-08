@@ -12,7 +12,7 @@
 
 use gwt::cli::hook::board_reminder;
 use serde_json::Value;
-use std::{ffi::OsString, path::Path, sync::Mutex};
+use std::{ffi::OsString, path::Path};
 
 const BOARD_REMINDER_SOURCE: &str = include_str!("../src/cli/hook/board_reminder/mod.rs");
 
@@ -39,9 +39,8 @@ impl Drop for ScopedEnvVar {
     }
 }
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 fn with_isolated_home<T>(run: impl FnOnce(&Path) -> T) -> T {

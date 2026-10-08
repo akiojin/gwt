@@ -16,8 +16,10 @@
 #
 #   GWT_FLAKE_TARGETS      space-separated `<crate>|test|<name>` / `<crate>|lib|`
 #                          tokens naming the cargo test targets to exercise
-#   GWT_FLAKE_RUNS         how many consecutive runs to compare (default 20)
-#   GWT_FLAKE_BUDGET_SECS  wall-clock budget for the whole job (default 1800)
+#   GWT_FLAKE_BASE_SHA     PR / merge-group base for changed-file test selection
+#                          (unset keeps full targets for standalone use)
+#   GWT_FLAKE_RUNS         integration run ceiling (default 20); libraries use 2
+#   GWT_FLAKE_BUDGET_SECS  test execution budget, excluding compile (default 600)
 #   GWT_FLAKE_MIN_FREE_MB  stop repeating below this much free disk (default 2048)
 #   GWT_FLAKE_LOG_DIR      where per-run logs go (default: a temp dir)
 #
@@ -27,13 +29,12 @@
 #   * Scope is per *target*, not per crate. One `cargo test --workspace
 #     --all-features` costs 11m23s on the CI runner class, so repeating a
 #     changed `gwt` twenty times could not fit any step budget.
-#   * N is a ceiling, not a promise. A changed integration test costs seconds,
-#     so it gets all 20 runs -- the cost model the SPEC assumed ("#4550 は 54
-#     テスト 0.53 秒で、20 回でも 11 秒"). A `--lib` target does not: measured
-#     warm, `cargo test -p gwt --lib` takes 381s and `-p gwt-core --lib` 193s,
-#     which at N=20 would be 127 and 64 minutes. Rather than drop those targets
-#     or hang the job, this times the first run and compares as many further
-#     runs as the budget allows, never fewer than two, and says so in the log.
+#   * Issue #5171 / SPEC #5170: libraries stop at the minimum two runs needed
+#     to compare outcomes. Warm `cargo test -p gwt --lib` takes 381s, so even
+#     those two runs exceed 600s; the comparison guarantee takes precedence.
+#     Integration targets keep a ceiling of 20, reduced by the 600s execution
+#     budget shared across targets. Compile is excluded. The budget never
+#     increases a target's ceiling, and the log states the actual run count.
 #   * Time is not the only budget. On 2026-09-21 a crate-scoped run of PR #4575
 #     caught two genuine flakes (runs 4 and 6) and then filled the runner's
 #     disk; the step summary write failed with "No space left on device", so
@@ -50,7 +51,7 @@ set -uo pipefail
 
 targets="${GWT_FLAKE_TARGETS:-}"
 max_runs="${GWT_FLAKE_RUNS:-20}"
-budget_secs="${GWT_FLAKE_BUDGET_SECS:-1800}"
+budget_secs="${GWT_FLAKE_BUDGET_SECS:-600}"
 min_free_mb="${GWT_FLAKE_MIN_FREE_MB:-2048}"
 
 if [ -z "${targets// /}" ]; then
@@ -76,14 +77,72 @@ selector_for() {
   esac
 }
 
+# Issue #4821 AC-7: retain the classifier's target contract, then select the
+# tests declared in changed source files. Matching complete function names
+# keeps a nearby prefix or an unrelated module out of the repetition loop.
+# Duplicate names are conservatively retained; no test threads are overridden.
+select_changed_tests() {
+  python3 - "$1" "$2" "$GWT_FLAKE_BASE_SHA" <<'PY'
+# changed-test-selection-begin
+import pathlib
+import re
+import subprocess
+import sys
+
+sys.stdout.reconfigure(newline="\n")
+entry, listing, base = sys.argv[1:]
+if not base:
+    raise SystemExit("Changed-test selection requires a base commit")
+crate, kind, target = entry.split("|")
+changed = subprocess.check_output(
+    ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    text=True,
+).split("\0")
+tests = sorted({line.removesuffix(": test") for line in
+                pathlib.Path(listing).read_text().splitlines()
+                if line.endswith(": test")})
+if kind == "test":
+    # A direct integration target is already one changed test file.
+    selected = tests
+elif kind == "lib":
+    functions = set()
+    for name in changed:
+        path = pathlib.Path(name)
+        if name.startswith(f"crates/{crate}/src/") and path.suffix == ".rs":
+            file_functions = set(re.findall(r"\bfn\s+(?:r#)?([A-Za-z_]\w*)\s*\(",
+                                            path.read_text())) if path.is_file() else set()
+            if not any(test.rsplit("::", 1)[-1] in file_functions for test in tests):
+                # One mapped file cannot establish coverage for another
+                # changed file with unknown (or deleted) test declarations.
+                functions.clear()
+                break
+            functions.update(file_functions)
+    selected = [test for test in tests if test.rsplit("::", 1)[-1] in functions]
+    if not selected:
+        # External test modules / cfg-specific functions can prevent a safe
+        # mapping. Retain coverage rather than silently repeating zero tests.
+        print(f"{entry}: no safe changed-file match; retaining the full target", file=sys.stderr)
+        selected = tests
+else:
+    raise SystemExit(f"Unsupported test target: {entry}")
+print("\n".join(selected))
+# changed-test-selection-end
+PY
+}
+
 # "<exit status> <failed test names, sorted>" for one execution. Two runs agree
 # when their outcomes are identical.
 outcome_of() {
-  local selector="$1" log="$2" status failed
+  local selector="$1" log="$2" selection="$3" status failed
+  local -a filters=()
+  if [ -n "$selection" ]; then
+    mapfile -t filters <"$selection"
+    filters=(-- --exact "${filters[@]}")
+  fi
   # No pipe around cargo: a pipeline would report the status of the tail, so a
   # suite the kernel killed would read as green.
   # shellcheck disable=SC2086 # the selector is a deliberate argument list
-  if cargo test $selector --all-features >"$log" 2>&1; then
+  if cargo test $selector --all-features "${filters[@]}" >"$log" 2>&1; then
     status=0
   else
     status=$?
@@ -116,7 +175,7 @@ target_count=0
 for _ in $targets; do target_count=$((target_count + 1)); done
 budget_share=$((budget_secs / target_count))
 
-echo "Flake detection: up to $max_runs runs per target, ${budget_secs}s total budget"
+echo "Flake detection: 2 runs per library, up to $max_runs per integration target, ${budget_secs}s test budget (compile excluded; minimum 2 runs)"
 echo "Targets ($target_count): $targets"
 echo "Logs: $log_dir  (free: $(free_mb)MB, floor: ${min_free_mb}MB)"
 
@@ -134,18 +193,42 @@ done
 
 wobbled=""
 cut_short=""
+test_started=$SECONDS
 for entry in $targets; do
   selector="$(selector_for "$entry")"
   safe="${entry//|/_}"
+  selection=""
+  if [ -n "${GWT_FLAKE_BASE_SHA:-}" ]; then
+    # List once after the build, and reuse the exact same selection on every
+    # repetition so the comparison still has identical inputs.
+    # shellcheck disable=SC2086 # the selector is a deliberate argument list
+    if ! cargo test $selector --all-features -- --list >"$log_dir/$safe-list.log" 2>&1; then
+      cat "$log_dir/$safe-list.log"
+      exit 1
+    fi
+    selection="$log_dir/$safe-selection.txt"
+    if ! select_changed_tests "$entry" "$log_dir/$safe-list.log" >"$selection"; then
+      echo "::error::Could not select changed tests for $entry"
+      exit 1
+    fi
+    if [ ! -s "$selection" ] || ! grep -q '[^[:space:]]' "$selection"; then
+      echo "$entry: no active tests in the built target"
+      continue
+    fi
+    echo "$entry: repeating $(wc -l <"$selection") exact tests from changed files"
+  fi
 
   started=$SECONDS
-  first="$(outcome_of "$selector" "$log_dir/$safe-run-1.log")"
+  first="$(outcome_of "$selector" "$log_dir/$safe-run-1.log" "$selection")"
   elapsed=$((SECONDS - started))
   [ "$elapsed" -lt 1 ] && elapsed=1
 
   runs=$((budget_share / elapsed))
   [ "$runs" -gt "$max_runs" ] && runs=$max_runs
   [ "$runs" -lt 2 ] && runs=2
+  case "$entry" in
+    *'|lib|'*) runs=2 ;;
+  esac
 
   echo "$entry: one run took ${elapsed}s; comparing $runs runs (budget share ${budget_share}s)"
   echo "  run 1/$runs: $first"
@@ -153,6 +236,14 @@ for entry in $targets; do
   unstable=false
   completed=1
   for run in $(seq 2 "$runs"); do
+    # Finish the mandatory comparison, then stop admitting runs once the
+    # shared execution budget is spent. A slower later run must not turn the
+    # first run's estimate into another fixed-duration repetition loop.
+    if [ "$run" -gt 2 ] && [ "$((SECONDS - test_started))" -ge "$budget_secs" ]; then
+      cut_short="${cut_short:+$cut_short }$entry(budget:${budget_secs}s)"
+      echo "  stopping after $completed run(s): ${budget_secs}s test execution budget reached"
+      break
+    fi
     # From the third run on. Two runs is the least that can detect anything and
     # is already the floor the time budget guarantees, so there is nothing to
     # protect below it -- stopping at one run would only produce a job that
@@ -164,7 +255,7 @@ for entry in $targets; do
       break
     fi
     log="$log_dir/$safe-run-$run.log"
-    outcome="$(outcome_of "$selector" "$log")"
+    outcome="$(outcome_of "$selector" "$log" "$selection")"
     completed=$((completed + 1))
     echo "  run $run/$runs: $outcome"
     if [ "$outcome" = "$first" ]; then

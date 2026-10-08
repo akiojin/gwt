@@ -96,11 +96,11 @@ fn observe_sessions_filtered(
             .with_cwd(UpdateKind::Always)
     };
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
-    let processes = system
+    let epochs = system
         .processes()
         .iter()
         .map(|(pid, process)| (pid.as_u32(), process.start_time()))
-        .collect();
+        .collect::<BTreeMap<_, _>>();
     // Retain only the Session id needed for attribution. The complete process
     // environment is never exposed in an observation or persisted anywhere.
     let legacy_processes = system
@@ -119,15 +119,36 @@ fn observe_sessions_filtered(
             Some(LegacyProcessObservation {
                 pid: pid.as_u32(),
                 parent_pid,
-                started_at: process.start_time(),
+                started_at: crate::process::snapshot_process_start_identity(pid.as_u32(), process),
                 session_id: session_id.to_string(),
                 cwd: process.cwd()?.to_path_buf(),
             })
         })
         .collect::<Vec<_>>();
+    // Identity comes from the per-process start token, not the wall-clock
+    // start time, which moves with the boot time on Linux (Issue #5089).
+    // Only the PIDs a candidate can name are read.
+    let named = candidates
+        .iter()
+        .flat_map(|candidate| [Some(candidate.host_pid), candidate.runtime.child_pid])
+        .flatten()
+        .chain(legacy_processes.iter().map(|process| process.pid))
+        .collect::<BTreeSet<_>>();
+    let processes = system
+        .processes()
+        .iter()
+        .filter(|(pid, _)| named.contains(&pid.as_u32()))
+        .map(|(pid, process)| {
+            (
+                pid.as_u32(),
+                crate::process::snapshot_process_start_identity(pid.as_u32(), process),
+            )
+        })
+        .collect();
     observe_candidates(
         candidates,
         &processes,
+        &epochs,
         crate::process::is_process_group_alive,
         &mut inventory,
         &legacy_processes,
@@ -144,7 +165,14 @@ fn observe_with_processes(
 ) -> SessionInventory {
     let mut inventory = SessionInventory::default();
     let candidates = read_candidates(project_root, sessions_dir, None, &mut inventory);
-    observe_candidates(candidates, processes, group_alive, &mut inventory, &[]);
+    observe_candidates(
+        candidates,
+        processes,
+        processes,
+        group_alive,
+        &mut inventory,
+        &[],
+    );
     inventory
 }
 
@@ -262,6 +290,7 @@ fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf
 fn observe_candidates(
     candidates: Vec<RuntimeCandidate>,
     processes: &BTreeMap<u32, u64>,
+    epochs: &BTreeMap<u32, u64>,
     group_alive: impl Fn(u32) -> bool,
     inventory: &mut SessionInventory,
     legacy_processes: &[LegacyProcessObservation],
@@ -343,8 +372,10 @@ fn observe_candidates(
                     continue;
                 }
             }
-            let Some(started_at) = i64::try_from(child_started_at)
-                .ok()
+            let Some(started_at) = epochs
+                .get(&child_pid)
+                .filter(|started| **started > 0)
+                .and_then(|started| i64::try_from(*started).ok())
                 .and_then(|started| chrono::DateTime::<chrono::Utc>::from_timestamp(started, 0))
             else {
                 inventory.uncertain(
@@ -630,6 +661,7 @@ mod tests {
             let candidates = read_candidates(temp.path(), &sessions, None, &mut inventory);
             observe_candidates(
                 candidates,
+                processes,
                 processes,
                 |_| false,
                 &mut inventory,

@@ -1031,7 +1031,137 @@ mod tests {
     }
 
     #[test]
+    fn hook_cpu_measurement_excludes_scheduler_pauses() {
+        let (cpu, wall) = measure_hook_work(|| {
+            // Sleeping models a descheduled hook thread without adding work.
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        assert!(wall >= Duration::from_millis(300));
+        assert!(
+            cpu < Duration::from_millis(250),
+            "a scheduler pause must not consume the hook CPU budget: cpu={cpu:?}, wall={wall:?}"
+        );
+    }
+
+    fn measure_hook_work(work: impl FnOnce()) -> (Duration, Duration) {
+        let started = Instant::now();
+        let cpu_started = hook_thread_cpu_time();
+        work();
+        (hook_thread_cpu_time() - cpu_started, started.elapsed())
+    }
+
+    #[cfg(windows)]
+    fn hook_thread_cpu_time() -> Duration {
+        use windows::Win32::{
+            Foundation::FILETIME,
+            System::Threading::{GetCurrentThread, GetThreadTimes},
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        // SAFETY: the output pointers are valid and the pseudo handle refers
+        // to this calling thread; it must not be closed.
+        unsafe {
+            GetThreadTimes(
+                GetCurrentThread(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+            .expect("read hook thread CPU time");
+        }
+        let ticks =
+            |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        // test-hygiene: allow-short-duration converts measured CPU ticks, not a wall-clock wait
+        Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+    }
+
+    #[cfg(unix)]
+    fn hook_thread_cpu_time() -> Duration {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: time is a valid output pointer and the clock measures only
+        // this calling thread, excluding unrelated concurrent tests.
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+        assert_eq!(result, 0, "read hook thread CPU time");
+        Duration::new(
+            u64::try_from(time.tv_sec).expect("nonnegative CPU seconds"),
+            u32::try_from(time.tv_nsec).expect("nonnegative CPU nanoseconds"),
+        )
+    }
+
+    fn consume_hook_thread_cpu(duration: Duration) {
+        let started = hook_thread_cpu_time();
+        while hook_thread_cpu_time() - started < duration {
+            for value in 0u64..10_000 {
+                std::hint::black_box(value.wrapping_mul(value));
+            }
+        }
+    }
+
+    #[test]
     fn warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget() {
+        warm_hook_p95(Duration::ZERO);
+    }
+
+    #[test]
+    #[ignore = "explicit Issue #5087 ten-run acceptance check"]
+    fn warm_four_megabyte_history_user_prompt_submit_p95_ten_consecutive_runs() {
+        for run in 1..=10 {
+            eprintln!("Issue #5087 normal acceptance run {run}/10");
+            warm_hook_p95(Duration::ZERO);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "hook thread CPU p95 must stay below 250ms")]
+    fn warm_four_megabyte_history_user_prompt_submit_rejects_cpu_regression() {
+        warm_hook_p95(Duration::from_millis(300));
+    }
+
+    #[test]
+    #[ignore = "explicit Issue #5087 CPU saturation acceptance run"]
+    fn warm_four_megabyte_history_user_prompt_submit_p95_under_cpu_saturation() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Barrier,
+        };
+
+        let workers = std::thread::available_parallelism()
+            .expect("CPU count")
+            .get()
+            + 8;
+        let running = AtomicBool::new(true);
+        let ready = Barrier::new(workers + 1);
+        let result = std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    ready.wait();
+                    while running.load(Ordering::Relaxed) {
+                        for value in 0u64..10_000 {
+                            std::hint::black_box(value.wrapping_mul(value));
+                        }
+                    }
+                });
+            }
+            ready.wait();
+            eprintln!("Issue #5087 CPU saturation: {workers} busy worker threads");
+            let result = std::panic::catch_unwind(|| warm_hook_p95(Duration::ZERO));
+            running.store(false, Ordering::Relaxed);
+            result
+        });
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn warm_hook_p95(extra_cpu_work: Duration) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1089,21 +1219,30 @@ mod tests {
             "the warm call must persist the legacy canonical root for later prompt reuse"
         );
 
-        let mut samples = (0..30)
+        let (mut samples, mut wall_samples): (Vec<_>, Vec<_>) = (0..30)
             .map(|_| {
-                let started = Instant::now();
-                handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
-                    .expect("warm UserPromptSubmit");
-                started.elapsed()
+                measure_hook_work(|| {
+                    consume_hook_thread_cpu(extra_cpu_work);
+                    handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
+                        .expect("warm UserPromptSubmit");
+                })
             })
-            .collect::<Vec<_>>();
+            .unzip();
         samples.sort_unstable();
+        wall_samples.sort_unstable();
         let p95 = samples[28];
+        let wall_p95 = wall_samples[28];
+        eprintln!("warm 4 MiB UserPromptSubmit: hook thread CPU p95={p95:?}; wall-clock p95={wall_p95:?}; samples=30; budget=250ms");
+        // Gate the calling thread's CPU work, not scheduler pauses. Worker CPU
+        // and I/O waits remain visible in wall-clock diagnostics. Never drop
+        // slow samples or skip the actual dispatcher/bookkeeping calls.
         // A single profiled replay usually lands in the fast mode and hides the
         // stage that blew the budget (Issue #3777: the slow mode reproduces on
         // roughly a quarter of the Windows samples). Replay several and report
         // the slowest, so the failure message names the responsible substage.
-        let timing_summary = if p95 >= Duration::from_millis(250) {
+        let timing_summary = if p95 >= Duration::from_millis(250)
+            || wall_p95 >= Duration::from_millis(250)
+        {
             (0..8)
                 .map(|attempt| {
                     let profile_path = home.path().join(format!("warm-hook-{attempt}.jsonl"));
@@ -1136,9 +1275,12 @@ mod tests {
         } else {
             Vec::new()
         };
+        if !timing_summary.is_empty() {
+            eprintln!("warm 4 MiB UserPromptSubmit wall-clock stages={timing_summary:?}");
+        }
         assert!(
             p95 < Duration::from_millis(250),
-            "warm 4 MiB UserPromptSubmit p95 must stay below 250ms, got {p95:?}: {samples:?}; stages={timing_summary:?}"
+            "warm 4 MiB UserPromptSubmit hook thread CPU p95 must stay below 250ms, got {p95:?}: {samples:?}; wall-clock p95={wall_p95:?}: {wall_samples:?}; stages={timing_summary:?}"
         );
     }
 
