@@ -771,6 +771,8 @@ mod tests {
                 ci_status: "SUCCESS".to_string(),
                 merge_status: "MERGEABLE".to_string(),
                 review_status: "APPROVED".to_string(),
+                check_counts: None,
+                required_pending_count: None,
                 checks: vec![PrCheckItem {
                     name: "CI".to_string(),
                     state: "COMPLETED".to_string(),
@@ -779,6 +781,7 @@ mod tests {
                     started_at: "2026-04-20T00:00:00Z".to_string(),
                     completed_at: "2026-04-20T00:01:00Z".to_string(),
                     workflow: "coverage".to_string(),
+                    is_required: None,
                 }],
             },
         );
@@ -918,6 +921,8 @@ mod tests {
                 ci_status: "PENDING".to_string(),
                 merge_status: "UNKNOWN".to_string(),
                 review_status: "PENDING".to_string(),
+                check_counts: None,
+                required_pending_count: None,
                 checks: Vec::new(),
             },
         );

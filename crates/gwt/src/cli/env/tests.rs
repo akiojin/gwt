@@ -521,6 +521,8 @@ fn test_env_records_io_and_pr_side_effects() {
             merge_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
             checks: Vec::new(),
+            check_counts: None,
+            required_pending_count: None,
         },
     );
     assert_eq!(env.fetch_pr_checks(7).expect("checks").summary, "All green");
