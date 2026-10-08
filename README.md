@@ -1444,6 +1444,13 @@ a time), and neither lane waits for the other.
 
 ### PR head verification
 
+To correct a PR targeting the wrong branch, use `pr.edit` with `params.number`
+and `params.base` (for example, `develop`). Base alone is a valid update; the
+existing editing authority checks still apply. To retire an incorrect PR, use
+`pr.close` with `params.number` and optional `params.comment`. A supplied comment
+is recorded before closing; if it fails, the PR stays open. Closing preserves
+the branch and is available without producing authority or verification evidence.
+
 Use `pr.head_check` with `params.base` (for example, `develop`) and optional
 `params.head` to compare a canonical passing verification record with the live
 remote head without creating or editing a PR. The JSON diagnostic reports the

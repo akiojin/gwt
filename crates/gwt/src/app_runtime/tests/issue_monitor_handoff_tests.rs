@@ -946,7 +946,7 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
     process.cwd = Some(fixture.worktree.clone());
     fixture
         .runtime
-        .handle_launch_complete_and_drain(window_id, result);
+        .handle_launch_complete_and_drain(window_id.clone(), result);
 
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
@@ -976,6 +976,15 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
         prefs.queued_launch_session_strategies.get(&3165),
         Some(&gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe),
     );
+    assert!(
+        !fixture.runtime.tracked_window_exists(&window_id),
+        "a definitely pre-submit Monitor failure must not leave an Error pane"
+    );
+    assert!(fixture.runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
 }
 
 /// Issue #3716 AC-2: an incomplete provider receipt is a retryable handoff

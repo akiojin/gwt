@@ -1950,6 +1950,8 @@ enum IssueMonitorControl {
     /// absence from a fresh snapshot is what makes a binding dead.
     WindowSnapshot {
         snapshot: crate::IssueMonitorWindowSnapshot,
+        host: Option<(u32, u64)>,
+        project_tab_ids: std::collections::BTreeSet<String>,
     },
     /// Issue #4084 AC-5: an operator asked the next scan to release idle
     /// windows (`number: None` releases every releasable row).
@@ -2787,8 +2789,16 @@ fn apply_routine_issue_monitor_control(
             // a possibly newer same-id launch.
             None => false,
         },
-        IssueMonitorControl::WindowSnapshot { snapshot } => {
-            monitor.record_window_snapshot(snapshot);
+        IssueMonitorControl::WindowSnapshot {
+            snapshot,
+            host,
+            project_tab_ids,
+        } => {
+            if let Some((pid, started)) = host {
+                monitor.record_window_snapshot_from_host(snapshot, pid, started, project_tab_ids);
+            } else {
+                monitor.record_window_snapshot_for_tabs(snapshot, project_tab_ids);
+            }
             // A canvas observation is not a durable decision; the next scan
             // reads it. Committing the snapshot itself would rewrite prefs on
             // every GUI tick for nothing.
@@ -3067,6 +3077,10 @@ fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
 ) -> Option<IssueMonitorControl> {
+    let source_pid = payload
+        .get("source_pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
     match crate::runtime_daemon_events::decode_runtime_daemon_event(
         crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
         payload,
@@ -3511,7 +3525,29 @@ fn decode_issue_monitor_control_in_repo(
                 {
                     return None;
                 }
-                return Some(IssueMonitorControl::WindowSnapshot { snapshot });
+                let host = source_pid.and_then(|pid| {
+                    crate::process::host_process_start_time(pid).map(|started| (pid, started))
+                });
+                let project_tab_ids = payload
+                    .get("window_snapshot_project_tabs")
+                    .map(|tabs| {
+                        serde_json::from_value::<std::collections::BTreeSet<String>>(tabs.clone())
+                    })
+                    .transpose()
+                    .ok()?
+                    .unwrap_or_else(|| {
+                        std::collections::BTreeSet::from([snapshot.project_tab_id.clone()])
+                    });
+                if !project_tab_ids.contains(&snapshot.project_tab_id)
+                    || project_tab_ids.iter().any(|tab| tab.trim().is_empty())
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::WindowSnapshot {
+                    snapshot,
+                    host,
+                    project_tab_ids,
+                });
             }
             if let Some(release) = payload.get("idle_release") {
                 let number = match release.get("number") {

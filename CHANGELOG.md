@@ -1,6 +1,64 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.112.1] - 2026-10-08
+
+### Bug Fixes
+
+- **verify:** Contain bounded gate workloads
+- **ci:** Checkout test sources before classifying pull requests
+- **verify:** Derive binary and node tests and flag unsupported surfaces
+- **verify:** Preserve node runners and generated exclusions in pre-pr plans
+- **ci:** Verify develop pushes without unnecessary base sync
+- **ci:** Preserve failure notifications for each develop commit
+- **test:** Isolate agent settings persistence from disk latency
+- **index:** Windows の削除保留エントリを正しく無視する
+- **verify:** Lease状態の一過性読取失敗を有界リトライで再読する
+- **wizard:** Renew manual successor operations after cancellation
+- **canvas:** Fit new agent surfaces within visible width
+- **issue-monitor:** Explain projection and capacity authority
+- **skills:** Recognize build outputs in any CARGO_TARGET_DIR
+- **discussion:** 同一 Proposal の再送で重複しないよう entry 更新を置換に変更
+- **launch:** 新しい Codex でも worktree-local の hooks.json を必ず置く
+
+### Miscellaneous Tasks
+
+- **work:** Preserve Issue 4821 runtime resume event
+- **work:** Preserve Issue 4821 PR projection event
+- **ci:** CIスループット収集と基準値の再計算を追加
+- **work:** Deliver PR 5124 metadata
+- **work:** Preserve acceptance audit for issue 4968
+- **work:** Record issue 4968 delivery audit after dependency fix
+- **work:** Record verification derivation delivery
+- **work:** Record issue 4968 verification relaunch
+- **work:** Issue #5030のPR関連付けを記録
+- **work:** Issue #5030の独立レビュー起動記録を保存
+- **work:** Record issue 5013 pr linkage
+- **work:** Record resumed canvas width delivery
+- **work:** Preserve issue-4248 delivery snapshot
+- **work:** Record issue-4248 work events
+
+### Performance
+
+- **test:** Consolidate gwt harnesses and split runtime tests
+- **verify:** Bound short non-Cargo gates
+
+### Testing
+
+- Use canonical workspace path in contention fixture
+- Respect home guards owned by shared fixtures
+- **ci:** Use resolved process commands in flake fixture
+- **verify:** Use native counter fixture on windows
+- **verify:** Align Node fixture with the required coverage check
+- **index:** Windows の削除保留を固定して coordinator を20回測定
+- **index:** Windows の型と回帰テストの実行条件を修正
+- **continuation:** Register portable manual retry verification
+- **launch:** Clippy の needless borrow を解消する
+
+### Ci
+
+- **test:** Narrow flake reruns and parallelize Windows stability
+
 ## [9.112.0] - 2026-10-08
 
 ### Bug Fixes

@@ -1352,6 +1352,13 @@ runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### PR HEAD の検証
 
+PR の対象ブランチを訂正するには、`pr.edit` に `params.number` と `params.base`
+（例: `develop`）を渡します。base だけの更新も可能で、既存の編集権限チェックを
+適用します。誤った PR を取り下げるには、`pr.close` に `params.number` と任意の
+`params.comment` を渡します。コメントを指定すると閉鎖前に記録し、記録に失敗した
+場合は PR を開いたままにします。close はブランチを保持し、実装変更の権限や
+検証証跡がない状態でも利用できます。
+
 `pr.head_check` に `params.base`（例: `develop`）と任意の `params.head` を渡すと、
 PR の作成・編集をせずに、正本の PASS 済み検証記録と live remote HEAD を比較できます。
 JSON の診断には record ID、検証済み/remote/base の SHA、product commit/file、local

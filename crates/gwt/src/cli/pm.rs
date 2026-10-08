@@ -96,12 +96,6 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         CapabilityGapReason::MissingOperation,
         "GitHub Actions: Run workflow on the target workflow (e.g. prepare-release.yml)",
     ),
-    (
-        "pr.close",
-        "",
-        CapabilityGapReason::MissingOperation,
-        "GitHub: Close pull request",
-    ),
 ];
 
 pub(crate) fn capabilities_report() -> CapabilitiesReport {
