@@ -1041,6 +1041,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "discuss.goal_skipped" | "discuss.goal-skipped" => {
             discuss_proposal(params, DiscussEnvelopeAction::GoalSkipped)?
         }
+        "verify.cancel" => {
+            reject_unknown_params(params, &["attempt_id", "reason"], "verify.cancel")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Cancel {
+                attempt_id: required_string(params, "attempt_id")?,
+                reason: required_string(params, "reason")?,
+            })
+        }
+        "verify.status" => {
+            reject_unknown_params(params, &["attempt_id"], "verify.status")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Status {
+                attempt_id: optional_string(params, "attempt_id")?,
+            })
+        }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
             let headed_e2e_commands = optional_string_vec(params, "headed_e2e_commands")?;
@@ -3053,6 +3066,22 @@ mod tests {
             ),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn verify_cancel_binds_an_exact_attempt_and_reason() {
+        assert!(parse(&envelope(
+            "verify.cancel",
+            json!({"attempt_id": "vat-example", "reason": "superseded matrix"})
+        ))
+        .is_ok());
+        assert!(parse(&envelope("verify.cancel", json!({"reason": "stop"}))).is_err());
+        assert!(parse(&envelope(
+            "verify.cancel",
+            json!({"attempt_id": "vat-example", "reason": "stop", "target": "foreign"})
+        ))
+        .is_err());
+        assert!(parse(&envelope("verify.status", json!({}))).is_ok());
     }
 
     #[test]

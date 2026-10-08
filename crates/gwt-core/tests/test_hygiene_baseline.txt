@@ -208,7 +208,6 @@ short-wall-clock|crates/gwt/tests/stable_server_port.rs|wait_until_ready
 short-wall-clock|crates/gwt/tests/startup_failure_observability.rs|wait_with_deadline
 short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|canonical_command_parks
 short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|spawn_sibling_heavy
-short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|start
 short-wall-clock|crates/gwt/tests/verification_lease_cli_test.rs|legacy_holder_can_still_be_observed_and_released
 short-wall-clock|crates/gwt/tests/workspace_cli_test.rs|drop
 short-wall-clock|crates/gwt/tests/workspace_cli_test.rs|start

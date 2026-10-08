@@ -18,6 +18,16 @@ use tempfile::TempDir;
 const SESSION: &str = "session-admission-test";
 
 fn spawn_gwtd(home: &Path, cwd: &Path, envelope: &str, extra_env: &[(&str, &Path)]) -> Child {
+    spawn_gwtd_for_session(home, cwd, envelope, extra_env, SESSION)
+}
+
+fn spawn_gwtd_for_session(
+    home: &Path,
+    cwd: &Path,
+    envelope: &str,
+    extra_env: &[(&str, &Path)],
+    session: &str,
+) -> Child {
     let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     for key in [
         "GWT_BIN_PATH",
@@ -37,7 +47,7 @@ fn spawn_gwtd(home: &Path, cwd: &Path, envelope: &str, extra_env: &[(&str, &Path
     let mut child = command
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("GWT_SESSION_ID", SESSION)
+        .env("GWT_SESSION_ID", session)
         // Issue #4409: this suite is about lease admission and serialization,
         // not about where verification is hosted. `verify.run` refuses to
         // spawn in place when its launcher runs at a degraded nice value and
@@ -193,13 +203,14 @@ struct CanonicalRun {
 
 impl CanonicalRun {
     fn start(arena: &Arena, cwd: &Path) -> Self {
+        Self::start_command(arena, cwd, "canonical_command_parks")
+    }
+
+    fn start_command(arena: &Arena, cwd: &Path, fixture: &str) -> Self {
         let ready = arena.home.path().join("canonical-ready");
         let release = arena.home.path().join("canonical-release");
         let exe = std::env::current_exe().unwrap();
-        let command = format!(
-            "\"{}\" --ignored --exact canonical_command_parks",
-            exe.display()
-        );
+        let command = format!("\"{}\" --ignored --exact {fixture}", exe.display());
         let child = spawn_gwtd(
             arena.home.path(),
             cwd,
@@ -217,7 +228,7 @@ impl CanonicalRun {
                 panic!("canonical run exited before its command started: {output}");
             }
             assert!(Instant::now() < deadline, "canonical command did not start");
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(100));
         }
         run
     }
@@ -436,6 +447,254 @@ fn a_separate_watchdog_cannot_interrupt_another_live_runner() {
         "unrelated companion must not change the live record: {output:?}"
     );
     assert!(ok, "{result}");
+}
+
+fn attempt_envelope(operation: &str, attempt_id: Option<&str>) -> String {
+    let params = attempt_id.map_or_else(
+        || serde_json::json!({}),
+        |id| serde_json::json!({"attempt_id": id}),
+    );
+    serde_json::json!({"schema_version": 1, "operation": operation, "params": params}).to_string()
+}
+
+fn wait_for_attempt(
+    arena: &Arena,
+    worktree: &Path,
+    attempt_id: Option<&str>,
+    status: &str,
+    reserved: bool,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (ok, output) = arena.run_in(worktree, &attempt_envelope("verify.status", attempt_id));
+        let record = ok
+            .then(|| serde_json::from_str::<serde_json::Value>(&output).ok())
+            .flatten();
+        if let Some(record) = record {
+            if record["status"] == status && record["reservation"] == reserved {
+                return record;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "attempt did not become {status}, reservation={reserved}: {output}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn cancel_envelope(attempt_id: &str) -> String {
+    serde_json::json!({
+        "schema_version": 1, "operation": "verify.cancel",
+        "params": {"attempt_id": attempt_id, "reason": "superseded matrix"}
+    })
+    .to_string()
+}
+
+fn collect_cancelled_runner(mut child: Child) -> (bool, String) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return collect_gwtd(child);
+        }
+        if Instant::now() >= deadline {
+            kill(child);
+            panic!("cancelled verification runner did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+// Issue #5103: readiness is the durable reservation, and release is the trusted
+// Interrupted transition. Neither cancellation nor runner death waits for TTL.
+#[test]
+fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations() {
+    let arena = Arena::new();
+    let (ok, output) = arena.run_in(&arena.repo, &verify_run(0));
+    assert!(ok, "initial successful run: {output}");
+    let predecessor_path = arena.repo.join(".gwt/skill-state/verification-run.json");
+    let predecessor = std::fs::read(&predecessor_path).unwrap();
+    let holder = CanonicalRun::start(&arena, &arena.sibling);
+    let waiter = spawn_gwtd(arena.home.path(), &arena.repo, &verify_run(30), &[]);
+    let waiting = wait_for_attempt(&arena, &arena.repo, None, "waiting", true);
+    let id = waiting["attempt_id"].as_str().unwrap();
+    assert_eq!(std::fs::read(&predecessor_path).unwrap(), predecessor);
+
+    let other_project = tempfile::tempdir().unwrap();
+    git(other_project.path(), &["init", "-q"]);
+    for (worktree, session) in [
+        (arena.repo.as_path(), "another-session"),
+        (arena.sibling.as_path(), SESSION),
+        (other_project.path(), SESSION),
+    ] {
+        let (ok, output) = collect_gwtd(spawn_gwtd_for_session(
+            arena.home.path(),
+            worktree,
+            &cancel_envelope(id),
+            &[],
+            session,
+        ));
+        assert!(
+            !ok && output.contains("not your verification attempt"),
+            "{output}"
+        );
+        let unchanged = wait_for_attempt(&arena, &arena.repo, Some(id), "waiting", true);
+        assert_eq!(
+            unchanged, waiting,
+            "foreign cancellation changed the attempt"
+        );
+    }
+
+    let (ok, output) = arena.run_in(&arena.repo, &cancel_envelope(id));
+    assert!(ok, "cancel own waiting attempt: {output}");
+    let interrupted = wait_for_attempt(&arena, &arena.repo, Some(id), "interrupted", false);
+    assert_eq!(
+        interrupted["reason"],
+        "caller cancellation: superseded matrix"
+    );
+    let (ok, output) = collect_cancelled_runner(waiter);
+    assert!(!ok, "cancelled runner succeeded: {output}");
+    assert!(
+        !output.contains("verify: PASS") && !output.contains("verify: FAIL"),
+        "{output}"
+    );
+    assert_eq!(std::fs::read(&predecessor_path).unwrap(), predecessor);
+
+    // Identical requested commands are a new attempt, while the other
+    // worktree's holder remains protected throughout both transitions.
+    let waiter = spawn_gwtd(arena.home.path(), &arena.repo, &verify_run(30), &[]);
+    let replacement = wait_for_attempt(&arena, &arena.repo, None, "waiting", true);
+    let replacement_id = replacement["attempt_id"].as_str().unwrap();
+    assert_ne!(replacement_id, id);
+    let mut waiter = waiter;
+    // SAFETY: this PID is the exact gwtd child spawned by this test.
+    assert_eq!(unsafe { libc::kill(waiter.id() as i32, libc::SIGKILL) }, 0);
+    waiter.wait().unwrap();
+    let interrupted = wait_for_attempt(
+        &arena,
+        &arena.repo,
+        Some(replacement_id),
+        "interrupted",
+        false,
+    );
+    assert!(interrupted["reason"].as_str().unwrap().contains("external"));
+    assert_eq!(std::fs::read(&predecessor_path).unwrap(), predecessor);
+    let (_, lease) = arena.run_in(&arena.repo, STATUS);
+    assert!(lease.starts_with("verification lease: held"), "{lease}");
+    assert!(
+        !lease.lines().any(|line| line.starts_with("queue[")),
+        "{lease}"
+    );
+
+    let (ok, output) = holder.finish();
+    assert!(ok && output.contains("verify: PASS"), "{output}");
+    let (ok, output) = arena.run_in(&arena.repo, &verify_run(0));
+    assert!(ok && output.contains("verify: PASS"), "{output}");
+    let completed = wait_for_attempt(&arena, &arena.repo, None, "completed", false);
+    assert_ne!(completed["attempt_id"], replacement["attempt_id"]);
+    assert_eq!(completed["commands"], waiting["commands"]);
+}
+
+#[test]
+#[ignore = "spawned as a cancellable command's descendant"]
+fn cancellation_descendant_parks() {
+    std::fs::write(
+        std::env::var_os("ADMISSION_READY").unwrap(),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(120));
+}
+
+#[test]
+#[ignore = "spawned as the cancellable canonical command"]
+fn cancellation_command_tree_parks() {
+    let ready = PathBuf::from(std::env::var_os("ADMISSION_READY").unwrap());
+    let descendant_ready = ready.with_extension("descendant");
+    let release = PathBuf::from(std::env::var_os("ADMISSION_RELEASE").unwrap());
+    let mut descendant = hidden_command(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "cancellation_descendant_parks"])
+        .env("ADMISSION_READY", &descendant_ready)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !descendant_ready.exists() {
+        assert!(
+            descendant.try_wait().unwrap().is_none(),
+            "descendant exited before readiness"
+        );
+        assert!(Instant::now() < deadline, "descendant did not become ready");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::fs::write(
+        &ready,
+        serde_json::json!({"command": std::process::id(), "descendant": descendant.id()})
+            .to_string(),
+    )
+    .unwrap();
+    while !release.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "cancellable command was not released"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = descendant.kill();
+    let _ = descendant.wait();
+}
+
+fn fixture_process_is_running(pid: u64) -> bool {
+    let output = hidden_command("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let state = String::from_utf8_lossy(&output.stdout);
+    output.status.success() && !state.trim().is_empty() && !state.trim().starts_with('Z')
+}
+
+#[test]
+fn caller_cancellation_reclaims_its_command_tree_and_preserves_an_unrelated_process() {
+    let arena = Arena::new();
+    let mut survivor = arena.spawn_sibling_heavy();
+    let mut run =
+        CanonicalRun::start_command(&arena, &arena.repo, "cancellation_command_tree_parks");
+    let tree: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(arena.home.path().join("canonical-ready")).unwrap())
+            .unwrap();
+    let running = wait_for_attempt(&arena, &arena.repo, None, "running", false);
+    let id = running["attempt_id"].as_str().unwrap();
+    let (ok, output) = arena.run_in(&arena.repo, &cancel_envelope(id));
+    assert!(ok, "cancel own active attempt: {output}");
+    wait_for_attempt(&arena, &arena.repo, Some(id), "interrupted", false);
+    let (ok, output) = collect_cancelled_runner(run.child.take().unwrap());
+    assert!(!ok, "cancelled active runner succeeded: {output}");
+    assert!(
+        !output.contains("verify: PASS") && !output.contains("verify: FAIL"),
+        "{output}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while fixture_process_is_running(tree["command"].as_u64().unwrap())
+        || fixture_process_is_running(tree["descendant"].as_u64().unwrap())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "owned command tree survived cancellation: {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let survivor_is_running = survivor.try_wait().unwrap().is_none();
+    kill(survivor);
+    assert!(
+        survivor_is_running,
+        "unrelated development process was stopped"
+    );
+    let record = continuation_state(&arena.repo, "verification-run.json");
+    assert_eq!(record["lifecycle"]["status"], "interrupted");
+    assert_eq!(record["all_passed"], false);
+    let (_, lease) = arena.run_in(&arena.repo, STATUS);
+    assert!(lease.starts_with("verification lease: free"), "{lease}");
 }
 
 // Issue #5035 AC-6: real two-worktree contention retains successful Heavy
