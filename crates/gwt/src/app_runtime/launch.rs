@@ -126,7 +126,12 @@ fn resolve_agent_resource_launch(
     };
     let max_active =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo_path))
-            .map_or(1, |prefs| prefs.max_active_agents);
+            .map_or(1, |prefs| {
+                let mut monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                monitor.refresh_agent_capacity(repo_path);
+                monitor.effective_max_active_agents()
+            });
     let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let resolved = gwt::agent_resource_policy::resolve_agent_resource_policy(
         &settings.agent.resource,

@@ -421,6 +421,22 @@ between its body and acceptance criteria and its agent's read-only output.
 the board the full width or restores the detail pane; columns scroll horizontally
 instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
 
+**Max active** uses **Auto** for new settings. Its recommendation reflects CPU,
+free memory and disk space, the GUI's CPU use, and live agents in other projects.
+Registered projects without live agents consume no share. **Machine budget**
+shows the limiting resource and distinguishes the Monitor's implementation/review
+limit from the total including PM agents. Auto pauses new admissions while required
+measurements are unavailable; running agents continue.
+Initial measurements of large `target` directories can take several minutes;
+the same pause applies when a previous measurement expires during refresh.
+Enter a positive number to keep a **Manual** override, or select **Use Auto** to
+follow the recommendation again. Existing saved limits remain Manual. Values above
+the recommendation are allowed, with a warning that verification may not finish and
+timing-dependent test failures may block unrelated PRs. Automation uses
+`issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
+`{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
+`max_active_agents_override`, and the shared `agent_capacity` measurement.
+
 **Allowed labels** controls which Issues this terminal's Monitor admits. Add or
 remove one label at a time; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and

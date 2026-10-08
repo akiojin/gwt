@@ -1444,6 +1444,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 1,
         priority_order: Vec::new(),
@@ -1504,6 +1505,7 @@ fn app_runtime_issue_monitor_requeue_releases_a_dead_hold_without_launching() {
     gwt::save_issue_monitor_prefs(
         &prefs_path,
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 2,
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {

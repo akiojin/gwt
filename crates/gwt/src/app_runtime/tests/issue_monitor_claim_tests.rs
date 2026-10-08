@@ -230,6 +230,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     gwt::save_issue_monitor_prefs(
         &prefs_path,
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             effect_authority_epoch: 7,
             pending_effects: journal.clone(),
             max_active_agents: 1,
@@ -244,7 +245,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     let max_events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetIssueMonitorMaxActiveAgents {
-            max_active_agents: 4,
+            max_active_agents: Some(4),
         },
     );
     let reorder_events = runtime.handle_frontend_event(
@@ -440,6 +441,7 @@ fn app_runtime_issue_monitor_queue_push_adds_only_to_the_local_terminal_queue() 
     };
     let host = gwt::process::current_hostname();
     let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         max_active_agents: 1,
         ..gwt::IssueMonitorPrefs::default()
     };
@@ -511,6 +513,7 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
     };
     let host = gwt::process::current_hostname();
     let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         max_active_agents: 1,
         ..gwt::IssueMonitorPrefs::default()
     };
@@ -830,6 +833,7 @@ fn app_runtime_gui_rebase_persist_deadline_expiry_fails_closed_and_restores_disk
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     let disk = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 2,
         ..gwt::IssueMonitorPrefs::default()
@@ -1181,6 +1185,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
     let mut monitor = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             effect_authority_epoch: 7,
             pending_effects: vec![journal.clone()],
@@ -2188,6 +2193,7 @@ fn app_runtime_restart_after_manual_drain_restores_pre_drain_monitor_setting() {
         gwt::save_issue_monitor_prefs(
             &prefs_path,
             &gwt::IssueMonitorPrefs {
+                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: enabled_before_drain,
                 autonomous_mode: false,
                 max_active_agents: 2,
@@ -3205,6 +3211,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         let implementing =
             issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 1);
         let migrated = gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 4,
             priority_order: vec![99, 42],
@@ -3483,6 +3490,7 @@ fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
     let disk_only = issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 3);
     let disk = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 4,
         priority_order: vec![99, 42],
@@ -3499,6 +3507,7 @@ fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let mut stale = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: false,
             max_active_agents: 1,
             priority_order: vec![42],
@@ -4696,6 +4705,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 5,
             ..queued_issue_monitor_prefs(&[42])

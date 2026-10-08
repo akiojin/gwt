@@ -398,6 +398,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            max_active_auto,
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent,
@@ -409,6 +410,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            max_active_auto,
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent.as_deref(),
@@ -825,8 +827,9 @@ fn load_monitor_agent_status(
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let authority =
+    let mut authority =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    authority.refresh_agent_capacity(project_root);
     if let Some(published) = published {
         let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(published)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
@@ -834,6 +837,15 @@ fn load_monitor_agent_status(
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
         status.source = crate::IssueMonitorStatusSource::Daemon;
+        let capacity_status = authority.agent_status();
+        status.agent_capacity = capacity_status.agent_capacity.clone();
+        status.max_active_agents_override = capacity_status.max_active_agents_override;
+        status.max_active = capacity_status.max_active;
+        if let Some(gui) = status.gui_status.as_mut() {
+            gui.agent_capacity = capacity_status.agent_capacity;
+            gui.max_active_agents_override = capacity_status.max_active_agents_override;
+            gui.max_active_agents = capacity_status.max_active;
+        }
         attach_monitor_control_identity(&authority, &mut status);
         return Ok(status);
     }
@@ -3066,6 +3078,7 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3077,6 +3090,7 @@ fn apply_monitor_config_set(
         enabled,
         autonomous_mode,
         max_active,
+        max_active_auto,
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
@@ -3100,6 +3114,9 @@ fn apply_monitor_config_set(
     }
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
+    }
+    if max_active_auto {
+        candidate.set_max_active_agents_override(None);
     }
     if let Some(auto_close_merged_issues) = auto_close_merged_issues {
         candidate
@@ -3148,6 +3165,7 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3164,6 +3182,7 @@ fn validate_monitor_config_set(
         && enabled.is_none()
         && autonomous_mode.is_none()
         && max_active.is_none()
+        && !max_active_auto
         && auto_close_merged_issues.is_none()
         && auto_apply_updates.is_none()
         && launch_agent.is_none()
@@ -3188,7 +3207,7 @@ fn validate_monitor_config_set(
              resident PM for this repository",
         ));
     }
-    if max_active == Some(0) {
+    if max_active == Some(0) || (max_active_auto && max_active.is_some()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "max_active must be greater than zero",
@@ -3208,6 +3227,7 @@ fn run_monitor_config_set<E: CliEnv>(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3223,6 +3243,7 @@ fn run_monitor_config_set<E: CliEnv>(
         enabled,
         autonomous_mode,
         max_active,
+        max_active_auto,
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
@@ -3254,6 +3275,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "max_active_mode": max_active_auto.then_some("auto"),
                 "auto_close_merged_issues": auto_close_merged_issues,
                 "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
@@ -3280,6 +3302,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 enabled,
                 autonomous_mode,
                 max_active,
+                max_active_auto,
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
@@ -3293,12 +3316,18 @@ fn run_monitor_config_set<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.refresh_agent_capacity(&project_root);
     out.push_str(
         &serde_json::json!({
             "allowed_labels": prefs.allowed_labels,
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
-            "max_active": prefs.max_active_agents.max(1),
+            "max_active": monitor.effective_max_active_agents(),
+            "max_active_agents_override": monitor.max_active_agents_override(),
+            "max_active_mode": prefs.max_active_agents_mode,
+            "agent_capacity": monitor.status_view().agent_capacity,
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
@@ -7920,6 +7949,7 @@ mod tests {
             crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
                 .expect("persisted queue");
         prefs.enabled = true;
+        prefs.max_active_agents_mode = crate::issue_monitor::IssueMonitorMaxActiveMode::Manual;
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
@@ -8511,6 +8541,8 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8568,6 +8600,8 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8710,6 +8744,8 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                agent_capacity: Default::default(),
+                max_active_agents_override: Some(1),
                 source: crate::IssueMonitorStatusSource::Daemon,
                 active_launches_incomplete: false,
                 queue: vec![2338],
@@ -8826,6 +8862,8 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8940,6 +8978,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 max_active_agents: 3,
                 priority_order: vec![2, 1],
@@ -9036,6 +9075,19 @@ mod tests {
             status["active_launches"].as_array().unwrap().len()
         );
         assert_eq!(gui_status["max_active_agents"], status["max_active"]);
+        assert_eq!(gui_status["agent_capacity"], status["agent_capacity"]);
+        assert_eq!(gui_status["max_active_agents_override"], 3);
+        assert_eq!(status["max_active_agents_override"], 3);
+        assert_eq!(status["agent_capacity"]["measurement_complete"], false);
+        assert!(status["agent_capacity"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("snapshot_unavailable"));
+        status.as_object_mut().unwrap().remove("agent_capacity");
+        status
+            .as_object_mut()
+            .unwrap()
+            .remove("max_active_agents_override");
         assert_eq!(
             status,
             serde_json::json!({
@@ -9378,6 +9430,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 max_active_agents: 2,
                 launched_issues: vec![
                     crate::IssueMonitorLaunchedIssue {
@@ -9717,6 +9770,7 @@ mod tests {
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
                 crate::IssueMonitorPrefs {
+                    max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                     enabled: true,
                     ..Default::default()
                 },
@@ -9945,6 +9999,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -9977,6 +10032,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
@@ -10020,6 +10076,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -10046,6 +10103,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -10055,6 +10113,62 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+    }
+
+    #[test]
+    fn agent_capacity_config_set_persists_auto_reset_without_daemon() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create project");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                max_active_agents: 7,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                ..Default::default()
+            },
+        )
+        .expect("manual preferences");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: None,
+                allowed_labels: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                max_active_auto: true,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
+            },
+            &mut out,
+        )
+        .expect("Auto reset");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("saved Auto preferences");
+        assert_eq!(
+            prefs.max_active_agents_mode,
+            crate::issue_monitor::IssueMonitorMaxActiveMode::Auto
+        );
+        assert_eq!(
+            prefs.max_active_agents, 1,
+            "resource observations are not project preferences"
+        );
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply");
+        assert_eq!(reply["max_active_mode"], "auto");
+        assert!(reply["max_active_agents_override"].is_null());
+        assert_eq!(
+            reply["max_active"], 0,
+            "unknown Auto measurement is visibly closed"
+        );
+        assert!(reply["agent_capacity"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()));
     }
 
     fn pool_profile(agent_id: &str, prefer_for: &[&str]) -> crate::IssueMonitorLaunchProfile {
@@ -10393,6 +10507,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: false,
                 autonomous_mode: false,
                 max_active_agents: 3,
@@ -10428,6 +10543,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    max_active_auto: false,
                     auto_close_merged_issues: None,
                     auto_apply_updates: None,
                     launch_agent: None,
@@ -10476,6 +10592,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: false,
                 autonomous_mode: false,
                 max_active_agents: 3,
@@ -10513,6 +10630,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    max_active_auto: false,
                     auto_close_merged_issues: None,
                     auto_apply_updates: None,
                     launch_agent: None,
@@ -11352,6 +11470,8 @@ mod tests {
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: Vec::new(),
@@ -12705,6 +12825,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -12747,6 +12868,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),

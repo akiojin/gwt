@@ -2038,6 +2038,9 @@ enum UserEvent {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     },
+    IssueMonitorCapacityChanged {
+        project_root: PathBuf,
+    },
     IssueMonitorDaemonStatus {
         project_root: PathBuf,
         status: Box<gwt::IssueMonitorStatusView>,
@@ -3097,6 +3100,8 @@ mod tests {
         let wire = serde_json::to_value(&events[0].event).expect("toast wire");
         assert_eq!(wire["notification_transition"], "needs_human");
         let status = gwt::IssueMonitorStatusView {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
@@ -10358,6 +10363,34 @@ fn main() -> std::io::Result<()> {
     #[cfg(windows)]
     verification_cap_relief::spawn(pty_writers.clone());
     let monitor_projects = Arc::new(RwLock::new(BTreeMap::new()));
+    // Capacity observation belongs to the host, independently of browser clients.
+    // Only open projects supply target candidates; registered projects consume
+    // nothing unless the machine census finds a live PTY.
+    let capacity_projects = Arc::new(RwLock::new(Vec::<PathBuf>::new()));
+    let capacity_roots = capacity_projects.clone();
+    let capacity_proxy = proxy.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("gwt-agent-capacity".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let roots = capacity_roots
+                .read()
+                .map(|projects| projects.clone())
+                .unwrap_or_default();
+            for root in roots {
+                if let Err(error) = gwt::agent_capacity::refresh_machine_capacity(&root) {
+                    tracing::warn!(%error, project_root = %root.display(), "agent capacity observation failed");
+                }
+                // Failed observations must also publish expiry instead of leaving
+                // an old positive Auto limit on a stopped Monitor.
+                let _ = capacity_proxy.send_event(UserEvent::IssueMonitorCapacityChanged {
+                    project_root: root,
+                });
+            }
+        })
+    {
+        tracing::warn!(%error, "agent capacity sampler unavailable; Auto admission remains closed");
+    }
     let monitor_writers = pty_writers.clone();
     gwt::monitor_duplicate_runtime::spawn(monitor_projects.clone(), move || {
         let writers = monitor_writers.read().ok()?;
@@ -10595,6 +10628,9 @@ fn main() -> std::io::Result<()> {
                     ready.set_agent_capability_issuer(server.agent_capability_issuer());
                     ready.set_server_url(browser_url.clone());
                     ready.set_usage_refresh(usage_refresh.clone());
+                    if let Ok(mut roots) = capacity_projects.write() {
+                        *roots = ready.project_contexts().into_iter().map(|context| context.project_root).collect();
+                    }
                     if let Ok(mut projects) = monitor_projects.write() {
                         for context in ready.project_contexts() {
                             projects.insert(context.project_root, ready.sessions_dir.clone());
@@ -11213,6 +11249,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);
             }
+            Event::UserEvent(UserEvent::IssueMonitorCapacityChanged { project_root }) => {
+                clients.dispatch(app.issue_monitor_capacity_changed_events(&project_root));
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
                 project_root,
                 status,
@@ -11818,6 +11857,9 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::MainEventsCleared => {
+                if let Ok(mut roots) = capacity_projects.write() {
+                    *roots = app.project_contexts().into_iter().map(|context| context.project_root).collect();
+                }
                 // Publish project membership even before a Monitor PTY exists.
                 // The worker retains it and needs no GUI round trip per census.
                 if let Ok(mut projects) = monitor_projects.write() {

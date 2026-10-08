@@ -225,6 +225,8 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Explicitly clear the manual concurrency override.
+        max_active_auto: bool,
         /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
         /// stored value untouched).
         auto_close_merged_issues: Option<bool>,

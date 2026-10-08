@@ -759,6 +759,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
+            let max_active_auto = match optional_string(params, "max_active_mode")?.as_deref() {
+                None | Some("manual") => false,
+                Some("auto") if max_active.is_none() => true,
+                Some(_) => {
+                    return Err(CliParseError::InvalidJson(
+                        "max_active_mode must be auto (without max_active) or manual".to_string(),
+                    ))
+                }
+            };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
             let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
@@ -769,6 +778,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
+                && !max_active_auto
                 && auto_close_merged_issues.is_none()
                 && auto_apply_updates.is_none()
                 && launch_agent.is_none()
@@ -792,6 +802,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                max_active_auto,
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
@@ -4157,6 +4168,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: Some(7),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4171,6 +4183,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4188,6 +4201,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: Some(false),
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4206,6 +4220,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: Some(true),
                 launch_agent: None,
@@ -4213,6 +4228,23 @@ mod tests {
             }),
             "Issue #3906 AC-1: the auto-apply override is settable on its own"
         );
+    }
+
+    #[test]
+    fn agent_capacity_config_envelope_accepts_explicit_auto() {
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "auto"}),
+        );
+        for params in [
+            json!({"max_active_mode": "invalid", "max_active": 4}),
+            json!({"max_active_mode": "auto", "max_active": 4}),
+        ] {
+            assert!(matches!(
+                err("issue.monitor.config.set", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
     }
 
     /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
@@ -4227,6 +4259,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -4241,6 +4274,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
@@ -4266,6 +4300,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -4750,6 +4785,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,

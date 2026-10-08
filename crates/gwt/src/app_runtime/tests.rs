@@ -6224,6 +6224,7 @@ fn monitor_relaunch_fixture_with_settlement(
                 ..gwt::IssueMonitorConfig::default()
             },
             gwt::IssueMonitorPrefs {
+                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 queued_launch_session_strategies: std::collections::BTreeMap::from([(
                     3165,
                     gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
