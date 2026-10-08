@@ -600,6 +600,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "verify.cancel",
+        aliases: &[],
+    },
+    Operation {
         name: "verify.lease.acquire",
         aliases: &["verify.lease-acquire"],
     },
@@ -625,6 +629,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "verify.run",
+        aliases: &[],
+    },
+    Operation {
+        name: "verify.status",
         aliases: &[],
     },
     Operation {
