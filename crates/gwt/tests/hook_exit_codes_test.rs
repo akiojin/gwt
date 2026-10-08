@@ -15,9 +15,7 @@
 //! - Block hook returning `Some(..)`   → 2 (block + stdout JSON)
 
 use chrono::Utc;
-use gwt::cli::hook::{
-    event_dispatcher, runtime_state::RuntimeState, HookOutput, IntentBoundaryEvent,
-};
+use gwt::cli::hook::{event_dispatcher, runtime_state::RuntimeState, HookOutput};
 use gwt::cli::{dispatch, TestEnv};
 use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
 use gwt_core::skill_state::{self, SkillState};
@@ -444,7 +442,7 @@ fn event_dispatcher_codex_tool_use_fails_open_without_hook_session_id() {
 }
 
 #[test]
-fn event_dispatcher_session_start_fails_open_when_session_toml_is_corrupt() {
+fn event_dispatcher_session_start_fails_closed_when_session_toml_is_corrupt() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -462,26 +460,18 @@ fn event_dispatcher_session_start_fails_open_when_session_toml_is_corrupt() {
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
     let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
 
-    let output = event_dispatcher::handle_with_input(
+    let error = event_dispatcher::handle_with_input(
         "SessionStart",
         r#"{"session_id":"agent-123"}"#,
         tmp.path(),
         Some("session-corrupt"),
     )
-    .expect("corrupt session TOML must not make SessionStart exit 1");
-
-    let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
-        panic!("expected SessionStart metadata diagnostic");
-    };
-    assert_eq!(event, IntentBoundaryEvent::SessionStart);
+    .expect_err("SessionStart must reject provider identity that cannot be persisted");
+    assert!(error.to_string().contains("runtime-state"), "{error}");
     assert!(
-        text.contains("provider session id from SessionStart was not persisted"),
-        "{text}"
+        !runtime_path.exists(),
+        "failed identity must not publish Idle"
     );
-    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
-    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
-    assert_eq!(runtime_state.status, "Idle");
-    assert_eq!(runtime_state.source_event, "SessionStart");
 }
 
 #[test]
