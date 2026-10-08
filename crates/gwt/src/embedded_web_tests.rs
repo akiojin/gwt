@@ -3411,12 +3411,15 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         terminal_event.is_match(html),
         "expected terminal output and snapshot events to update the shared window model",
     );
+    let terminal_subscription = js_braced_block_after(
+        html,
+        "subscribePmWindowState(state => state.windows[state.changedWindowId], state => ",
+    )
+    .expect("shared window terminal subscription");
     assert!(
-        html.contains(
-            "subscribePmWindowState(state => state.windows[state.changedWindowId], state => {"
-        ) && html.contains(
+        terminal_subscription.contains(
             "frontendUnits.terminalHost.replaceTerminalSnapshot(state.windowId, packet.dataBase64)"
-        ) && html
+        ) && terminal_subscription
             .contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)"),
         "expected shared window subscriptions to retain the named terminal host delivery contract",
     );
