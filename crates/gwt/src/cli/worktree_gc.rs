@@ -1157,6 +1157,10 @@ mod tests {
     }
 
     fn check_gc_verification_boundary(legacy_exclusive: bool) {
+        // ScopedGwtHome is thread-local; Git still inherits the process PATH.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");

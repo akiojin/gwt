@@ -13,8 +13,9 @@ develop ブランチでバージョン更新・CHANGELOG更新を行い、main �
 GitHub Actions の `Prepare Release` ワークフローを使う。** GitHub の
 Actions → `Prepare Release` → `Run workflow` を押すだけで、CI が develop 上で
 バージョン更新（`scripts/compute_release_version.py` の最新タグ相対計算、`cargo set-version`、
-`cargo update -w`、git-cliff）・`chore(release): vX.Y.Z` コミット・develop→main の
-Release PR 作成までを実行する。`bump` 入力は `auto`（既定。breaking marker を検出しても
+`cargo update -w`、git-cliff）・`chore(release): vX.Y.Z` コミットを develop に push した後、
+その commit を固定した `release/vX.Y.Z` から main への Release PR を作成する。
+develop への後続マージで release head / CI は動かない。`bump` 入力は `auto`（既定。breaking marker を検出しても
 minor 止まりで、marker はログと Release PR 本文に列挙されるだけ。Issue #4373）/ `patch` /
 `minor` / `major`。**メジャーはユーザーが `major` を明示した場合のみ。**
 
@@ -27,9 +28,12 @@ merge 後は `release.yml` がタグ・GitHub Release・5プラットフォー�
 
 ワークフローは push と PR 作成が別ステップのため、push 成功後に PR 作成が失敗すると
 develop に bump コミットだけが残ることがある（GitHub Actions が失敗を可視化する）。その場合は
-**同じワークフローを再実行**すればよい（`git pull --rebase` は no-op、既存 PR は更新される）。
+固定 snapshot が未作成なら同じワークフローを再実行する。`release/vX.Y.Z` が既に存在する場合は、
+その branch の PR を復旧する。既存 snapshot は上書きせず、develop を head とする PR も再作成しない。
 
-以下の手動手順は、develop 上で対話的に実行したい場合の **fallback** として残す。
+新規リリースは必ず上の workflow を使い、ローカルで release branch を作成しない。
+以下の旧手動手順は中断したリリースの調査・復旧用に限る。固定 snapshot が存在する場合は
+バージョン更新をやり直さず、ステップ 10 の専用 `release.status` 経路で PR を復旧する。
 
 ## フロー概要
 
@@ -319,13 +323,15 @@ git push origin develop
 > Issue の決着は work ブランチが `develop` に merge された時点で Issue Monitor が
 > 受け入れ基準を確認して行う（Issue #3917）。Release PR は Issue を **参照するだけ**。
 
-まず、今回のリリース範囲を決定：
+固定 snapshot の内容を調べる場合は、その SHA を対象にリリース範囲を決定：
 
 ```bash
+git fetch --no-tags origin "refs/heads/release/v{NEW_VERSION}"
+RELEASE_SHA=$(git rev-parse FETCH_HEAD)
 if [ -n "$PREV_TAG" ]; then
-  RANGE="${PREV_TAG}..HEAD"
+  RANGE="${PREV_TAG}..${RELEASE_SHA}"
 else
-  RANGE="HEAD"
+  RANGE="${RELEASE_SHA}"
 fi
 ```
 
@@ -364,7 +370,10 @@ python3 scripts/release_issue_refs.py --range "$RANGE" --format pr-body \
 
 ### 10. PR作成/更新
 
-まず現在の develop 向け PR を確認：
+固定 snapshot の復旧では現在の branch の `pr.current` を使用しない。
+次の読み取りで対象 head を明示し、その PR 番号だけを操作する。
+通常の `gwt-manage-pr` は現在 branch を対象とするため、固定 snapshot の復旧には
+専用 `release.status` を使う。branch の作成・切り替え・更新は行わない。
 
 ```bash
 resolve_gwt_bin() {
@@ -386,43 +395,26 @@ resolve_gwt_bin() {
 }
 
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
-"$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.current","params":{}}
-JSON
+PR_NUMBER=$(gh pr list --repo akiojin/gwt --base main --head "release/v{NEW_VERSION}" \
+  --state open --json number -q '.[0].number // empty')
 ```
 
-#### 既存PRがある場合
+#### 固定 snapshot の専用復旧
 
-`pr.current` の JSON envelope 出力に PR 番号が含まれている場合、以下を実行してタイトル・ラベル・本文を更新（`## Delivered Issues` を反映）：
-本文は `params.body` に入れること。
+`release_branch` を明示して既存 snapshot だけを照合する。既に PR がある場合は
+何も変更しない。PR が無く、未リリースの bump がある場合だけ PR を作成する：
 
 ```bash
 "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.edit","params":{"number":123,"title":"chore(release): v{NEW_VERSION}","body":"<PR body>","add_labels":["release"]}}
+{"schema_version":1,"operation":"release.status","params":{"release_branch":"release/v{NEW_VERSION}","base_branch":"main","ensure_release_pr":true}}
 JSON
 ```
 
-> 「既存のRelease PR（#{PR番号}）を更新しました。」
-> 「URL: {PR URL}」
-
-#### 既存PRがない場合
-
-PRを作成：
-
-```bash
-"$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.create","params":{"base":"main","head":"develop","title":"chore(release): v{NEW_VERSION}","body":"<PR body>","labels":["release"],"draft":false}}
-JSON
-```
-
-**PR_BODY の内容**: ステップ 9.2 で生成した `$BODY_FILE` の内容をそのまま `params.body` に渡す。
-生成される本文は次のセクションで構成される：
-
-- `## Summary` - リリースの概要
-- `## Version` - バージョン番号と bump 種別
-- `## Changes` - `--notes-file` を渡した場合のみ（closing keyword は無害化済み）
-- `## Delivered Issues` - `DELIVERED_ISSUES` を `- #<番号>` で列挙（空なら `None`）
-- `## Related Issues / Links` - `REFERENCE_ONLY_ISSUES` を `- #<番号>` で列挙（空なら `None`）
+応答の `release_pr` / `release_pr_url` を確認する。snapshot が無い場合はエラーを報告し、
+Prepare Release で準備する。現在の worktree と snapshot が異なるため、汎用
+`"operation":"pr.create"` / `"operation":"pr.edit"` は verified HEAD gate に拒否され得る。
+この復旧では使用しない。本文は専用経路が version に対応する CHANGELOG section を使い、
+closing keyword を無害化する。
 
 **重要**: 本文を手で編集して `Closes #<番号>` 等の closing keyword を追加しない。
 **重要**: Issue の close は Release PR の役割ではない。未 close の Issue が残っていれば、
@@ -432,15 +424,13 @@ develop merge 時の Issue Monitor settlement コメント（`merge 済み・未
 
 `DELIVERED_ISSUES` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する（close はしない）。
 
-まず、ステップ10の直後に JSON operation `pr.current` を再実行し、出力から PR 番号を取得する：
+ステップ 10 で確定した snapshot PR 番号を使う。新規作成の場合は `release.status` の
+応答から番号を取り、次の対象 head を明示した読み取りで照合する。
 
 ```bash
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
-PR_CURRENT=$("$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.current","params":{}}
-JSON
-)
-PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head -1)
+PR_NUMBER=$(gh pr list --repo akiojin/gwt --base main --head "release/v{NEW_VERSION}" \
+  --state open --json number -q '.[0].number // empty')
 ```
 
 各 Issue にコメントを追記：

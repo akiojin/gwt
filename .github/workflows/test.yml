@@ -353,8 +353,12 @@ jobs:
   # parallelism (#4023 and #4182 reproduce only when the suite competes with
   # itself), and fails when the outcome changes between runs.
   #
-  # It depends on `changes`, so its name must stay off the develop required
-  # status checks: branch protection reads a skipped job as Success. Pinned by
+  # Flake detection is a required status check on develop (Issue #5171).
+  # Its target filter is the exception to the optional-job filter above.
+  # No changed test targets intentionally means there is nothing to compare.
+  # Libraries run twice; integration targets run up to 20 times within the
+  # 600s test execution budget. Compile is excluded, and the minimum two-run
+  # comparison takes precedence over the budget. Pinned by
   # crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
   flake-detection:
     name: Flake detection (changed test targets)
@@ -367,6 +371,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
       - name: Cache Linux GTK dependency packages
         uses: actions/cache@v6
         with:
@@ -389,6 +396,7 @@ jobs:
       - name: Re-run the changed test targets until the outcome wobbles
         env:
           GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
+          GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: scripts/ci-flake-detect.sh
         timeout-minutes: 45
 
@@ -514,14 +522,19 @@ jobs:
   # Prove the complete core suite is stable at native Windows default
   # parallelism; keep the selective regression runner below unchanged.
   test-windows-core-stability:
-    name: Windows core stability (five runs)
+    name: Windows core stability (${{ matrix.run }}/5)
     if: ${{ !cancelled() }}
     needs: source-sync
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-core-stability
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.run }}-test-windows-core-stability
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        run: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -533,20 +546,20 @@ jobs:
       - name: Build the complete core suite before repetition
         run: cargo test -p gwt-core --all-features --no-run
         timeout-minutes: 30
-      - name: Repeat gwt-core at default parallelism five times
+      - name: Run the complete gwt-core suite at default parallelism
         shell: pwsh
+        env:
+          CORE_STABILITY_RUN: ${{ matrix.run }}
         run: |
           Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
           Write-Host "logical processors: $([Environment]::ProcessorCount)"
-          1..5 | ForEach-Object {
-            Write-Host "default-parallel core run $_ of 5"
-            cargo test -p gwt-core --all-features
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          Write-Host "default-parallel core run $env:CORE_STABILITY_RUN of 5"
+          cargo test -p gwt-core --all-features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         timeout-minutes: 30
 
   test-windows-rust:
-    name: Windows Rust regressions
+    name: Test (Windows regressions)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-rust
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
@@ -611,6 +624,7 @@ jobs:
         run: |
           node scripts/ci-windows-tests.mjs run gwt test windows_binary_subsystem_test -- --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt test pty_start_gate_console_test -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt-terminal test pty_start_gate_test -- --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
         shell: bash
@@ -695,28 +709,25 @@ jobs:
         run: node scripts/ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1
         timeout-minutes: 15
 
-  # #5172: run both Windows workloads in parallel and preserve the protected
-  # check name. always() makes failure, cancellation, and skipping fail closed;
-  # all five SPEC #4740 AC-8 stability runs remain required.
-  test-windows-result:
+  # Issue #4821: both workloads start together; the protected check still
+  # requires every core matrix run and all selective regressions to succeed.
+  test-windows-required:
     name: Test (Rust, Windows)
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-required
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     needs: [test-windows-core-stability, test-windows-rust, source-sync]
     if: ${{ always() }}
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-test-windows-result
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - name: Require both Windows workloads to succeed
+      - name: Require all five core stability runs and Windows regressions
         shell: bash
         env:
           CORE_STABILITY_RESULT: ${{ needs.test-windows-core-stability.result }}
-          RUST_REGRESSIONS_RESULT: ${{ needs.test-windows-rust.result }}
+          WINDOWS_RESULT: ${{ needs.test-windows-rust.result }}
         run: |
-          echo "Windows core stability: $CORE_STABILITY_RESULT"
-          echo "Windows Rust regressions: $RUST_REGRESSIONS_RESULT"
-          test "$CORE_STABILITY_RESULT" = success && test "$RUST_REGRESSIONS_RESULT" = success
+          echo "Windows core stability: $CORE_STABILITY_RESULT; regressions: $WINDOWS_RESULT"
+          test "$CORE_STABILITY_RESULT" = success && test "$WINDOWS_RESULT" = success
 
   # The default-parallel determinism proof lives in nightly.yml (Issue #4134
   # AC-1). It re-ran on Windows a suite Linux had already run, cost 2806s, and
@@ -789,7 +800,13 @@ jobs:
       - name: Run verification reporter regressions
         run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
       - name: Run frontend unit tests
-        run: bash scripts/run-frontend-unit-tests.sh
+        env:
+          GWT_PULL_RENDER_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          if [ -n "$GWT_PULL_RENDER_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$GWT_PULL_RENDER_BASE_SHA"
+          fi
+          bash scripts/run-frontend-unit-tests.sh --test-concurrency=1
         timeout-minutes: 10
       - name: Run frontend smoke tests
         run: bash scripts/run-frontend-smoke-tests.sh

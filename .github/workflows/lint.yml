@@ -39,16 +39,10 @@ jobs:
         run: cargo deny check advisories sources
   lint:
     name: Clippy & Rustfmt
-    needs: coverage
-    # A failed dependency normally skips this required job (reported as
-    # success by branch protection). Run the guard to propagate the failure.
-    if: ${{ !cancelled() }}
+    # Issue #5173: coverage / Rust Coverage is required independently, so
+    # Clippy can start alongside coverage without weakening its thresholds.
     runs-on: ubuntu-latest
     steps:
-      - name: Require coverage thresholds
-        env:
-          COVERAGE_RESULT: ${{ needs.coverage.result }}
-        run: test "$COVERAGE_RESULT" = success
       - uses: actions/checkout@v7
       # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
       # list, so a changed set is never served the previous archive.

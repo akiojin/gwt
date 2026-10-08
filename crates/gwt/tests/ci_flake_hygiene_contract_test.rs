@@ -14,11 +14,11 @@
 //! - T-055 / AC-6: a separate job re-runs the changed crates' tests at default
 //!   parallelism and fails when the outcome is not stable across runs.
 //!
-//! The flake job must stay off the required-status-check list. Branch
-//! protection reports a skipped job as Success, so a required check gated on
-//! `changes` would let a PR merge without ever having run it — the same
-//! property `ci_concurrency_contract_test.rs` pins for the docs-only filter.
+//! The flake job is a develop required status check. No changed test targets
+//! intentionally means there is nothing to compare; changes with targets run
+//! the detector. Its name and bounded repetition policy are pinned below.
 
+use gwt_core::process::{resolved_command, ProcessPlanRequest};
 use serde_yaml::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,8 @@ const FLAKE_JOB: &str = "flake-detection";
 const TARGETS_OUTPUT: &str = "flake_targets";
 const CORE_STABILITY_JOB: &str = "test-windows-core-stability";
 
-/// SPEC #4551 plan: "N = 20, 対象は変更されたクレートの test target のみ, 毎 PR".
+/// Issue #5171: integration targets retain their ceiling of 20; libraries stop
+/// after the two runs required to compare outcomes.
 const REQUIRED_FLAKE_RUNS: u32 = 20;
 
 fn repo_root() -> PathBuf {
@@ -178,10 +179,10 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
     );
 }
 
-/// The flake job is gated on `changes`, so it must never carry the name of a
-/// required status check: branch protection reads a skipped job as Success.
+/// Issue #5171 AC-3: preserve the live required check's name and describe its
+/// status consistently in the workflow.
 #[test]
-fn the_flake_detection_job_is_not_a_required_status_check() {
+fn the_flake_detection_job_keeps_its_required_status_check_name() {
     let doc = test_workflow();
     let name = job(&doc, FLAKE_JOB)
         .get("name")
@@ -189,23 +190,10 @@ fn the_flake_detection_job_is_not_a_required_status_check() {
         .unwrap_or(FLAKE_JOB)
         .to_string();
 
-    // Mirror of develop's `required_status_checks.contexts`; kept in step with
-    // `ci_concurrency_contract_test.rs::REQUIRED_CHECKS`.
-    const REQUIRED_CHECKS: &[&str] = &[
-        "Commit Message Lint",
-        "Clippy & Rustfmt",
-        "Test (Rust)",
-        "Build",
-        "Test (Python runner)",
-        "Test (Rust, Windows)",
-        "Cargo Deny (advisories + sources)",
-        "Check (Windows)",
-        "Check (macOS)",
-        "Clippy (macOS)",
-    ];
+    assert_eq!(name, "Flake detection (changed test targets)");
     assert!(
-        !REQUIRED_CHECKS.contains(&name.as_str()),
-        "`{FLAKE_JOB}` is gated on `{CHANGES_JOB}`, so `{name}` must not be a required check"
+        read(TEST_WORKFLOW).contains("Flake detection is a required status check"),
+        "the workflow must document the actual branch protection contract"
     );
 }
 
@@ -223,6 +211,10 @@ fn the_flake_detector_repeats_the_agreed_number_of_times() {
     assert!(
         !workflow.contains("GWT_FLAKE_RUNS"),
         "the workflow must not override the run count; keep N in {FLAKE_SCRIPT}"
+    );
+    assert!(
+        script.contains("GWT_FLAKE_BUDGET_SECS:-600"),
+        "Issue #5171 AC-1: compile-excluded test budget defaults to 600 seconds"
     );
 }
 
@@ -269,19 +261,60 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
         Some("source-sync")
     );
     assert!(core.get("continue-on-error").is_none());
+    assert!(
+        core.get("concurrency")
+            .and_then(|value| value.get("group"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("${{ matrix.run }}"),
+        "each matrix run must have independent concurrency admission"
+    );
+    let strategy = core.get("strategy").expect("five independent Windows runs");
+    assert_eq!(
+        strategy.get("fail-fast").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        strategy.get("max-parallel").and_then(Value::as_u64),
+        Some(5)
+    );
+    let runs: Vec<_> = strategy
+        .get("matrix")
+        .and_then(|matrix| matrix.get("run"))
+        .and_then(Value::as_sequence)
+        .expect("the matrix must schedule exactly five full-suite runs")
+        .iter()
+        .map(Value::as_u64)
+        .collect();
+    assert_eq!(runs, [Some(1), Some(2), Some(3), Some(4), Some(5)]);
     let steps = run_steps(&core);
     let build = index_of_step_running(&steps, "cargo test -p gwt-core --all-features --no-run")
-        .expect("build the complete core suite before the stability loop");
-    let repeat = index_of_step_running(&steps, "1..5 | ForEach-Object")
-        .expect("repeat the complete core suite five times");
+        .expect("build the complete core suite before each stability run");
+    let repeat = index_of_step_running(&steps, "Remove-Item Env:RUST_TEST_THREADS")
+        .expect("each matrix runner must use default test parallelism");
     assert!(build < repeat);
     let run = &steps[repeat].1;
     assert!(run.contains("Remove-Item Env:RUST_TEST_THREADS"));
+    let repeat_step = core
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .unwrap()
+        .iter()
+        .find(|step| step.get("run").and_then(Value::as_str) == Some(run.as_str()))
+        .unwrap();
+    assert_eq!(
+        repeat_step
+            .get("env")
+            .and_then(|env| env.get("CORE_STABILITY_RUN"))
+            .and_then(Value::as_str),
+        Some("${{ matrix.run }}")
+    );
     assert!(
-        run.contains("Write-Host"),
-        "report each iteration in CI logs"
+        run.contains("Write-Host") && run.contains("$env:CORE_STABILITY_RUN"),
+        "report the matrix run number in CI logs"
     );
     assert!(run.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    assert!(!run.contains("1..5") && !run.contains("ForEach-Object"));
     let commands: Vec<_> = run
         .lines()
         .map(str::trim)
@@ -298,31 +331,53 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
             || step.get("uses").and_then(Value::as_str) == Some("Swatinem/rust-cache@v2")));
 }
 
-/// Either failed, cancelled, or skipped Windows job must fail the protected check,
+/// A failed or skipped stability job must fail the existing protected check,
 /// rather than letting GitHub treat a skipped dependent job as success.
 #[test]
-fn the_required_windows_check_aggregates_both_parallel_jobs() {
-    let windows = job(&test_workflow(), "test-windows-result");
-    assert_eq!(windows["name"], "Test (Rust, Windows)");
-    assert_eq!(windows["runs-on"], "ubuntu-latest");
-    assert!(windows.get("continue-on-error").is_none());
+fn the_required_windows_check_requires_successful_core_stability() {
+    let doc = test_workflow();
+    let regressions = job(&doc, "test-windows-rust");
     assert_eq!(
-        windows
-            .get("needs")
-            .and_then(Value::as_sequence)
-            .unwrap()
-            .iter()
-            .map(|dependency| dependency.as_str().unwrap())
-            .collect::<Vec<_>>(),
+        regressions.get("name").and_then(Value::as_str),
+        Some("Test (Windows regressions)")
+    );
+    assert_eq!(
+        regressions.get("needs").and_then(Value::as_str),
+        Some("source-sync")
+    );
+    assert_eq!(
+        regressions.get("if").and_then(Value::as_str),
+        Some("${{ !cancelled() }}")
+    );
+    let windows = job(&doc, "test-windows-required");
+    assert_eq!(
+        windows.get("name").and_then(Value::as_str),
+        Some("Test (Rust, Windows)")
+    );
+    assert_eq!(
+        windows.get("runs-on").and_then(Value::as_str),
+        Some("ubuntu-latest")
+    );
+    let needs: Vec<_> = windows
+        .get("needs")
+        .and_then(Value::as_sequence)
+        .expect("the protected check must aggregate both Windows jobs")
+        .iter()
+        .map(|dependency| {
+            dependency
+                .as_str()
+                .expect("job dependency must be a string")
+        })
+        .collect();
+    assert_eq!(
+        needs,
         [CORE_STABILITY_JOB, "test-windows-rust", "source-sync"]
     );
     assert_eq!(
         windows.get("if").and_then(Value::as_str),
         Some("${{ always() }}")
     );
-    let steps = windows.get("steps").and_then(Value::as_sequence).unwrap();
-    assert_eq!(steps.len(), 1, "aggregation needs no checkout or build");
-    let guard = &steps[0];
+    let guard = &windows.get("steps").and_then(Value::as_sequence).unwrap()[0];
     assert_eq!(guard.get("shell").and_then(Value::as_str), Some("bash"));
     assert_eq!(
         guard
@@ -332,46 +387,125 @@ fn the_required_windows_check_aggregates_both_parallel_jobs() {
         Some("${{ needs.test-windows-core-stability.result }}")
     );
     assert_eq!(
-        guard["env"]["RUST_REGRESSIONS_RESULT"],
-        "${{ needs.test-windows-rust.result }}"
+        guard
+            .get("env")
+            .and_then(|env| env.get("WINDOWS_RESULT"))
+            .and_then(Value::as_str),
+        Some("${{ needs.test-windows-rust.result }}")
     );
     let run = guard
         .get("run")
         .and_then(Value::as_str)
         .expect("guard must run");
     assert!(run.contains("echo"), "report the dependency result");
-    assert!(run.contains(
-        "test \"$CORE_STABILITY_RESULT\" = success && test \"$RUST_REGRESSIONS_RESULT\" = success"
-    ));
+    assert!(run.contains("test \"$CORE_STABILITY_RESULT\" = success"));
+    assert!(run.contains("test \"$WINDOWS_RESULT\" = success"));
     assert!(guard.get("continue-on-error").is_none() && guard.get("if").is_none());
 }
 
-/// Exercise the actual Ubuntu guard, including a successful pair to catch
-/// a gate that rejects legitimate results as well as each unsafe outcome.
-#[cfg(unix)]
+/// SPEC #4821 AC-7: changing one source file must not rerun unrelated unit tests
+/// or mistake a longer test name for an exact match.
 #[test]
-fn windows_aggregate_guard_accepts_only_two_successful_jobs() {
-    use gwt_core::process::{resolved_command, ProcessPlanRequest};
-
-    let aggregate = job(&test_workflow(), "test-windows-result");
-    let script = aggregate["steps"][0]["run"].as_str().unwrap();
-    for (core, regressions, expected) in [
-        ("success", "success", true),
-        ("failure", "success", false),
-        ("success", "failure", false),
-        ("cancelled", "success", false),
-        ("success", "cancelled", false),
-        ("skipped", "success", false),
-        ("success", "skipped", false),
-    ] {
-        let output = resolved_command(
-            ProcessPlanRequest::new("bash").args(["-e", "-o", "pipefail", "-c", script]),
-        )
-        .expect("resolve the Ubuntu guard shell")
-        .env("CORE_STABILITY_RESULT", core)
-        .env("RUST_REGRESSIONS_RESULT", regressions)
+fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
+    let script = read(FLAKE_SCRIPT);
+    let code = script
+        .split_once("# changed-test-selection-begin\n")
+        .expect("the flake script must expose its changed-test selector")
+        .1
+        .split_once("# changed-test-selection-end\n")
+        .expect("the changed-test selector must have an end marker")
+        .0;
+    let repo = tempfile::tempdir().unwrap();
+    let source = repo.path().join("crates/gwt/src");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("changed.rs"),
+        "fn relevant_test() {}\nfn helper() {}\n",
+    )
+    .unwrap();
+    fs::write(source.join("unrelated.rs"), "fn unrelated_test() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = resolved_command(ProcessPlanRequest::new("git"))
+            .expect("resolve git for the isolated fixture")
+            .args([
+                "-c",
+                "user.name=CI fixture",
+                "-c",
+                "user.email=ci@example.invalid",
+            ])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("run git in the isolated fixture");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    fs::write(
+        source.join("changed.rs"),
+        "fn relevant_test() { assert!(true); }\nfn helper() {}\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "change one source file"]);
+    let test_list = repo.path().join("test-list.txt");
+    fs::write(&test_list, "changed::tests::relevant_test: test\nunrelated::tests::unrelated_test: test\nhelper::tests::unrelated_test: test\nchanged::tests::relevant_test_extra: test\n").unwrap();
+    let select = |base: &str| {
+        resolved_command(ProcessPlanRequest::new(if cfg!(windows) {
+            "python"
+        } else {
+            "python3"
+        }))
+        .expect("resolve Python for the real selector")
+        .args(["-c", code, "gwt|lib|", test_list.to_str().unwrap(), base])
+        .current_dir(repo.path())
         .output()
-        .expect("run the aggregate guard");
-        assert_eq!(output.status.success(), expected, "{core}/{regressions}");
+        .expect("run the real Python selector")
+    };
+    let selected = select(base.trim());
+    assert!(
+        selected.status.success(),
+        "selector: {}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(selected.stdout).unwrap(),
+        "changed::tests::relevant_test\n"
+    );
+    // A safely mapped file must not hide another changed file with external
+    // tests whose function names cannot be mapped from the source.
+    fs::write(source.join("external.rs"), "fn external_helper() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "change an unmapped source file"]);
+    let mixed = select(base.trim());
+    assert!(mixed.status.success());
+    assert_eq!(
+        mixed.stdout,
+        b"changed::tests::relevant_test\nchanged::tests::relevant_test_extra\nhelper::tests::unrelated_test\nunrelated::tests::unrelated_test\n",
+        "any unmapped changed source file must retain the full target"
+    );
+    fs::write(
+        &test_list,
+        "external::first_test: test\nexternal::second_test: test\n",
+    )
+    .unwrap();
+    let unmapped = select(base.trim());
+    assert!(unmapped.status.success());
+    assert_eq!(
+        unmapped.stdout,
+        b"external::first_test\nexternal::second_test\n"
+    );
+    for invalid_base in ["", "missing-base"] {
+        assert!(
+            !select(invalid_base).status.success(),
+            "an unavailable base must fail closed"
+        );
     }
 }
