@@ -1212,11 +1212,20 @@ pub(super) fn command_disk_budgets(
     paths: &[PathBuf],
 ) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
     let settings = gwt_config::Settings::load().map_err(|error| error.to_string())?;
+    command_disk_budgets_with_inventory(paths, &settings, sysinfo::Disks::new_with_refreshed_list)
+}
+
+fn command_disk_budgets_with_inventory(
+    paths: &[PathBuf],
+    settings: &gwt_config::Settings,
+    _disk_inventory: impl FnOnce() -> sysinfo::Disks,
+) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
     let bytes = settings
         .verification
         .disk_budget_bytes
         .unwrap_or(DEFAULT_VERIFICATION_DISK_BUDGET_BYTES);
-    let disks = sysinfo::Disks::new_with_refreshed_list();
+    #[cfg(not(unix))]
+    let disks = _disk_inventory();
     let mut budgets: Vec<gwt_core::index_coordinator::VerificationDiskBudget> = Vec::new();
     for path in paths {
         let mut probe = path.clone();
@@ -1226,6 +1235,7 @@ pub(super) fn command_disk_budgets(
             }
         }
         let probe = dunce::canonicalize(probe).map_err(|error| error.to_string())?;
+        #[cfg(not(unix))]
         let mount = disks
             .iter()
             .filter(|disk| probe.starts_with(disk.mount_point()))
@@ -1240,6 +1250,7 @@ pub(super) fn command_disk_budgets(
         let volume = mount.mount_point().to_string_lossy().to_lowercase();
         #[cfg(unix)]
         let volume = {
+            // Bind mounts may have different mount paths on the same device.
             use std::os::unix::fs::MetadataExt;
             format!(
                 "device:{}",
@@ -1250,8 +1261,6 @@ pub(super) fn command_disk_budgets(
         };
         #[cfg(not(any(windows, unix)))]
         let volume = mount.mount_point().to_string_lossy().into_owned();
-        // Unix bind mounts may have different mount paths on the same device.
-        let _ = mount;
         if budgets.iter().any(|budget| budget.volume == volume) {
             continue;
         }
@@ -1528,6 +1537,44 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn unix_disk_budgets_do_not_require_a_listed_mount() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join("temporary");
+        std::fs::create_dir(&temporary).unwrap();
+        let settings = toml::from_str::<gwt_config::Settings>(
+            "[verification]\ndisk_budget_bytes=1234\n[build_artifact_gc]\nbelow_bytes=21474836480\nbelow_percent=5\n",
+        )
+        .unwrap();
+        let inventory_called = std::cell::Cell::new(false);
+        let budgets = super::command_disk_budgets_with_inventory(
+            &[directory.path().join("missing/target"), temporary],
+            &settings,
+            || {
+                inventory_called.set(true);
+                sysinfo::Disks::new()
+            },
+        )
+        .expect("Unix device identity must work without a listed ancestor mount");
+
+        assert!(!inventory_called.get(), "Unix must not enumerate mounts");
+        assert_eq!(budgets.len(), 1, "same-device paths share one reservation");
+        let probe = dunce::canonicalize(directory.path()).unwrap();
+        assert_eq!(budgets[0].path, probe);
+        assert_eq!(
+            budgets[0].volume,
+            format!("device:{}", std::fs::metadata(&probe).unwrap().dev())
+        );
+        assert_eq!(budgets[0].bytes, 1234);
+        assert_eq!(
+            budgets[0].floor_bytes,
+            21_474_836_480.max(fs2::total_space(&probe).unwrap().saturating_mul(5) / 100)
+        );
+    }
+
     #[test]
     fn status_lists_both_slot_holders_and_remaining_capacity() {
         let home = tempfile::tempdir().unwrap();

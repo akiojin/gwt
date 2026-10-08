@@ -51,6 +51,7 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
 pub mod continuation;
+pub mod driver;
 pub mod headed_e2e;
 pub mod interruption;
 pub mod nextest;
@@ -416,6 +417,10 @@ pub struct VerificationRunData {
     /// Omission preserves legacy record serialization and integrity hashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_head: Option<String>,
+    /// Windows driver image identity, including its embedded source commit.
+    /// Omitted on other hosts so existing evidence hashes remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<driver::DriverProvenance>,
     pub commands: Vec<VerificationCommandResult>,
     pub all_passed: bool,
     /// Conditional dispositions for exact failures. Raw command exits and
@@ -861,12 +866,17 @@ fn derive_and_register_plan_for_caller(
     ),
     String,
 > {
+    let required = if pre_pr.is_some() {
+        crate::cli::verify_derivation::read_pre_pr_required_contexts(worktree)?
+    } else {
+        Vec::new()
+    };
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         let derived = match pre_pr {
-            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, acceptance, local),
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local),
             None => crate::cli::verify_derivation::derive(worktree),
         }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
@@ -3146,8 +3156,8 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
 fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
-    // Windows' canonical matrix is library-only because the running gwtd.exe
-    // cannot be replaced (#4182). That matrix does not overwrite the binary.
+    // Windows' default library-only matrix does not overwrite the binary.
+    // Explicit binary matrices include their own bootstrap as the last command.
     if cfg!(windows)
         || !commands.iter().any(|command| {
             split_command_line(command).is_ok_and(|args| {
@@ -3165,29 +3175,50 @@ fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
     if cfg!(windows) {
         return None;
     }
+    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd")
+}
+
+/// Identify this repository without comparing another project's HEAD to gwt's.
+pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
     let manifest =
         |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
-    let workspace = manifest(&worktree.join("Cargo.toml"))?;
+    let Some(workspace) = manifest(&worktree.join("Cargo.toml")) else {
+        return false;
+    };
     if !workspace
-        .get("workspace")?
-        .get("members")?
-        .as_array()?
-        .iter()
-        .any(|member| member.as_str() == Some("crates/gwt"))
-    {
-        return None;
-    }
-    let package = manifest(&worktree.join("crates/gwt/Cargo.toml"))?;
-    if package.get("package")?.get("name")?.as_str()? != "gwt"
-        || package.get("features")?.get("test-gh-guard").is_none()
-        || !package.get("bin")?.as_array()?.iter().any(|binary| {
-            binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
-                && binary.get("path").and_then(toml::Value::as_str) == Some("src/bin/gwtd.rs")
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|member| member.as_str() == Some("crates/gwt"))
         })
     {
-        return None;
+        return false;
     }
-    Some("cargo build -p gwt --bin gwtd")
+    let Some(package) = manifest(&worktree.join("crates/gwt/Cargo.toml")) else {
+        return false;
+    };
+    package
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        == Some("gwt")
+        && package
+            .get("features")
+            .and_then(|features| features.get("test-gh-guard"))
+            .is_some()
+        && package
+            .get("bin")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|binaries| {
+                binaries.iter().any(|binary| {
+                    binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
+                        && binary.get("path").and_then(toml::Value::as_str)
+                            == Some("src/bin/gwtd.rs")
+                })
+            })
 }
 
 /// Keep recovery (including failures) in the deferred admission diagnostic,
@@ -4002,6 +4033,7 @@ pub fn run_verification(
 
 #[derive(Default)]
 struct RunOptions<'a> {
+    driver: Option<driver::DriverProvenance>,
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
     /// Where this run launches its commands from (Issue #4409). It belongs
@@ -4191,6 +4223,9 @@ where
             )?;
         }
         let verified_head = current_head_sha(worktree).ok();
+        if let Some(driver) = &options.driver {
+            driver::validate_for_head(worktree, verified_head.as_deref(), &driver.source_head)?;
+        }
         interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
         let predecessor = match (&preview, &request) {
             (Some(preview), Some(request)) => load(worktree)?.filter(|record| {
@@ -4279,7 +4314,19 @@ where
     // the runner's host/target locks (Command uses close-on-exec descriptors).
     let _watchdog = options
         .watch_runner
-        .then(|| interruption::Watchdog::start(worktree, &record_id, &watchdog_token))
+        .then(|| {
+            let watchdog_executable = options
+                .driver
+                .as_ref()
+                .map(|driver| Ok(driver.fixed_path.clone()))
+                .unwrap_or_else(std::env::current_exe)?;
+            interruption::Watchdog::start(
+                worktree,
+                &record_id,
+                &watchdog_token,
+                &watchdog_executable,
+            )
+        })
         .transpose()
         .map_err(|error| format!("failed to start verification watchdog: {error}"))?;
     let mut running = VerificationRunRecord::from(VerificationRunData {
@@ -4294,6 +4341,7 @@ where
         lease_id: options.lease_id.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
         verified_head: verified_head.clone(),
+        driver: options.driver.clone(),
         commands: results.clone(),
         all_passed: false,
         quarantined_failures: Vec::new(),
@@ -4683,6 +4731,7 @@ where
         lease_id: options.lease_id.take(),
         worktree_fingerprint: fingerprint_before.clone(),
         verified_head,
+        driver: options.driver.take(),
         commands: results,
         all_passed,
         quarantined_failures,
@@ -6120,6 +6169,19 @@ pub(super) fn run<E: CliEnv>(
             // subsequent timeouts preserve the preceding command evidence.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
+            let driver = driver::prepare(&worktree, &commands).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to fix verification driver: {error}"
+                )))
+            })?;
+            if let Some(driver) = &driver {
+                out.push_str(&format!(
+                    "verify: driver — {}; SHA256 {}; source HEAD {}\n",
+                    driver.fixed_path.display(),
+                    driver.sha256,
+                    driver.source_head
+                ));
+            }
             match crate::cli::verification_lease::first_heavy_command(&commands) {
                 Some(heavy) => {
                     out.push_str(&format!(
@@ -6166,6 +6228,7 @@ pub(super) fn run<E: CliEnv>(
                 &authority,
                 &prepared_quarantines,
                 RunOptions {
+                    driver,
                     // Unit CLI fixtures are in-process, not a gwtd executable.
                     // Real runner death is covered by verification_admission_cli_test.
                     watch_runner: !cfg!(test),
@@ -6289,6 +6352,7 @@ pub(crate) mod tests {
             lease_id: None,
             worktree_fingerprint: fingerprint.to_string(),
             verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
                 headed_e2e: None,
@@ -6464,6 +6528,70 @@ pub(crate) mod tests {
         let loaded = load_plan(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.surfaces, derived.surfaces);
         assert!(plan_integrity_ok(&loaded));
+    }
+
+    #[test]
+    fn pre_pr_context_read_allows_a_concurrent_trusted_writer() {
+        crate::cli::test_support::with_fake_gh("pre-pr-writer-probe", |worktree| {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .status()
+                .unwrap()
+                .success());
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["checkout", "-q", "-b", "work/pre-pr-writer"])
+                .status()
+                .unwrap()
+                .success());
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            for path in [
+                "crates/gwt/Cargo.toml",
+                ".github/workflows/test.yml",
+                ".github/workflows/lint.yml",
+                ".github/workflows/coverage.yml",
+            ] {
+                let destination = worktree.join(path);
+                fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                fs::copy(root.join(path), destination).unwrap();
+            }
+            // Initialize the same kernel lease that registration uses; fake gh
+            // attempts an independent writer while its API read is in progress.
+            crate::cli::trusted_store::with_write_lease(worktree, || Ok(())).unwrap();
+            let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree).unwrap();
+            fs::write(
+                std::env::var_os("GWT_FAKE_GH_STATE_FILE").unwrap(),
+                trusted.join(".write-lease").to_str().unwrap(),
+            )
+            .unwrap();
+            let authority =
+                snapshot_verification_caller_authority(worktree, "sess-pre-pr").unwrap();
+            let acceptance = vec!["git --version".to_string()];
+            let (derived, plan) = derive_and_register_plan_for_caller(
+                worktree,
+                "sess-pre-pr",
+                Vec::new(),
+                Vec::new(),
+                &authority,
+                Some((&acceptance, &[])),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::cli::trusted_store::read(worktree, "pre-pr-writer-probe.json").unwrap(),
+                Some("written".into())
+            );
+            assert!(derived
+                .surfaces
+                .iter()
+                .any(|s| s.starts_with("ci-delegated(")));
+            assert!(plan.commands.contains(&acceptance[0]));
+            assert!(plan_integrity_ok(&plan));
+            assert_eq!(load_plan(worktree).unwrap().unwrap(), plan);
+        });
     }
 
     // P9b (T-174 core): the repo-scoped trusted copy wins over a forged
@@ -7928,6 +8056,7 @@ mod tests {
             lease_id: None,
             worktree_fingerprint: "abc".to_string(),
             verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
                 headed_e2e: None,
