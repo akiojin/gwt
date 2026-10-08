@@ -3853,8 +3853,8 @@ mod tests {
                 has_non_gwt_changes: Some(true),
             },
             gwt_git::UnlandedBranch {
-                branch: "work/issue-3552".to_string(),
-                owner_issue: Some(3552),
+                branch: "pm/resident".to_string(),
+                owner_issue: None,
                 ahead: 2,
                 last_commit_at: Some("2026-08-28T04:00:00Z".parse().expect("commit date")),
                 has_open_pr: false,
@@ -3894,7 +3894,7 @@ mod tests {
             "\"has_open_pr\": false",
             "\"has_non_gwt_changes\": true",
             "\"bookkeeping_only_branch_count\": 1",
-            "\"branch\": \"work/issue-3552\"",
+            "\"branch\": \"pm/resident\"",
         ] {
             assert!(out.contains(field), "missing {field}: {out}");
         }
@@ -3908,8 +3908,15 @@ mod tests {
         );
         assert_eq!(payload["bookkeeping_only_branch_count"], 1);
         assert_eq!(
-            payload["bookkeeping_only_branches"][0]["branch"],
-            "work/issue-3552"
+            payload["bookkeeping_only_branches"][0],
+            serde_json::json!({
+                "branch": "pm/resident",
+                "owner_issue": null,
+                "ahead": 2,
+                "last_commit_at": "2026-08-28T04:00:00Z",
+                "has_open_pr": false,
+                "has_non_gwt_changes": false,
+            })
         );
     }
 
