@@ -1254,6 +1254,41 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
+### CI throughput measurements
+
+With Python 3.11+, authenticated `gh`, and local Git history for the merged PRs,
+collect the latest 25 develop merges and save their input data:
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --limit 25 --save target/ci-throughput.json
+python scripts/ci_throughput.py --input target/ci-throughput.json
+```
+
+Run collection from this checkout (or specify `--root`). Fetch missing history
+before collecting; for a shallow clone, use `git fetch --unshallow origin develop`.
+`--before 2026-10-08T00:30:00Z` fixes the inclusive merge cutoff, and
+`--workflow lint.yml` measures Lint using the same collection and replay path.
+Replay needs neither GitHub access nor Git history. The saved baseline is:
+
+```bash
+python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
+```
+
+The JSON reports PR creation-to-merge time, each PR's latest successful final-head
+workflow attempt, base synchronizations per merge, runner waits, and per-job
+durations. Durations are in minutes; p50 is the median and p90 is nearest rank.
+Workflow duration is `run_started_at` to `updated_at`; job duration is `started_at`
+to `completed_at`. Runner wait is job `created_at` to `started_at`, after dependency
+scheduling. All jobs and required jobs have separate wait distributions. Missing
+samples remain unavailable; rerun jobs whose creation time follows their reused
+execution time retain their duration but have unavailable runner waits.
+
+The fixed 25-PR baseline reproduces p50 **130.27 minutes** from creation to merge
+and **32.43 minutes** per Test attempt. Base synchronizations use merges whose
+second parent belongs to the base's first-parent history: **115/25 = 4.6**.
+The report also shows the historical `Merge ... develop` subject filter's
+**110/25 = 4.4**, which omits five synchronizations with custom subjects.
+
 ### Shared frontend state (SPEC-5016)
 
 Migrated frontend domains use `web/ui-state-store.js` to own immutable data. Receive
@@ -1275,6 +1310,29 @@ Heavy commands. Heavy commands retain their relative order; gwt artifact
 restoration runs last. An admission timeout before the first remaining command
 starts preserves any predecessor without writing a replacement record. Later
 timeouts retain completed results in an incomplete, non-PASS deferred record.
+
+The following short non-Cargo gates are Light and run without a Heavy lease:
+
+| Command | Resource bound |
+| --- | --- |
+| `git diff --check` (including `--cached`) | Checks whitespace in a diff |
+| `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | Reads an existing coverage JSON; does not run tests |
+| `actionlint` without custom checker options, `shellcheck`, `yamllint` | Static analysis of workflow, shell, or YAML files |
+| `taplo check`, `taplo fmt --check` | TOML validation or formatting checks |
+| `typos` | Static spelling checks |
+
+These gates have a 60-second execution timeout on both local and daemon hosts.
+A timeout records a failure (exit 124), preserves diagnostic output, and stops
+the command's process tree. Fix the reported command and rerun the full matrix.
+Existing markdownlint and scoped Cargo classification is unchanged. Unknown
+commands, script wrappers, the coverage producer `coverage-summary.mjs`, Cargo
+builds or broad tests, and headed Playwright remain Heavy.
+`actionlint -shellcheck` / `-pyflakes` overrides also remain Heavy because they
+can launch arbitrary wrappers. Bounded commands reclaim descendants on normal
+completion as well as on timeout.
+The Node reader also remains Heavy when its effective `NODE_OPTIONS` is nonempty,
+because those options can preload arbitrary modules. An explicit `NODE_OPTIONS=`
+disables inherited options and retains Light classification.
 
 Retry with the same full requested matrix and headed E2E nominations. `verify.run`
 automatically resumes only a valid admission-deferred record with identical

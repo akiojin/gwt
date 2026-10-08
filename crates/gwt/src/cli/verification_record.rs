@@ -3416,7 +3416,7 @@ fn execute_command_with_artifact_guard(
         .prefix("gwt-verify-")
         .tempdir_in(temporary_base)
         .map_err(|error| error.to_string())?;
-    let result = (|| match host {
+    let result = match host {
         VerificationHost::Daemon(endpoint) => {
             let mut request = delegated_spawn_request(
                 worktree,
@@ -3458,55 +3458,17 @@ fn execute_command_with_artifact_guard(
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
             }
-            // Issue #4405: this process runs inside the agent tree, whose
-            // launch policy lowers priority; the workload must not inherit
-            // that. Issue #4409 removes the inheritance at its source by
-            // launching from the daemon instead, but this branch is still
-            // taken whenever the launcher is already at baseline priority or
-            // has declared that it accepts its own.
-            let output = (|| -> io::Result<_> {
-                // Issue #4746 (earlier instance #4105): a grandchild can
-                // inherit stdout/stderr beyond the direct child's lifetime.
-                // Files let us wait for that child without waiting for EOF.
-                let stdout = temp.path().join("stdout");
-                let stderr = temp.path().join("stderr");
-                process
-                    .stdin(std::process::Stdio::null())
-                    .stdout(fs::File::create(&stdout)?)
-                    .stderr(fs::File::create(&stderr)?);
-                let stdout_reader = fs::File::open(stdout)?;
-                let stderr_reader = fs::File::open(stderr)?;
-                let mut spawned = gwt_core::process_tree::spawn_at_normal_priority(&mut process)?;
-                let _command_scope = progress.map(|progress| progress.start(spawned.child.id()));
-                let status = spawned.child.wait()?;
-                let output = std::process::Output {
-                    status,
-                    stdout: captured_output_snapshot(&stdout_reader),
-                    stderr: captured_output_snapshot(&stderr_reader),
-                };
-                Ok((output, spawned.priority))
-            })();
-            let output = match output {
-                Ok(output) => output,
-                Err(err) => {
-                    return spawn_failure_result(output_worktree, command, &err.to_string())
-                }
-            };
-            let (output, priority) = output;
-            let exit_code = output.status.code().unwrap_or(-1);
-            let signal = terminating_signal(output.status);
-            let mut tail = String::new();
-            if !priority.restored {
-                tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
-            }
-            let (streams_tail, output_streams) = render_streams(
+            execute_inherited_command(
+                &mut process,
+                temp.path(),
+                command,
+                crate::cli::verification_lease::short_non_cargo_timeout(command),
+                progress,
                 output_worktree,
-                &[("stdout", &output.stdout), ("stderr", &output.stderr)],
-            )?;
-            tail.push_str(&streams_tail);
-            Ok((exit_code, signal, tail, output_streams))
+                std::time::Instant::now,
+            )
         }
-    })();
+    };
     match result {
         Ok(result) => Ok(result),
         Err(error) => {
@@ -3517,6 +3479,231 @@ fn execute_command_with_artifact_guard(
             ))
         }
     }
+}
+
+fn execute_inherited_command(
+    process: &mut std::process::Command,
+    temporary_directory: &Path,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    progress: Option<&CommandProgress>,
+    output_worktree: Option<&Path>,
+    mut now: impl FnMut() -> std::time::Instant,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    // Issue #4405: this process runs inside the agent tree, whose
+    // launch policy lowers priority; the workload must not inherit
+    // that. Issue #4409 removes the inheritance at its source by
+    // launching from the daemon instead, but this branch is still
+    // taken whenever the launcher is already at baseline priority or
+    // has declared that it accepts its own.
+    let output = (|| -> io::Result<_> {
+        // Issue #4746 (earlier instance #4105): a grandchild can
+        // inherit stdout/stderr beyond the direct child's lifetime.
+        // Files let us wait for that child without waiting for EOF.
+        let stdout = temporary_directory.join("stdout");
+        let stderr = temporary_directory.join("stderr");
+        process
+            .stdin(std::process::Stdio::null())
+            .stdout(fs::File::create(&stdout)?)
+            .stderr(fs::File::create(&stderr)?);
+        let stdout_reader = fs::File::open(stdout)?;
+        let stderr_reader = fs::File::open(stderr)?;
+        let mut spawned = InheritedVerificationChild::spawn(process, timeout.is_some())?;
+        let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
+        let (status, timed_out) = spawned.wait(timeout, &mut now)?;
+        let output = std::process::Output {
+            status,
+            stdout: captured_output_snapshot(&stdout_reader),
+            stderr: captured_output_snapshot(&stderr_reader),
+        };
+        Ok((output, spawned.spawned.priority.clone(), timed_out))
+    })();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => return spawn_failure_result(output_worktree, command, &err.to_string()),
+    };
+    let (output, priority, timed_out) = output;
+    let (exit_code, signal, mut tail) = if timed_out {
+        command_timeout_result(
+            command,
+            timeout.expect("a timed-out command has a deadline"),
+        )
+    } else {
+        (
+            output.status.code().unwrap_or(-1),
+            terminating_signal(output.status),
+            String::new(),
+        )
+    };
+    if !priority.restored {
+        tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+    }
+    let (streams_tail, output_streams) = render_streams(
+        output_worktree,
+        &[("stdout", &output.stdout), ("stderr", &output.stderr)],
+    )?;
+    tail.push_str(&streams_tail);
+    Ok((exit_code, signal, tail, output_streams))
+}
+
+/// A bounded child owns its group/Job before any descendants can run.
+struct InheritedVerificationChild {
+    spawned: gwt_core::process_tree::NormalPriorityChild,
+    bounded: bool,
+    reaped: bool,
+    #[cfg(windows)]
+    job: Option<gwt_core::process_tree::WindowsJobObject>,
+}
+
+impl InheritedVerificationChild {
+    fn spawn(process: &mut std::process::Command, bounded: bool) -> io::Result<Self> {
+        #[cfg(unix)]
+        if bounded {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
+        #[cfg(windows)]
+        let mut job = if bounded {
+            use std::os::windows::process::CommandExt;
+            let job = gwt_core::process_tree::WindowsJobObject::new().map_err(io::Error::other)?;
+            process.creation_flags(
+                gwt_core::process_tree::WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS
+                    | gwt_core::process_tree::WINDOWS_NORMAL_PRIORITY_CLASS,
+            );
+            Some(job)
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let spawned = if let Some(job) = &mut job {
+            let mut child = process.spawn()?;
+            if let Err(error) = job.assign_and_resume(child.id()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::other(error));
+            }
+            gwt_core::process_tree::NormalPriorityChild {
+                child,
+                priority: gwt_core::process_tree::ChildPriorityReport {
+                    restored: true,
+                    detail: "normal priority class".to_string(),
+                },
+            }
+        } else {
+            gwt_core::process_tree::spawn_at_normal_priority(process)?
+        };
+        #[cfg(not(windows))]
+        let spawned = gwt_core::process_tree::spawn_at_normal_priority(process)?;
+        Ok(Self {
+            spawned,
+            bounded,
+            reaped: false,
+            #[cfg(windows)]
+            job,
+        })
+    }
+
+    fn wait(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+        now: &mut impl FnMut() -> std::time::Instant,
+    ) -> io::Result<(std::process::ExitStatus, bool)> {
+        let Some(timeout) = timeout else {
+            let status = self.spawned.child.wait()?;
+            self.reaped = true;
+            return Ok((status, false));
+        };
+        let deadline = now() + timeout;
+        loop {
+            #[cfg(unix)]
+            let completed = if self.exited_without_reaping()? {
+                // Keep the exited leader waitable until its group is reclaimed:
+                // reaping first would allow its PID/PGID to be recycled.
+                self.reclaim();
+                Some(self.spawned.child.wait()?)
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let completed = self.spawned.child.try_wait()?;
+            if let Some(status) = completed {
+                self.reaped = true;
+                return Ok((status, false));
+            }
+            if now() >= deadline {
+                self.reclaim();
+                let status = self.spawned.child.wait()?;
+                self.reaped = true;
+                return Ok((status, true));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(unix)]
+    fn exited_without_reaping(&mut self) -> io::Result<bool> {
+        // SAFETY: zero-initialized siginfo_t is valid; waitid writes into this
+        // live buffer and WNOWAIT leaves the exact owned child unreaped.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            if libc::waitid(
+                libc::P_PID,
+                self.spawned.child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            ) == -1
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    return Ok(false);
+                }
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    // Lost wait ownership cannot authorize a group signal.
+                    self.reaped = true;
+                }
+                return Err(error);
+            }
+            Ok(info.si_pid() != 0)
+        }
+    }
+
+    fn reclaim(&mut self) {
+        #[cfg(unix)]
+        // SAFETY: the bounded child leads this group and has not been reaped,
+        // so its id cannot have been recycled to an unrelated workload.
+        unsafe {
+            libc::killpg(self.spawned.child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        if let Some(mut job) = self.job.take() {
+            let _ = job.terminate();
+        }
+        let _ = self.spawned.child.kill();
+    }
+}
+
+impl Drop for InheritedVerificationChild {
+    fn drop(&mut self) {
+        if self.bounded && !self.reaped {
+            self.reclaim();
+            let _ = self.spawned.child.wait();
+        }
+    }
+}
+
+fn command_timeout_result(
+    command: &str,
+    timeout: std::time::Duration,
+) -> (i32, Option<i32>, String) {
+    let diagnostic = bounded_output_tail(
+        format!(
+            "verification command '{command}' timed out after {}s; reclaiming its owned workload. \
+         Check the command and retry verify.run.",
+            timeout.as_secs(),
+        )
+        .as_bytes(),
+    );
+    (124, None, format!("--- timeout ---\n{diagnostic}\n"))
 }
 
 fn captured_output_snapshot(file: &fs::File) -> Vec<u8> {
@@ -3587,35 +3774,49 @@ fn execute_command_on_daemon(
     progress: Option<&CommandProgress>,
     output_worktree: Option<&Path>,
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
-    let delegated = match crate::cli::daemon::verification_host::run(endpoint, request, |pid| {
-        progress.map(|progress| progress.start(pid))
-    }) {
-        Ok(delegated) => delegated,
-        // A daemon that cannot take the command is a spawn failure like any
-        // other: the record must be written with the partial transcript, not
-        // abandoned. It is emphatically *not* a reason to retry in-process —
-        // that is the implicit fallback AC-5 forbids.
-        Err(error) => return spawn_failure_result(output_worktree, command, &error),
+    use crate::cli::daemon::verification_host::DelegatedRunError;
+
+    let delegated = crate::cli::daemon::verification_host::run(
+        endpoint,
+        request,
+        |pid| progress.map(|progress| progress.start(pid)),
+        crate::cli::verification_lease::short_non_cargo_timeout(command),
+    );
+    let (exit_code, signal, mut tail, mut output_streams) = match delegated {
+        Ok(delegated) => {
+            let mut tail = String::new();
+            if let Some(reason) = &delegated.accepted.nice_reason {
+                tail.push_str(&format!("--- priority ---\n{reason}\n"));
+            }
+            if delegated.reclaimed_survivors {
+                tail.push_str(
+                    "--- reclaimed ---\nthe command left descendants running after it exited; the \
+                     daemon killed its process group (Issue #3845)\n",
+                );
+            }
+            (delegated.exit_code, delegated.signal, tail, Vec::new())
+        }
+        Err(DelegatedRunError::TimedOut(timeout)) => {
+            let (exit_code, signal, tail) = command_timeout_result(command, timeout);
+            (exit_code, signal, tail, Vec::new())
+        }
+        // Keep partial output on errors too; never retry in the caller's tree.
+        Err(DelegatedRunError::Failed(error)) => {
+            spawn_failure_result(output_worktree, command, &error)?
+        }
     };
-    let mut tail = String::new();
-    // AC-6: what the child actually got, recorded even when it is not
-    // baseline. An environment that refuses nice 0 is not the caller's to fix,
-    // so the run continues and says so.
-    if let Some(reason) = &delegated.accepted.nice_reason {
-        tail.push_str(&format!("--- priority ---\n{reason}\n"));
-    }
-    if delegated.reclaimed_survivors {
-        tail.push_str(
-            "--- reclaimed ---\nthe command left descendants running after it exited; the \
-             daemon killed its process group (Issue #3845)\n",
-        );
-    }
-    let stdout = fs::read(&request.stdout_path).map_err(|error| error.to_string())?;
-    let stderr = fs::read(&request.stderr_path).map_err(|error| error.to_string())?;
-    let (streams_tail, output_streams) =
+    let snapshot = |path| {
+        fs::File::open(path)
+            .map(|file| captured_output_snapshot(&file))
+            .unwrap_or_default()
+    };
+    let stdout = snapshot(&request.stdout_path);
+    let stderr = snapshot(&request.stderr_path);
+    let (streams_tail, captured_streams) =
         render_streams(output_worktree, &[("stdout", &stdout), ("stderr", &stderr)])?;
     tail.push_str(&streams_tail);
-    Ok((delegated.exit_code, delegated.signal, tail, output_streams))
+    output_streams.extend(captured_streams);
+    Ok((exit_code, signal, tail, output_streams))
 }
 
 fn spawn_failure_result(
@@ -7131,6 +7332,171 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn verification_timeout_fixture() {
+        let Ok(directory) = std::env::var("GWT_VERIFY_TIMEOUT_FIXTURE") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        let mut grandchild = if std::env::var_os("GWT_VERIFY_TIMEOUT_GRANDCHILD").is_some() {
+            fs::write(
+                directory.join("grandchild.pid"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
+            None
+        } else {
+            let grandchild = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::verification_record::tests::verification_timeout_fixture",
+                ])
+                .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+                .spawn()
+                .unwrap();
+            let safety = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !directory.join("grandchild.pid").exists() {
+                assert!(
+                    std::time::Instant::now() < safety,
+                    "grandchild did not start"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            println!("partial-stdout");
+            eprintln!("partial-stderr");
+            fs::write(directory.join("ready"), "ready").unwrap();
+            Some(grandchild)
+        };
+        if grandchild.is_some() && std::env::var_os("GWT_VERIFY_TIMEOUT_LEADER_EXIT").is_some() {
+            // Leave the grandchild to the bounded runner's completion cleanup.
+            std::process::exit(0);
+        }
+        let safety = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !directory.join("release").exists() && std::time::Instant::now() < safety {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !directory.join("release").exists() {
+            fs::write(directory.join("fixture-deadline-elapsed"), "elapsed").unwrap();
+        }
+        if let Some(grandchild) = &mut grandchild {
+            grandchild.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn inherited_short_command_timeout_keeps_output_and_reclaims_its_tree() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let fixture = "cli::verification_record::tests::verification_timeout_fixture";
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args(["--exact", fixture, "--nocapture"])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root);
+        let unrelated_directory = tempfile::tempdir().unwrap();
+        let mut unrelated = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", fixture, "--nocapture"])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", unrelated_directory.path())
+            .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let mut clock_calls = 0;
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            "git diff --check",
+            Some(Duration::from_secs(60)),
+            None,
+            None,
+            || {
+                clock_calls += 1;
+                if clock_calls == 1 {
+                    return started;
+                }
+                let safety = Instant::now() + Duration::from_secs(30);
+                while !root.join("ready").exists() {
+                    assert!(Instant::now() < safety, "the fixture did not start");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                started + Duration::from_secs(60)
+            },
+        )
+        .unwrap();
+        let unrelated_alive = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let safety = Instant::now() + Duration::from_secs(30);
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(result.0, 124, "{}", result.2);
+        assert_eq!(result.1, None, "owned timeout is not external interruption");
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(result.2.contains("timed out after 60s"), "{}", result.2);
+        assert!(result.2.contains("retry"), "{}", result.2);
+        assert!(!crate::process::is_process_alive(grandchild));
+        assert!(unrelated_alive, "reclamation must stay in the owned tree");
+    }
+
+    #[test]
+    fn inherited_short_command_completion_reclaims_descendants() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_timeout_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root)
+            .env("GWT_VERIFY_TIMEOUT_LEADER_EXIT", "1");
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            "git diff --check",
+            Some(Duration::from_secs(60)),
+            None,
+            None,
+            Instant::now,
+        )
+        .unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let safety = Instant::now() + Duration::from_secs(45);
+        while crate::process::is_process_alive(grandchild)
+            && !root.join("fixture-deadline-elapsed").exists()
+            && Instant::now() < safety
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // A natural fixture exit is not proof that the runner reclaimed it.
+        let survived = crate::process::is_process_alive(grandchild)
+            || root.join("fixture-deadline-elapsed").exists();
+        fs::write(root.join("release"), "release").unwrap();
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(result.0, 0, "{}", result.2);
+        assert_eq!(result.1, None, "{}", result.2);
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(!survived, "bounded completion left its descendant running");
+    }
+
+    #[test]
     fn canonical_output_retains_inventory_before_long_stdout_and_stderr() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".gwt")).unwrap();
@@ -9461,6 +9827,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let _node_options = ScopedEnvVar::unset("NODE_OPTIONS");
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
 
@@ -9487,17 +9854,37 @@ mod tests {
         // resolves the target, but the missing test answers immediately: the
         // command's outcome is irrelevant here, its classification is not.
         let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         fs::write(
             dir.path().join("Cargo.toml"),
             "[package]\nname='gwt'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
         )
         .unwrap();
         fs::write(dir.path().join("lib.rs"), "").unwrap();
+        // #5086: execute the real short gates while a Heavy holder is active.
+        fs::create_dir(dir.path().join("scripts")).unwrap();
+        fs::write(
+            dir.path().join("scripts/check-coverage-threshold.mjs"),
+            include_str!("../../../../scripts/check-coverage-threshold.mjs"),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("summary.json"),
+            r#"{"data":[{"files":[{"filename":"fixture.rs","summary":{"lines":{"covered":100,"count":100}}}]}]}"#,
+        )
+        .unwrap();
+        let short_gates = [
+            "git diff --check",
+            "node scripts/check-coverage-threshold.mjs summary.json 90",
+        ];
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
         let (_code, out) = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
-                commands: vec!["cargo test -p gwt --test issue-4196-absent".to_string()],
+                commands: std::iter::once("cargo test -p gwt --test issue-4196-absent")
+                    .chain(short_gates)
+                    .map(str::to_owned)
+                    .collect(),
                 headed_e2e_commands: vec![],
                 max_wait_secs: Some(0),
                 user_verification_result: None,
@@ -9512,6 +9899,19 @@ mod tests {
             !out.contains("host admission"),
             "a light matrix must not claim the host lease: {out}"
         );
+        let record = load(dir.path()).unwrap().unwrap();
+        for command in short_gates {
+            let result = record
+                .commands
+                .iter()
+                .find(|result| result.command == command)
+                .unwrap();
+            assert_eq!(result.exit_code, 0, "{}", result.output_tail);
+            assert!(
+                result.admission.is_none(),
+                "short gates must bypass Heavy admission"
+            );
+        }
 
         // #4953: a stale plan must be diagnosed before even attempting the
         // occupied host lease. max_wait=0 observes admission without sleeping.

@@ -1176,6 +1176,40 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
+### CI スループットの計測
+
+Python 3.11 以上、認証済みの `gh`、対象 PR のマージ履歴を含むローカル Git
+履歴を用意し、develop の直近 25 マージを収集して入力データを保存します。
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --limit 25 --save target/ci-throughput.json
+python scripts/ci_throughput.py --input target/ci-throughput.json
+```
+
+収集はこの checkout で実行します（別の場所からは `--root` を指定）。不足する
+履歴は先に取得してください。shallow clone は `git fetch --unshallow origin develop`
+で補えます。`--before 2026-10-08T00:30:00Z` はマージ時刻の上限を固定し、
+その時刻も含めます。`--workflow lint.yml` は同じ収集・再計算経路で Lint を計測します。
+保存データの再計算には GitHub 接続や Git 履歴は不要です。保存済みの基準値は次で再現できます。
+
+```bash
+python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
+```
+
+JSON は PR 作成からマージまでの時間、各 PR の最終 head に対する最新成功
+workflow attempt、マージあたりの base 同期回数、runner 待ち、job ごとの所要時間を
+出力します。時間は分単位で、p50 は中央値、p90 は nearest-rank です。
+workflow は `run_started_at` から `updated_at`、job は `started_at` から
+`completed_at` を計測します。runner 待ちは依存 job のスケジューリング後の
+`created_at` から `started_at` で、全 job と required job の分布を分けて示します。
+欠測は取得不能として扱います。再実行で以前の実行時刻が再利用され、作成時刻が
+開始時刻より後になった job は、実行時間を保持して runner 待ちを取得不能とします。
+
+固定した 25 PR の基準値は、作成からマージまでの p50 **130.27 分**、Test attempt
+の p50 **32.43 分**を再現します。base 同期は第二親が base の第一親履歴に属する
+マージを数え、**115/25 = 4.6 回**です。従来の `Merge ... develop` 件名フィルターによる
+**110/25 = 4.4 回**も併記し、独自件名の正当な同期 5 件との差を比較できます。
+
 ### フロントエンドの共有状態（SPEC-5016）
 
 移行したフロントエンド domain は `web/ui-state-store.js` で immutable なデータを保持します。
@@ -1194,6 +1228,27 @@ Markdown 描画を選びます。移行対象と受け入れ条件は
 未実行の Light を先に進め、Heavy の相対順序を保ち、gwt の成果物復旧は最後に実行します。
 残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
+
+次の短命な non-Cargo ゲートは Light として Heavy lease を取らずに実行します。
+
+| コマンド | 資源を限定できる根拠 |
+| --- | --- |
+| `git diff --check`（`--cached` を含む） | 差分の空白を検査する |
+| `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | 既存の coverage JSON を読む。テストは実行しない |
+| custom checker 指定のない `actionlint`、`shellcheck`、`yamllint` | workflow・shell・YAML ファイルの静的解析 |
+| `taplo check`、`taplo fmt --check` | TOML の検証・書式確認 |
+| `typos` | 静的な綴り検査 |
+
+これらのゲートには local・daemon 両方で 60 秒の実行タイムアウトを設けます。
+時間切れは失敗（exit 124）として診断出力を残し、そのコマンドの process tree を停止します。
+診断されたコマンドを修正してから行列全体を再実行してください。
+既存の markdownlint・スコープ付き Cargo の分類は従来どおりです。
+unknown コマンド、script wrapper、coverage を生成する `coverage-summary.mjs`、Cargo build・
+広範囲の test、headed Playwright は Heavy のままです。
+`actionlint -shellcheck` / `-pyflakes` の上書き指定も任意の wrapper を起動できるため Heavy です。
+bounded command は時間切れ時に加え、通常終了時にも子孫プロセスを回収します。
+Node reader も実効 `NODE_OPTIONS` が空でない場合は、任意 module を preload できるため Heavy です。
+明示的な `NODE_OPTIONS=` は継承オプションを無効にし、Light 分類を維持します。
 
 再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
 execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、

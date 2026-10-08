@@ -16,6 +16,8 @@
 #
 #   GWT_FLAKE_TARGETS      space-separated `<crate>|test|<name>` / `<crate>|lib|`
 #                          tokens naming the cargo test targets to exercise
+#   GWT_FLAKE_BASE_SHA     PR / merge-group base for changed-file test selection
+#                          (unset keeps full targets for standalone use)
 #   GWT_FLAKE_RUNS         integration run ceiling (default 20); libraries use 2
 #   GWT_FLAKE_BUDGET_SECS  test execution budget, excluding compile (default 600)
 #   GWT_FLAKE_MIN_FREE_MB  stop repeating below this much free disk (default 2048)
@@ -75,14 +77,72 @@ selector_for() {
   esac
 }
 
+# Issue #4821 AC-7: retain the classifier's target contract, then select the
+# tests declared in changed source files. Matching complete function names
+# keeps a nearby prefix or an unrelated module out of the repetition loop.
+# Duplicate names are conservatively retained; no test threads are overridden.
+select_changed_tests() {
+  python3 - "$1" "$2" "$GWT_FLAKE_BASE_SHA" <<'PY'
+# changed-test-selection-begin
+import pathlib
+import re
+import subprocess
+import sys
+
+sys.stdout.reconfigure(newline="\n")
+entry, listing, base = sys.argv[1:]
+if not base:
+    raise SystemExit("Changed-test selection requires a base commit")
+crate, kind, target = entry.split("|")
+changed = subprocess.check_output(
+    ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    text=True,
+).split("\0")
+tests = sorted({line.removesuffix(": test") for line in
+                pathlib.Path(listing).read_text().splitlines()
+                if line.endswith(": test")})
+if kind == "test":
+    # A direct integration target is already one changed test file.
+    selected = tests
+elif kind == "lib":
+    functions = set()
+    for name in changed:
+        path = pathlib.Path(name)
+        if name.startswith(f"crates/{crate}/src/") and path.suffix == ".rs":
+            file_functions = set(re.findall(r"\bfn\s+(?:r#)?([A-Za-z_]\w*)\s*\(",
+                                            path.read_text())) if path.is_file() else set()
+            if not any(test.rsplit("::", 1)[-1] in file_functions for test in tests):
+                # One mapped file cannot establish coverage for another
+                # changed file with unknown (or deleted) test declarations.
+                functions.clear()
+                break
+            functions.update(file_functions)
+    selected = [test for test in tests if test.rsplit("::", 1)[-1] in functions]
+    if not selected:
+        # External test modules / cfg-specific functions can prevent a safe
+        # mapping. Retain coverage rather than silently repeating zero tests.
+        print(f"{entry}: no safe changed-file match; retaining the full target", file=sys.stderr)
+        selected = tests
+else:
+    raise SystemExit(f"Unsupported test target: {entry}")
+print("\n".join(selected))
+# changed-test-selection-end
+PY
+}
+
 # "<exit status> <failed test names, sorted>" for one execution. Two runs agree
 # when their outcomes are identical.
 outcome_of() {
-  local selector="$1" log="$2" status failed
+  local selector="$1" log="$2" selection="$3" status failed
+  local -a filters=()
+  if [ -n "$selection" ]; then
+    mapfile -t filters <"$selection"
+    filters=(-- --exact "${filters[@]}")
+  fi
   # No pipe around cargo: a pipeline would report the status of the tail, so a
   # suite the kernel killed would read as green.
   # shellcheck disable=SC2086 # the selector is a deliberate argument list
-  if cargo test $selector --all-features >"$log" 2>&1; then
+  if cargo test $selector --all-features "${filters[@]}" >"$log" 2>&1; then
     status=0
   else
     status=$?
@@ -137,9 +197,29 @@ test_started=$SECONDS
 for entry in $targets; do
   selector="$(selector_for "$entry")"
   safe="${entry//|/_}"
+  selection=""
+  if [ -n "${GWT_FLAKE_BASE_SHA:-}" ]; then
+    # List once after the build, and reuse the exact same selection on every
+    # repetition so the comparison still has identical inputs.
+    # shellcheck disable=SC2086 # the selector is a deliberate argument list
+    if ! cargo test $selector --all-features -- --list >"$log_dir/$safe-list.log" 2>&1; then
+      cat "$log_dir/$safe-list.log"
+      exit 1
+    fi
+    selection="$log_dir/$safe-selection.txt"
+    if ! select_changed_tests "$entry" "$log_dir/$safe-list.log" >"$selection"; then
+      echo "::error::Could not select changed tests for $entry"
+      exit 1
+    fi
+    if [ ! -s "$selection" ] || ! grep -q '[^[:space:]]' "$selection"; then
+      echo "$entry: no active tests in the built target"
+      continue
+    fi
+    echo "$entry: repeating $(wc -l <"$selection") exact tests from changed files"
+  fi
 
   started=$SECONDS
-  first="$(outcome_of "$selector" "$log_dir/$safe-run-1.log")"
+  first="$(outcome_of "$selector" "$log_dir/$safe-run-1.log" "$selection")"
   elapsed=$((SECONDS - started))
   [ "$elapsed" -lt 1 ] && elapsed=1
 
@@ -175,7 +255,7 @@ for entry in $targets; do
       break
     fi
     log="$log_dir/$safe-run-$run.log"
-    outcome="$(outcome_of "$selector" "$log")"
+    outcome="$(outcome_of "$selector" "$log" "$selection")"
     completed=$((completed + 1))
     echo "  run $run/$runs: $outcome"
     if [ "$outcome" = "$first" ]; then
