@@ -995,7 +995,27 @@ impl IndexCoordinator {
     /// only reported as `held` while its ticket's holder is still there —
     /// process alive, and no terminal status published for the target it took
     /// the lease for.
+    /// Issue #5051: a registration being replaced or probed by another handle
+    /// can briefly read as empty or locked. Reread a few times within a
+    /// bounded budget instead of reporting the whole lease state unavailable.
     pub fn heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
+        let mut delays = HEAVY_STATUS_REREAD_DELAYS.iter();
+        loop {
+            match self.read_heavy_lease_status() {
+                Err(err) if is_transient_read_failure(&err) => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err);
+                    };
+                    #[cfg(test)]
+                    tests::before_status_retry();
+                    std::thread::sleep(*delay);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn read_heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
         if self.verification_pool || self.root.join("slots").is_dir() {
             let pool = self.heavy_pool_status()?;
             let mut status = pool
@@ -2196,6 +2216,24 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Rereads after an empty/torn payload or a lock held by another handle
+/// (Windows os error 33). Three reads in total, well under one second.
+const HEAVY_STATUS_REREAD_DELAYS: [Duration; 2] =
+    [Duration::from_millis(150), Duration::from_millis(300)];
+
+fn is_transient_read_failure(err: &CoordinatorError) -> bool {
+    match err {
+        CoordinatorError::Io(err) => {
+            is_contended(err)
+                || matches!(
+                    err.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                )
+        }
+        _ => false,
+    }
+}
+
 fn is_contended(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::WouldBlock
         || err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
@@ -2567,7 +2605,7 @@ fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, Coordin
         // as an empty registration that cannot establish its expiry.
         let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) if registration_is_gone(&path, &err) => continue,
             Err(err) => return Err(CoordinatorError::Io(err)),
         };
         // UUID registrations stay on this inode. Reservations replace their
@@ -2716,7 +2754,7 @@ fn sweep_heavy_queue_entry(
 fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorError> {
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if registration_is_gone(path, &err) => return Ok(None),
         Err(err) => return Err(CoordinatorError::Io(err)),
     };
     // Preserve nonblocking admission budgets when a concurrent cleanup probe
@@ -2727,6 +2765,85 @@ fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorErr
     serde_json::from_slice(&raw)
         .map(Some)
         .map_err(|err| CoordinatorError::Io(io_invalid(err)))
+}
+
+fn registration_is_gone(path: &Path, error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::NotFound {
+        return true;
+    }
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(5) {
+        return windows_registration_is_gone(path);
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    false
+}
+
+#[cfg(windows)]
+fn windows_registration_is_gone(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Wdk::Foundation::{NtClose, OBJECT_ATTRIBUTES};
+    use windows::Wdk::Storage::FileSystem::{
+        NtOpenFile, RtlDosPathNameToNtPathName_U_WithStatus, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows::Win32::Foundation::{
+        HANDLE, OBJ_CASE_INSENSITIVE, STATUS_DELETE_PENDING, STATUS_OBJECT_NAME_NOT_FOUND,
+        STATUS_OBJECT_PATH_NOT_FOUND, UNICODE_STRING,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows::Win32::System::{WindowsProgramming::RtlFreeUnicodeString, IO::IO_STATUS_BLOCK};
+
+    // Win32 maps both DELETE_PENDING and real access denial to error 5.
+    // Probe the native status rather than hiding every PermissionDenied error.
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return false;
+    }
+    wide.push(0);
+    let mut name = UNICODE_STRING::default();
+    // SAFETY: wide is NUL terminated and outlives the call; name is writable.
+    let converted = unsafe {
+        RtlDosPathNameToNtPathName_U_WithStatus(PCWSTR(wide.as_ptr()), &mut name, None, None)
+    };
+    if converted.0 < 0 {
+        return false;
+    }
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..Default::default()
+    };
+    let mut handle = HANDLE::default();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: all pointers reference live, correctly sized values. The name
+    // buffer belongs to Rtl and is released below after the synchronous call.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            (FILE_READ_ATTRIBUTES | SYNCHRONIZE).0,
+            &attributes,
+            &mut status_block,
+            (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
+            FILE_SYNCHRONOUS_IO_NONALERT.0,
+        )
+    };
+    // SAFETY: successful conversion allocated name; successful open owns handle.
+    unsafe {
+        RtlFreeUnicodeString(&mut name);
+        if status.0 >= 0 {
+            let _ = NtClose(handle);
+        }
+    }
+    // The final deletion handle may close between the Win32 error and probe.
+    matches!(
+        status,
+        STATUS_DELETE_PENDING | STATUS_OBJECT_NAME_NOT_FOUND | STATUS_OBJECT_PATH_NOT_FOUND
+    )
 }
 
 #[cfg(test)]
@@ -2742,6 +2859,15 @@ mod tests {
             const { std::cell::RefCell::new(None) };
         static NEW_SLOT_CREATED_HOOK: std::cell::RefCell<Option<NewSlotCreatedHook>> =
             const { std::cell::RefCell::new(None) };
+        static STATUS_RETRY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn before_status_retry() {
+        let hook = STATUS_RETRY_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     pub(super) fn after_registration_snapshot(path: &Path) {
@@ -2866,6 +2992,80 @@ mod tests {
         let queue = coordinator.heavy_lease_status().unwrap().queue;
         assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
         assert_eq!(queue[0].priority, JobPriority::ManualRebuild);
+    }
+
+    #[test]
+    fn lease_status_rereads_a_reservation_another_handle_has_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+        let probe = open_lock_file(&coordinator.heavy_reservation_path(&key)).unwrap();
+        fs2::FileExt::lock_exclusive(&probe).unwrap();
+        STATUS_RETRY_HOOK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || drop(probe))));
+
+        let queue = coordinator
+            .heavy_lease_status()
+            .expect("a transient lock conflict must be reread, not reported")
+            .queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
+    }
+
+    #[test]
+    fn lease_status_rereads_an_empty_reservation_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        let path = coordinator.heavy_reservation_path(&key);
+        let registration = heavy_queue_entry(
+            &coordinator.heavy_pending_dir(),
+            &key.file_stem(),
+            JobPriority::ManualRebuild,
+        )
+        .unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"").unwrap();
+        STATUS_RETRY_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut registration = registration;
+                registration.reserved_until_ms = Some(now_ms() + 60_000);
+                write_json_atomic(&path, &registration).unwrap();
+            }))
+        });
+
+        let queue = coordinator
+            .heavy_lease_status()
+            .expect("an empty payload must be reread, not reported as EOF")
+            .queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
+    }
+
+    #[test]
+    fn lease_status_never_fails_while_a_writer_refreshes_reservations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let key = verification_key();
+        let writer = std::thread::spawn({
+            let root = root.clone();
+            let key = key.clone();
+            move || {
+                let coordinator = open(&root);
+                for _ in 0..200 {
+                    coordinator
+                        .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+                        .unwrap();
+                }
+            }
+        });
+        let coordinator = open(&root);
+        while !writer.is_finished() {
+            coordinator
+                .heavy_lease_status()
+                .expect("a reader must never observe a torn reservation");
+        }
+        writer.join().unwrap();
     }
 
     #[test]
@@ -3181,6 +3381,110 @@ mod tests {
         assert!(!coordinator.heavy_lease_status().unwrap().expired);
         drop(lease);
         guard.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn departed_waiter_with_a_retained_handle_is_not_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::repo_shared("repo-a", "issues");
+        let owner = own(&coordinator, &key, JobPriority::Background);
+        let waiter = match coordinator
+            .request_job(&key, JobPriority::Background, Duration::from_secs(5))
+            .unwrap()
+        {
+            JobAdmission::Joined(waiter) => waiter,
+            JobAdmission::Owner(_) => panic!("owner already holds the target"),
+        };
+        let path = waiter.waiter_path.clone();
+        assert_eq!(owner.waiter_count().unwrap(), 1);
+        #[cfg(not(windows))]
+        let retained = waiter._waiter_file.try_clone().unwrap();
+        #[cfg(windows)]
+        let retained = {
+            use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+            use windows::Win32::Foundation::{GENERIC_READ, HANDLE};
+            use windows::Win32::Storage::FileSystem::{
+                FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO,
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+
+            let retained = OpenOptions::new()
+                .access_mode(DELETE.0 | GENERIC_READ.0)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+                .open(&path)
+                .unwrap();
+            // Explicitly retain the name in delete-pending state. Modern Rust
+            // remove_file may use POSIX deletion and unlink the name immediately.
+            let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+            // SAFETY: retained owns the live handle with DELETE access, and
+            // disposition has the exact layout and size required by this API.
+            unsafe {
+                SetFileInformationByHandle(
+                    HANDLE(retained.as_raw_handle()),
+                    FileDispositionInfo,
+                    std::ptr::from_ref(&disposition).cast(),
+                    std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+                )
+            }
+            .unwrap();
+            retained
+        };
+        drop(waiter);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
+            };
+
+            let mut info = FILE_STANDARD_INFO::default();
+            // SAFETY: retained owns the live handle, and info has the exact
+            // layout and buffer size required by FileStandardInfo.
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(retained.as_raw_handle()),
+                    FileStandardInfo,
+                    (&mut info as *mut FILE_STANDARD_INFO).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            }
+            .unwrap();
+            assert!(info.DeletePending);
+            let error = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(5));
+            eprintln!("#5030: departed registration DeletePending=true, open error={error}; parent read_dir succeeds={}", fs::read_dir(path.parent().unwrap()).is_ok());
+        }
+
+        assert_eq!(owner.waiter_count().unwrap(), 0);
+        assert!(read_registration(&path).unwrap().is_none());
+        drop(retained);
+        owner.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    // Restores a Windows file attribute, without changing Unix permission bits.
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn registration_permission_denied_is_still_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("read-only.json");
+        fs::write(&path, b"{}").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions.clone()).unwrap();
+        let result = sweep_live_registrations(tmp.path());
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+        assert!(
+            matches!(result, Err(CoordinatorError::Io(error)) if error.raw_os_error() == Some(5))
+        );
     }
 
     #[test]
