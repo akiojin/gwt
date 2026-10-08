@@ -92,9 +92,9 @@ const HOME_IMPLICIT_PATH_HELPER_SOURCES: &[&str] = &[
     "crates/gwt/src/pm_registry.rs",
 ];
 
-/// The shared test file that owns the `--bin gwt` fixtures. Fixtures declared
-/// here resolve gwt-home paths on behalf of their callers, so the guard
-/// obligation propagates from them to every test that uses them.
+/// The shared test file that owns the `--bin gwt` fixtures. Unguarded fixtures
+/// resolve gwt-home paths on behalf of their callers, so the guard obligation
+/// propagates from them to every test that uses them.
 const SHARED_FIXTURE_SOURCE: &str = "crates/gwt/src/app_runtime/tests.rs";
 
 /// Test entry points that enqueue the Issue Monitor scheduled scan worker.
@@ -322,8 +322,9 @@ fn relative(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Fixtures in [`SHARED_FIXTURE_SOURCE`] that reach a home-implicit helper,
-/// directly or through another fixture in the same file.
+/// Unguarded fixtures in [`SHARED_FIXTURE_SOURCE`] that reach a home-implicit
+/// helper, directly or through another unguarded fixture in the same file.
+/// A fixture that owns its home satisfies the obligation within its body.
 fn derived_home_implicit_fixtures(fixture_source: &str) -> BTreeSet<String> {
     let watched: BTreeSet<String> = HOME_IMPLICIT_PATH_HELPERS
         .iter()
@@ -331,7 +332,7 @@ fn derived_home_implicit_fixtures(fixture_source: &str) -> BTreeSet<String> {
         .collect();
     let fixtures: Vec<ParsedFn> = parse_functions(fixture_source)
         .into_iter()
-        .filter(|function| !function.is_test)
+        .filter(|function| !function.is_test && !function.guarded())
         .collect();
     let mut closure: BTreeSet<String> = BTreeSet::new();
     loop {
@@ -658,6 +659,15 @@ fn leaf_fixture() {
 
 fn wrapper_fixture() {
     leaf_fixture();
+}
+
+fn guarded_fixture() {
+    let _home = ScopedGwtHome::set(temp_root);
+    leaf_fixture();
+}
+
+fn wrapper_of_guarded_fixture() {
+    guarded_fixture();
 }
 
 fn unrelated_fixture() {
