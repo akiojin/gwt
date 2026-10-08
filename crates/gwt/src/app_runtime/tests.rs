@@ -15496,6 +15496,20 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
 
 #[test]
 fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
+    assert_genesis_receipt_cleanup_failure(false, false);
+}
+
+#[test]
+fn genesis_receipt_cleanup_failure_evicts_cached_session_after_window_close() {
+    assert_genesis_receipt_cleanup_failure(false, true);
+}
+
+#[test]
+fn genesis_receipt_cleanup_failure_evicts_cached_session_when_window_already_closed() {
+    assert_genesis_receipt_cleanup_failure(true, false);
+}
+
+fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_before_apply: bool) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -15534,7 +15548,9 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     session.id = session_id.to_string();
     session.project_state_root = Some(repo.clone());
@@ -15608,52 +15624,72 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         )
     };
 
-    let events = runtime.handle_launch_complete_and_drain(
-        window_id.clone(),
-        Ok((
-            ProcessLaunch {
-                initial_prompt_file: None,
-                command,
-                args,
-                env: HashMap::new(),
-                remove_env: Vec::new(),
-                cwd: Some(repo.clone()),
-                resource_policy: None,
-            },
-            session_id.to_string(),
-            "work/issue-2359".to_string(),
-            "Codex".to_string(),
-            repo.clone(),
-            gwt_agent::AgentId::Codex,
-            Some(owner.number),
-            Some("origin/develop".to_string()),
-            gwt_agent::LaunchRuntimeTarget::Host,
-            gwt_agent::SessionMode::Normal,
-            false,
-            repo.display().to_string().into(),
-        )),
-    );
-
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::TerminalStatus {
-            status: WindowProcessStatus::Error,
-            ..
-        }
-    )));
+    if close_before_enqueue {
+        assert!(runtime.close_window_outcome(&window_id).closed);
+    }
+    assert!(runtime
+        .handle_launch_complete(
+            window_id.clone(),
+            Ok((
+                ProcessLaunch {
+                    initial_prompt_file: None,
+                    command,
+                    args,
+                    env: HashMap::new(),
+                    remove_env: Vec::new(),
+                    cwd: Some(repo.clone()),
+                    resource_policy: None,
+                },
+                session_id.to_string(),
+                "work/issue-2359".to_string(),
+                "Codex".to_string(),
+                repo.clone(),
+                gwt_agent::AgentId::Codex,
+                Some(owner.number),
+                Some("origin/develop".to_string()),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                gwt_agent::SessionMode::Normal,
+                false,
+                repo.display().to_string().into(),
+            )),
+        )
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    if close_before_apply {
+        assert!(runtime.close_window_outcome(&window_id).closed);
+        assert!(!runtime.pending_launch_completions.contains_key(&window_id));
+    }
+    let events = runtime.handle_agent_launch_prepared(prepared);
+    if close_before_apply {
+        assert!(
+            events.is_empty(),
+            "stale failure must not update a closed window"
+        );
+    } else if !close_before_enqueue {
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Error,
+                ..
+            }
+        )));
+    }
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
-    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
-        .expect("read compensated Workspace")
-        .expect("compensated Workspace projection");
-    assert!(projection.latest_agent_for_session(session_id).is_none());
-    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-        .expect("read compensated WorkItems")
-        .expect("compensated WorkItems projection");
-    assert_eq!(work_items.work_items.len(), 1);
-    assert!(
-        work_items.work_items[0].is_terminal() && work_items.work_items[0].discarded,
-        "the published Work must be discarded when readiness cannot commit",
-    );
+    if !close_before_enqueue {
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("read compensated Workspace")
+            .expect("compensated Workspace projection");
+        assert!(projection.latest_agent_for_session(session_id).is_none());
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("read compensated WorkItems")
+            .expect("compensated WorkItems projection");
+        assert_eq!(work_items.work_items.len(), 1);
+        assert!(
+            work_items.work_items[0].is_terminal() && work_items.work_items[0].discarded,
+            "the published Work must be discarded when readiness cannot commit",
+        );
+    }
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&repo, owner)
             .expect("read terminal genesis ledger")
