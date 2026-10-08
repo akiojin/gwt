@@ -430,28 +430,6 @@ pub(super) const WINDOWS_SHELL_OPTIONS: [gwt_agent::WindowsShellKind; 3] = [
     gwt_agent::WindowsShellKind::PowerShell7,
 ];
 
-pub(super) const YES_NO_OPTIONS: [ChoiceOption; 2] = [
-    ChoiceOption {
-        label: "Yes",
-        description: "Skip permission prompts",
-    },
-    ChoiceOption {
-        label: "No",
-        description: "Show permission prompts",
-    },
-];
-
-pub(super) const FAST_MODE_OPTIONS: [ChoiceOption; 2] = [
-    ChoiceOption {
-        label: "On",
-        description: "Use the agent's Fast mode",
-    },
-    ChoiceOption {
-        label: "Off",
-        description: "Use the standard service tier",
-    },
-];
-
 pub(super) fn default_docker_lifecycle_intent(
     status: gwt_docker::ComposeServiceStatus,
 ) -> gwt_agent::DockerLifecycleIntent {
@@ -564,7 +542,7 @@ impl<'a> LaunchWizardFlow<'a> {
                     Some(LaunchWizardStep::FocusExistingSession)
                 }
                 QuickStartAction::ReuseEntry { .. } | QuickStartAction::StartNewEntry { .. } => {
-                    Some(LaunchWizardStep::SkipPermissions)
+                    None
                 }
             },
             LaunchWizardStep::FocusExistingSession => None,
@@ -596,18 +574,9 @@ impl<'a> LaunchWizardFlow<'a> {
             }
             LaunchWizardStep::ReasoningLevel => self.next_after_agent_configuration(),
             LaunchWizardStep::RuntimeTarget => self.next_after_runtime_target(),
-            LaunchWizardStep::WindowsShell => self.next_after_windows_shell(),
+            LaunchWizardStep::WindowsShell => None,
             LaunchWizardStep::DockerServiceSelect => Some(LaunchWizardStep::DockerLifecycle),
-            LaunchWizardStep::DockerLifecycle => self.next_after_docker_lifecycle(),
-            LaunchWizardStep::ExecutionMode => Some(LaunchWizardStep::SkipPermissions),
-            LaunchWizardStep::SkipPermissions => {
-                if self.state.current_agent_supports_fast_mode() {
-                    Some(LaunchWizardStep::CodexFastMode)
-                } else {
-                    None
-                }
-            }
-            LaunchWizardStep::CodexFastMode => None,
+            LaunchWizardStep::DockerLifecycle | LaunchWizardStep::ExecutionMode => None,
         }
     }
 
@@ -659,8 +628,6 @@ impl<'a> LaunchWizardFlow<'a> {
                 }
             }
             LaunchWizardStep::ExecutionMode => self.previous_before_execution_mode(),
-            LaunchWizardStep::SkipPermissions => self.previous_before_execution_mode(),
-            LaunchWizardStep::CodexFastMode => Some(LaunchWizardStep::SkipPermissions),
         }
     }
 
@@ -698,20 +665,8 @@ impl<'a> LaunchWizardFlow<'a> {
         if self.state.runtime_context_resolved && self.state.show_windows_shell_selection() {
             Some(LaunchWizardStep::WindowsShell)
         } else {
-            self.next_after_windows_shell()
-        }
-    }
-
-    fn next_after_windows_shell(&self) -> Option<LaunchWizardStep> {
-        if self.state.launch_target_is_shell() {
             None
-        } else {
-            Some(LaunchWizardStep::SkipPermissions)
         }
-    }
-
-    fn next_after_docker_lifecycle(&self) -> Option<LaunchWizardStep> {
-        self.next_after_windows_shell()
     }
 
     fn previous_agent_configuration_step(&self) -> Option<LaunchWizardStep> {
@@ -817,10 +772,6 @@ pub(super) fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizar
             .iter()
             .position(|option| option.value == state.mode)
             .unwrap_or(0),
-        LaunchWizardStep::SkipPermissions => usize::from(!state.skip_permissions),
-        LaunchWizardStep::CodexFastMode => {
-            usize::from(!state.fast_mode_enabled_for_current_agent())
-        }
     }
 }
 
@@ -1065,7 +1016,7 @@ pub struct AgentSetupAffordance {
     pub kind: AgentSetupKind,
     pub title: String,
     pub detail: String,
-    /// Button label when gwt can run the setup in a shell pane; `None` when
+    /// Button label when gwt can run the setup action; `None` when
     /// the user has to act outside gwt.
     pub action_label: Option<String>,
 }
@@ -1104,9 +1055,17 @@ pub fn agent_setup_affordance(
         let verb = if available { "Update" } else { "Install" };
         let command = agent_install_update_command(descriptor, available)?;
         return Some(AgentSetupAffordance {
-            kind: if available { AgentSetupKind::Update } else { AgentSetupKind::Install },
+            kind: if available {
+                AgentSetupKind::Update
+            } else {
+                AgentSetupKind::Install
+            },
             title: format!("{verb} {name} before launch"),
-            detail: format!("Run `{command}` in a host shell pane. Restart gwt afterward to refresh the detected version. Launch uses the detected CLI directly and reports an error if it cannot launch."),
+            detail: if available {
+                format!("Run `{command}` in the background on the Host. View progress and the updated version here; your Agent Settings stay open.")
+            } else {
+                format!("Run `{command}` in a host shell pane. Restart gwt afterward to refresh the detected version. Launch uses the detected CLI directly and reports an error if it cannot launch.")
+            },
             action_label: Some(format!("{verb} {name}")),
         });
     }
@@ -1166,6 +1125,8 @@ pub(super) fn no_detected_agent_setup_view() -> super::LaunchWizardAgentSetupVie
                  make sure it is on PATH, then reopen this wizard. Shell launches stay available."
             .to_string(),
         action_label: None,
+        pending: false,
+        status: None,
     }
 }
 
@@ -1421,19 +1382,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_agent_options_runs_detection_and_derives_availability() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _env = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let executable = dir.path().join("agy");
-        std::fs::write(&executable, "#!/bin/sh\nprintf '1.2.3\\n'\n").expect("write agy stub");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("stub metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("chmod stub");
+        gwt_core::test_support::write_executable_script(
+            &executable,
+            "#!/bin/sh\nprintf '1.2.3\\n'\n",
+        )
+        .expect("write agy stub");
         // PATH is replaced wholesale so no real agent leaks in, but tests that
         // spawn `git` or `sh` without the env lock still run concurrently;
         // keep both reachable through the scoped PATH (Issue #4497).
@@ -1551,14 +1509,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wizard_detection_uses_the_active_profile_path() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         for (directory, version) in [("old", "2.1.153"), ("new", "2.1.156")] {
             let bin = temp.path().join(directory);
             std::fs::create_dir(&bin).unwrap();
             let executable = bin.join("claude");
-            std::fs::write(&executable, format!("#!/bin/sh\nprintf '{version}\\n'\n")).unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Issue #5028: sibling forks must never inherit a writable CLI fd.
+            gwt_core::test_support::write_executable_script(
+                &executable,
+                &format!("#!/bin/sh\nprintf '{version}\\n'\n"),
+            )
+            .unwrap();
             let environment = (
                 std::collections::HashMap::from([(
                     "PATH".into(),
@@ -1791,7 +1752,7 @@ mod tests {
         let expected_host_tail = if cfg!(windows) {
             Some(LaunchWizardStep::WindowsShell)
         } else {
-            Some(LaunchWizardStep::SkipPermissions)
+            None
         };
 
         assert_eq!(flow.next_after_agent_configuration(), expected_host_tail);
@@ -2156,14 +2117,6 @@ mod tests {
                 .iter()
                 .position(|option| option.value == "resume")
                 .unwrap()
-        );
-        assert_eq!(
-            step_default_selection(LaunchWizardStep::SkipPermissions, &state),
-            0
-        );
-        assert_eq!(
-            step_default_selection(LaunchWizardStep::CodexFastMode, &state),
-            0
         );
     }
 

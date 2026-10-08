@@ -20,7 +20,6 @@
 use std::{
     fs,
     path::Path,
-    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -28,9 +27,8 @@ use gwt::index_search::{IndexSearchError, INDEX_NOT_READY_EXIT_CODE};
 use gwt::protocol::{IndexSearchMatchMode, IndexSearchScope, IndexSearchTarget};
 use gwt_core::test_support::ScopedEnvVar;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 struct SearchFixture {

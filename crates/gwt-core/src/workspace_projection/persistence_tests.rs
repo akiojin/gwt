@@ -2205,10 +2205,10 @@ fn split_root_transaction_rejects_incompatible_canonical_work_items_without_mate
 #[test]
 fn external_workspace_operation_lock_uses_portable_contention_detection() {
     assert!(
-        is_external_workspace_operation_lock_contended(&fs2::lock_contended_error()),
+        crate::operation_deadline::is_lock_contended(&fs2::lock_contended_error()),
         "operation lock contention must recognize fs2's platform-specific error"
     );
-    assert!(!is_external_workspace_operation_lock_contended(
+    assert!(!crate::operation_deadline::is_lock_contended(
         &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not contention")
     ));
 }
@@ -2899,6 +2899,8 @@ fn workspace_state_transaction_reconciles_post_commit_error_without_rerunning_co
     let commit_called = std::cell::Cell::new(0_u8);
     let external_committed = std::cell::Cell::new(false);
     let event_id = "event-post-commit-error";
+    #[cfg(unix)]
+    let inherited_description = std::cell::RefCell::new(None);
 
     let result = transact_workspace_state_at_with_commit(
         &current,
@@ -2923,6 +2925,36 @@ fn workspace_state_transaction_reconciles_post_commit_error_without_rerunning_co
         || {
             commit_called.set(commit_called.get() + 1);
             external_committed.set(true);
+            #[cfg(unix)]
+            {
+                // A fork inherits this exact open file description even with
+                // CLOEXEC, until the child execs. Retain a dup deterministically
+                // instead of racing a sibling process or waiting on a clock.
+                use std::os::unix::{fs::MetadataExt, io::FromRawFd};
+                let lock_path = external_workspace_operation_lock_path(
+                    &current,
+                    &works,
+                    "continue-operation-response-lost",
+                );
+                let expected = fs::metadata(&lock_path).expect("operation lock inode");
+                let duplicate = fs::read_dir("/dev/fd")
+                    .expect("open descriptors")
+                    .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+                    .find_map(|fd| {
+                        // SAFETY: dup returns a new owned descriptor on success;
+                        // an entry closed during enumeration simply returns -1.
+                        let duplicate = unsafe { libc::dup(fd) };
+                        if duplicate < 0 {
+                            return None;
+                        }
+                        let file = unsafe { fs::File::from_raw_fd(duplicate) };
+                        let metadata = file.metadata().ok()?;
+                        (metadata.dev() == expected.dev() && metadata.ino() == expected.ino())
+                            .then_some(file)
+                    })
+                    .expect("exact operation lock descriptor");
+                *inherited_description.borrow_mut() = Some(duplicate);
+            }
             Err(GwtError::Other(
                 "external commit response was lost".to_string(),
             ))

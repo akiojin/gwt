@@ -101,6 +101,18 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
                 "materialized {skill} must contain {required}"
             );
         }
+        if matches!(skill, "gwt-execute" | "gwt-verify") {
+            for required in [
+                "bounded host slot pool",
+                "effective Cargo target directories",
+                "shared FIFO queue",
+            ] {
+                assert!(
+                    claude.contains(required),
+                    "materialized {skill} must contain {required}"
+                );
+            }
+        }
     }
 
     let has_gwt_command = fs::read_dir(dir.path().join(".claude/commands"))

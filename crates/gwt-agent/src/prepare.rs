@@ -4464,8 +4464,39 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn runner_probe_timeout_kills_pipe_holding_descendant() {
+        use std::{
+            ffi::CString,
+            fs::OpenOptions,
+            io::{Read, Write},
+            os::{
+                fd::AsRawFd,
+                unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+            },
+        };
+
         let temp = tempdir().expect("tempdir");
-        let pid_file = temp.path().join("descendant.pid");
+        let ready = temp.path().join("ready");
+        let release = temp.path().join("release");
+        let marker = temp.path().join("escaped");
+        for path in [&ready, &release] {
+            let path = CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+            // SAFETY: this is a NUL-terminated path in our unique tempdir.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        // Keep release available before the descendant runs so a survivor can
+        // consume the queued message even if it opens its end after cleanup.
+        let mut release_writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&release)
+            .expect("hold release FIFO");
+        // Nonblocking open also lets a failed fixture report missing readiness
+        // rather than hang if the deadline kills it before it opens the FIFO.
+        let mut ready_reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&ready)
+            .expect("open readiness FIFO");
         let hub = gwt_core::process_console::ProcessConsoleHub::new();
         let outcome = probe_host_runner_bounded_with_hub(
             HostRunnerProbeRequest {
@@ -4473,31 +4504,44 @@ mod tests {
                 command: "sh",
                 args: vec![
                     "-c".to_string(),
-                    "(sleep 6) & printf '%s' \"$!\" > \"$1\"; wait".to_string(),
+                    "(exec 3<> \"$2\"; exec 4> \"$1\"; printf ready >&4; read -r go <&3; printf escaped > \"$3\") & wait".to_string(),
                     "gwt-runner-probe".to_string(),
-                    pid_file.display().to_string(),
+                    ready.display().to_string(),
+                    release.display().to_string(),
+                    marker.display().to_string(),
                 ],
                 env_vars: &HashMap::new(),
                 remove_env: &[],
                 cwd: None,
                 timeout: Duration::from_secs(2),
-                poll_interval: Duration::from_millis(10),
+                poll_interval: Duration::from_millis(100),
             },
             &hub,
         );
-        let pid = fs::read_to_string(&pid_file)
-            .expect("descendant pid")
-            .parse::<u32>()
-            .expect("numeric descendant pid");
-        let still_running = unix_process_exists(pid);
-        if still_running {
-            terminate_unix_test_process(pid);
-        }
+        // A survivor writes the failure marker before closing the readiness
+        // pipe. Queue its release even if it has not opened the FIFO yet.
+        release_writer.write_all(b"go\n").expect("release survivor");
+        // EOF observes descriptor closure on exit, independent of how soon
+        // init reaps the descendant: kill -0 also succeeds for a zombie.
+        let fd = ready_reader.as_raw_fd();
+        // SAFETY: ready_reader owns this live descriptor throughout both calls.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0, "read FIFO flags");
+        // SAFETY: preserve all flags except nonblocking on our owned descriptor.
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) },
+            0
+        );
+        let mut message = Vec::new();
+        ready_reader
+            .read_to_end(&mut message)
+            .expect("observe descendant exit and pipe EOF");
 
-        assert!(outcome.timed_out);
+        assert!(outcome.timed_out, "probe must time out: {outcome:?}");
+        assert_eq!(message, b"ready", "descendant must hold the pipe");
         assert!(
-            !still_running,
-            "timed-out probe descendant {pid} must be terminated"
+            !marker.exists(),
+            "timed-out probe descendant must be terminated"
         );
     }
 

@@ -120,32 +120,15 @@ pub fn spawn_unbound_pane(
     incarnation: u64,
     observation: Option<(&Path, &str)>,
 ) -> Result<Pane, String> {
-    // SPEC #1921 Phase 86 (#3813): a policy-bearing AgentBootstrap launch
-    // goes through the start gate so priority / Job limits exist before
-    // the target can create its first descendant. Shell panes stay direct.
-    let pane = if let Some((policy, gate_program, gate_args)) = policy_gate {
-        let pending = Pane::new_pending_with_spawn_config(
-            id.to_string(),
-            spawn_config,
-            gate_program,
-            gate_args,
-            uuid::Uuid::new_v4().to_string(),
-        )
-        .map_err(|error| error.to_string())?;
-        best_effort_apply_policy(id, &pending, policy);
-        pending.release().map_err(|error| error.to_string())?
-    } else {
-        Pane::new_with_spawn_config(id.to_string(), spawn_config)
-            .map_err(|error| error.to_string())?
-    };
-    if let Some((sessions_dir, session_id)) = observation {
+    let record_observation = |child_pid: Option<u32>| {
+        let Some((sessions_dir, session_id)) = observation else {
+            return;
+        };
         // Unbound launches and automatic restores need the same physical
         // process observation as producing launches. This does not grant
         // execution authority or reserve an Issue Monitor slot.
         let observation = (|| -> std::io::Result<()> {
-            let child_pid = pane
-                .pty()
-                .process_id()
+            let child_pid = child_pid
                 .ok_or_else(|| std::io::Error::other("agent PTY process id is unavailable"))?;
             let child_started_at = crate::process::host_process_start_time(child_pid)
                 .ok_or_else(|| std::io::Error::other("agent PTY start time is unavailable"))?;
@@ -179,7 +162,29 @@ pub fn spawn_unbound_pane(
             tracing::warn!(window_id = %id, session_id = %session_id, %error,
                     "agent process observation could not be persisted");
         }
-    }
+    };
+    // SPEC #1921 Phase 86 (#3813): a policy-bearing AgentBootstrap launch
+    // goes through the start gate so priority / Job limits exist before
+    // the target can create its first descendant. Shell panes stay direct.
+    let pane = if let Some((policy, gate_program, gate_args)) = policy_gate {
+        let pending = Pane::new_pending_with_spawn_config(
+            id.to_string(),
+            spawn_config,
+            gate_program,
+            gate_args,
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .map_err(|error| error.to_string())?;
+        best_effort_apply_policy(id, &pending, policy);
+        // Finish the Session lease transaction before SessionStart can run.
+        record_observation(pending.process_id());
+        pending.release().map_err(|error| error.to_string())?
+    } else {
+        let pane = Pane::new_with_spawn_config(id.to_string(), spawn_config)
+            .map_err(|error| error.to_string())?;
+        record_observation(pane.pty().process_id());
+        pane
+    };
     Ok(pane)
 }
 
