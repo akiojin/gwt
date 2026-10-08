@@ -25,7 +25,6 @@ short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_u
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_forwards_failed_stderr_to_agent_console
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_never_exposes_nonstandard_secret_environment_names
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_sync_entrypoint_is_safe_inside_tokio_runtime
-short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_timeout_kills_pipe_holding_descendant
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_trace_and_failure_surfaces_never_expose_command_metadata_secrets
 short-wall-clock|crates/gwt-agent/src/prepare.rs|windows_runner_probe_job_kills_dead_root_pipe_descendant_before_marker
 short-wall-clock|crates/gwt-agent/src/session.rs|hook_metadata_backfills_project_state_root_without_overwriting_authority
