@@ -44,8 +44,8 @@ export function createUiStateStore(initialState) {
           try {
             const selected = view.select(read());
             if (Object.is(selected, view.selected)) continue;
-            view.selected = selected;
             view.render(selected);
+            view.selected = selected;
           } catch (error) { errors.push(error); }
         }
       }

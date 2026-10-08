@@ -74,6 +74,15 @@ test("synchronous and scheduled callbacks retain the receiver boundary", () => {
   assert.equal(findings.filter(finding => finding.kind.startsWith("dom-")).length, 2);
 });
 
+test("subscribing inside a receiver includes the immediately rendered view", () => {
+  const findings = scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+    const model = createUiStateStore({ value: "" });
+    function receive(event) {
+      model.subscribe(state => state.value, value => { element.textContent = value; });
+    }`, "fixture.js");
+  assert.equal(findings.filter(finding => finding.kind === "dom-write").length, 1);
+});
+
 test("recursive helpers terminate even when nested switches change case context", () => {
   let findings;
   assert.doesNotThrow(() => {

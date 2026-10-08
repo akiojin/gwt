@@ -1515,7 +1515,6 @@ export function createKnowledgeKanbanSurface({
       }
 
       function ensureKnowledgeBridgeState(windowId, knowledgeKind) {
-        const created = !knowledgeBridgeStateMap.has(windowId);
         if (!knowledgeBridgeStateMap.has(windowId)) {
           knowledgeBridgeStateMap.set(windowId, {
             kind: normalizeKnowledgeKind(knowledgeKind),
@@ -1600,21 +1599,6 @@ export function createKnowledgeKanbanSurface({
         }
         if (!state.pendingPhaseUpdates) {
           state.pendingPhaseUpdates = new Map();
-        }
-        if (created) {
-          // Isolate views so a failed renderer cannot leave another window stale.
-          // Mount performs the initial render after both subscriptions exist.
-          // A failed mount can then retry without a partially registered view.
-          let mounted = false;
-          state.monitorSubscriptions = [
-            issueMonitorModel.subscribe(model => model.status, () => {
-              if (mounted && state.kind === "issue") renderIssueMonitorControls(windowMap.get(windowId));
-            }),
-            issueMonitorModel.subscribe(model => model, () => {
-              if (mounted) renderKnowledgeBridge(windowId);
-            }),
-          ];
-          mounted = true;
         }
         return state;
       }
@@ -4613,6 +4597,20 @@ export function createKnowledgeKanbanSurface({
             windowData.id,
             knowledgeKind,
           );
+          if (!state.monitorSubscriptions) {
+            // Register views only at mount; receive-side state creation is data-only.
+            // Initial rendering follows registration so a failed mount can retry.
+            let mounted = false;
+            state.monitorSubscriptions = [
+              issueMonitorModel.subscribe(model => model.status, () => {
+                if (mounted && state.kind === "issue") renderIssueMonitorControls(windowMap.get(windowData.id));
+              }),
+              issueMonitorModel.subscribe(model => model, () => {
+                if (mounted) renderKnowledgeBridge(windowData.id);
+              }),
+            ];
+            mounted = true;
+          }
           const laneFilter = body.querySelector("[data-issue-lane-filter]");
           if (laneFilter) {
             for (const option of laneFilter.options) option.selected = option.value === state.issueLaneFilter;

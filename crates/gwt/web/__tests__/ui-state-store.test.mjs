@@ -31,10 +31,17 @@ test('push payloads and renderer code cannot mutate the canonical snapshot', () 
 test('a throwing view does not leave other views stale and nested updates settle at the latest model', () => {
   const store = createUiStateStore({ value: 0 });
   const values = [];
-  store.subscribe(state => state.value, value => { if (value === 1) throw new Error('broken view'); });
+  let broken = true, rendered = 0;
+  store.subscribe(state => state.value, value => {
+    if (value === 1 && broken) throw new Error('broken view');
+    rendered = value;
+  });
   store.subscribe(state => state.value, value => values.push(value));
   assert.throws(() => store.update(() => ({ value: 1 })), /broken view/);
   assert.deepEqual(values, [0, 1]);
+  broken = false;
+  store.update(state => ({ ...state, unrelated: true }));
+  assert.equal(rendered, 1, 'the next model update retries a view that failed to render');
   store.subscribe(state => state.value, value => { if (value === 2) store.update(() => ({ value: 3 })); });
   store.update(() => ({ value: 2 }));
   assert.equal(values.at(-1), 3);

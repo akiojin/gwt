@@ -141,9 +141,9 @@ export function scanModule(source, file, { modules, rootName } = {}) {
           && !pureNamespaces.test(spelling) && !pureObject.test(spelling)
           && !builtins.has(callee.name) && !schedules.has(callee.name)
           && !["clearTimeout", "clearInterval", "cancelAnimationFrame"].includes(callee.name)) add("unresolved-call", node, path, context);
-        const executeCallbacks = callbacks.has(method) || schedules.has(callee.name) || (model && method === "update");
-        for (const [position, argument] of node.arguments.entries()) {
-          if (executeCallbacks || (model && method === "subscribe" && position === 0)) {
+        const executeCallbacks = callbacks.has(method) || schedules.has(callee.name) || (model && ["update", "subscribe"].includes(method));
+        for (const argument of node.arguments) {
+          if (executeCallbacks) {
             const fn = functionPattern.test(argument.type) ? argument : argument.type === "Identifier" ? resolve(node, argument.name).fn : null;
             if (fn) follow(fn, path + ">" + (method || callee.name) + ":callback", context);
           }
