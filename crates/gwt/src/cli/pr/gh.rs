@@ -1223,18 +1223,91 @@ pub fn fetch_pr_checks_via_gh(
         }
     }
 
-    let checks = parse_pr_checks_items_response(&output.stdout, &output.stderr, output.success())?;
-    let merge_status = pr.effective_merge_status().to_string();
+    let checks = parse_pr_checks_items_response(
+        &output.stdout,
+        &output.stderr,
+        output.success() || output.exit_code == Some(8),
+    )?;
+    // The details are fetched after the PR rollup: derive the headline from
+    // this same snapshot instead of retaining an earlier green verdict.
+    let rollup = serde_json::Value::Array(
+        checks
+            .iter()
+            .map(|check| {
+                let state = check.state.to_ascii_uppercase();
+                let bucket = check.conclusion.to_ascii_lowercase();
+                let conclusion = match bucket.as_str() {
+                    // Modern gh exports a bucket alongside the actual state.
+                    // Preserve shared semantics for NEUTRAL / EXPECTED / STALE.
+                    "pass" | "fail" | "cancel" | "skipping" | "pending"
+                        if !state.is_empty() && state != "COMPLETED" => None,
+                    "pass" => Some("SUCCESS"),
+                    "fail" => Some("FAILURE"),
+                    "cancel" => Some("CANCELLED"),
+                    "skipping" => Some("SKIPPED"),
+                    "" => None,
+                    _ => Some(check.conclusion.as_str()),
+                };
+                serde_json::json!({"status": check.state, "state": check.state, "conclusion": conclusion})
+            })
+            .collect(),
+    );
+    let check_counts = gwt_git::pr_status::check_counts_from_rollup(Some(&rollup));
+    let unknown_required = serde_json::Value::Array(
+        checks
+            .iter()
+            .zip(rollup.as_array().unwrap())
+            .filter(|(check, _)| check.is_required.is_none())
+            .map(|(_, node)| node.clone())
+            .collect(),
+    );
+    let required_metadata_complete =
+        gwt_git::pr_status::check_counts_from_rollup(Some(&unknown_required))
+            .is_none_or(|counts| counts.in_progress == 0);
+    let required_pending_count = (required_metadata_complete
+        && checks.iter().any(|check| check.is_required.is_some()))
+    .then(|| {
+        let required = serde_json::Value::Array(
+            checks
+                .iter()
+                .zip(rollup.as_array().unwrap())
+                .filter(|(check, _)| check.is_required == Some(true))
+                .map(|(_, node)| node.clone())
+                .collect(),
+        );
+        gwt_git::pr_status::check_counts_from_rollup(Some(&required))
+            .map_or(0, |counts| counts.in_progress)
+    });
+    let ci_status = check_counts
+        .map_or("UNKNOWN", |counts| {
+            if counts.in_progress > 0 {
+                "PENDING"
+            } else {
+                counts.summary()
+            }
+        })
+        .to_string();
+    let mut ci_summary = ci_status.clone();
+    if let Some(counts) = check_counts.filter(|counts| counts.in_progress > 0) {
+        ci_summary.push_str(&format!(" ({} unfinished", counts.in_progress));
+        if let Some(required) = required_pending_count {
+            ci_summary.push_str(&format!(", {required} required"));
+        }
+        ci_summary.push(')');
+    }
+    let merge_status = pr.merge_state_status;
 
     Ok(PrChecksSummary {
         summary: format!(
             "PR #{} | CI: {} | Merge: {} | Review: {}",
-            pr.number, pr.ci_status, merge_status, pr.review_status
+            pr.number, ci_summary, merge_status, pr.review_status
         ),
-        ci_status: pr.ci_status,
+        ci_status,
         merge_status,
         review_status: pr.review_status,
         checks,
+        check_counts,
+        required_pending_count,
     })
 }
 
@@ -1306,6 +1379,10 @@ pub fn parse_pr_checks_items_json(json: &str) -> Result<Vec<PrCheckItem>, serde_
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            is_required: value
+                .get("isRequired")
+                .or_else(|| value.get("is_required"))
+                .and_then(serde_json::Value::as_bool),
         })
         .collect())
 }

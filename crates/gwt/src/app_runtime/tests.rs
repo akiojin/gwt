@@ -32448,6 +32448,87 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
     .expect("managed hook health");
 
     assert_eq!(health.last_event.as_deref(), Some("UserPromptSubmit"));
+    // The selection timestamp must also reuse the unchanged runtime snapshot,
+    // even when another session has a valid but older timestamp.
+    let latest = gwt_agent::runtime_state_path(&sessions_dir, &second.session_id);
+    let metadata = fs::metadata(&latest).unwrap();
+    fs::write(&latest, vec![b'x'; metadata.len() as usize]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&latest)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+        .unwrap();
+    let reused = super::workspace_views::managed_hook_health_view_for_worktree(
+        &worktree,
+        &sessions_dir,
+        &[&first, &second],
+        &gwt::cli::hook::health::ManagedHookFailureSnapshot::read(),
+    )
+    .expect("cached hook health");
+    assert_eq!(reused.last_event.as_deref(), Some("UserPromptSubmit"));
+}
+
+#[test]
+fn managed_hook_health_for_one_hundred_forty_rows_reuses_session_json_within_one_second() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let _hook_bin = ScopedEnvVar::unset("GWT_HOOK_BIN");
+    let sessions_dir = temp.path().join("sessions");
+    let sessions = (0..140)
+        .map(|index| {
+            let mut session =
+                sample_active_agent_session("tab-1", &format!("tab-1::agent-{index}"));
+            session.session_id = format!("session-{index}");
+            session.worktree_path = temp.path().join(format!("work-{index}"));
+            // Keep health visible without unrelated Git/config audits in fixture setup.
+            gwt::cli::hook::health::record_managed_hook_self_healed(&session.worktree_path)
+                .unwrap();
+            let path = gwt_agent::runtime_state_path(&sessions_dir, &session.session_id);
+            gwt::cli::hook::runtime_state::write_for_event(&path, "PreToolUse").unwrap();
+            session
+        })
+        .collect::<Vec<_>>();
+    let project = || {
+        let snapshot = gwt::cli::hook::health::ManagedHookFailureSnapshot::default();
+        for session in &sessions {
+            let health = super::workspace_views::managed_hook_health_view_for_worktree(
+                &session.worktree_path,
+                &sessions_dir,
+                &[session],
+                &snapshot,
+            )
+            .expect("Work row hook health");
+            assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
+        }
+    };
+    project(); // Populate the existing surface cache outside the runtime budget.
+               // Replacing bytes while retaining each stamp proves every runtime is reused.
+    for session in &sessions {
+        let path = gwt_agent::runtime_state_path(&sessions_dir, &session.session_id);
+        let metadata = fs::metadata(&path).unwrap();
+        fs::write(&path, vec![b'x'; metadata.len() as usize]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+            .unwrap();
+    }
+    let started = std::time::Instant::now();
+    project();
+    let elapsed = started.elapsed();
+    eprintln!(
+        "Work hook health: 140 rows, unchanged runtime JSON, {}ms",
+        elapsed.as_millis()
+    );
+    assert!(
+        elapsed <= std::time::Duration::from_secs(1),
+        "140 rows took {elapsed:?}"
+    );
 }
 
 fn managed_hook_inspection_text(rendered: &str) -> String {
@@ -75424,7 +75505,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
 
 /// Repo with an enabled Issue Monitor, a registered PM whose pane is live,
 /// and a second non-PM pane that the wake must never reach.
-fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
+pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -75489,6 +75570,34 @@ fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     .expect("seed registration");
 
     (repo, runtime, pm_window_id)
+}
+
+fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("PM wake fixture must use queued workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("PM wake fixture must record completions");
+    };
+    let completions = Arc::clone(completions);
+    loop {
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        if queued.is_empty() {
+            break;
+        }
+        for task in queued {
+            task();
+        }
+        let completed = std::mem::take(&mut *completions.lock().unwrap());
+        for event in completed {
+            if let Some(UserEvent::PmWakeDeliveryComplete(delivery)) =
+                runtime.accept_project_completion(event)
+            {
+                runtime.pm_wake_delivery_complete(delivery);
+            }
+        }
+    }
 }
 
 /// T-093 (FR-012): a parked PM is woken by a NeedsHuman transition, the wake
@@ -76330,7 +76439,7 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
         .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(monitor_prefs_path.clone());
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &monitor_prefs_path,
         "2026-08-10T01:00:00Z",
@@ -76398,7 +76507,7 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
@@ -76749,7 +76858,7 @@ fn seed_quiet_standing_supervision(repo: &Path) {
 
 /// Own the fixture's child independently of runtime/finalizer Arc clones.
 /// Drain output as well as input: an unread macOS PTY can stall child exit.
-struct TestPaneGuard {
+pub(super) struct TestPaneGuard {
     pty: Arc<gwt_terminal::PtyHandle>,
     reader: Option<thread::JoinHandle<()>>,
 }
@@ -76801,7 +76910,8 @@ impl Drop for TestPaneGuard {
     }
 }
 
-fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> TestPaneGuard {
+pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> TestPaneGuard {
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let (command, args) = if cfg!(windows) {
         (
             "powershell",
@@ -76955,6 +77065,7 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
     let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
 
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     let pty = runtime
         .runtimes
         .get(&pm_window_id)
@@ -77030,6 +77141,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
     );
 
     let _ = runtime.terminal_input_events(&pm_window_id, "ますか？\r");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
         runtime
             .project_state(&runtime.test_context())
@@ -77082,6 +77194,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
     );
 
     let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
         runtime
             .project_state(&runtime.test_context())
@@ -77146,7 +77259,7 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
     ));
     assert!(
         runtime
-            .issue_monitor_scheduled_scan_complete_events(
+            .complete_scheduled_scan_for_test(
                 &completed_root,
                 &completed_prefs,
                 &completed_at,
@@ -77178,7 +77291,7 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
     );
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
         &completed_at,
@@ -77660,6 +77773,51 @@ fn scheduled_tick_spawn_failure_is_observable_and_releases_single_flight() {
 }
 
 #[test]
+fn scheduled_scan_completion_defers_projection_until_worker_runs() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("prefs");
+    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+
+    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+        &repo,
+        &prefs_path,
+        "2026-08-10T01:00:00Z",
+        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(monitor))),
+    );
+    assert!(
+        events.is_empty(),
+        "GUI ingress must not prepare the snapshot"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "one worker prepares the result"
+    );
+}
+
+#[test]
 fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
     let _env_lock = env_test_lock()
         .lock()
@@ -77690,21 +77848,49 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
         priority_order: vec![43],
         ..queued_issue_monitor_prefs(&[43])
     };
-    gwt::save_issue_monitor_prefs(&prefs_path, &latest).expect("concurrent controls");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (proxy, completions) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     runtime
         .project_state_mut(&runtime.test_context())
         .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
-        &repo,
-        &prefs_path,
-        "2026-08-10T01:00:00Z",
-        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(scanned))),
+    assert!(runtime
+        .issue_monitor_scheduled_scan_complete_events(
+            &repo,
+            &prefs_path,
+            "2026-08-10T01:00:00Z",
+            Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(scanned))),
+        )
+        .is_empty());
+    tasks.lock().unwrap().remove(0)();
+    let UserEvent::IssueMonitorScheduledScanPrepared(stale) =
+        into_recorded_project_payload(completions.lock().unwrap().remove(0))
+    else {
+        panic!("prepared completion")
+    };
+    // Controls can change after preparation but before the GUI applies it.
+    gwt::save_issue_monitor_prefs(&prefs_path, &latest).expect("concurrent controls");
+    assert!(runtime
+        .issue_monitor_scheduled_scan_prepared_events(*stale)
+        .is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "stale projection is reprepared"
     );
+    tasks.lock().unwrap().remove(0)();
+    let UserEvent::IssueMonitorScheduledScanPrepared(current) =
+        into_recorded_project_payload(completions.lock().unwrap().remove(0))
+    else {
+        panic!("reprepared completion")
+    };
+    let events = runtime.issue_monitor_scheduled_scan_prepared_events(*current);
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -77753,7 +77939,7 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
     assert!(runtime
-        .issue_monitor_scheduled_scan_complete_events(
+        .complete_scheduled_scan_for_test(
             &repo,
             &prefs_path,
             "2026-08-10T01:00:00Z",
@@ -77771,7 +77957,7 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
         .insert(prefs_path.clone());
     runtime.tabs.clear();
     assert!(runtime
-        .issue_monitor_scheduled_scan_complete_events(
+        .complete_scheduled_scan_for_test(
             &repo,
             &prefs_path,
             "2026-08-10T01:01:00Z",
@@ -78313,7 +78499,7 @@ fn scheduled_scan_defers_to_live_daemon_without_remote_io_or_launch() {
         &outcome,
         Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon)
     ));
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
         &completed_at,
@@ -78369,7 +78555,7 @@ fn scheduled_scan_defer_still_rearms_periodic_wake_for_durable_standing_work() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
@@ -78428,7 +78614,7 @@ fn scheduled_scan_reload_error_rearms_periodic_wake_from_the_worker_snapshot() {
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
@@ -78502,14 +78688,16 @@ fn scheduled_scan_discards_scanned_state_when_authority_appears_before_commit() 
         &outcome,
         Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon)
     ));
-    assert!(runtime
-        .issue_monitor_scheduled_scan_complete_events(
-            &completed_root,
-            &completed_prefs,
-            &completed_at,
-            outcome,
-        )
-        .is_empty());
+    assert!(
+        runtime
+            .complete_scheduled_scan_for_test(
+                &completed_root,
+                &completed_prefs,
+                &completed_at,
+                outcome,
+            )
+            .is_empty()
+    );
     assert_eq!(
         fs::read(&prefs_path).expect("prefs after deferred commit"),
         before,
@@ -78576,7 +78764,7 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     assert!(events.is_empty(), "the tick returns before the remote scan");
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
-    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+    let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
         &completed_at,
@@ -83515,7 +83703,7 @@ fn assert_pm_delivery_refused(
     }
 }
 
-fn seed_pm_session_escalation(repo: &Path, session: &gwt_agent::Session, body: &str) {
+pub(super) fn seed_pm_session_escalation(repo: &Path, session: &gwt_agent::Session, body: &str) {
     session
         .save(&gwt_core::paths::gwt_sessions_dir())
         .expect("save subject session");
@@ -83629,6 +83817,7 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
         "a held wake must render current subjects at delivery time"
     );
     runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(runtime
         .project_state(&runtime.test_context())
         .unwrap()
