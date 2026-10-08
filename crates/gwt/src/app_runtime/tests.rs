@@ -63688,7 +63688,7 @@ fn docker_codex_hook_discovery_mode_keeps_safe_both_fallback() {
 #[test]
 fn host_codex_launch_writes_worktree_local_hooks_into_a_new_linked_worktree() {
     let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(&temp.path().join("home"));
+    let _gwt_home = ScopedGwtHome::set(temp.path().join("home"));
     let repo = temp.path().join("repo");
     let gitdir = repo.join("repo.git/worktrees/issue-1");
     let worktree = repo.join("work/issue-1");
