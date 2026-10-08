@@ -2395,14 +2395,6 @@ fn prepare_agent_launch_inner(
             return Err("bound launch Session identity changed before PTY spawn".into());
         }
     }
-    let geometry = input.geometry.as_ref().ok_or_else(|| {
-        terminalized_genesis_failure_detail(
-            &input.sessions_dir,
-            genesis.as_ref(),
-            "genesis launch window disappeared before PTY spawn",
-            "Window not found",
-        )
-    })?;
     let active = ActiveAgentSession {
         window_id: input.window_id.clone(),
         session_id: session_id.clone(),
@@ -2414,6 +2406,24 @@ fn prepare_agent_launch_inner(
         runtime_target,
         tab_id: input.tab_id.clone(),
     };
+    let geometry = input.geometry.as_ref().ok_or_else(|| {
+        let Some(genesis) = genesis.as_ref() else {
+            return "Window not found".to_string();
+        };
+        match rollback_worker_genesis(
+            &input.sessions_dir,
+            &input.project_root,
+            &active,
+            genesis,
+            "genesis launch window disappeared before PTY spawn",
+            &mut input.removed_genesis_session,
+        ) {
+            Ok(()) => "Window not found; genesis authority was terminalized".to_string(),
+            Err(error) => format!(
+                "Window not found; failed genesis terminalization retained exact evidence for retry: {error}"
+            ),
+        }
+    })?;
     if !input.current.load(Ordering::Acquire) {
         if let Some(genesis) = genesis.as_ref() {
             rollback_worker_genesis(
@@ -3182,16 +3192,9 @@ impl LaunchWizardMemoryCache {
     }
 
     fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-        let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-            })
-            .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+        gwt_agent::session_ledger::load_sessions(sessions_dir)
+            .unwrap_or_default()
+            .into_iter()
             .filter(|session| !durable_launch_recovery_exists(sessions_dir, &session.id))
             .collect()
     }
@@ -4706,6 +4709,16 @@ impl AppRuntime {
         else {
             return Vec::new();
         };
+        // Exact durable removal is already committed, even if this window closed.
+        // Evict only that identity before fencing stale window updates below.
+        if let Some(identity) = prepared
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.removed_genesis_session.as_ref())
+        {
+            self.launch_wizard_cache
+                .forget_prepared_genesis_session(identity);
+        }
         let window_id = prepared.window_id;
         let matches_generation = self
             .pending_launch_completions
@@ -4824,10 +4837,6 @@ impl AppRuntime {
                 let Some(failure) = failure else {
                     return Vec::new();
                 };
-                if let Some(identity) = failure.removed_genesis_session {
-                    self.launch_wizard_cache
-                        .forget_prepared_genesis_session(&identity);
-                }
                 let mut events = Vec::new();
                 if let Some((pending, cleanup, status)) = failure.continue_work {
                     events.extend(self.apply_prepared_continue_work_launch_failure(

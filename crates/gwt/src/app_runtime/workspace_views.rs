@@ -27,6 +27,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+#[path = "workspace_watcher.rs"]
+mod watcher;
+pub(crate) use watcher::WorkspaceProjectionPatchPrepared;
+
 use gwt::cli::hook::health::ManagedHookFailureSnapshot;
 
 use super::{
@@ -4062,6 +4066,7 @@ impl AppRuntime {
             }
             match prepared.result {
                 Ok(Some(prepared_projection)) => {
+                    self.invalidate_workspace_projection_patch(&prepared.tab_id);
                     self.project_state_for_tab(&prepared.tab_id)
                         .expect("open project state")
                         .active_work_projection_payload_cache
@@ -4110,6 +4115,7 @@ impl AppRuntime {
                 .ok()
                 .flatten()?;
         let view = prepared.projection;
+        self.invalidate_workspace_projection_patch(&tab.id);
         self.project_state_for_tab(&tab.id)
             .expect("open project state")
             .active_work_projection_payload_cache
@@ -4151,6 +4157,7 @@ impl AppRuntime {
         let Some(state) = self.project_state_for_tab(tab_id) else {
             return;
         };
+        self.invalidate_workspace_projection_patch(tab_id);
         let mut cache = state.active_work_projection_cache.borrow_mut();
         let Some(projection) = cache.get_mut(tab_id) else {
             return;
@@ -4290,6 +4297,7 @@ impl AppRuntime {
             .expect("open project state")
             .active_work_projection_cache
             .borrow_mut();
+        self.invalidate_workspace_projection_patch(&tab_id);
         if let Some(projection) = cache.get_mut(&tab_id) {
             merge_workspace_projection_membership_cache_only(projection, project_root, fresh);
         } else {
@@ -4461,6 +4469,7 @@ impl AppRuntime {
         self.recheck_workspace_state_after_projection(&context.project_root);
         let mut events = Vec::new();
         {
+            self.invalidate_workspace_projection_patch(&tab_id);
             let mut cache = self
                 .project_state_for_tab(&tab_id)
                 .expect("open project state")
@@ -4680,7 +4689,132 @@ impl AppRuntime {
         project_root: &Path,
         projection: &gwt_core::workspace_projection::WorkspaceProjection,
     ) -> Vec<OutboundEvent> {
-        self.apply_workspace_projection_title_sync_cache_only(project_root, projection)
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
+        self.invalidate_workspace_projection_patch(&context.tab_id);
+        let state = self.project_state(&context).expect("current project");
+        state
+            .workspace_projection_requested_revision
+            .set(state.workspace_projection_revision.get());
+        let cached = state
+            .active_work_projection_cache
+            .borrow()
+            .get(&context.tab_id)
+            .map(bounded_active_work_projection_snapshot);
+        let windows = self.workspace_projection_title_windows();
+        let input = watcher::WorkspaceProjectionPatchInput {
+            revision: state.workspace_projection_revision.get(),
+            context: context.clone(),
+            cached,
+            fresh: Box::new(projection.clone()),
+            sessions: self.active_agent_sessions.values().cloned().collect(),
+            windows,
+            window_generations: self
+                .window_lifecycle_generations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        };
+        let proxy = self.proxy.clone().for_project(context);
+        self.blocking_tasks.spawn(move || {
+            match watcher::prepare_workspace_projection_patch(input) {
+                Ok(prepared) => proxy.send(UserEvent::WorkspaceProjectionPatchPrepared(Box::new(
+                    prepared,
+                ))),
+                Err(error) => tracing::warn!(%error, "workspace watcher patch preparation failed"),
+            }
+        });
+        Vec::new()
+    }
+
+    pub(crate) fn invalidate_workspace_projection_patch(&self, tab_id: &str) {
+        if let Some(state) = self.project_state_for_tab(tab_id) {
+            state
+                .workspace_projection_revision
+                .set(state.workspace_projection_revision.get().wrapping_add(1));
+        }
+    }
+
+    pub(crate) fn apply_workspace_projection_patch(
+        &mut self,
+        mut prepared: WorkspaceProjectionPatchPrepared,
+    ) -> Option<PreparedActiveWorkDispatch> {
+        if !self.project_context_is_current(&prepared.context) {
+            return None;
+        }
+        let state = self.project_state(&prepared.context)?;
+        if state.workspace_projection_revision.get() != prepared.revision {
+            // Another accepted producer owns the current cache. Reload from the
+            // canonical files instead of replaying a stale watcher snapshot.
+            if state.workspace_projection_requested_revision.get() == prepared.revision {
+                crate::spawn_workspace_projection_reload(
+                    &self.blocking_tasks,
+                    self.proxy.clone(),
+                    prepared.context.clone(),
+                );
+            }
+            return None;
+        }
+        let tab_id = prepared.context.tab_id.clone();
+        let mut cache = state.active_work_projection_cache.borrow_mut();
+        if let Some(cached) = cache.get_mut(&tab_id) {
+            prepared.restore_histories(cached);
+        }
+        cache.insert(tab_id.clone(), prepared.projection);
+        drop(cache);
+        state
+            .active_work_projection_payload_cache
+            .borrow_mut()
+            .remove(&tab_id);
+        self.invalidate_workspace_projection_patch(&tab_id);
+        let mut titles_changed = false;
+        for (id, title, detail) in prepared.title_updates {
+            let generation = self
+                .window_lifecycle_generations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&id)
+                .copied();
+            if generation != prepared.window_generations.get(&id).copied() {
+                continue;
+            }
+            let Some(address) = self.window_lookup.get(&id).cloned() else {
+                continue;
+            };
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                continue;
+            };
+            let Some(window) = tab.workspace.window(&address.raw_id) else {
+                continue;
+            };
+            if prepared.title_baselines.get(&id)
+                != Some(&(
+                    window.dynamic_title.clone(),
+                    window.dynamic_title_detail.clone(),
+                ))
+            {
+                continue;
+            }
+            if tab
+                .workspace
+                .set_dynamic_title_with_detail(&address.raw_id, title, detail)
+            {
+                titles_changed = true;
+                self.invalidate_workspace_projection_patch(&address.tab_id);
+            }
+        }
+        if titles_changed {
+            self.proxy.send(UserEvent::ProjectDispatch {
+                context: prepared.context.clone(),
+                events: vec![self.workspace_state_broadcast(&prepared.context)],
+            });
+        }
+        Some(PreparedActiveWorkDispatch {
+            context: prepared.context,
+            payload: prepared.payload,
+            profile: ActiveWorkProjectionProfile::default(),
+        })
     }
 }
 

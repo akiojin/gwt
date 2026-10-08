@@ -642,6 +642,8 @@ fn recovery_center_projects_only_active_project_records_without_rewriting_sessio
         )
         .expect("prepare foreign");
 
+    // One unreadable ledger entry must not hide the valid recovery records.
+    fs::write(runtime.sessions_dir.join("broken.toml"), "id = [").unwrap();
     let events = runtime.handle_frontend_event(
         "client-recovery".to_string(),
         FrontendEvent::LoadRecoveryCenter {
@@ -15494,6 +15496,20 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
 
 #[test]
 fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
+    assert_genesis_receipt_cleanup_failure(false, false);
+}
+
+#[test]
+fn genesis_receipt_cleanup_failure_evicts_cached_session_after_window_close() {
+    assert_genesis_receipt_cleanup_failure(false, true);
+}
+
+#[test]
+fn genesis_receipt_cleanup_failure_evicts_cached_session_when_window_already_closed() {
+    assert_genesis_receipt_cleanup_failure(true, false);
+}
+
+fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_before_apply: bool) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -15532,7 +15548,9 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     session.id = session_id.to_string();
     session.project_state_root = Some(repo.clone());
@@ -15606,52 +15624,72 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
         )
     };
 
-    let events = runtime.handle_launch_complete_and_drain(
-        window_id.clone(),
-        Ok((
-            ProcessLaunch {
-                initial_prompt_file: None,
-                command,
-                args,
-                env: HashMap::new(),
-                remove_env: Vec::new(),
-                cwd: Some(repo.clone()),
-                resource_policy: None,
-            },
-            session_id.to_string(),
-            "work/issue-2359".to_string(),
-            "Codex".to_string(),
-            repo.clone(),
-            gwt_agent::AgentId::Codex,
-            Some(owner.number),
-            Some("origin/develop".to_string()),
-            gwt_agent::LaunchRuntimeTarget::Host,
-            gwt_agent::SessionMode::Normal,
-            false,
-            repo.display().to_string().into(),
-        )),
-    );
-
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::TerminalStatus {
-            status: WindowProcessStatus::Error,
-            ..
-        }
-    )));
+    if close_before_enqueue {
+        assert!(runtime.close_window_outcome(&window_id).closed);
+    }
+    assert!(runtime
+        .handle_launch_complete(
+            window_id.clone(),
+            Ok((
+                ProcessLaunch {
+                    initial_prompt_file: None,
+                    command,
+                    args,
+                    env: HashMap::new(),
+                    remove_env: Vec::new(),
+                    cwd: Some(repo.clone()),
+                    resource_policy: None,
+                },
+                session_id.to_string(),
+                "work/issue-2359".to_string(),
+                "Codex".to_string(),
+                repo.clone(),
+                gwt_agent::AgentId::Codex,
+                Some(owner.number),
+                Some("origin/develop".to_string()),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                gwt_agent::SessionMode::Normal,
+                false,
+                repo.display().to_string().into(),
+            )),
+        )
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    if close_before_apply {
+        assert!(runtime.close_window_outcome(&window_id).closed);
+        assert!(!runtime.pending_launch_completions.contains_key(&window_id));
+    }
+    let events = runtime.handle_agent_launch_prepared(prepared);
+    if close_before_apply {
+        assert!(
+            events.is_empty(),
+            "stale failure must not update a closed window"
+        );
+    } else if !close_before_enqueue {
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Error,
+                ..
+            }
+        )));
+    }
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
-    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
-        .expect("read compensated Workspace")
-        .expect("compensated Workspace projection");
-    assert!(projection.latest_agent_for_session(session_id).is_none());
-    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-        .expect("read compensated WorkItems")
-        .expect("compensated WorkItems projection");
-    assert_eq!(work_items.work_items.len(), 1);
-    assert!(
-        work_items.work_items[0].is_terminal() && work_items.work_items[0].discarded,
-        "the published Work must be discarded when readiness cannot commit",
-    );
+    if !close_before_enqueue {
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("read compensated Workspace")
+            .expect("compensated Workspace projection");
+        assert!(projection.latest_agent_for_session(session_id).is_none());
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("read compensated WorkItems")
+            .expect("compensated WorkItems projection");
+        assert_eq!(work_items.work_items.len(), 1);
+        assert!(
+            work_items.work_items[0].is_terminal() && work_items.work_items[0].discarded,
+            "the published Work must be discarded when readiness cannot commit",
+        );
+    }
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&repo, owner)
             .expect("read terminal genesis ledger")
@@ -36781,6 +36819,7 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     let gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider,
         resets_at,
+        evidence,
         ..
     } = failure.clone().expect("a quota notice is a typed failure")
     else {
@@ -36790,6 +36829,14 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     assert!(
         resets_at.is_some(),
         "the notice states when access returns; dropping it forces the PM to guess"
+    );
+    let evidence = evidence.expect("native message fallback retains its refusal evidence");
+    assert_eq!(evidence.source, "failure_notice");
+    assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
+    assert_eq!(evidence.screen_region.as_deref(), Some("provider_response"));
+    assert_eq!(
+        evidence.matched_pattern.as_deref(),
+        Some("codex_usage_limit")
     );
 
     let payload = AppRuntime::issue_monitor_agent_failed_payload_with_failure(
@@ -40807,6 +40854,83 @@ fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() 
         gwt_agent::Session::CURRENT_SCHEMA_VERSION
     );
     assert_eq!(persisted.status, gwt_agent::AgentStatus::Interrupted);
+}
+
+/// Issue #5025 AC-3: startup uses shared classification and failed-read caching.
+#[test]
+fn app_runtime_startup_recovery_classifies_preferences_and_caches_failed_candidates() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    // Resolve the setup's empty background load before writing failures; it
+    // must not prime the shared failure cache outside the tracing capture.
+    let _ = runtime.launch_wizard_cache.agent_preferences();
+    let mut session =
+        gwt_agent::Session::new(temp.path(), "work/startup", gwt_agent::AgentId::Codex);
+    session.id = "valid-startup".to_string();
+    session.status = gwt_agent::AgentStatus::Stopped;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save valid Session");
+    for (name, content) in [
+        ("window-state.toml", "display_mode = 'grid'\n"),
+        ("legacy-launch-prefs.toml", "last_branch = 'main'\n"),
+        (".writer-temporary.toml", "not = [valid toml"),
+        ("malformed-session.toml", "not = [valid toml"),
+    ] {
+        fs::write(runtime.sessions_dir.join(name), content).expect("write ledger fixture");
+    }
+    let mut missing_agent = toml::Value::try_from(&session).expect("Session TOML value");
+    let table = missing_agent.as_table_mut().expect("Session table");
+    table.insert("id".to_string(), "missing-agent".into());
+    table.remove("agent_id");
+    fs::write(
+        runtime.sessions_dir.join("missing-agent.toml"),
+        toml::to_string(&missing_agent).expect("serialize missing-agent fixture"),
+    )
+    .expect("write missing-agent fixture");
+
+    let events = capture_tracing_events(|| {
+        for _ in 0..2 {
+            let loaded = runtime.load_recovery_sessions();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].id, session.id);
+        }
+    });
+    let warnings = events
+        .iter()
+        .filter(|event| {
+            event
+                .fields
+                .get("message")
+                .is_some_and(|message| message.starts_with("Cannot load session"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        warnings.len() <= 2,
+        "preferences/hidden temporary must not reach typed Session reads, and unchanged failed candidates must not flood warnings; captured={events:?}"
+    );
+    // Other background readers can emit a failure outside this thread-local
+    // capture. Candidate parse-count tests prove unchanged failures are not
+    // reread; every diagnostic captured here must still belong to a bad file.
+    assert!(warnings
+        .iter()
+        .all(|event| event.fields.get("path").is_some_and(|path| {
+            path.ends_with("malformed-session.toml") || path.ends_with("missing-agent.toml")
+        })));
+    for name in ["malformed-session.toml", "missing-agent.toml"] {
+        assert!(
+            warnings
+                .iter()
+                .filter(|event| event
+                    .fields
+                    .get("path")
+                    .is_some_and(|path| path.ends_with(name)))
+                .count()
+                <= 1,
+            "failed candidate {name} must not warn repeatedly across startup reads"
+        );
+    }
 }
 
 /// Issue #4377 (AC-1 / AC-3): startup reads only the Sessions it may restore.
@@ -60575,7 +60699,7 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     // Issue #3783 keeps this watcher path cache-only on purpose: it merges the
     // already-loaded payload into the last materialized view instead of
@@ -60677,6 +60801,166 @@ fn apply_title_sync_sample_projection(
     projection
 }
 
+fn commit_workspace_watcher_update(
+    runtime: &mut AppRuntime,
+    repo: &Path,
+    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+) -> Vec<OutboundEvent> {
+    let (proxy, recorded) = AppEventProxy::stub();
+    let old_proxy = std::mem::replace(&mut runtime.proxy, proxy);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    let old_spawner = std::mem::replace(&mut runtime.blocking_tasks, spawner);
+    let mut events = runtime.handle_workspace_projection_changed_events(repo, projection);
+    std::thread::spawn(move || drain_queued_blocking_tasks(&tasks))
+        .join()
+        .unwrap();
+    loop {
+        let next = {
+            let mut recorded = recorded.lock().unwrap();
+            if recorded.is_empty() {
+                None
+            } else {
+                Some(recorded.remove(0))
+            }
+        };
+        let Some(next) = next else {
+            break;
+        };
+        match into_recorded_project_payload(next) {
+            UserEvent::WorkspaceProjectionPatchPrepared(prepared) => {
+                if let Some(dispatch) = runtime.apply_workspace_projection_patch(*prepared) {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&dispatch.payload).unwrap();
+                    events.push(OutboundEvent::project(
+                        dispatch.context.project_key,
+                        BackendEvent::ActiveWorkProjectionPatch {
+                            projection: Box::new(
+                                serde_json::from_value(payload["projection"].clone()).unwrap(),
+                            ),
+                        },
+                    ));
+                }
+            }
+            UserEvent::ProjectDispatch {
+                events: dispatched, ..
+            } => events.extend(dispatched),
+            other => panic!("unexpected watcher event: {other:?}"),
+        }
+    }
+    runtime.proxy = old_proxy;
+    runtime.blocking_tasks = old_spawner;
+    events
+}
+
+#[test]
+fn workspace_watcher_defers_membership_and_titles_until_worker_completion() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let projection = apply_title_sync_sample_projection(
+        &repo,
+        &window_id,
+        Some("Prepared watcher title"),
+        Some("Prepared watcher focus"),
+    );
+
+    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+
+    assert!(
+        events.is_empty(),
+        "Tao must only schedule the watcher preparation"
+    );
+    assert_eq!(tasks.lock().expect("queued tasks").len(), 1);
+    assert!(runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow()
+        .is_empty());
+    assert!(runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .window("agent-1")
+        .unwrap()
+        .dynamic_title
+        .is_none());
+}
+
+#[test]
+fn workspace_watcher_rejects_superseded_and_closed_pane_patches() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut projection =
+        apply_title_sync_sample_projection(&repo, &window_id, Some("Old watcher title"), None);
+    runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    projection.agents[0].title_summary = Some("Latest watcher title".into());
+    runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let run_next = || tasks.lock().unwrap().remove(0)();
+    let take_prepared = || match into_recorded_project_payload(recorded.lock().unwrap().remove(0)) {
+        UserEvent::WorkspaceProjectionPatchPrepared(prepared) => *prepared,
+        event => panic!("unexpected event: {event:?}"),
+    };
+    run_next();
+    assert!(runtime
+        .apply_workspace_projection_patch(take_prepared())
+        .is_none());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "an older result must not spawn another reload"
+    );
+    run_next();
+    assert!(runtime
+        .apply_workspace_projection_patch(take_prepared())
+        .is_some());
+    assert_eq!(
+        runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .window("agent-1")
+            .unwrap()
+            .dynamic_title
+            .as_deref(),
+        Some("Latest watcher title")
+    );
+    recorded.lock().unwrap().clear();
+
+    projection.agents[0].title_summary = Some("Stale close title".into());
+    runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    run_next();
+    let stale = take_prepared();
+    runtime.active_agent_sessions.clear();
+    assert!(runtime.close_window_outcome(&window_id).closed);
+    assert!(runtime.apply_workspace_projection_patch(stale).is_none());
+    let state = runtime.project_state_for_tab("tab-1").unwrap();
+    assert_eq!(
+        state
+            .active_work_projection_cache
+            .borrow()
+            .get("tab-1")
+            .unwrap()
+            .agents[0]
+            .title_summary
+            .as_deref(),
+        Some("Latest watcher title")
+    );
+}
+
 #[test]
 fn workspace_projection_changed_uses_supplied_snapshot_instead_of_rereading_disk() {
     let _env_lock = env_test_lock()
@@ -60704,7 +60988,7 @@ fn workspace_projection_changed_uses_supplied_snapshot_instead_of_rereading_disk
     gwt_core::workspace_projection::save_workspace_projection(&repo, &stale_disk)
         .expect("save stale projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &supplied);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &supplied);
 
     assert!(events
         .iter()
@@ -60838,7 +61122,7 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         .expect("save projection");
 
     super::workspace_views::reset_full_active_work_projection_builds();
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     let active_work = events
         .iter()
@@ -60943,7 +61227,7 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
     projection.agents[0].session_id = "session-added".to_string();
     projection.agents[0].window_id = Some("tab-1::added".to_string());
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     let active_work = events
         .iter()
@@ -61220,7 +61504,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     // The original handler returned only ActiveWorkProjection. Phase
     // U-2 promotes it to also broadcast WindowCanvasState in one batch so
@@ -61278,7 +61562,7 @@ fn handle_workspace_projection_changed_events_syncs_title_from_canonical_project
     gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
         .expect("save projection");
 
-    let events = runtime.handle_workspace_projection_changed_events(&project_root, &projection);
+    let events = commit_workspace_watcher_update(&mut runtime, &project_root, &projection);
 
     assert!(
         events
@@ -80473,6 +80757,9 @@ fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence
     assert_eq!(evidence.source, "screen_notice");
     assert_eq!(evidence.recorded_at, "2026-09-02T09:00:00.000Z");
     assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
+    let provenance = serde_json::to_value(evidence).expect("evidence JSON");
+    assert_eq!(provenance["screen_region"], "provider_response");
+    assert_eq!(provenance["matched_pattern"], "codex_usage_limit");
     assert!(
         evidence
             .screen_text
@@ -80490,6 +80777,61 @@ fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence
             used_percent: 100,
         }]
     );
+
+    // Issue #5037: an exit detail can contain the refusal while the pane still
+    // shows startup output. Retain the text that actually authenticated it.
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime.runtimes[&window_id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"Starting provider CLI\r\n");
+    runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
+        true,
+    );
+    let exit_hold = serde_json::to_value(&runtime.provider_quota_holds[&window_id])
+        .expect("exit evidence JSON");
+    assert_eq!(exit_hold["evidence"]["screen_region"], "provider_response");
+    assert_eq!(
+        exit_hold["evidence"]["matched_pattern"],
+        "codex_usage_limit"
+    );
+}
+
+/// Issue #5037: neither full usage nor persistence authenticates a quotation
+/// (including the incident's Claude wording printed by a Codex agent).
+#[test]
+fn quoted_or_other_provider_notices_never_hold_a_codex_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    for screen in [
+        r#"{"body":"旧 Claude PM pane: You've hit your weekly limit · resets Oct 8, 6am"}"#,
+        "```text\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n  to purchase more credits or try again at Oct 8, 2026 6am.\n```",
+        CLAUDE_USAGE_LIMIT_SCREEN,
+    ] {
+        let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+        runtime.set_provider_usage_accounts(vec![codex_usage_account(100.0, true)]);
+        for now in ["2026-10-05T05:31:32Z", "2026-10-05T05:36:32Z"] {
+            runtime.observe_provider_quota_notice(&window_id, Some(screen), instant(now));
+            assert!(!runtime.provider_quota_holds.contains_key(&window_id), "{screen}");
+            assert!(!runtime.provider_quota_candidates.contains_key(&window_id), "{screen}");
+        }
+        runtime.handle_runtime_status_with_exit_confirmation(
+            window_id.clone(),
+            WindowProcessStatus::Stopped,
+            Some(screen.to_string()),
+            true,
+        );
+        assert!(!runtime.provider_quota_holds.contains_key(&window_id),
+            "a terminal status must not authenticate the quotation: {screen}");
+    }
 }
 
 // Issue #3927 (SPEC #3340 T-624 / AS-40〜42 / FR-045〜046): the Tao thread
