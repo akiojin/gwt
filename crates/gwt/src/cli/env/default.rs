@@ -403,6 +403,13 @@ impl CliEnv for DefaultCliEnv {
             number,
         )
     }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        gwt_git::pr_status::fetch_pr_completion_snapshot(&self.repo_path, number)
+            .map_err(io::Error::other)
+    }
     fn edit_pr(
         &mut self,
         number: u64,

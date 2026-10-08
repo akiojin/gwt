@@ -45,6 +45,9 @@ pub struct TestEnv {
     pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
+    pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
+    pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
+    pub completion_pr_call_log: Vec<u64>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
@@ -100,6 +103,9 @@ impl TestEnv {
             linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
             current_pr: None,
+            completion_prs: HashMap::new(),
+            completion_prs_after_ready: HashMap::new(),
+            completion_pr_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
@@ -310,6 +316,9 @@ impl CliEnv for TestEnv {
         self.compare_pr_head(base, head, Some(verified))
     }
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
+        if let Some(snapshot) = self.completion_prs.get(&number) {
+            return Ok(Some(snapshot.head_sha.clone()));
+        }
         let Some(pr) = self.prs.get(&number) else {
             return Ok(None);
         };
@@ -330,6 +339,16 @@ impl CliEnv for TestEnv {
             .split_whitespace()
             .next()
             .map(str::to_string))
+    }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.completion_pr_call_log.push(number);
+        self.completion_prs
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| io::Error::other(format!("no completion PR snapshot: {number}")))
     }
     fn edit_pr(
         &mut self,
@@ -396,6 +415,11 @@ impl CliEnv for TestEnv {
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_ready_call_log.push(number);
+        if let Some(snapshot) = self.completion_prs_after_ready.remove(&number) {
+            self.completion_prs.insert(number, snapshot);
+        } else if let Some(snapshot) = self.completion_prs.get_mut(&number) {
+            snapshot.inventory.is_draft = false;
+        }
         self.prs
             .get(&number)
             .cloned()
