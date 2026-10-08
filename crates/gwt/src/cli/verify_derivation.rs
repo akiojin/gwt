@@ -14,10 +14,13 @@
 //!   `gwt-skills` test suite (managed-asset parity lives there).
 //! - **frontend** (`crates/gwt/web/` and js/ts/css/html): the embedded web
 //!   contract tests, which live in the `gwt` crate.
+//! - **node scripts** (`scripts/*.js`, `*.mjs`, `*.cjs`): existing sibling
+//!   `*.test.*` files through `node --test`.
 //! - **docs** (markdown outside the skill trees): `bunx markdownlint-cli2`
 //!   over the changed files (AGENTS markdown policy).
-//! - **anything else** (scripts, CI config, …): the conservative default —
-//!   the CI lint gates + the `gwt` crate suite.
+//! - **anything else**: the conservative Rust matrix plus an explicit
+//!   `unsupported(path)` diagnostic. Automatic registration refuses unknown
+//!   surfaces; an explicit plan supplies their project-specific commands.
 //!
 //! # Package narrowing, never target narrowing
 //!
@@ -33,7 +36,7 @@
 //! (#3640). Tests in this module pin the derived commands against the
 //! workflow files so CI cannot drift away from them unnoticed.
 //!
-//! # The one exception: the rest of the `gwt` crate's targets on Windows
+//! # Windows: library and binary unit tests without integration targets
 //!
 //! This narrowing used to cover `--bin gwt` as well. A Windows run wedged
 //! with the test binary's CPU flat and a pile of orphaned
@@ -51,22 +54,18 @@
 //! tests — the other three were only queued behind the lock. `--bin gwt` is
 //! back in the nightly Windows gate as a result.
 //!
-//! **It is not back in this derivation, and the reason is unrelated to the
-//! deadlock.** Building any binary target of the `gwt` crate on Windows
-//! relinks `target/debug/gwtd.exe`, and a local verification run is itself a
-//! live `gwtd.exe`; Windows cannot replace a file that is open, so the build
-//! fails with `os error 5` every time (#3808, #4172). CI has no such process,
-//! which is why the two gates legitimately differ. That difference is pinned
-//! by `windows_derived_rust_matrix_tracks_the_ci_windows_gate` so neither
-//! side can drift on its own. The portable fallback stays serialized there.
+//! Integration tests cause Cargo to build the regular binaries, including
+//! the live `target/debug/gwtd.exe`, which Windows cannot replace (#3808,
+//! #4172). Binary unit tests build separate test harnesses instead. Selecting
+//! `--lib --bins` covers both `gwt` and `gwtd` unit tests without rebuilding
+//! the running controller (#4968). The portable fallback stays serialized.
 //! Projects declaring a `gwt-verify` nextest profile opt into process-isolated
 //! tests and JUnit evidence on Windows (#4822), with resource scheduling owned
 //! by that profile. The same target coverage is preserved, including separate
 //! rustdoc commands when the original gate included doctests.
 //!
-//! Every other package keeps CI's full gate, because only these targets have
-//! ever been observed to wedge — narrowing further would buy nothing and
-//! cost real coverage.
+//! Every other package keeps CI's full gate, because its integration tests
+//! do not build the live controller.
 //! Windows verification is weaker than Linux's as a result, and CI stays the
 //! gate that decides; a local run that cannot finish decides nothing at all.
 //!
@@ -94,29 +93,23 @@ const CI_CLIPPY_GATE: &str = "cargo clippy --workspace --all-targets --all-featu
 const CI_RUSTDOC_GATE: &str =
     r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items"#;
 
-/// The Rust test gate derivation uses on Windows: CI's gate restricted to
-/// library targets. Derivation cannot go wider there — see the module header
-/// — because a local verification run *is* a live `gwtd.exe` and Windows
-/// cannot relink a file that is open.
-///
-/// The nightly `test-windows-default-parallel` job runs this gate plus
-/// `--bin gwt`, which #4014 returned to it. Nothing is running there, so the
-/// relink restriction does not apply to CI. The test
+/// The Rust unit-test gate derivation uses on Windows. Explicit library and
+/// binary targets avoid integration tests rebuilding the live `gwtd.exe`.
+/// The nightly `test-windows-default-parallel` job selects `--bin gwt`
+/// instead of all binary unit-test harnesses. The test
 /// `windows_derived_rust_matrix_tracks_the_ci_windows_gate` pins that exact
 /// relationship so neither side can drift alone.
-const CI_WINDOWS_RUST_TEST_GATE: &str = "cargo test --workspace --lib --all-features";
+const CI_WINDOWS_RUST_TEST_GATE: &str = "cargo test --workspace --lib --bins --all-features";
 
-/// The only package whose targets derivation narrows on Windows, and the
-/// only one whose binary targets can relink the running `gwtd` (#4014,
-/// #4182).
-const WINDOWS_DEADLOCKING_PACKAGE: &str = "gwt";
+/// The package whose integration tests rebuild the running controller.
+const WINDOWS_CONTROLLER_PACKAGE: &str = "gwt";
 
 /// Which host the derived matrix has to be runnable on.
 ///
 /// Derivation is host-sensitive because CI's own Rust matrix is (#4182).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationHost {
-    /// Windows, where the `gwt` crate's remaining targets are unrunnable.
+    /// Windows, where `gwt` integration tests rebuild the live controller.
     Windows,
     /// Every other host, where CI's full gate runs as written.
     Other,
@@ -152,10 +145,10 @@ fn workspace_test_command_for(host: VerificationHost) -> String {
 /// The derived Rust test command for one package, or for the whole
 /// workspace when `package` is `None`.
 fn rust_test_command_for(package: Option<&str>, host: VerificationHost) -> String {
-    // A workspace-wide gate builds the deadlocking package too, so both
+    // A workspace-wide gate builds the controller package too, so both
     // spellings take CI's Windows gate.
     let takes_windows_gate = host == VerificationHost::Windows
-        && package.is_none_or(|package| package == WINDOWS_DEADLOCKING_PACKAGE);
+        && package.is_none_or(|package| package == WINDOWS_CONTROLLER_PACKAGE);
     let gate = if takes_windows_gate {
         CI_WINDOWS_RUST_TEST_GATE
     } else {
@@ -207,6 +200,21 @@ impl TrivialReason {
 }
 
 impl DerivedPlan {
+    pub(crate) fn unsupported_reason(&self) -> Option<String> {
+        let unsupported: Vec<&str> = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.starts_with("unsupported("))
+            .map(String::as_str)
+            .collect();
+        (!unsupported.is_empty()).then(|| {
+            format!(
+                "verify.plan derive has unsupported changed surfaces [{}]; register an explicit verify.plan with params.commands covering these paths before canonical verification",
+                unsupported.join(", ")
+            )
+        })
+    }
+
     fn trivial(reason: TrivialReason) -> Self {
         Self {
             commands: Vec::new(),
@@ -331,6 +339,32 @@ fn is_frontend_path(path: &str) -> bool {
             .any(|ext| path.ends_with(ext))
 }
 
+fn is_node_script_path(path: &str) -> bool {
+    path.starts_with("scripts/")
+        && [".js", ".mjs", ".cjs"]
+            .iter()
+            .any(|ext| path.ends_with(ext))
+}
+
+fn node_test_paths(worktree: &Path, path: &str) -> Vec<String> {
+    if is_frontend_test_path(path) {
+        return worktree
+            .join(path)
+            .is_file()
+            .then(|| path.to_string())
+            .into_iter()
+            .collect();
+    }
+    let Some((stem, _)) = path.rsplit_once('.') else {
+        return Vec::new();
+    };
+    ["mjs", "js", "cjs"]
+        .iter()
+        .map(|ext| format!("{stem}.test.{ext}"))
+        .filter(|test| worktree.join(test).is_file())
+        .collect()
+}
+
 /// A frontend path that exercises the UI rather than rendering it.
 ///
 /// Issue #4510: these still belong to the frontend *matrix* — changing a
@@ -384,8 +418,16 @@ fn is_docs_path(path: &str) -> bool {
 /// A no-target change set is represented by a reason-bearing trivial plan.
 /// Non-git directories remain invalid because they cannot provide a stable
 /// worktree fingerprint.
+#[cfg(test)]
 pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
-    derive_for_host(worktree, VerificationHost::current())
+    derive_excluding(worktree, &[])
+}
+
+pub(crate) fn derive_excluding(
+    worktree: &Path,
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
+    derive_for_host_excluding(worktree, VerificationHost::current(), generated_outputs)
 }
 
 /// Read live protected contexts before taking the trusted store writer lease.
@@ -435,16 +477,19 @@ pub fn derive_pre_pr(
     required: &[String],
     acceptance: &[String],
     local: &[String],
+    generated_outputs: &[String],
 ) -> Result<DerivedPlan, String> {
-    derive_pre_pr_for_host(
+    derive_pre_pr_for_host_excluding(
         worktree,
         VerificationHost::current(),
         required,
         acceptance,
         local,
+        generated_outputs,
     )
 }
 
+#[cfg(test)]
 fn derive_pre_pr_for_host(
     worktree: &Path,
     host: VerificationHost,
@@ -452,7 +497,18 @@ fn derive_pre_pr_for_host(
     acceptance: &[String],
     local: &[String],
 ) -> Result<DerivedPlan, String> {
-    let mut plan = derive_for_host(worktree, host)?;
+    derive_pre_pr_for_host_excluding(worktree, host, required, acceptance, local, &[])
+}
+
+fn derive_pre_pr_for_host_excluding(
+    worktree: &Path,
+    host: VerificationHost,
+    required: &[String],
+    acceptance: &[String],
+    local: &[String],
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
+    let mut plan = derive_for_host_excluding(worktree, host, generated_outputs)?;
     if plan.trivial_reason.is_some() {
         for command in acceptance.iter().chain(local) {
             if command.trim().is_empty() {
@@ -483,6 +539,9 @@ fn derive_pre_pr_for_host(
     let mut packages = BTreeSet::new();
     let mut workspace = false;
     for path in changed_paths(worktree).map_err(|reason| reason.as_str().to_string())? {
+        if generated_outputs.contains(&path) {
+            continue;
+        }
         if is_rust_path(&path) {
             if let Some(package) = crate_of(&path) {
                 packages.insert(package.to_string());
@@ -495,7 +554,12 @@ fn derive_pre_pr_for_host(
             packages.insert("gwt".to_string());
         }
     }
-    plan.commands.clear();
+    // Required Rust/coverage contexts do not cover the derived Node runner.
+    let node_commands: Vec<_> = plan
+        .commands
+        .drain(..)
+        .filter(|command| command.starts_with("node --test "))
+        .collect();
     if workspace || !packages.is_empty() {
         plan.commands.push(CI_FMT_GATE.to_string());
         let scope = if workspace {
@@ -510,6 +574,7 @@ fn derive_pre_pr_for_host(
         plan.commands
             .push(CI_CLIPPY_GATE.replace("--workspace", &scope));
     }
+    plan.commands.extend(node_commands);
     for command in acceptance.iter().chain(local) {
         if command.trim().is_empty() {
             return Err("pre-pr commands must not be empty".into());
@@ -693,17 +758,41 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
 
 /// [`derive()`] against an explicit host, so both branches of the
 /// host-sensitive matrix stay reachable from tests on any machine (#4182).
+#[cfg(test)]
 fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPlan, String> {
+    derive_for_host_excluding(worktree, host, &[])
+}
+
+fn derive_for_host_excluding(
+    worktree: &Path,
+    host: VerificationHost,
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
     if git_lines(worktree, &["rev-parse", "--git-dir"]).is_empty() {
         return Err("verify.plan derive requires a git worktree".to_string());
     }
     let paths = match changed_paths(worktree) {
-        Ok(paths) => paths,
+        Ok(paths) => paths
+            .into_iter()
+            .filter(|path| !generated_outputs.contains(path))
+            .collect::<Vec<_>>(),
         Err(reason) => return Ok(DerivedPlan::trivial(reason)),
     };
     if paths.is_empty() {
         return Ok(DerivedPlan::trivial(TrivialReason::LedgerOnly));
     }
+
+    // Only mark the config covered when a derived runner actually reads it.
+    let nextest_profile = host == VerificationHost::Windows
+        && std::fs::read_to_string(worktree.join(".config/nextest.toml"))
+            .ok()
+            .and_then(|config| toml::from_str::<toml::Value>(&config).ok())
+            .is_some_and(|config| {
+                config
+                    .get("profile")
+                    .and_then(|p| p.get("gwt-verify"))
+                    .is_some()
+            });
 
     let mut rust_crates: BTreeSet<String> = BTreeSet::new();
     let mut workspace_rust = false;
@@ -712,12 +801,22 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
     let mut ui_surface = false;
     let mut docs_files: Vec<String> = Vec::new();
     let mut other = false;
+    let mut node_tests = BTreeSet::new();
+    let mut unsupported = Vec::new();
 
     for path in &paths {
         if is_skills_path(path) {
             skills = true;
         } else if is_docs_path(path) {
             docs_files.push(path.clone());
+        } else if is_node_script_path(path) {
+            let tests = node_test_paths(worktree, path);
+            if tests.is_empty() {
+                other = true;
+                unsupported.push(format!("unsupported({path})"));
+            } else {
+                node_tests.extend(tests);
+            }
         } else if is_frontend_path(path) {
             frontend = true;
             ui_surface |= is_ui_surface_path(path);
@@ -730,6 +829,9 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
             }
         } else {
             other = true;
+            if path != ".config/nextest.toml" || !nextest_profile {
+                unsupported.push(format!("unsupported({path})"));
+            }
         }
     }
     // Rust changes inside gwt-skills are also the skills surface.
@@ -797,16 +899,7 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
     }
     // Projects opt in through their own nextest profile. Do not require an
     // additional runner in unrelated projects or change non-Windows gates.
-    let nextest_profile = std::fs::read_to_string(worktree.join(".config/nextest.toml"))
-        .ok()
-        .and_then(|config| toml::from_str::<toml::Value>(&config).ok())
-        .is_some_and(|config| {
-            config
-                .get("profile")
-                .and_then(|p| p.get("gwt-verify"))
-                .is_some()
-        });
-    if host == VerificationHost::Windows && nextest_profile {
+    if nextest_profile {
         let mut nextest_commands = Vec::new();
         for command in commands {
             if let Some(selection) = command.strip_prefix("cargo test ") {
@@ -825,6 +918,22 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
         }
         commands = nextest_commands;
     }
+
+    if !node_tests.is_empty() {
+        surfaces.push("node-tests".to_string());
+        push_unique(
+            &mut commands,
+            format!(
+                "node --test {}",
+                node_tests
+                    .iter()
+                    .map(|path| format!("\"{path}\""))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        );
+    }
+    surfaces.extend(unsupported);
 
     // Only lint files that still exist — a deleted path would make
     // markdownlint-cli2 exit 0 on zero matches (a vacuous PASS), and paths
@@ -1096,6 +1205,40 @@ mod tests {
         assert_eq!(
             derive_pre_pr_for_host(dir.path(), VerificationHost::Other, &[], &[], &[]).unwrap(),
             derive_for_host(dir.path(), VerificationHost::Other).unwrap()
+        );
+    }
+
+    #[test]
+    fn pre_pr_keeps_node_runner_outside_required_ci() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        git(dir.path(), &["add", "."]);
+        git(
+            dir.path(),
+            &["commit", "-qm", "test: existing pre-pr workflow"],
+        );
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(dir.path(), "scripts/tool.mjs", "export {};\n");
+        write(dir.path(), "scripts/tool.test.mjs", "import 'node:test';\n");
+        let plan = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Windows,
+            &[
+                "Test (Rust)".into(),
+                "Clippy & Rustfmt".into(),
+                "coverage / Rust Coverage".into(),
+            ],
+            &["git --version".into()],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            plan.commands
+                .contains(&r#"node --test "scripts/tool.test.mjs""#.into()),
+            "{plan:?}"
         );
     }
 
@@ -1533,22 +1676,17 @@ mod tests {
             .collect()
     }
 
-    // #4182 AC-1 / AC-6: the derived matrix must not ask a Windows host to
-    // run the `gwt` crate's binary targets. Four `app_runtime` tests take
-    // `env_test_lock` and never release it there (#4014), so the run wedges
-    // with the test binary's CPU flat and a pile of orphaned
-    // `cmd /d /s /c "exit /b 0"` children — while still holding the
-    // host-wide verification lease. CI already refuses to run that target on
-    // Windows; only the locally derived matrix still demanded it.
+    // #4968 AC-1: library-only selection silently omitted app_runtime and
+    // gwtd unit tests. Binary harnesses do not rebuild the regular binaries.
     #[test]
-    fn windows_derivation_drops_the_deadlocking_gwt_bin_target() {
+    fn windows_derivation_includes_gwt_binary_unit_tests() {
         let plan = derive_on(
             VerificationHost::Windows,
             &["crates/gwt/src/app_runtime.rs"],
         );
         assert!(
             plan.commands.contains(
-                &"cargo test -p gwt --lib --all-features -- --test-threads=1".to_string()
+                &"cargo test -p gwt --lib --bins --all-features -- --test-threads=1".to_string()
             ),
             "{:?}",
             plan.commands
@@ -1557,7 +1695,7 @@ mod tests {
             !plan
                 .commands
                 .contains(&"cargo test -p gwt --all-features".to_string()),
-            "the full gate deadlocks on Windows: {:?}",
+            "the full gate builds the running controller on Windows: {:?}",
             plan.commands
         );
     }
@@ -1600,7 +1738,7 @@ mod tests {
         let plan = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
         assert!(
             plan.commands.contains(
-                &"cargo nextest run -p gwt --lib --all-features --profile gwt-verify --retries 0"
+                &"cargo nextest run -p gwt --lib --bins --all-features --profile gwt-verify --retries 0"
                     .to_string()
             ),
             "{plan:?}"
@@ -1625,18 +1763,29 @@ mod tests {
             .commands
             .iter()
             .any(|command| command.contains("--test-threads=1")));
+        assert!(plan.unsupported_reason().is_none(), "{plan:?}");
         let other = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
         assert!(other
             .commands
             .contains(&"cargo test -p gwt --all-features".to_string()));
+        assert!(
+            other
+                .surfaces
+                .contains(&"unsupported(.config/nextest.toml)".to_string()),
+            "{other:?}"
+        );
+        write(dir.path(), ".config/nextest.toml", "[invalid config\n");
+        let invalid = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            invalid
+                .surfaces
+                .contains(&"unsupported(.config/nextest.toml)".to_string()),
+            "{invalid:?}"
+        );
     }
 
-    // #4182 AC-8 / AC-9: the run that holds the verification lease is itself
-    // a `gwtd` process, and Windows cannot replace a file that is open. A
-    // derived matrix that relinks `target/debug/gwtd.exe` therefore fails
-    // with `os error 5` every time (#3808, #4172). Restricting the Windows
-    // matrix to library targets makes that structurally impossible, because
-    // `--lib` builds no binary targets at all.
+    // #4968 / #4182: integration targets build the regular binaries and
+    // relink the running controller. Library and binary unit harnesses do not.
     #[test]
     fn windows_derivation_never_relinks_the_running_gwtd() {
         for files in [
@@ -1645,16 +1794,16 @@ mod tests {
             vec!["scripts/release.sh"],
         ] {
             for command in cargo_tests(&derive_on(VerificationHost::Windows, &files)) {
-                for target in ["--bins", "--bin ", "--all-targets", "--tests", "--test "] {
+                for target in ["--all-targets", "--tests", "--test "] {
                     assert!(
                         !command.contains(target),
-                        "{files:?}: `{command}` builds binary targets ({target}) and would \
+                        "{files:?}: `{command}` builds integration targets ({target}) and would \
                          relink the running gwtd"
                     );
                 }
                 assert!(
                     command.contains(" --lib "),
-                    "{files:?}: `{command}` is not restricted to library targets"
+                    "{files:?}: `{command}` does not explicitly select unit targets"
                 );
             }
         }
@@ -1671,12 +1820,8 @@ mod tests {
         // twice: once with `--no-run`, once for real. The job left PR CI for
         // the nightly schedule (#4134 AC-1) without changing its gate.
         let gwt_gate = CI_WINDOWS_RUST_TEST_GATE.replace("--workspace", "-p gwt");
-        // The nightly job runs one target this derivation cannot: `--bin gwt`
-        // returned there with #4014, but building it locally would relink the
-        // `gwtd.exe` running the verification (#3808, #4172). Deriving the
-        // nightly gate from the local one here is what keeps that the *only*
-        // difference — any other drift on either side fails this assertion.
-        let nightly_gate = gwt_gate.replace("--lib", "--lib --bin gwt");
+        // Local verification includes gwtd's unit harness as well as gwt's.
+        let nightly_gate = gwt_gate.replace("--bins", "--bin gwt");
         assert_eq!(
             workflow_cargo_tests("nightly.yml", "test-windows-default-parallel"),
             vec![format!("{nightly_gate} --no-run"), nightly_gate.clone()],
@@ -1694,11 +1839,8 @@ mod tests {
         );
     }
 
-    // #4182: the Windows narrowing is as small as the evidence. Only the
-    // `gwt` crate's binary targets have ever wedged a Windows host, so only
-    // they are dropped — every other package keeps CI's full gate there,
-    // integration tests included. Narrowing further would trade real
-    // coverage for nothing, which is the #3640 failure mode in reverse.
+    // The controller package excludes integration targets on Windows;
+    // every other package keeps CI's full gate, integration tests included.
     #[test]
     fn windows_narrowing_is_confined_to_the_deadlocking_package() {
         assert_eq!(
@@ -1902,13 +2044,14 @@ mod tests {
         );
     }
 
-    // Unknown surfaces (scripts, CI config) fall back to the conservative
-    // default matrix.
+    // Unknown surfaces retain the fallback matrix for diagnosis, but mark
+    // the uncovered path so automatic registration cannot silently pass.
     #[test]
     fn unknown_surface_gets_conservative_default() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
         write(dir.path(), "scripts/release.sh", "#!/bin/sh\n");
+        write(dir.path(), ".github/workflows/custom.yml", "jobs: {}\n");
 
         let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
         assert!(plan.commands.contains(&CI_CLIPPY_GATE.to_string()));
@@ -1916,5 +2059,73 @@ mod tests {
             .commands
             .contains(&"cargo test -p gwt --all-features".to_string()));
         assert!(plan.surfaces.contains(&"other".to_string()));
+        assert!(plan
+            .surfaces
+            .contains(&"unsupported(scripts/release.sh)".to_string()));
+        assert!(
+            plan.surfaces
+                .contains(&"unsupported(.github/workflows/custom.yml)".to_string()),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn node_scripts_derive_their_existing_tests_without_frontend_classification() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(
+            dir.path(),
+            "scripts/coverage-summary.test.mjs",
+            "import 'node:test';\n",
+        );
+        write(
+            dir.path(),
+            "scripts/tool.test.js",
+            "require('node:test');\n",
+        );
+        git(dir.path(), &["add", "."]);
+        git(
+            dir.path(),
+            &["commit", "-qm", "test: existing Node runners"],
+        );
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(dir.path(), "scripts/coverage-summary.mjs", "export {};\n");
+        write(dir.path(), "scripts/tool.js", "module.exports = {};\n");
+
+        let plan = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            plan.commands.contains(
+                &r#"node --test "scripts/coverage-summary.test.mjs" "scripts/tool.test.js""#
+                    .to_string()
+            ),
+            "{plan:?}"
+        );
+        assert!(
+            plan.surfaces.contains(&"node-tests".to_string()),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .surfaces
+                .iter()
+                .any(|surface| surface.starts_with("frontend")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn node_script_without_tests_is_an_unsupported_surface() {
+        let plan = derive_for(&["scripts/no-tests.mjs", "crates/gwt-core/src/lib.rs"]);
+        assert!(
+            plan.surfaces
+                .contains(&"unsupported(scripts/no-tests.mjs)".to_string()),
+            "{plan:?}"
+        );
+        assert!(plan
+            .commands
+            .contains(&"cargo test -p gwt-core --all-features".to_string()));
     }
 }
