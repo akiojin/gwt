@@ -5,6 +5,16 @@ import path from "node:path";
 import test from "node:test";
 import { build, run, targets } from "./ci-windows-tests.mjs";
 
+test("required Windows CI builds and runs the gate lifecycle regressions", () => {
+  assert.ok(targets("default").some(([pkg, kind, name]) =>
+    pkg === "gwt-terminal" && kind === "test" && name === "pty_start_gate_test"));
+  const workflow = fs.readFileSync(new URL("../.github/workflows/test.yml", import.meta.url), "utf8")
+    .replace(/\r\n/g, "\n");
+  const windowsJob = workflow.split("  test-windows-rust:\n")[1]?.split(/\n  [\w-]+:/)[0];
+  assert.ok(windowsJob?.includes(
+    "node scripts/ci-windows-tests.mjs run gwt-terminal test pty_start_gate_test -- --test-threads=1"));
+});
+
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-windows-tests-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

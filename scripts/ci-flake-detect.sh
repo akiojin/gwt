@@ -18,8 +18,8 @@
 #                          tokens naming the cargo test targets to exercise
 #   GWT_FLAKE_BASE_SHA     PR / merge-group base for changed-file test selection
 #                          (unset keeps full targets for standalone use)
-#   GWT_FLAKE_RUNS         how many consecutive runs to compare (default 20)
-#   GWT_FLAKE_BUDGET_SECS  wall-clock budget for the whole job (default 1800)
+#   GWT_FLAKE_RUNS         integration run ceiling (default 20); libraries use 2
+#   GWT_FLAKE_BUDGET_SECS  test execution budget, excluding compile (default 600)
 #   GWT_FLAKE_MIN_FREE_MB  stop repeating below this much free disk (default 2048)
 #   GWT_FLAKE_LOG_DIR      where per-run logs go (default: a temp dir)
 #
@@ -29,13 +29,12 @@
 #   * Scope is per *target*, not per crate. One `cargo test --workspace
 #     --all-features` costs 11m23s on the CI runner class, so repeating a
 #     changed `gwt` twenty times could not fit any step budget.
-#   * N is a ceiling, not a promise. A changed integration test costs seconds,
-#     so it gets all 20 runs -- the cost model the SPEC assumed ("#4550 は 54
-#     テスト 0.53 秒で、20 回でも 11 秒"). A `--lib` target does not: measured
-#     warm, `cargo test -p gwt --lib` takes 381s and `-p gwt-core --lib` 193s,
-#     which at N=20 would be 127 and 64 minutes. Rather than drop those targets
-#     or hang the job, this times the first run and compares as many further
-#     runs as the budget allows, never fewer than two, and says so in the log.
+#   * Issue #5171 / SPEC #5170: libraries stop at the minimum two runs needed
+#     to compare outcomes. Warm `cargo test -p gwt --lib` takes 381s, so even
+#     those two runs exceed 600s; the comparison guarantee takes precedence.
+#     Integration targets keep a ceiling of 20, reduced by the 600s execution
+#     budget shared across targets. Compile is excluded. The budget never
+#     increases a target's ceiling, and the log states the actual run count.
 #   * Time is not the only budget. On 2026-09-21 a crate-scoped run of PR #4575
 #     caught two genuine flakes (runs 4 and 6) and then filled the runner's
 #     disk; the step summary write failed with "No space left on device", so
@@ -52,7 +51,7 @@ set -uo pipefail
 
 targets="${GWT_FLAKE_TARGETS:-}"
 max_runs="${GWT_FLAKE_RUNS:-20}"
-budget_secs="${GWT_FLAKE_BUDGET_SECS:-1800}"
+budget_secs="${GWT_FLAKE_BUDGET_SECS:-600}"
 min_free_mb="${GWT_FLAKE_MIN_FREE_MB:-2048}"
 
 if [ -z "${targets// /}" ]; then
@@ -138,11 +137,12 @@ outcome_of() {
   local -a filters=()
   if [ -n "$selection" ]; then
     mapfile -t filters <"$selection"
+    filters=(-- --exact "${filters[@]}")
   fi
   # No pipe around cargo: a pipeline would report the status of the tail, so a
   # suite the kernel killed would read as green.
   # shellcheck disable=SC2086 # the selector is a deliberate argument list
-  if cargo test $selector --all-features -- --exact "${filters[@]}" >"$log" 2>&1; then
+  if cargo test $selector --all-features "${filters[@]}" >"$log" 2>&1; then
     status=0
   else
     status=$?
@@ -175,7 +175,7 @@ target_count=0
 for _ in $targets; do target_count=$((target_count + 1)); done
 budget_share=$((budget_secs / target_count))
 
-echo "Flake detection: up to $max_runs runs per target, ${budget_secs}s total budget"
+echo "Flake detection: 2 runs per library, up to $max_runs per integration target, ${budget_secs}s test budget (compile excluded; minimum 2 runs)"
 echo "Targets ($target_count): $targets"
 echo "Logs: $log_dir  (free: $(free_mb)MB, floor: ${min_free_mb}MB)"
 
@@ -193,6 +193,7 @@ done
 
 wobbled=""
 cut_short=""
+test_started=$SECONDS
 for entry in $targets; do
   selector="$(selector_for "$entry")"
   safe="${entry//|/_}"
@@ -225,6 +226,9 @@ for entry in $targets; do
   runs=$((budget_share / elapsed))
   [ "$runs" -gt "$max_runs" ] && runs=$max_runs
   [ "$runs" -lt 2 ] && runs=2
+  case "$entry" in
+    *'|lib|'*) runs=2 ;;
+  esac
 
   echo "$entry: one run took ${elapsed}s; comparing $runs runs (budget share ${budget_share}s)"
   echo "  run 1/$runs: $first"
@@ -232,6 +236,14 @@ for entry in $targets; do
   unstable=false
   completed=1
   for run in $(seq 2 "$runs"); do
+    # Finish the mandatory comparison, then stop admitting runs once the
+    # shared execution budget is spent. A slower later run must not turn the
+    # first run's estimate into another fixed-duration repetition loop.
+    if [ "$run" -gt 2 ] && [ "$((SECONDS - test_started))" -ge "$budget_secs" ]; then
+      cut_short="${cut_short:+$cut_short }$entry(budget:${budget_secs}s)"
+      echo "  stopping after $completed run(s): ${budget_secs}s test execution budget reached"
+      break
+    fi
     # From the third run on. Two runs is the least that can detect anything and
     # is already the floor the time budget guarantees, so there is nothing to
     # protect below it -- stopping at one run would only produce a job that

@@ -14,10 +14,9 @@
 //! - T-055 / AC-6: a separate job re-runs the changed crates' tests at default
 //!   parallelism and fails when the outcome is not stable across runs.
 //!
-//! The flake job must stay off the required-status-check list. Branch
-//! protection reports a skipped job as Success, so a required check gated on
-//! `changes` would let a PR merge without ever having run it — the same
-//! property `ci_concurrency_contract_test.rs` pins for the docs-only filter.
+//! The flake job is a develop required status check. No changed test targets
+//! intentionally means there is nothing to compare; changes with targets run
+//! the detector. Its name and bounded repetition policy are pinned below.
 
 use gwt_core::process::{resolved_command, ProcessPlanRequest};
 use serde_yaml::Value;
@@ -33,7 +32,8 @@ const FLAKE_JOB: &str = "flake-detection";
 const TARGETS_OUTPUT: &str = "flake_targets";
 const CORE_STABILITY_JOB: &str = "test-windows-core-stability";
 
-/// SPEC #4551 plan: "N = 20, 対象は変更されたクレートの test target のみ, 毎 PR".
+/// Issue #5171: integration targets retain their ceiling of 20; libraries stop
+/// after the two runs required to compare outcomes.
 const REQUIRED_FLAKE_RUNS: u32 = 20;
 
 fn repo_root() -> PathBuf {
@@ -179,10 +179,10 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
     );
 }
 
-/// The flake job is gated on `changes`, so it must never carry the name of a
-/// required status check: branch protection reads a skipped job as Success.
+/// Issue #5171 AC-3: preserve the live required check's name and describe its
+/// status consistently in the workflow.
 #[test]
-fn the_flake_detection_job_is_not_a_required_status_check() {
+fn the_flake_detection_job_keeps_its_required_status_check_name() {
     let doc = test_workflow();
     let name = job(&doc, FLAKE_JOB)
         .get("name")
@@ -190,23 +190,10 @@ fn the_flake_detection_job_is_not_a_required_status_check() {
         .unwrap_or(FLAKE_JOB)
         .to_string();
 
-    // Mirror of develop's `required_status_checks.contexts`; kept in step with
-    // `ci_concurrency_contract_test.rs::REQUIRED_CHECKS`.
-    const REQUIRED_CHECKS: &[&str] = &[
-        "Commit Message Lint",
-        "Clippy & Rustfmt",
-        "Test (Rust)",
-        "Build",
-        "Test (Python runner)",
-        "Test (Rust, Windows)",
-        "Cargo Deny (advisories + sources)",
-        "Check (Windows)",
-        "Check (macOS)",
-        "Clippy (macOS)",
-    ];
+    assert_eq!(name, "Flake detection (changed test targets)");
     assert!(
-        !REQUIRED_CHECKS.contains(&name.as_str()),
-        "`{FLAKE_JOB}` is gated on `{CHANGES_JOB}`, so `{name}` must not be a required check"
+        read(TEST_WORKFLOW).contains("Flake detection is a required status check"),
+        "the workflow must document the actual branch protection contract"
     );
 }
 
@@ -224,6 +211,10 @@ fn the_flake_detector_repeats_the_agreed_number_of_times() {
     assert!(
         !workflow.contains("GWT_FLAKE_RUNS"),
         "the workflow must not override the run count; keep N in {FLAKE_SCRIPT}"
+    );
+    assert!(
+        script.contains("GWT_FLAKE_BUDGET_SECS:-600"),
+        "Issue #5171 AC-1: compile-excluded test budget defaults to 600 seconds"
     );
 }
 
