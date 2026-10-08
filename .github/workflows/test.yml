@@ -618,6 +618,7 @@ jobs:
         run: |
           node scripts/ci-windows-tests.mjs run gwt test windows_binary_subsystem_test -- --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt test pty_start_gate_console_test -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt-terminal test pty_start_gate_test -- --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
         shell: bash
