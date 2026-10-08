@@ -584,6 +584,12 @@ fn bin_gwt_test_sources_cover_the_shared_fixture_file() {
         relative_paths.contains("crates/gwt/src/main.rs"),
         "the `--bin gwt` source walk must include the binary root"
     );
+    assert!(
+        relative_paths.iter().any(|path| {
+            path.starts_with("crates/gwt/src/app_runtime/tests/") && path.ends_with("_tests.rs")
+        }),
+        "the `--bin gwt` source walk must include the runtime behavior test modules"
+    );
 }
 
 #[test]

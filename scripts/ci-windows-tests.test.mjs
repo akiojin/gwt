@@ -24,6 +24,14 @@ function artifacts(root, group) {
   });
 }
 
+test("default Windows integration targets use Cargo's consolidated registrations", () => {
+  const manifest = fs.readFileSync(new URL("../crates/gwt/Cargo.toml", import.meta.url), "utf8");
+  const declared = [...manifest.matchAll(/\[\[test\]\]\s+name = "([^"]+)"/g)].map((match) => match[1]);
+  const selected = targets("default").filter(([pkg, kind]) => pkg === "gwt" && kind === "test");
+  assert.equal(new Set(selected.map((target) => target.join("|"))).size, selected.length);
+  for (const [, , name] of selected) assert.ok(declared.includes(name), `${name} must be a Cargo test target`);
+});
+
 test("each feature set builds once and runs the exact target with Cargo's cwd and failure status", (t) => {
   const root = fixture(t);
   for (const group of ["default", "warm"]) {

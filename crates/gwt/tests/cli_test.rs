@@ -11,7 +11,6 @@ use gwt_github::{
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     Cache, SectionName,
 };
-use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
 fn s(v: &str) -> String {
@@ -22,9 +21,8 @@ fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(std::string::ToString::to_string).collect()
 }
 
-fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

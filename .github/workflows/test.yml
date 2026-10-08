@@ -129,6 +129,9 @@ jobs:
               *) continue ;;
             esac
             case "$file" in
+              crates/gwt/tests/*.rs)
+                # Explicit suites map original modules after the file walk.
+                ;;
               "crates/$crate/tests/"*.rs)
                 # Only a direct child of tests/ is its own integration target;
                 # a helper module in a subdirectory is not.
@@ -145,6 +148,10 @@ jobs:
                 ;;
             esac
           done <<<"$files"
+          suite_targets="$(python scripts/test_layout.py targets <<<"$files")"
+          while IFS= read -r target; do
+            [ -z "$target" ] || add_target "$target"
+          done <<<"$suite_targets"
           echo "$files"
           echo "docs_only=$docs_only"
           echo "flake_targets=$flake_targets"
@@ -305,7 +312,7 @@ jobs:
           shared-key: linux-workspace
         continue-on-error: true
       - name: Build infrastructure regression artifacts
-        run: cargo test -p gwt --all-features --lib --test gwtd_cli_test --no-run
+        run: cargo test -p gwt --all-features --lib --test cli_contracts --no-run
         timeout-minutes: 25
       - name: Verify per-test timeout and suite continuation
         run: node scripts/test-nextest-timeout.mjs
@@ -582,8 +589,8 @@ jobs:
       - name: Run managed hook self-heal regressions
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test hook_health_test codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
         timeout-minutes: 15
       - name: Run priority roundtrip from Normal and BelowNormal launchers
         run: node scripts/ci-windows-tests.mjs run gwt-core test process_priority_roundtrip -- --nocapture
@@ -616,8 +623,8 @@ jobs:
       - name: Run Windows PTY start-gate console contracts
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt test windows_binary_subsystem_test -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test pty_start_gate_console_test -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
         shell: bash
@@ -638,11 +645,11 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_scan_now_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1
         timeout-minutes: 15
       - name: Run agent process resolver caller contracts
-        run: node scripts/ci-windows-tests.mjs run gwt test agent_process_resolution_contract_test
+        run: 'node scripts/ci-windows-tests.mjs run gwt test runtime_tests agent_process_resolution_contract_test::'
         timeout-minutes: 15
       - name: Run Windows runtime daemon named-pipe transport contracts
         shell: bash
@@ -664,7 +671,7 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_lease:: -- --test-threads=1
         timeout-minutes: 15
       - name: Run Windows verification driver relink regression
-        run: node scripts/ci-windows-tests.mjs run gwt test verification_driver_cli_test -- --test-threads=1
+        run: 'node scripts/ci-windows-tests.mjs run gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1'
         timeout-minutes: 15
       # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
       # can tell the Issue Monitor its silence is a wait rather than a stall.
@@ -689,7 +696,7 @@ jobs:
       # Issue #4803 AC-4: Linux runs this in the workspace suite; pin it here
       # too so exceeding the deterministic 1500-session Git budget fails CI.
       - name: Check startup update Git-spawn budget
-        run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1
+        run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1
         timeout-minutes: 15
       # Build the second feature set only after default artifacts finish.
       - name: Build warm latency target once
