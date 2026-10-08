@@ -911,8 +911,9 @@ fn evaluate_authenticated_execution_continuation(
 
 fn continuation_requires_new_session(
     project_state_root: &Path,
-    session_id: &str,
+    session: &Session,
 ) -> std::result::Result<bool, AgentWorkspaceUpdateError> {
+    let session_id = session.id.as_str();
     let works = gwt_core::workspace_projection::load_workspace_work_items(project_state_root)
         .map_err(|_| execution_binding_error("execution_continuation_work_unreadable"))?;
     let projection = load_workspace_projection(project_state_root)
@@ -951,7 +952,22 @@ fn continuation_requires_new_session(
             })?;
         return Ok(assigned_work.is_terminal());
     }
-    // Absence on both surfaces is the supported legacy bootstrap case.
+    if let Some(works) = works.as_ref() {
+        let current_work_id = gwt_core::workspace_projection::current_work_id(
+            works,
+            project_state_root,
+            Some(&session.branch),
+            Some(&session.worktree_path),
+        );
+        if works
+            .work_items
+            .iter()
+            .any(|work| Some(work.id.as_str()) == current_work_id.as_deref() && work.is_terminal())
+        {
+            return Ok(true);
+        }
+    }
+    // No canonical terminal Work remains: preserve legacy bootstrap behavior.
     Ok(false)
 }
 
@@ -987,7 +1003,7 @@ pub(crate) fn probe_authenticated_execution_continuation(
             };
             match continuation_requires_new_session(
                 &authority.project_state_root,
-                &authority.session.id,
+                &authority.session,
             ) {
                 Ok(true) => {
                     return RecoveryProbe::unavailable(
@@ -1093,7 +1109,7 @@ fn continue_authenticated_execution_inner(
         authenticated_project_root,
         authenticated_session_id,
     )?;
-    if continuation_requires_new_session(&authority.project_state_root, &authority.session.id)? {
+    if continuation_requires_new_session(&authority.project_state_root, &authority.session)? {
         return Err(AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::RelaunchRequired,
             TERMINAL_WORK_CONTINUATION_GUIDANCE,
@@ -6363,6 +6379,27 @@ mod tests {
                 error.code,
                 AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
             );
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before
+            );
+            // Missing references on both surfaces do not turn a canonical
+            // terminal Work into an unassigned legacy execution.
+            let mut projection = load_workspace_projection(repo).unwrap().unwrap();
+            projection.agents.clear();
+            gwt_core::workspace_projection::save_workspace_projection(repo, &projection).unwrap();
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let error = continue_authenticated_execution(
+                repo,
+                &session.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "issue-5076-missing-both-work-references".to_string(),
+                    readiness_nonce: None,
+                },
+            )
+            .expect_err("canonical terminal Work must not fall back to legacy rebound");
+            assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::RelaunchRequired);
             assert_eq!(
                 ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
                 before
