@@ -1879,6 +1879,7 @@ fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() 
     codex.model = Some("saved-codex-model".into());
     codex.fast_mode = true;
     let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         max_active_agents: 7,
         launch_usage_threshold_percent: 83,
         ..Default::default()

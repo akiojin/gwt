@@ -63,6 +63,7 @@ mod tests {
     fn monitor_with_pool_holding(agents: &[&str], holds: &[(&str, &str)]) -> IssueMonitorState {
         let mut prefs = IssueMonitorPrefs {
             enabled: true,
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             provider_quota_holds: holds
                 .iter()
                 .map(|(provider, reset_at)| (provider.to_string(), reset_at.to_string()))

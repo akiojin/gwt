@@ -5,6 +5,7 @@ use std::{
     path::Path,
 };
 
+use crate::agent_capacity::AgentCapacity;
 use crate::autonomous_handoff::{
     parse_protected_autonomous_handoff_answer_prompt, protected_autonomous_handoff_answer_prompt,
     AutonomousHandoffDeliveryState, AutonomousHandoffDeliveryTarget,
@@ -916,10 +917,21 @@ pub struct IssueClosureRecord {
     pub reopened_after_close: bool,
 }
 
+/// Missing provenance preserves positive limits written by older versions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorMaxActiveMode {
+    Auto,
+    #[default]
+    Manual,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
+    #[serde(default)]
+    pub max_active_agents_mode: IssueMonitorMaxActiveMode,
     pub priority_order: Vec<u64>,
     /// Project-local any-of admission; an empty list preserves existing policy.
     #[serde(default)]
@@ -1201,6 +1213,7 @@ impl Default for IssueMonitorPrefs {
         Self {
             enabled: false,
             max_active_agents: 1,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
             priority_order: Vec::new(),
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
@@ -3344,6 +3357,10 @@ pub struct IssueMonitorStatusView {
     pub other_terminal_queue_count: usize,
     pub active_count: usize,
     pub max_active_agents: usize,
+    #[serde(default)]
+    pub max_active_agents_override: Option<usize>,
+    #[serde(default)]
+    pub agent_capacity: AgentCapacity,
     pub total_candidates: usize,
     pub active_issue_number: Option<u64>,
     pub last_scan_at: Option<String>,
@@ -3539,6 +3556,10 @@ pub struct IssueMonitorAgentStatus {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub active_launches_incomplete: bool,
     pub max_active: usize,
+    #[serde(default)]
+    pub max_active_agents_override: Option<usize>,
+    #[serde(default)]
+    pub agent_capacity: AgentCapacity,
     pub enabled: bool,
     /// Issue #4273: the authoritative GUI projection; absent in older daemons.
     #[serde(default)]
@@ -4474,6 +4495,11 @@ pub struct IssueMonitorState {
     #[serde(default)]
     label_excluded_issues: BTreeSet<u64>,
     pub config: IssueMonitorConfig,
+    #[serde(default)]
+    max_active_agents_mode: IssueMonitorMaxActiveMode,
+    /// Machine observations are refreshed separately and never stored in prefs.
+    #[serde(skip)]
+    agent_capacity: AgentCapacity,
     pub gui_connected: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
     legacy_git_launch_failure_migration_version: u32,
@@ -6818,6 +6844,8 @@ impl IssueMonitorState {
         Self {
             queue_label_observation: None,
             config,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            agent_capacity: AgentCapacity::default(),
             gui_connected: false,
             inbox: Vec::new(),
             legacy_git_launch_failure_migration_version:
@@ -6904,6 +6932,8 @@ impl IssueMonitorState {
         config.enabled = prefs.enabled;
         config.max_active = prefs.max_active_agents.max(1);
         let mut state = Self::new(config);
+        state.max_active_agents_mode = prefs.max_active_agents_mode;
+        state.apply_agent_capacity_limit();
         state.legacy_git_launch_failure_migration_version =
             prefs.legacy_git_launch_failure_migration_version;
         state.launch_profiles = prefs.launch_profile_pool();
@@ -7072,7 +7102,9 @@ impl IssueMonitorState {
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
             enabled: self.config.enabled,
-            max_active_agents: self.config.max_active.max(1),
+            // Auto's recommendation is machine state, not a saved project limit.
+            max_active_agents: self.max_active_agents_override().unwrap_or(1),
+            max_active_agents_mode: self.max_active_agents_mode,
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
@@ -9441,7 +9473,55 @@ impl IssueMonitorState {
     }
 
     pub fn set_max_active_agents(&mut self, max_active_agents: usize) {
-        self.config.max_active = max_active_agents.max(1);
+        self.set_max_active_agents_override(Some(max_active_agents));
+    }
+
+    /// `None` returns to measured Auto admission; positive values are Manual.
+    pub fn set_max_active_agents_override(&mut self, max_active_agents: Option<usize>) {
+        match max_active_agents {
+            Some(value) => {
+                self.max_active_agents_mode = IssueMonitorMaxActiveMode::Manual;
+                self.config.max_active = value.max(1);
+            }
+            None => {
+                self.max_active_agents_mode = IssueMonitorMaxActiveMode::Auto;
+                self.apply_agent_capacity_limit();
+            }
+        }
+    }
+
+    pub fn max_active_agents_override(&self) -> Option<usize> {
+        (self.max_active_agents_mode == IssueMonitorMaxActiveMode::Manual)
+            .then_some(self.config.max_active.max(1))
+    }
+
+    pub fn effective_max_active_agents(&self) -> usize {
+        match self.max_active_agents_mode {
+            IssueMonitorMaxActiveMode::Manual => self.config.max_active.max(1),
+            IssueMonitorMaxActiveMode::Auto
+                if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() =>
+            {
+                self.agent_capacity.recommended_worker_limit
+            }
+            IssueMonitorMaxActiveMode::Auto => 0,
+        }
+    }
+
+    fn apply_agent_capacity_limit(&mut self) {
+        self.config.max_active = self.effective_max_active_agents();
+    }
+
+    pub fn set_agent_capacity(&mut self, capacity: AgentCapacity) {
+        self.agent_capacity = capacity;
+        self.apply_agent_capacity_limit();
+    }
+
+    pub fn refresh_agent_capacity(&mut self, project_root: &Path) {
+        self.set_agent_capacity(crate::agent_capacity::project_capacity(
+            project_root,
+            &BTreeSet::new(),
+            self.review_windows.len(),
+        ));
     }
 
     /// Put back the durable scan timestamp after a projection-only rebuild.
@@ -9837,6 +9917,8 @@ impl IssueMonitorState {
             .unwrap_or_default();
         self.config.enabled = disk.enabled;
         self.config.max_active = disk.max_active_agents.max(1);
+        self.max_active_agents_mode = disk.max_active_agents_mode;
+        self.apply_agent_capacity_limit();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.priority_order = disk.priority_order.clone();
         self.terminal_queues = disk.terminal_queues.clone();
@@ -11586,7 +11668,7 @@ impl IssueMonitorState {
         if let Some(hold) = self.launch_admission_hold_at(now) {
             return Some(hold);
         }
-        let (available, candidates) = self.claim_probe_plan(self.config.max_active.max(1));
+        let (available, candidates) = self.claim_probe_plan(self.effective_max_active_agents());
         if available == 0 {
             return Some(Reason::MaxActiveSaturated);
         }
@@ -11818,7 +11900,9 @@ impl IssueMonitorState {
             unqueued_open_count,
             other_terminal_queue_count,
             active_count: self.active_count(),
-            max_active_agents: self.config.max_active,
+            max_active_agents: self.effective_max_active_agents(),
+            max_active_agents_override: self.max_active_agents_override(),
+            agent_capacity: self.agent_capacity.clone(),
             total_candidates: self.inbox.len(),
             active_issue_number: self.active_issue_number(),
             last_scan_at: self.last_scan_at.clone(),
@@ -12101,7 +12185,9 @@ impl IssueMonitorState {
             occupied_slot_count: Some(self.occupied_slot_count()),
             pending_claim_issues: Some(self.pending_claim_issue_numbers().into_iter().collect()),
             active_launches_incomplete: false,
-            max_active: self.config.max_active.max(1),
+            max_active: self.effective_max_active_agents(),
+            max_active_agents_override: self.max_active_agents_override(),
+            agent_capacity: self.agent_capacity.clone(),
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),
             autonomous_mode: self.autonomous_mode,
@@ -13114,7 +13200,7 @@ impl IssueMonitorState {
             .collect();
         IssueMonitorSlotOccupancy {
             occupied: self.occupied_slot_count(),
-            max_active: self.config.max_active.max(1),
+            max_active: self.effective_max_active_agents(),
             occupants,
         }
     }
@@ -13148,6 +13234,10 @@ impl IssueMonitorState {
     /// Check the current cap at the final boundary before adding a pane.
     /// Only a reservation that has not become a pane supplies its own slot.
     pub fn has_capacity_for_monitor_spawn(&self, issue_number: u64, review_dispatch: bool) -> bool {
+        let max_active = self.effective_max_active_agents();
+        if max_active == 0 {
+            return false;
+        }
         let reserved = if review_dispatch {
             self.review_windows
                 .get(&issue_number)
@@ -13170,9 +13260,28 @@ impl IssueMonitorState {
                             })
                     })
         };
-        self.occupied_slot_count()
-            .saturating_sub(usize::from(reserved))
-            < self.config.max_active.max(1)
+        if reserved {
+            if review_dispatch {
+                if let Some(position) = self
+                    .pending_review_dispatches
+                    .iter()
+                    .position(|dispatch| dispatch.issue_number == issue_number)
+                {
+                    return position < self.remaining_materialization_slots();
+                }
+            } else if let Some(delivery) = self
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| delivery.issue_number == issue_number)
+            {
+                return self.can_materialize_delivery(delivery, None);
+            }
+        }
+        let own_issued_reservation = reserved
+            && (review_dispatch || !self.unissued_launch_reservations().contains(&issue_number));
+        self.issued_slot_count()
+            .saturating_sub(usize::from(own_issued_reservation))
+            < max_active
     }
 
     fn forget_review_window(&mut self, issue_number: u64) {
@@ -13208,7 +13317,7 @@ impl IssueMonitorState {
                 ),
             }
         } else {
-            let max_active = self.config.max_active.max(1);
+            let max_active = self.effective_max_active_agents();
             let occupied = self.occupied_slot_count();
             if occupied < max_active {
                 return None;
@@ -14574,7 +14683,7 @@ impl IssueMonitorState {
     }
 
     pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
-        let max_active = self.config.max_active.max(1);
+        let max_active = self.effective_max_active_agents();
         if !self.gui_connected
             || self.occupied_slot_count() >= max_active
             || self.launch_admission_is_held_at(now)
@@ -14623,7 +14732,7 @@ impl IssueMonitorState {
             client,
             owner,
             now,
-            self.config.max_active.max(1),
+            self.effective_max_active_agents(),
         )
     }
 
@@ -14693,7 +14802,7 @@ impl IssueMonitorState {
     /// commit anything. The planner below only ever walks this list, so a scan
     /// only ever needs to probe this list.
     pub fn claim_probe_plan(&self, active_cap: usize) -> (usize, Vec<u64>) {
-        let max_active = self.config.max_active.max(1).min(active_cap);
+        let max_active = self.effective_max_active_agents().min(active_cap);
         if !self.config.enabled || max_active == 0 {
             return (0, Vec::new());
         }
@@ -14862,7 +14971,7 @@ impl IssueMonitorState {
         // are consumed, so a lapsed claim can never starve its issue.
         self.requeue_expired_claim_blocks(now);
         let mut launches = Vec::new();
-        let max_active = self.config.max_active.max(1).min(active_cap);
+        let max_active = self.effective_max_active_agents().min(active_cap);
         if max_active == 0 || self.launch_admission_is_held_at(now) {
             return launches;
         }
@@ -14976,31 +15085,28 @@ impl IssueMonitorState {
             .iter()
             .map(|delivery| delivery.issue_number)
             .collect::<BTreeSet<_>>();
-        let pending = std::mem::take(&mut self.pending_launches);
-        let mut requests = Vec::new();
-        for request in pending {
-            if durable_issue_numbers.contains(&request.issue_number) {
-                continue;
-            }
-            if self.has_capacity_for_monitor_spawn(request.issue_number, false) {
-                requests.push(request);
-            } else {
-                self.pending_launches.push_back(request);
-            }
-        }
+        self.pending_launches
+            .retain(|request| !durable_issue_numbers.contains(&request.issue_number));
+        let count = self
+            .remaining_materialization_slots()
+            .min(self.pending_launches.len());
+        let mut requests = self.pending_launches.drain(..count).collect::<Vec<_>>();
         requests.extend(
             self.pending_launch_deliveries
                 .iter()
-                .filter(|delivery| {
-                    self.launch_delivery_can_reack(delivery)
-                        || self.has_capacity_for_monitor_spawn(delivery.issue_number, false)
-                })
-                .map(|delivery| IssueMonitorLaunchRequest {
-                    issue_number: delivery.issue_number,
-                    branch_name: delivery.branch_name.clone(),
-                    linked_issue_kind: delivery.linked_issue_kind,
-                    delivery_id: Some(delivery.delivery_id.clone()),
-                    launch_session_strategy: delivery.launch_session_strategy,
+                .filter_map(|delivery| {
+                    if !self.launch_delivery_can_reack(delivery)
+                        && !self.can_materialize_delivery(delivery, None)
+                    {
+                        return None;
+                    }
+                    Some(IssueMonitorLaunchRequest {
+                        issue_number: delivery.issue_number,
+                        branch_name: delivery.branch_name.clone(),
+                        linked_issue_kind: delivery.linked_issue_kind,
+                        delivery_id: Some(delivery.delivery_id.clone()),
+                        launch_session_strategy: delivery.launch_session_strategy,
+                    })
                 }),
         );
         requests
@@ -15051,7 +15157,89 @@ impl IssueMonitorState {
 
     /// Drain queued review-agent spawn requests for emission to the GUI.
     pub fn take_pending_review_dispatches(&mut self) -> Vec<AutonomousReviewDispatch> {
-        self.pending_review_dispatches.drain(..).collect()
+        let available = self.remaining_materialization_slots();
+        let count = available.min(self.pending_review_dispatches.len());
+        self.pending_review_dispatches.drain(..count).collect()
+    }
+
+    fn unissued_launch_reservations(&self) -> BTreeSet<u64> {
+        let durable = self
+            .pending_launch_deliveries
+            .iter()
+            .map(|delivery| delivery.issue_number)
+            .collect::<BTreeSet<_>>();
+        self.pending_launch_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && delivery.materialized_window_id.is_none()
+                    && !self.launched_windows.contains_key(&delivery.issue_number)
+            })
+            .map(|delivery| delivery.issue_number)
+            .chain(self.pending_launches.iter().filter_map(|request| {
+                (!durable.contains(&request.issue_number)).then_some(request.issue_number)
+            }))
+            .filter(|issue_number| self.active_launches.contains(issue_number))
+            .collect()
+    }
+
+    fn issued_slot_count(&self) -> usize {
+        let queued_reviews = self
+            .pending_review_dispatches
+            .iter()
+            .filter(|dispatch| {
+                self.review_windows
+                    .get(&dispatch.issue_number)
+                    .is_some_and(|window| {
+                        window.pr_number == dispatch.pr_number && window.window_id.is_none()
+                    })
+            })
+            .count();
+        self.occupied_slot_count()
+            .saturating_sub(self.unissued_launch_reservations().len())
+            .saturating_sub(queued_reviews)
+    }
+
+    fn remaining_materialization_slots(&self) -> usize {
+        self.effective_max_active_agents()
+            .saturating_sub(self.issued_slot_count())
+    }
+
+    fn can_materialize_delivery(
+        &self,
+        delivery: &PendingIssueMonitorLaunchDelivery,
+        window_id: Option<&str>,
+    ) -> bool {
+        let matches_window = |existing: &str| {
+            window_id.is_none_or(|incoming| issue_monitor_window_ids_match(existing, incoming))
+        };
+        if delivery
+            .materialized_window_id
+            .as_deref()
+            .is_some_and(matches_window)
+            || self
+                .launched_windows
+                .get(&delivery.issue_number)
+                .is_some_and(|existing| matches_window(existing))
+        {
+            return true;
+        }
+        let max_active = self.effective_max_active_agents();
+        if max_active == 0 {
+            return false;
+        }
+        if delivery.materializer_id.is_some()
+            || self.launched_windows.contains_key(&delivery.issue_number)
+        {
+            // A claim or legacy ACK already occupies this Issue's slot.
+            return self.issued_slot_count() <= max_active;
+        }
+        let unissued = self.unissued_launch_reservations();
+        self.pending_launch_deliveries
+            .iter()
+            .filter(|pending| unissued.contains(&pending.issue_number))
+            .position(|pending| pending.delivery_id == delivery.delivery_id)
+            .is_some_and(|position| position < self.remaining_materialization_slots())
     }
 
     /// SPEC #3200 FR-034 (T-111): queue an operator notice for an unattended
@@ -15226,7 +15414,7 @@ impl IssueMonitorState {
                 item.state == MonitorInboxState::Queued
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_observed_monitor_runtime(issue_number)
-                    && self.occupied_slot_count() < self.config.max_active.max(1)
+                    && self.occupied_slot_count() < self.effective_max_active_agents()
             })
             .map(|item| item.issue.clone())
         else {
@@ -15363,7 +15551,13 @@ impl IssueMonitorState {
         let recorded_pane = same_materializer
             && delivery.materializer_pid == Some(materializer_pid)
             && delivery.materializer_window_id.as_deref() == Some(materializer_window_id)
-            && self.launch_delivery_can_reack(delivery);
+            && (self.launch_delivery_can_reack(delivery)
+                || self
+                    .launched_windows
+                    .get(&issue_number)
+                    .is_some_and(|window| {
+                        issue_monitor_window_ids_match(window, materializer_window_id)
+                    }));
         let observed_pane = self.window_snapshot.as_ref().is_some_and(|snapshot| {
             self.fresh_window_snapshot(
                 self.last_scan_at
@@ -15392,7 +15586,7 @@ impl IssueMonitorState {
         if !recorded_pane
             && !observed_pane
             && (self.has_monitor_pane_for_issue(issue_number)
-                || !self.has_capacity_for_monitor_spawn(issue_number, false))
+                || !self.can_materialize_delivery(delivery, Some(materializer_window_id)))
         {
             return false;
         }
@@ -20003,6 +20197,372 @@ fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn agent_capacity_new_preferences_wait_for_measurement() {
+        let prefs = IssueMonitorPrefs::default();
+        let saved = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(saved["max_active_agents_mode"], "auto");
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.config.max_active, 0);
+        assert_eq!(monitor.status_view().max_active_agents, 0);
+        assert_eq!(monitor.agent_status().max_active, 0);
+    }
+
+    #[test]
+    fn agent_capacity_legacy_positive_preferences_remain_manual() {
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(r#"{"enabled":false,"max_active_agents":1,"priority_order":[]}"#)
+                .unwrap();
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.config.max_active, 1);
+        let saved = serde_json::to_value(monitor.prefs()).unwrap();
+        assert_eq!(saved["max_active_agents_mode"], "manual");
+        assert_eq!(saved["max_active_agents"], 1);
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(saved).unwrap(),
+        );
+        assert_eq!(restored.config.max_active, 1);
+    }
+
+    #[test]
+    fn agent_capacity_unmeasured_auto_holds_implementation_and_review() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], IDLE_NOW);
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+        assert_eq!(monitor.claim_probe_plan(8), (0, Vec::new()));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert!(monitor
+            .review_dispatch_hold(42, 420, None, IDLE_NOW)
+            .is_some());
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    }
+
+    #[test]
+    fn agent_capacity_auto_tracks_measurements_and_manual_override_survives() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs::default(),
+        );
+        let capacity = AgentCapacity {
+            measurement_complete: true,
+            machine_budget: Some(4),
+            recommended_worker_limit: 3,
+            recommended_implementation_count: 3,
+            recommended_total_count: 4,
+            ..AgentCapacity::default()
+        };
+        monitor.set_agent_capacity(capacity.clone());
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        monitor.set_max_active_agents(8);
+        monitor.set_agent_capacity(capacity.clone());
+        assert_eq!(monitor.effective_max_active_agents(), 8);
+        assert_eq!(monitor.max_active_agents_override(), Some(8));
+        let manual = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(manual.max_active_agents_override(), Some(8));
+        monitor.set_max_active_agents_override(None);
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        let saved = serde_json::to_value(monitor.prefs()).unwrap();
+        assert_eq!(saved["max_active_agents_mode"], "auto");
+        assert_eq!(saved["max_active_agents"], 1);
+        assert!(saved.get("agent_capacity").is_none());
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert_eq!(
+            status["max_active_agents_override"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            status["gui_status"]["max_active_agents_override"],
+            serde_json::Value::Null
+        );
+        assert_eq!(status["agent_capacity"]["recommended_worker_limit"], 3);
+        assert_eq!(
+            status["gui_status"]["agent_capacity"],
+            status["agent_capacity"]
+        );
+        assert_eq!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs())
+                .effective_max_active_agents(),
+            0
+        );
+    }
+
+    #[test]
+    fn agent_capacity_zero_cap_preserves_running_bindings_and_survives_rebase() {
+        let mut monitor = launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            machine_budget: Some(0),
+            ..AgentCapacity::default()
+        });
+        monitor.set_max_active_agents_override(None);
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 1);
+        assert!(monitor
+            .review_dispatch_hold(41, 410, None, IDLE_NOW)
+            .is_some());
+        let saved = monitor.prefs();
+        monitor.refresh_disk_owned_prefs(&saved);
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
+    fn agent_capacity_expired_measurement_stops_new_admissions() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs::default(),
+        );
+        let mut capacity = serde_json::to_value(AgentCapacity {
+            measurement_complete: true,
+            machine_budget: Some(4),
+            recommended_worker_limit: 3,
+            ..AgentCapacity::default()
+        })
+        .unwrap();
+        capacity["observed_at"] = serde_json::json!(1);
+        capacity["expires_at"] = serde_json::json!(2);
+        monitor.set_agent_capacity(serde_json::from_value(capacity).unwrap());
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert!(monitor
+            .review_dispatch_hold(42, 420, None, IDLE_NOW)
+            .is_some());
+    }
+
+    #[test]
+    fn agent_capacity_review_outbox_waits_for_capacity_and_resumes_its_reserved_slot() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(2);
+        let dispatch = review_dispatch_for(41, 410);
+        monitor.dispatch_review(dispatch.clone(), IDLE_NOW).unwrap();
+        monitor.set_agent_capacity(AgentCapacity::default());
+        monitor.set_max_active_agents_override(None);
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+        assert!(!monitor.has_capacity_for_monitor_spawn(41, true));
+        assert_eq!(monitor.review_windows().len(), 1);
+        assert_eq!(monitor.active_count(), 1);
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..AgentCapacity::default()
+        });
+        assert_eq!(monitor.take_pending_review_dispatches(), vec![dispatch]);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+    }
+
+    #[test]
+    fn agent_capacity_review_outbox_only_emits_the_remaining_capacity() {
+        let mut monitor =
+            autonomous_launched_cohort(&[(41, "tab-1::impl-41"), (42, "tab-1::impl-42")]);
+        monitor.set_max_active_agents(4);
+        let first = review_dispatch_for(41, 410);
+        let second = review_dispatch_for(42, 420);
+        monitor.dispatch_review(first.clone(), IDLE_NOW).unwrap();
+        monitor.dispatch_review(second.clone(), IDLE_NOW).unwrap();
+        monitor.set_max_active_agents(3);
+        assert_eq!(monitor.take_pending_review_dispatches(), vec![first]);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+        monitor.forget_review_window(41);
+        assert_eq!(monitor.take_pending_review_dispatches(), vec![second]);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, true));
+    }
+
+    #[test]
+    fn agent_capacity_launch_delivery_waits_for_fresh_capacity_before_materializing() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        monitor.set_max_active_agents_override(None);
+        let held = monitor.prefs();
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert_eq!(monitor.prefs(), held);
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 1,
+            ..AgentCapacity::default()
+        });
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+    }
+
+    #[test]
+    fn agent_capacity_reduced_launch_delivery_budget_keeps_later_reservations() {
+        let mut monitor = launched_cohort(&[(40, "tab-1::impl-40")]);
+        monitor.set_max_active_agents(3);
+        for number in [41, 42] {
+            monitor.terminal_queue_push(&[number], "test", IDLE_NOW);
+            monitor.record_candidate(issue(number));
+            assert!(monitor.apply_confirmed_claim(
+                number,
+                format!("claim-{number}"),
+                "owner",
+                &format!("effect-{number}"),
+                IDLE_NOW
+            ));
+        }
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..AgentCapacity::default()
+        });
+        monitor.set_max_active_agents_override(None);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert_eq!(
+            monitor
+                .take_pending_launch_requests()
+                .iter()
+                .map(|request| request.issue_number)
+                .collect::<Vec<_>>(),
+            vec![41]
+        );
+        assert!(monitor.claim_launch_delivery(
+            41,
+            "launch:effect-41",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-41",
+            |_| false
+        ));
+        assert!(monitor.has_capacity_for_monitor_spawn(41, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 2);
+        assert_eq!(monitor.active_count(), 3);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 1);
+    }
+
+    #[test]
+    fn agent_capacity_materialized_delivery_ack_survives_zero_capacity() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui",
+            "tab-1::agent-42"
+        ));
+        monitor.set_max_active_agents_override(None);
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::replacement-42",
+            |_| false
+        ));
+        monitor
+            .pending_launch_deliveries
+            .front_mut()
+            .unwrap()
+            .materialized_window_id = None;
+        monitor
+            .launched_windows
+            .insert(42, "tab-1::agent-42".to_string());
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+    }
+
+    #[test]
+    fn agent_capacity_review_and_launch_outboxes_share_one_remaining_slot() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+            .unwrap();
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..AgentCapacity::default()
+        });
+        monitor.set_max_active_agents_override(None);
+        assert_eq!(monitor.take_pending_review_dispatches().len(), 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        monitor.forget_review_window(41);
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+    }
+
     fn label_allowlist_monitor(labels: &[&str]) -> IssueMonitorState {
         let mut saved = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
         saved["allowed_labels"] = serde_json::json!(labels);
@@ -20353,6 +20913,8 @@ mod tests {
                 occupied_slot_count: Some(0),
                 pending_claim_issues: Some(Vec::new()),
                 max_active: 3,
+                max_active_agents_override: Some(3),
+                agent_capacity: AgentCapacity::default(),
                 enabled: true,
                 gui_status: Some(monitor.status_view()),
                 autonomous_mode: false,
@@ -20604,6 +21166,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 1,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-1".to_string(),
@@ -20686,6 +21249,7 @@ mod tests {
     #[test]
     fn launch_now_priority_head_claims_the_target_once_across_rescans() {
         let prefs = IssueMonitorPrefs {
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             // exactly what run_monitor_launch_now writes for issue 7
             priority_order: vec![7],
             ..IssueMonitorPrefs::default()
@@ -20847,6 +21411,7 @@ mod tests {
         let stale_prefs = IssueMonitorPrefs {
             // This fixture tests snapshot provenance with two in-flight entries.
             max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-a::agent-1".to_string(),
@@ -20898,6 +21463,7 @@ mod tests {
             // drop persisted launches beyond `max_active`, and this fixture is
             // about window provenance, not slot accounting.
             max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: vec![
                 IssueMonitorLaunchedIssue {
                     issue_number: 42,
@@ -21309,6 +21875,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -21858,6 +22425,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 5,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-42".to_string(),
@@ -21902,6 +22470,7 @@ mod tests {
         let disk = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 5,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             merged_issues: vec![42, 43, 44, 45, 88],
             autonomous_mode: true,
             ..IssueMonitorPrefs::default()
@@ -23127,6 +23696,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -23197,6 +23767,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 4,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -23225,6 +23796,7 @@ mod tests {
                 IssueMonitorPrefs {
                     enabled: true,
                     max_active_agents: 1,
+                    max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                     launch_profile: Some(test_launch_profile("codex")),
                     ..IssueMonitorPrefs::default()
                 },
@@ -23349,6 +23921,7 @@ mod tests {
     fn a_pool_gate_only_closes_when_every_provider_is_held() {
         let pool_prefs = |holds: BTreeMap<String, String>| {
             let mut prefs = IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 provider_quota_holds: holds,
                 ..IssueMonitorPrefs::default()
@@ -23420,6 +23993,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 3,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -23509,6 +24083,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
@@ -23569,6 +24144,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
@@ -23610,6 +24186,7 @@ mod tests {
         let mut held = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 provider_quota_holds: BTreeMap::from([(
@@ -23674,6 +24251,7 @@ mod tests {
         let mut prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 8,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             ..IssueMonitorPrefs::default()
         };
         prefs.set_launch_profile_pool(vec![
@@ -23913,6 +24491,7 @@ mod tests {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 autonomous_mode: true,
                 launch_profile: Some(test_launch_profile("ClaudeCode")),
@@ -24060,6 +24639,7 @@ mod tests {
         let mut base = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 provider_quota_holds: BTreeMap::from([(
@@ -24109,6 +24689,7 @@ mod tests {
         let mut no_profile = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 provider_quota_holds: BTreeMap::from([(
                     "codex".to_string(),
@@ -24145,6 +24726,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 8,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -24267,6 +24849,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 8,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -24358,6 +24941,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 4,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -24595,6 +25179,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -25095,6 +25680,7 @@ mod tests {
         let prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 5,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: (1..=11)
                 .map(|issue_number| IssueMonitorLaunchedIssue {
                     issue_number,
@@ -25146,6 +25732,7 @@ mod tests {
         let prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: (1..=4)
                 .map(|issue_number| IssueMonitorLaunchedIssue {
                     issue_number,
@@ -25213,6 +25800,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: bindings.len(),
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -31683,6 +32271,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -31727,6 +32316,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -31775,6 +32365,7 @@ mod tests {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -31866,6 +32457,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -31940,6 +32532,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -38816,6 +39409,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -38902,6 +39496,7 @@ mod tests {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
@@ -38949,6 +39544,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -38999,6 +39595,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );

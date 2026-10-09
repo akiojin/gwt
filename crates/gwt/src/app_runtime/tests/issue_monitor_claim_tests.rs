@@ -230,6 +230,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     gwt::save_issue_monitor_prefs(
         &prefs_path,
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             effect_authority_epoch: 7,
             pending_effects: journal.clone(),
             max_active_agents: 1,
@@ -244,7 +245,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     let max_events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetIssueMonitorMaxActiveAgents {
-            max_active_agents: 4,
+            max_active_agents: Some(4),
         },
     );
     let reorder_events = runtime.handle_frontend_event(
@@ -440,6 +441,7 @@ fn app_runtime_issue_monitor_queue_push_adds_only_to_the_local_terminal_queue() 
     };
     let host = gwt::process::current_hostname();
     let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         max_active_agents: 1,
         ..gwt::IssueMonitorPrefs::default()
     };
@@ -511,6 +513,7 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
     };
     let host = gwt::process::current_hostname();
     let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         max_active_agents: 1,
         ..gwt::IssueMonitorPrefs::default()
     };
@@ -830,6 +833,7 @@ fn app_runtime_gui_rebase_persist_deadline_expiry_fails_closed_and_restores_disk
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     let disk = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 2,
         ..gwt::IssueMonitorPrefs::default()
@@ -1181,6 +1185,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
     let mut monitor = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             effect_authority_epoch: 7,
             pending_effects: vec![journal.clone()],
@@ -2188,6 +2193,7 @@ fn app_runtime_restart_after_manual_drain_restores_pre_drain_monitor_setting() {
         gwt::save_issue_monitor_prefs(
             &prefs_path,
             &gwt::IssueMonitorPrefs {
+                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: enabled_before_drain,
                 autonomous_mode: false,
                 max_active_agents: 2,
@@ -2789,6 +2795,53 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
         persisted.failed_issues.is_empty(),
         "marker and cleanup are persisted by the final atomic save"
     );
+    #[cfg(not(unix))]
+    {
+        let mut enabled = persisted;
+        enabled.enabled = true;
+        enabled.max_active_agents_mode = gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto;
+        enabled.launch_profile = Some(sample_issue_monitor_launch_profile());
+        gwt::save_issue_monitor_prefs(&prefs_path, &enabled).expect("enable Auto scan");
+        let observed_at = chrono::Utc::now().timestamp() as u64;
+        let measured_root = dunce::canonicalize(&repo).expect("measured project");
+        let machine_state = gwt_core::paths::gwt_home().join("machine-state");
+        fs::create_dir_all(&machine_state).expect("machine state");
+        fs::write(
+            machine_state.join("agent-capacity.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "observed_at": observed_at, "expires_at": observed_at + 30,
+                "performance_cores": 8, "gui_cpu_millicores": 0,
+                "available_ram_bytes": 80, "per_agent_ram_bytes": 10,
+                "free_disk_bytes": 100,
+                "targets": {measured_root.join("target").to_string_lossy(): {"bytes": 10, "observed_at": observed_at}},
+                "disk_observations": {measured_root.to_string_lossy(): {"available_bytes": 100, "observed_at": observed_at}}
+            }))
+            .expect("capacity snapshot"),
+        )
+        .expect("fresh capacity snapshot");
+        let capacity = gwt::agent_capacity::project_capacity(&repo, &Default::default(), 0);
+        assert!(capacity.measurement_complete, "{}", capacity.reason);
+        let probed = Arc::new(Mutex::new(Vec::new()));
+        let _hook = super::super::set_local_completion_probe_test_hook({
+            let probed = Arc::clone(&probed);
+            move |issue_number| {
+                probed.lock().expect("probe log").push(issue_number);
+                Err(gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Deadline(
+                    gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                        gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                        "test stops after reaching the Auto admission probe",
+                    ),
+                ))
+            }
+        });
+        let _events = runtime.local_issue_monitor_events_with_policy(
+            &runtime.test_context(),
+            Some("client-1"),
+            super::super::IssueMonitorScanPolicy::Scan,
+            |_| {},
+        );
+        assert_eq!(probed.lock().expect("probe log").as_slice(), &[43]);
+    }
 }
 
 #[cfg(unix)]
@@ -3175,6 +3228,8 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let writer_failure = failure.clone();
     let writer_repo = repo.clone();
     let writer = thread::spawn(move || {
+        // Keep callsite interest dynamic if a subscriber-free sibling registers the WARN first.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let subscriber = tracing_subscriber::registry().with(PrefsLockContentionLayer {
             sender: Mutex::new(Some(contention_tx)),
         });
@@ -3205,6 +3260,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         let implementing =
             issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 1);
         let migrated = gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 4,
             priority_order: vec![99, 42],
@@ -3483,6 +3539,7 @@ fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
     let disk_only = issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 3);
     let disk = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 4,
         priority_order: vec![99, 42],
@@ -3499,6 +3556,7 @@ fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let mut stale = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: false,
             max_active_agents: 1,
             priority_order: vec![42],
@@ -3781,6 +3839,15 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 1,
+            ..Default::default()
+        },
+    )
+    .expect("seed positive Monitor pane capacity");
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let mut previous = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
@@ -4729,6 +4796,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 5,
             ..queued_issue_monitor_prefs(&[42])
@@ -4817,6 +4885,15 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
 
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 1,
+            ..Default::default()
+        },
+    )
+    .expect("seed positive Monitor pane capacity");
     fs::write(
         repo.join("docker-compose.yml"),
         "services:\n  app:\n    image: alpine:3.20\n",

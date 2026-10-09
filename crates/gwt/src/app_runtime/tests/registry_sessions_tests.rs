@@ -1351,6 +1351,7 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
     gwt::save_issue_monitor_prefs(
         &prefs_path,
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             ..gwt::IssueMonitorPrefs::default()
