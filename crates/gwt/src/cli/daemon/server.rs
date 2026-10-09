@@ -892,6 +892,7 @@ fn spawn_issue_monitor_worker_with_lease(
         };
         let mut interval =
             tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
+        let mut capacity_interval = tokio::time::interval(Duration::from_secs(5));
         let mut revision = 0_u64;
         let mut scan_requested = false;
         let mut in_flight_scan: Option<InFlightIssueMonitorScan> = None;
@@ -1009,6 +1010,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                     break;
                                 };
                                 revision = next_revision;
+                                monitor.refresh_agent_capacity(&scope.project_root);
                                 let should_scan = apply_or_queue_issue_monitor_control(
                                     &hub,
                                     &prefs_path,
@@ -1301,6 +1303,16 @@ fn spawn_issue_monitor_worker_with_lease(
                         // still-running Attempting tuple; never overlap effects.
                         effect_execution_requested = true;
                     }
+                }
+                _ = capacity_interval.tick() => {
+                    let previous_limit = monitor.effective_max_active_agents();
+                    monitor.refresh_agent_capacity(&scope.project_root);
+                    if previous_limit != monitor.effective_max_active_agents() {
+                        let Some(next_revision) = revision.checked_add(1) else { break; };
+                        revision = next_revision;
+                        scan_requested = true;
+                    }
+                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                 }
                 _ = interval.tick() => {
                     if !pending_authority_controls
@@ -1843,7 +1855,7 @@ enum IssueMonitorControl {
         reason: String,
         at: String,
     },
-    MaxActiveAgents(usize),
+    MaxActiveAgents(Option<usize>),
     PriorityOrder(Vec<u64>),
     /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
     /// the user's own act, so the entries are attributed to the operator.
@@ -1886,6 +1898,7 @@ enum IssueMonitorControl {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active_agents: Option<usize>,
+        max_active_auto: bool,
         /// Issue #3917 AC-5: explicit auto-close override.
         auto_close_merged_issues: Option<bool>,
         /// Issue #3906 AC-1: explicit auto-apply-updates override.
@@ -2263,6 +2276,7 @@ fn try_apply_issue_monitor_control(
             enabled,
             autonomous_mode,
             max_active_agents,
+            max_active_auto,
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent,
@@ -2275,6 +2289,7 @@ fn try_apply_issue_monitor_control(
                     && enabled.is_none()
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
+                    && !max_active_auto
                     && auto_close_merged_issues.is_none()
                     && auto_apply_updates.is_none()
                     && launch_agent.is_none()
@@ -2299,6 +2314,9 @@ fn try_apply_issue_monitor_control(
             }
             if let Some(max_active_agents) = max_active_agents {
                 candidate.set_max_active_agents(max_active_agents);
+            }
+            if max_active_auto {
+                candidate.set_max_active_agents_override(None);
             }
             if let Some(auto_close_merged_issues) = auto_close_merged_issues {
                 candidate.set_auto_close_merged_issues_with_effect_revocation(Some(
@@ -2585,7 +2603,7 @@ fn apply_routine_issue_monitor_control(
             false
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
-            monitor.set_max_active_agents(max_active_agents);
+            monitor.set_max_active_agents_override(max_active_agents);
             true
         }
         IssueMonitorControl::PriorityOrder(issue_numbers) => {
@@ -3103,6 +3121,14 @@ fn decode_issue_monitor_control_in_repo(
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
                 };
+                let max_active_auto = match config.get("max_active_mode") {
+                    None | Some(serde_json::Value::Null) => false,
+                    Some(value) => match value.as_str()? {
+                        "auto" if max_active_agents.is_none() => true,
+                        "manual" if max_active_agents.is_some() => false,
+                        _ => return None,
+                    },
+                };
                 let auto_close_merged_issues = match config.get("auto_close_merged_issues") {
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
@@ -3156,6 +3182,7 @@ fn decode_issue_monitor_control_in_repo(
                         && enabled.is_none()
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
+                        && !max_active_auto
                         && auto_close_merged_issues.is_none()
                         && auto_apply_updates.is_none()
                         && launch_agent.is_none()
@@ -3168,6 +3195,7 @@ fn decode_issue_monitor_control_in_repo(
                     enabled,
                     autonomous_mode,
                     max_active_agents,
+                    max_active_auto,
                     auto_close_merged_issues,
                     auto_apply_updates,
                     launch_agent,
@@ -3340,11 +3368,16 @@ fn decode_issue_monitor_control_in_repo(
                     verdict_raw,
                 });
             }
-            if let Some(max_active_agents) = payload
-                .get("max_active_agents")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-            {
+            if let Some(value) = payload.get("max_active_agents") {
+                let max_active_agents = if value.is_null() {
+                    None
+                } else {
+                    Some(
+                        usize::try_from(value.as_u64()?)
+                            .ok()
+                            .filter(|value| *value > 0)?,
+                    )
+                };
                 return Some(IssueMonitorControl::MaxActiveAgents(max_active_agents));
             }
             if let Some(claim) = payload.get("claim_launch_delivery") {
@@ -3850,6 +3883,10 @@ fn commit_issue_monitor_scan_if_current(
     if monitor.effect_authority_epoch() != captured_authority_epoch {
         return false;
     }
+    // A long scan owns its proposals, while the live driver owns the latest
+    // machine observation. Preserve refreshed capacity even when its numeric
+    // cap did not change (and therefore did not fence the scan by revision).
+    scanned.set_agent_capacity(monitor.status_view().agent_capacity);
     let proposed_effects = scanned.pending_effects().to_vec();
     let proposed_launch_session_strategies = scanned.prefs().queued_launch_session_strategies;
     let recovery_baseline = monitor.prefs();
@@ -4770,6 +4807,7 @@ fn scan_issue_monitor_once_blocking(
     ) {
         monitor.rebase_daemon_driver_prefs(&disk);
     }
+    monitor.refresh_agent_capacity(&scope.project_root);
     let (owner, repo) = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
@@ -4827,7 +4865,7 @@ fn scan_issue_monitor_once_blocking(
     let confirmed_previous_candidates =
         if candidates_are_from_previous_result {
             let claimable_cap = if monitor.has_launch_profile() {
-                monitor.config.max_active.max(1)
+                monitor.effective_max_active_agents()
             } else {
                 0
             };
@@ -5033,7 +5071,7 @@ fn scan_issue_monitor_once_blocking(
         && gui_connected
     {
         let active_cap = if monitor.has_launch_profile() {
-            monitor.config.max_active.max(1)
+            monitor.effective_max_active_agents()
         } else {
             0
         };
@@ -7088,6 +7126,7 @@ exit 0
                 ..crate::IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 autonomous_mode: true,
                 max_active_agents: 3,
@@ -7634,6 +7673,7 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let initial = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             max_active_agents: 1,
             ..crate::IssueMonitorPrefs::default()
         };
@@ -9175,7 +9215,11 @@ exit 0
                 },
                 false,
             ),
-            ("max active", IssueMonitorControl::MaxActiveAgents(7), true),
+            (
+                "max active",
+                IssueMonitorControl::MaxActiveAgents(Some(7)),
+                true,
+            ),
             (
                 "priority",
                 IssueMonitorControl::PriorityOrder(vec![42]),
@@ -9930,6 +9974,7 @@ exit 0
                 ..crate::IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 autonomous_mode: true,
                 autonomous_tuning: crate::issue_monitor::AutonomousTuning {
@@ -10016,6 +10061,7 @@ exit 0
                 ..crate::IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 autonomous_mode: true,
                 launch_profile: Some(profile),
@@ -10133,6 +10179,7 @@ exit 0
                 ..crate::IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(sample_issue_monitor_profile()),
                 ..crate::IssueMonitorPrefs::default()
@@ -10200,6 +10247,7 @@ exit 0
                 ..crate::IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(sample_issue_monitor_profile()),
                 ..crate::IssueMonitorPrefs::default()
@@ -10292,6 +10340,7 @@ exit 0
                     ..crate::IssueMonitorConfig::default()
                 },
                 crate::IssueMonitorPrefs {
+                    max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                     enabled: true,
                     autonomous_mode: true,
                     autonomous_tuning: crate::issue_monitor::AutonomousTuning {
@@ -10594,8 +10643,10 @@ exit 0
             ..crate::IssueMonitorConfig::default()
         });
 
-        let should_scan =
-            apply_issue_monitor_control(&mut monitor, IssueMonitorControl::MaxActiveAgents(5));
+        let should_scan = apply_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::MaxActiveAgents(Some(5)),
+        );
         assert!(should_scan);
         assert_eq!(monitor.status_view().max_active_agents, 5);
 
@@ -10675,6 +10726,7 @@ exit 0
         );
 
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             autonomous_mode: true,
             max_active_agents: 3,
@@ -10765,6 +10817,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -10787,6 +10840,7 @@ exit 0
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: Some(true),
                 launch_agent: None,
@@ -10815,6 +10869,7 @@ exit 0
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Raise {
@@ -10864,6 +10919,60 @@ exit 0
         assert_eq!(persisted.effect_authority_epoch, 9);
     }
 
+    #[test]
+    fn agent_capacity_control_restores_auto_without_changing_running_work() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            max_active: 7,
+            ..Default::default()
+        });
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"max_active_agents": null}),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("explicit Auto control");
+        assert!(apply_issue_monitor_control(&mut monitor, control));
+        assert_eq!(
+            monitor.config.max_active, 0,
+            "unknown automatic capacity blocks new work"
+        );
+    }
+
+    #[test]
+    fn agent_capacity_config_control_restores_auto_and_rejects_conflicting_override() {
+        let payload = |config| {
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set": config}),
+                std::process::id() + 1,
+            )
+        };
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            max_active: 7,
+            ..Default::default()
+        });
+        let control =
+            decode_issue_monitor_control(payload(serde_json::json!({"max_active_mode":"auto"})))
+                .expect("Auto config control is a complete operation");
+        assert!(apply_issue_monitor_control(&mut monitor, control));
+        assert_eq!(monitor.max_active_agents_override(), None);
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert!(decode_issue_monitor_control(payload(serde_json::json!({
+            "max_active_mode":"auto", "max_active_agents":7,
+        })))
+        .is_none());
+        assert!(decode_issue_monitor_control(payload(serde_json::json!({
+            "max_active_mode":"manual", "allowed_labels":[],
+        })))
+        .is_none());
+        let control = decode_issue_monitor_control(payload(serde_json::json!({
+            "max_active_mode":"manual", "max_active_agents":7, "allowed_labels":[],
+        })))
+        .expect("explicit Manual with its numeric limit");
+        assert!(apply_issue_monitor_control(&mut monitor, control));
+        assert_eq!(monitor.max_active_agents_override(), Some(7));
+    }
+
     /// Issue #4037 AC-2 / AC-5: the daemon decodes `update_drain` as part of
     /// the atomic `config_set` frame and applies it without disturbing the
     /// launches it is draining.
@@ -10887,6 +10996,7 @@ exit 0
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -11126,6 +11236,7 @@ exit 0
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -11367,6 +11478,7 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let initial = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             autonomous_mode: true,
             max_active_agents: 1,
@@ -11388,6 +11500,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -11586,6 +11699,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             autonomous_mode: true,
             max_active_agents: 2,
@@ -11715,6 +11829,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             autonomous_mode: true,
             max_active_agents: 2,
@@ -11833,6 +11948,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             autonomous_mode: true,
             max_active_agents: 1,
@@ -11917,6 +12033,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             launch_profile: Some(sample_issue_monitor_profile()),
@@ -12003,6 +12120,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             launch_profile: Some(sample_issue_monitor_profile()),
@@ -12081,6 +12199,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             launch_profile: Some(sample_issue_monitor_profile()),
@@ -12183,6 +12302,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 2,
             launch_profile: Some(sample_issue_monitor_profile()),
@@ -12316,6 +12436,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             // More than one free slot, so the planner keeps walking the queue
             // past every deferred candidate instead of stopping at the first.
@@ -12428,6 +12549,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 2,
             launch_profile: Some(sample_issue_monitor_profile()),
@@ -12529,6 +12651,7 @@ exit 0
         )
         .expect("scope");
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 2,
             launch_profile: Some(sample_issue_monitor_profile()),
@@ -12663,6 +12786,7 @@ exit 0
         let mut preserved = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 max_active_agents: 1,
                 launch_profile: Some(sample_issue_monitor_profile()),
@@ -12754,6 +12878,7 @@ exit 0
         let mut preserved = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 max_active_agents: 1,
                 launch_profile: Some(sample_issue_monitor_profile()),
@@ -13382,6 +13507,7 @@ exit 0
         .expect("scope");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             priority_order: vec![43],
@@ -13619,6 +13745,7 @@ exit 0
                 crate::IssueMonitorPrefs {
                     enabled: true,
                     max_active_agents: 2,
+                    max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                     launch_profile: Some(sample_issue_monitor_profile()),
                     ..crate::IssueMonitorPrefs::default()
                 },
@@ -13889,6 +14016,10 @@ exit 0
         let tick_status =
             recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
                 status.max_active_agents == 7
+                    && status
+                        .last_error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("issue #42: Launch timed out:"))
             })
             .await;
         let timeout_prefs = crate::load_issue_monitor_prefs(&prefs_path)
@@ -14956,6 +15087,11 @@ exit 1
 
     #[test]
     fn worker_stays_starting_until_the_local_fallback_lease_is_released() {
+        // The worker may scan after its control ACK. Keep sibling fixtures'
+        // process-wide fake-gh configuration out until shutdown has joined it.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _prefs_budget = pin_prefs_hang_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -14964,6 +15100,7 @@ exit 1
             .expect("runtime");
         runtime.block_on(async {
             let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path().join("home"));
             let repo = temp.path().join("repo");
             fs::create_dir_all(&repo).expect("repo");
             init_git_repo(&repo);
@@ -16525,6 +16662,37 @@ exit 1
     }
 
     #[test]
+    fn agent_capacity_scan_commit_keeps_latest_volatile_measurement() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs::default();
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut canonical =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let stale_scan = canonical.clone();
+        let latest = crate::agent_capacity::AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 3,
+            reason: "latest machine measurement".to_string(),
+            ..Default::default()
+        };
+        canonical.set_agent_capacity(latest.clone());
+        let epoch = canonical.effect_authority_epoch();
+
+        assert!(super::commit_issue_monitor_scan_if_current(
+            &prefs_path,
+            &mut canonical,
+            stale_scan,
+            epoch,
+        ));
+        assert_eq!(canonical.status_view().agent_capacity, latest);
+        assert_eq!(canonical.effective_max_active_agents(), 3);
+        let persisted = std::fs::read_to_string(&prefs_path).expect("read prefs");
+        assert!(!persisted.contains("latest machine measurement"));
+    }
+
+    #[test]
     fn stale_scan_cannot_commit_a_prepared_arm_after_authority_is_revoked() {
         let _prefs_budget = pin_prefs_hang_guard();
         // SPEC #3200 Phase 7 T-134/FR-041/FR-044: a scan may only propose an
@@ -16662,6 +16830,7 @@ exit 1
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let initial = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             autonomous_mode: true,
             effect_authority_epoch: 7,
@@ -18929,6 +19098,7 @@ exit 1
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 max_active_agents: 4,
                 priority_order: vec![99, 42],
@@ -18946,6 +19116,7 @@ exit 1
         let mut daemon = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: false,
                 max_active_agents: 1,
                 priority_order: vec![42],
@@ -19293,7 +19464,10 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
             .expect("seed prefs");
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
         let before = monitor.prefs();
         let started = Instant::now();
 
@@ -19685,7 +19859,14 @@ exit 1
             },
             Duration::from_secs(3),
         );
-        assert!(wait_for_path(&effect_started).await);
+        assert!(
+            wait_for_path(&effect_started).await,
+            "effect did not start: worker_finished={}, status={:?}, authority={:?}",
+            worker.is_finished(),
+            hub.issue_monitor_status(),
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .map(|prefs| (prefs.effect_authority_epoch, prefs.pending_effects))
+        );
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
         let contended_budget =
             super::ScopedIssueMonitorPrefsTimeout::set(Duration::from_millis(250));
@@ -20064,6 +20245,7 @@ exit 1
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 max_active_agents: 1,
                 ..crate::IssueMonitorPrefs::default()
             },

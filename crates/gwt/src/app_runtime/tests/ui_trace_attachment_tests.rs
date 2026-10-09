@@ -1559,6 +1559,7 @@ fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
         &prefs_path,
         &gwt::IssueMonitorPrefs {
             enabled: true,
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             autonomous_mode: true,
             launch_profile: Some(sample_issue_monitor_launch_profile()),
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
