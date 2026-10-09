@@ -3181,6 +3181,8 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let writer_failure = failure.clone();
     let writer_repo = repo.clone();
     let writer = thread::spawn(move || {
+        // Keep callsite interest dynamic if a subscriber-free sibling registers the WARN first.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let subscriber = tracing_subscriber::registry().with(PrefsLockContentionLayer {
             sender: Mutex::new(Some(contention_tx)),
         });
