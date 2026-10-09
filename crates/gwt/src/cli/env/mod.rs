@@ -43,6 +43,23 @@ pub trait CliEnv {
     fn client(&self) -> &Self::Client;
     fn cache_root(&self) -> PathBuf;
     fn repo_path(&self) -> &std::path::Path;
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::FeedbackRecord,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        use gwt_github::client::{http::HttpIssueClient, OwnerMutationError, ResolutionDeadline};
+        let deadline = ResolutionDeadline::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(120),
+        );
+        let client =
+            HttpIssueClient::from_owner_environment_with_deadline("akiojin", "gwt", &deadline)
+                .map_err(OwnerMutationError::PreSubmit)?;
+        super::feedback::send_to_upstream_with_deadline(&client, record, &deadline)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        super::feedback::spawn_worker(self.repo_path(), id)
+    }
     fn stdout(&mut self) -> &mut dyn io::Write;
     fn stderr(&mut self) -> &mut dyn io::Write;
     fn read_stdin(&mut self) -> io::Result<String>;

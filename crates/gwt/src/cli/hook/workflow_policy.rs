@@ -660,6 +660,11 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             | "execution.no-action"
             | "execution.blocked"
             | "memory.add"
+            // Feedback retains its own source identity and native consent.
+            // A broken Work assignment must not prevent reporting that fault.
+            | "feedback.create"
+            | "feedback.process"
+            | "feedback.retry"
     )
 }
 
@@ -769,6 +774,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
+            | "feedback.status"
             | "workspace.projection_list"
             | "workspace.projection-list"
             | "board.show"
@@ -1818,6 +1824,27 @@ mod tests {
             HookOutput::Silent,
             "production source writes must pass ownerless after the owner guard removal"
         );
+    }
+
+    #[test]
+    fn feedback_is_reportable_when_workspace_identity_is_unavailable() {
+        let repo = tempfile::tempdir().unwrap();
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        for operation in [
+            "feedback.create",
+            "feedback.process",
+            "feedback.retry",
+            "feedback.status",
+        ] {
+            let command = envelope_command(operation, "{}");
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), repo.path(), &context).unwrap(),
+                HookOutput::Silent,
+                "{operation}"
+            );
+        }
+        assert!(is_read_only_json_envelope_operation("feedback.status"));
+        assert!(!is_read_only_json_envelope_operation("feedback.create"));
     }
 
     #[test]

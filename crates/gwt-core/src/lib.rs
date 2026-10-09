@@ -16,6 +16,7 @@ pub mod deadline_budget;
 pub mod error;
 pub mod error_ledger;
 pub mod fd_limit;
+pub mod feedback;
 pub mod github_budget;
 pub mod github_quota;
 pub mod index;

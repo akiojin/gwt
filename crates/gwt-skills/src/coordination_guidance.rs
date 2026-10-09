@@ -185,18 +185,28 @@ Board with the registered Issue number, threaded under your proposal via
 
 Commenting on an existing Issue with `issue.comment` is never restricted
 - add evidence, propose acceptance criteria, and share analysis freely.
-Only creating a new Issue routes through the PM.
+New project work routes through the PM; gwt feedback uses the path below.
 
-### Friction in gwt itself takes the same route
+### Report gwt feedback from any agent
 
 Friction and capability gaps in gwt itself - a hook, launch, skill, index,
 verification, coordination, or Issue/SPEC workflow that contradicts what gwt
-told you to do - is reported the same way: post it to the Board for the PM,
-who registers it with `gwt-register-issue`. Never file an Issue upstream in
-the gwt repository yourself, and never work around it silently. Include the
-contract you were following, what you observed instead, and the primary
-evidence (command, output, file and line). gwt has no automatic capture for
-this; the Board post is the intake.
+told you to do - uses `gwt-feedback` and JSON operation `feedback.create`.
+PM and implementation agents share this path from every project; do not wait
+for a Board proposal or PM registration. The destination is always
+`akiojin/gwt`, separate from the current project's Issue intake.
+
+Collect the affected operation, complete refusal verbatim, reproduction steps
+(or `unconfirmed`), and workaround. gwtd adds environment/source context and
+saves a durable receipt. The actual gwt repository sends synchronously without
+consent and returns the Issue number and URL. Other or unknown repos return
+immediately and use a detached worker for the user's native **Send feedback**
+action. Continue project work while approval is pending; it must not hold
+project completion. No JSON flag, setting, or environment override grants
+consent. Cancellation or no desktop retains the report.
+Keep the request id and use `feedback.status` when needed. Retry only declined
+or failed receipts through `feedback.retry`; never automatically resend an
+uncertain outcome. Use the Board separately for local blockers/coordination.
 
 ## Work (current state)
 
@@ -601,19 +611,31 @@ agent をブロックしているか）。PM は登録した Issue 番号を返�
 の返信を確認してください。
 
 既存 Issue への `issue.comment` は一切制限しません。証拠の追記、AC の提案、
-分析の共有は自由に行ってください。制限するのは新規 Issue の登録だけです。
+分析の共有は自由に行ってください。通常の新規作業は PM を通し、gwt 自体の
+feedback は次の専用経路を使います。
 PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
 指定した Board 返信で返します。
 
-### gwt 自体の摩擦・機能ギャップも同じ経路
+### どの agent からも gwt feedback を報告する
 
 gwt 自体の摩擦や機能ギャップ（hook、launch、skill、index、verification、
-coordination、Issue/SPEC workflow が gwt の指示と食い違う）も同じ経路で
-扱います。Board に投稿して PM へ報告し、PM が `gwt-register-issue` で
-起票します。gwt リポジトリに自分で Issue を作らないでください。黙って
-回避するのも禁止です。投稿には、従っていた契約、実際に観測した挙動、
-一次証拠（コマンド、出力、ファイルと行）を含めます。自動捕捉の仕組みは
-無く、この Board 投稿が唯一の intake です。
+coordination、Issue/SPEC workflow が gwt の指示と食い違う）は
+`gwt-feedback` と JSON operation `feedback.create` で報告します。
+PM と実装 agent がどのプロジェクトからも同じ経路を使えます。Board 提案や
+PM の起票を待たないでください。宛先は常に `akiojin/gwt` で、現在の
+プロジェクトの通常 Issue intake とは別です。
+
+対象 operation、拒否文の原文全体、再現手順（不明なら `unconfirmed`）、
+回避策を集めます。gwtd が環境・報告元の文脈を追加し、ローカル receipt へ
+保存します。実際の gwt リポジトリは無承認で同期送信し、Issue 番号と URL を
+返します。他・不明の repo は即座に返り、独立 worker の native dialog で
+**Send feedback** をユーザーが明示的に選ぶ必要があります。承認待ちでも
+本作業を続け、feedback のために本作業の完了を止めないでください。
+JSON flag、設定、環境変数で承認を免除できません。
+取消や desktop 不在でも報告は保全されます。request id を保持し、必要時に
+`feedback.status` で確認します。declined / failed だけ `feedback.retry` で
+再試行し、uncertain は自動再送しません。ローカルの blocker や連携には
+別途 Board を使ってください。
 
 ## Work (current state)
 

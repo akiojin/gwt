@@ -17,7 +17,7 @@
   gwt リポジトリの CI・レビュー・リリース慣習に限定される運用は AGENTS.md、仕様は該当 SPEC、利用者向け説明は「ドキュメント管理」に従い README.md / README.ja.md に記載する（運用ルールは README に入れない）。
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
 - **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd` JSON operation `memory.add` でマシンローカルの work-notes memory（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`、SPEC-3214）に記録し、同種の作業を始める前に確認する。repo-local `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は読み取り fallback / legacy alias として扱う。
-- **Report gwt Friction to the PM:** gwt 自体の摩擦・機能ギャップは Board で PM に報告し、PM が `gwt-register-issue` で起票する。agent は自分で upstream に Issue を作らない（詳細な投稿手順は generated `gwt-coordination` SKILL.md が配信する）。
+- **Report gwt Friction to the PM:** gwt 自体の摩擦・機能ギャップは PM・実装 agent 共通の [`gwt-feedback`](.codex/skills/gwt-feedback/SKILL.md) で報告する。観測内容と受付結果の PM への共有は、generated `gwt-coordination` SKILL.md の Board 手順に従う。
 - **PM 機能の修正は PM 自身が実装して着地させる:** PM が動作するために必要な機能の修正は、実装エージェントに委譲せず、**PM 自身が PM worktree で実装し、PR を出してマージする**。対象は PM guidance / PM skill、PM が呼ぶ `issue.monitor.*` / `pm.*` operation、PM が裁定に使う Board・escalation 面、および PM が作業を観測・順序付け・決着できなくなる欠陥。理由は順序にある — **動けない PM は、それを直すエージェントを steer できない**ため、委譲するとデッドロックする。それ以外は従来どおり実装エージェントが担当する。判断に迷う場合は「その修正なしで艦隊を steer できるか」で判定し、できないなら PM の担当とする。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。

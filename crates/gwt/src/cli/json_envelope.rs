@@ -391,6 +391,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "feedback.create" => {
+            params.keys().for_each(|key| param_audit::note(key));
+            let input = serde_json::from_value(Value::Object(params.clone()))
+                .map_err(|err| CliParseError::InvalidJson(err.to_string()))?;
+            CliCommand::Feedback(super::feedback::FeedbackCommand::Create(Box::new(input)))
+        }
+        "feedback.status" | "feedback.retry" | "feedback.process" => {
+            reject_unknown_params(params, &["id"], &envelope.operation)?;
+            let id = required_string(params, "id")?;
+            let command = match envelope.operation.as_str() {
+                "feedback.status" => super::feedback::FeedbackCommand::Status { id },
+                "feedback.retry" => super::feedback::FeedbackCommand::Retry { id },
+                _ => super::feedback::FeedbackCommand::Process { id },
+            };
+            CliCommand::Feedback(command)
+        }
         "concern.create" | "concern.update" | "concern.list" | "concern.measure"
         | "concern.resolve" => {
             // These decode the whole `params` object through serde with
@@ -2389,6 +2405,23 @@ fn verification_quarantine_requests(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feedback_create_accepts_structured_evidence() {
+        let input = serde_json::json!({"schema_version":1,"operation":"feedback.create","params":{
+            "title":"Host bridge refusal", "kind":"bug", "operation":"workspace.update",
+            "refusal":"  exact\r\nrefusal  ", "reproduction":"unconfirmed", "workaround":null
+        }});
+        assert!(
+            super::parse(&input.to_string()).is_ok(),
+            "feedback.create must accept a structured report"
+        );
+        for forbidden in ["approved", "repo", "project_root"] {
+            let mut forged = input.clone();
+            forged["params"][forbidden] = serde_json::json!(true);
+            assert!(super::parse(&forged.to_string()).is_err());
+        }
+    }
+
     use super::{
         parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
         CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,

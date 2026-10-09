@@ -22,6 +22,7 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod feedback;
 mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
@@ -89,6 +90,7 @@ pub(crate) use title_summary_guard::validate_title_summary_work_name;
 /// variants and dispatch becomes a nested match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    Feedback(feedback::FeedbackCommand),
     ProviderReset(provider_reset::ProviderResetCommand),
     Issue(IssueCommand),
     Pr(PrCommand),
@@ -587,6 +589,7 @@ pub(crate) fn run_collect<E: CliEnv>(
 ) -> Result<(i32, String), SpecOpsError> {
     let mut out = String::new();
     let code = match cmd {
+        CliCommand::Feedback(inner) => feedback::run(env, inner, &mut out)?,
         CliCommand::Issue(inner) => issue::run(env, inner, &mut out)?,
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,

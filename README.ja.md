@@ -259,7 +259,8 @@ PTY のドレイン → サーバー停止の順で graceful shutdown を実行�
 プロセスは 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を
 出して終了します。
 
-`gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
+`gwtd` operation は stdin JSON envelope で処理され、gwt のメインウィンドウは起動しません。
+承認が必要な operation では OS のネイティブダイアログが表示されることがあります。
 
 ```bash
 gwtd <<'JSON'
@@ -640,6 +641,23 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-arch-review` — architecture review と改善 routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent pane の確認と操作
+- `gwt-feedback` — 任意のプロジェクトから gwt の問題を報告する
+
+gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
+`gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
+報告できます。JSON operation `feedback.create` の宛先は常に
+`akiojin/gwt` で、報告元プロジェクトと環境情報は自動で加わります。
+ローカル receipt に保存します。実際の gwt リポジトリ以外では受付後に
+即座に返るため、本来のプロジェクト作業を続けられます。送信には native
+dialog でユーザーが **Send feedback** を選ぶ必要があります。取消や desktop
+不在でも内容はローカルに残ります。gwt 自体の開発では承認を求めず同期送信し、
+Issue 番号と URL を返します。
+
+返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
+URL を確認できます。類似する既存 Issue があればコメントを追記します。
+`feedback.retry` は declined / failed の receipt だけ再試行し、外部プロジェクト
+では改めて承認を求めます。送信結果が uncertain の場合は内容を保全し、
+自動再送しません。
 
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
