@@ -50,6 +50,8 @@ pub enum CapabilityGapReason {
     /// The operation exists but refuses these parameters by design.
     Permission,
     /// No operation exists for it yet.
+    // Retain the FR-003 reason schema even when every current gap is implemented.
+    #[allow(dead_code)]
     MissingOperation,
 }
 
@@ -89,12 +91,6 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         r#"{"autonomous_mode":true}"#,
         CapabilityGapReason::Permission,
         "Issue Monitor panel: Autonomous switch -> On",
-    ),
-    (
-        "pr.close",
-        "",
-        CapabilityGapReason::MissingOperation,
-        "GitHub: Close pull request",
     ),
 ];
 

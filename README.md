@@ -1394,6 +1394,33 @@ gwtd <<'JSON'
 JSON
 ```
 
+Each `verify.run` publishes an attempt before waiting for admission. Inspect
+your latest attempt with `verify.status`, or pass `params.attempt_id` to inspect
+an exact attempt. Its JSON output includes the attempt ID, lifecycle status,
+interruption reason and whether its FIFO reservation remains:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.status","params":{}}
+JSON
+```
+
+Cancel a superseded attempt using the returned ID and a reason:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.cancel","params":{"attempt_id":"<attempt-id>","reason":"superseded matrix"}}
+JSON
+```
+
+Cancellation requires the same project, worktree, session and execution
+authority. Foreign attempts are refused with `not your verification attempt`.
+It records `interrupted`, releases only that attempt's reservation immediately,
+and stops its owned command tree. Runner death also releases its reservation
+without waiting for the reservation TTL. An interruption is neither PASS nor a
+test failure; rerunning the same matrix creates a fresh attempt. A cancellation
+before the first command starts preserves the previous verification record.
+
 Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
 lint, coverage, direct headed browser checks, and pre-push checks run
 directly without a verification lease. Completion still requires canonical
@@ -1451,6 +1478,13 @@ each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
 
 ### PR head verification
+
+To correct a PR targeting the wrong branch, use `pr.edit` with `params.number`
+and `params.base` (for example, `develop`). Base alone is a valid update; the
+existing editing authority checks still apply. To retire an incorrect PR, use
+`pr.close` with `params.number` and optional `params.comment`. A supplied comment
+is recorded before closing; if it fails, the PR stays open. Closing preserves
+the branch and is available without producing authority or verification evidence.
 
 Use `pr.head_check` with `params.base` (for example, `develop`) and optional
 `params.head` to compare a canonical passing verification record with the live

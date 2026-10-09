@@ -12,6 +12,7 @@ mod board;
 pub(crate) mod branch;
 mod build;
 mod commands;
+mod completion_pr;
 mod concern;
 pub mod daemon;
 pub mod delivered_owner;

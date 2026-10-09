@@ -125,6 +125,7 @@ pub struct PrCreateCall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrEditCall {
     pub number: u64,
+    pub base: Option<String>,
     pub title: Option<String>,
     pub body: Option<String>,
     pub add_labels: Vec<String>,

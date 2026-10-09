@@ -4103,7 +4103,7 @@ mod tests {
         ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
-            gwt::BackendEvent::TerminalStatus { id, status, detail }
+            gwt::BackendEvent::TerminalStatus { id, status, detail, .. }
                 if id == "tab-1::shell-1"
                     && *status == WindowProcessStatus::Ready
                     && detail.as_deref() == Some("Shell ready")
@@ -4872,7 +4872,7 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 &event.event,
-                BackendEvent::TerminalStatus { id, status, detail }
+                BackendEvent::TerminalStatus { id, status, detail, .. }
                     if id == &window_id
                         && *status == WindowProcessStatus::Ready
                         && detail.as_deref() == Some("Paused")
@@ -6163,7 +6163,7 @@ mod tests {
 
         let failed_launch = runtime.handle_launch_complete_and_drain(
             "tab-1::missing".to_string(),
-            Err("launch failed".to_string()),
+            Err("launch failed".into()),
         );
         assert!(
             failed_launch.is_empty(),

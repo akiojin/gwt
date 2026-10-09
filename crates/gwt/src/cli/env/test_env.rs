@@ -45,6 +45,9 @@ pub struct TestEnv {
     pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
+    pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
+    pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
+    pub completion_pr_call_log: Vec<u64>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
@@ -82,6 +85,10 @@ pub struct TestEnv {
     /// Issue #3515: when set, `rerun_actions` refuses with this message.
     pub rerun_rejection: Option<String>,
     pub dispatch_call_log: Vec<crate::cli::ActionsDispatchCall>,
+    pub cancel_call_log: Vec<u64>,
+    pub cancel_rejection: Option<String>,
+    pub queued_actions: Option<String>,
+    pub queued_actions_call_count: usize,
     pub internal_command_call_log: Vec<InternalCommandCall>,
 }
 
@@ -101,6 +108,9 @@ impl TestEnv {
             linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
             current_pr: None,
+            completion_prs: HashMap::new(),
+            completion_prs_after_ready: HashMap::new(),
+            completion_pr_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
@@ -133,6 +143,10 @@ impl TestEnv {
             rerun_call_log: Vec::new(),
             rerun_rejection: None,
             dispatch_call_log: Vec::new(),
+            cancel_call_log: Vec::new(),
+            cancel_rejection: None,
+            queued_actions: None,
+            queued_actions_call_count: 0,
             internal_command_call_log: Vec::new(),
         }
     }
@@ -188,6 +202,14 @@ impl TestEnv {
     /// Issue #3515: make the next `actions.rerun` fail the repository guard.
     pub fn seed_rerun_rejection(&mut self, message: impl Into<String>) {
         self.rerun_rejection = Some(message.into());
+    }
+
+    pub fn seed_cancel_rejection(&mut self, message: impl Into<String>) {
+        self.cancel_rejection = Some(message.into());
+    }
+
+    pub fn seed_queued_actions(&mut self, runs: impl Into<String>) {
+        self.queued_actions = Some(runs.into());
     }
 
     pub fn seed_job_log(&mut self, job_id: u64, log: impl Into<String>) {
@@ -312,6 +334,9 @@ impl CliEnv for TestEnv {
         self.compare_pr_head(base, head, Some(verified))
     }
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
+        if let Some(snapshot) = self.completion_prs.get(&number) {
+            return Ok(Some(snapshot.head_sha.clone()));
+        }
         let Some(pr) = self.prs.get(&number) else {
             return Ok(None);
         };
@@ -333,15 +358,27 @@ impl CliEnv for TestEnv {
             .next()
             .map(str::to_string))
     }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.completion_pr_call_log.push(number);
+        self.completion_prs
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| io::Error::other(format!("no completion PR snapshot: {number}")))
+    }
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
     ) -> io::Result<PrStatus> {
         self.pr_edit_call_log.push(PrEditCall {
             number,
+            base: base.map(ToOwned::to_owned),
             title: title.map(ToOwned::to_owned),
             body: body.map(ToOwned::to_owned),
             add_labels: add_labels.to_vec(),
@@ -350,6 +387,15 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        let mut pr = self.fetch_pr(number)?;
+        if let Some(comment) = comment {
+            self.comment_on_pr(number, comment)?;
+        }
+        pr.state = gwt_git::pr_status::PrState::Closed;
+        self.prs.insert(number, pr.clone());
+        Ok(pr)
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_view_call_log.push(number);
@@ -398,6 +444,11 @@ impl CliEnv for TestEnv {
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_ready_call_log.push(number);
+        if let Some(snapshot) = self.completion_prs_after_ready.remove(&number) {
+            self.completion_prs.insert(number, snapshot);
+        } else if let Some(snapshot) = self.completion_prs.get_mut(&number) {
+            snapshot.inventory.is_draft = false;
+        }
         self.prs
             .get(&number)
             .cloned()
@@ -478,6 +529,20 @@ impl CliEnv for TestEnv {
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
         self.dispatch_call_log.push(call);
         Ok("workflow dispatch requested".into())
+    }
+
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        self.cancel_call_log.push(run_id);
+        if let Some(message) = self.cancel_rejection.clone() {
+            return Err(io::Error::other(message));
+        }
+        Ok(format!("cancel requested for run {run_id}"))
+    }
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        self.queued_actions_call_count += 1;
+        self.queued_actions
+            .clone()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no queued actions"))
     }
     fn run_internal_command(
         &mut self,

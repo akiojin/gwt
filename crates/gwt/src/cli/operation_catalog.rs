@@ -30,6 +30,10 @@ pub struct Operation {
 /// first. Kept sorted so a diff against the dispatch source stays readable.
 pub const OPERATIONS: &[Operation] = &[
     Operation {
+        name: "actions.cancel",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.dispatch",
         aliases: &[],
     },
@@ -39,6 +43,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "actions.logs",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.queued",
         aliases: &[],
     },
     Operation {
@@ -504,6 +512,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.close",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.comment",
         aliases: &[],
     },
@@ -592,6 +604,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "verify.cancel",
+        aliases: &[],
+    },
+    Operation {
         name: "verify.lease.acquire",
         aliases: &["verify.lease-acquire"],
     },
@@ -617,6 +633,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "verify.run",
+        aliases: &[],
+    },
+    Operation {
+        name: "verify.status",
         aliases: &[],
     },
     Operation {
