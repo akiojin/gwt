@@ -2686,7 +2686,11 @@ mod tests {
             Instant::now() + gwt_core::deadline_budget::HANG_GUARD,
         );
         let error = gwt_core::process_console::spawn::with_spawn_ready_for_tests(
-            Duration::from_secs(1),
+            // The cleanup reserve is a quarter of this budget, capped at the
+            // 1s production grace. A 1s budget left only 250ms to reap the
+            // Windows process tree on a loaded runner, so the fail-closed
+            // path (no reap evidence, no marker) fired instead.
+            Duration::from_secs(4),
             move || {
                 let started = Instant::now();
                 while !ready.exists() {
