@@ -1663,6 +1663,12 @@ fn manual_launch_completed_and_blocked_use_typed_successor_routes_without_holder
         runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
         fs::create_dir_all(&runtime.sessions_dir).expect("create canonical sessions dir");
         let holder_id = format!("manual-{suffix}-holder");
+        runtime.agent_capability_issuer =
+            Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+                "http://127.0.0.1:1/internal/hook-live",
+                "ws://127.0.0.1:1/ws",
+                "ws://127.0.0.1:1/internal/pane-ws",
+            ));
         install_manual_launch_holder(
             &mut runtime,
             &repo,
@@ -1677,37 +1683,110 @@ fn manual_launch_completed_and_blocked_use_typed_successor_routes_without_holder
         ));
         fs::remove_file(runtime.sessions_dir.join(format!("{holder_id}.toml")))
             .expect("remove terminal holder Session fixture");
-        runtime
-            .project_state_mut(&runtime.test_context())
-            .expect("test project state")
-            .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let predecessor = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+            .unwrap()
+            .unwrap();
+        let mut previous_operation = None;
+        // Issue #4964: repeated cancellations must create fresh audited operations,
+        // while response-loss retries of each operation keep the exact candidate.
+        for launch in 0..3 {
+            recorded_events.lock().unwrap().clear();
+            runtime
+                .project_state_mut(&runtime.test_context())
+                .expect("test project state")
+                .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-        runtime.handle_launch_wizard_action(
-            &runtime.test_context(),
-            LaunchWizardAction::Submit,
-            Some(canvas_bounds()),
-        );
+            runtime.handle_launch_wizard_action(
+                &runtime.test_context(),
+                LaunchWizardAction::Submit,
+                Some(canvas_bounds()),
+            );
 
-        wait_for_recorded_event("terminal generation route", &recorded_events, |events| {
-            events.iter().any(|event| {
-                matches!(
-                    recorded_project_payload(event),
-                    UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
-                        if matches!(
-                            config.as_ref(),
-                            gwt::LaunchWizardLaunchRequest::Agent(config)
-                                if matches!(
-                                    &config.execution_intent,
-                                    gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
-                                        expected_predecessor: None,
-                                        predecessor_kind,
-                                        ..
-                                    } if *predecessor_kind == expected_kind
-                                )
-                        )
+            wait_for_recorded_event("terminal generation route", &recorded_events, |events| {
+                events.iter().any(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                            if matches!(
+                                config.as_ref(),
+                                gwt::LaunchWizardLaunchRequest::Agent(config)
+                                    if matches!(
+                                        &config.execution_intent,
+                                        gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                            expected_predecessor: None,
+                                            predecessor_kind,
+                                            ..
+                                        } if *predecessor_kind == expected_kind
+                                    )
+                            )
+                    )
+                })
+            });
+            let mut config = recorded_events
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|event| match recorded_project_payload(event) {
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. } => {
+                        match config.as_ref() {
+                            gwt::LaunchWizardLaunchRequest::Agent(config) => Some(config.clone()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .expect("manual successor request");
+            let operation_id = match &config.execution_intent {
+                gwt_agent::ExecutionLaunchIntent::ManualSuccessor { operation_id, .. } => {
+                    operation_id.clone()
+                }
+                intent => panic!("expected manual successor, got {intent:?}"),
+            };
+            assert_ne!(
+                previous_operation.as_ref(),
+                Some(&operation_id),
+                "a new user launch after Aborted must select a fresh operation"
+            );
+            let mut replay = config.clone();
+            runtime
+                .prepare_manual_successor_before_pane(&repo, &mut config)
+                .expect("prepare the fresh user operation");
+            runtime
+                .prepare_manual_successor_before_pane(&repo, &mut replay)
+                .expect("same-operation replay remains idempotent");
+            assert_eq!(config.execution_intent, replay.execution_intent);
+            assert_eq!(
+                gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                    .unwrap()
+                    .as_ref(),
+                Some(&predecessor)
+            );
+            if launch < 2 {
+                let attempt = gwt::cli::execution_state::continuation_attempt_for_operation(
+                    &repo,
+                    owner,
+                    &operation_id,
                 )
-            })
-        });
+                .unwrap()
+                .unwrap();
+                let aborted = gwt::cli::execution_state::abort_successor(
+                    &repo,
+                    owner,
+                    &attempt.request,
+                    "candidate closed before readiness",
+                )
+                .unwrap();
+                assert_eq!(
+                    aborted.status,
+                    gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
+                );
+                previous_operation = Some(operation_id);
+            }
+        }
     }
 }
 
@@ -1949,7 +2028,7 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_project_client_and_star
     )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::TerminalStatus { id, status, detail }
+        BackendEvent::TerminalStatus { id, status, detail, .. }
             if id == &window_id
                 && *status == WindowProcessStatus::Ready
                 && detail.as_deref() == Some("Shell ready")

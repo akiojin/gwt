@@ -20,6 +20,15 @@ test.describe("Issue queue real backend launch", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue",
         bounds: { x: 20, y: 60, width: 1480, height: 920 } });
+      // create_window bounds position a preset-sized window; set the intended
+      // fixture geometry so the drag source and target are both in view.
+      const issueWindow = page.locator('.workspace-window[data-preset="issue"]');
+      await expect(issueWindow).toBeVisible();
+      await sendLiveGwtEvent(page, { kind: "update_window_geometry",
+        id: await issueWindow.getAttribute("data-id"),
+        geometry: { x: 20, y: 60, width: 1480, height: 920 }, cols: 0, rows: 0 });
+      await expect(issueWindow).toHaveCSS("width", "1480px");
+      await expect(issueWindow).toHaveCSS("height", "920px");
       const backlog = page.locator('[data-queue-column="backlog"]');
       const queued = page.locator('[data-queue-column="queued"]');
       const row = backlog.locator(`[data-issue-number="${fixture.issueNumber}"]`);

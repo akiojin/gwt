@@ -4065,10 +4065,16 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (label, pane_status, expect_adoption) in [
-        ("running pane", WindowProcessStatus::Running, true),
-        ("idle pane", WindowProcessStatus::Idle, true),
-        ("stopped pane", WindowProcessStatus::Stopped, false),
+    for (label, pane_status, expect_adoption, pending_identity) in [
+        ("running pane", WindowProcessStatus::Running, true, false),
+        ("idle pane", WindowProcessStatus::Idle, true, false),
+        ("stopped pane", WindowProcessStatus::Stopped, false, false),
+        (
+            "pre-session Monitor pane",
+            WindowProcessStatus::Starting,
+            true,
+            true,
+        ),
     ] {
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -4081,11 +4087,12 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
         gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
             .save(&sessions_dir)
             .expect("save previous session");
+        let now = chrono::Utc::now().to_rfc3339();
         let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
             enabled: true,
             ..gwt::IssueMonitorConfig::default()
         });
-        monitor.terminal_queue_push(&[3165], "operator", "2026-07-28T00:00:00Z");
+        monitor.terminal_queue_push(&[3165], "operator", &now);
         monitor.record_candidate(gwt::IssueMonitorIssue {
             number: 3165,
             title: "SPEC: duplicate launch".to_string(),
@@ -4101,7 +4108,7 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
             "claim-3165",
             "host/session",
             "effect-3165",
-            "2026-07-28T00:00:00Z",
+            &now,
         ));
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
@@ -4115,11 +4122,27 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
         let raw_window_id = tab.workspace.persisted().windows[0].id.clone();
         assert!(tab
             .workspace
-            .set_linked_issue_number(&raw_window_id, Some(3165)));
+            .set_linked_issue_number(&raw_window_id, (!pending_identity).then_some(3165)));
         tab.workspace.set_status(&raw_window_id, pane_status);
         let (mut runtime, _recorded_events) =
             sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
         let live_window_id = combined_window_id("tab-1", &raw_window_id);
+        if pending_identity {
+            let mut feedback = issue_monitor_feedback(3165);
+            feedback.issue_monitor_project_root = Some(repo.clone());
+            runtime
+                .pending_launch_feedback_contexts
+                .insert(live_window_id.clone(), feedback);
+            let snapshot = runtime
+                .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-06T00:00:00Z")
+                .unwrap();
+            assert_eq!(
+                snapshot.windows[0].issue_number,
+                Some(3165),
+                "pre-Session identity is observable"
+            );
+            assert!(snapshot.windows[0].monitor_owned);
+        }
         if pane_status == WindowProcessStatus::Stopped {
             runtime
                 .window_pty_statuses
@@ -4133,6 +4156,13 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
                 .insert(live_window_id.clone(), pane_status);
         }
         assert_eq!(runtime.window_status(&live_window_id), Some(pane_status));
+        let observation = runtime
+            .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())
+            .unwrap();
+        assert_eq!(
+            observation.windows[0].monitor_owned, pending_identity,
+            "{label}: sessionless manual panes cannot inherit this agent's ambient Monitor route"
+        );
 
         let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = ack_spawner;
@@ -4162,7 +4192,7 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
                     BackendEvent::IssueMonitorToast { message, .. }
                         if message.contains("did not open a second pane")
                 )),
-                "{label}: the refusal is reported"
+                "{label}: the refusal is reported: {events:?}; prefs={prefs:?}"
             );
             assert!(
                 prefs.pending_launch_deliveries.is_empty(),
@@ -4654,10 +4684,13 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         1
     );
     restarted.finish_queued_delivery_acks(&ack_tasks);
-    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
-        .expect("reload ACKed prefs")
-        .pending_launch_deliveries
-        .is_empty());
+    let acknowledged = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload ACKed prefs");
+    assert!(
+        acknowledged.pending_launch_deliveries.is_empty(),
+        "restart must ACK the exact saved pane: window={:?}, deliveries={:?}",
+        restarted.tabs[0].workspace.persisted().windows,
+        acknowledged.pending_launch_deliveries
+    );
 }
 
 #[test]
@@ -4705,7 +4738,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
-        repo,
+        repo.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
@@ -4718,7 +4751,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
-            issue_monitor_project_root: None,
+            issue_monitor_project_root: Some(repo),
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
@@ -4761,6 +4794,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
         item.error_message.as_deref(),
         Some("Stop-block hit an error")
     );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
 }
 
 #[test]

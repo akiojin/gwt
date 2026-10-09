@@ -437,12 +437,13 @@ fn publish_issue_monitor_control_with_timeout_and_liveness(
 pub fn publish_issue_monitor_window_snapshot(
     project_root: &Path,
     snapshot: &crate::IssueMonitorWindowSnapshot,
+    project_tab_ids: &std::collections::BTreeSet<String>,
 ) -> Result<(), IssueMonitorControlPublishError> {
     publish_issue_monitor_control(
         project_root,
         crate::runtime_daemon_events::issue_monitor_payload(
             "control",
-            serde_json::json!({ "window_snapshot": snapshot }),
+            serde_json::json!({ "window_snapshot": snapshot, "window_snapshot_project_tabs": project_tab_ids }),
             std::process::id(),
         ),
     )
@@ -711,8 +712,12 @@ mod window_snapshot_publish_tests {
             }],
         };
 
-        let error = super::publish_issue_monitor_window_snapshot(project.path(), &snapshot)
-            .expect_err("no daemon is running for this project root");
+        let error = super::publish_issue_monitor_window_snapshot(
+            project.path(),
+            &snapshot,
+            &std::collections::BTreeSet::from([snapshot.project_tab_id.clone()]),
+        )
+        .expect_err("no daemon is running for this project root");
 
         assert!(
             matches!(

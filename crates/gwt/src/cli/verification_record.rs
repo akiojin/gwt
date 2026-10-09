@@ -50,6 +50,7 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+pub mod cancellation;
 pub mod continuation;
 pub mod driver;
 pub mod headed_e2e;
@@ -3227,10 +3228,20 @@ pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
 
 /// Keep recovery (including failures) in the deferred admission diagnostic,
 /// without presenting unexecuted commands as passing verification evidence.
+#[cfg(all(test, not(windows)))]
 fn restore_gwtd_after_deferral(
     worktree: &Path,
     host: &VerificationHost,
     artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+) -> String {
+    restore_gwtd_after_deferral_cancellable(worktree, host, artifacts, None)
+}
+
+fn restore_gwtd_after_deferral_cancellable(
+    worktree: &Path,
+    host: &VerificationHost,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+    check: Option<&CancellationCheck<'_>>,
 ) -> String {
     let Some(command) = gwtd_artifact_restore_command(worktree) else {
         return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
@@ -3238,8 +3249,9 @@ fn restore_gwtd_after_deferral(
     // Restore this checkout's operational path, even when Cargo's environment
     // or user configuration points ordinary builds at another target directory.
     let command = format!("{command} --target-dir target");
-    match execute_command_with_artifact_guard(worktree, &command, true, None, host, None, artifacts)
-    {
+    match execute_command_with_artifact_guard_cancellable(
+        worktree, &command, true, None, host, None, artifacts, check,
+    ) {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
             "gwtd artifact restoration: failed (`{command}`, exit {code}); \
@@ -3336,6 +3348,7 @@ fn verification_command_arguments(
     args
 }
 
+#[cfg(test)]
 fn execute_command_with_isolation(
     worktree: &Path,
     command: &str,
@@ -3355,6 +3368,38 @@ fn execute_command_with_isolation(
     )
 }
 
+type CancellationCheck<'a> = dyn Fn() -> Result<bool, String> + Sync + 'a;
+
+fn check_cancellation(check: Option<&CancellationCheck<'_>>) -> Result<(), String> {
+    if check.map(|check| check()).transpose()?.unwrap_or(false) {
+        Err("verification attempt canceled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn execute_command_cancellable(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard_cancellable(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        None,
+        check,
+    )
+}
+
+#[cfg(test)]
 fn execute_command_with_artifact_guard(
     worktree: &Path,
     command: &str,
@@ -3364,6 +3409,30 @@ fn execute_command_with_artifact_guard(
     progress: Option<&CommandProgress>,
     artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard_cancellable(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        artifacts,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_command_with_artifact_guard_cancellable(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    check_cancellation(check)?;
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
     // Auxiliary baseline proofs and artifact restoration do not produce
     // canonical command rows, so do not leave unreferenced output artifacts.
@@ -3385,11 +3454,24 @@ fn execute_command_with_artifact_guard(
                 if protected {
                     None
                 } else {
-                    Some(
+                    Some(if check.is_some() {
+                        loop {
+                            check_cancellation(check)?;
+                            if let Some(guard) =
+                                crate::cli::verification_lease::try_lock_build_artifacts(&target)
+                                    .map_err(|error| {
+                                        format!("build artifact coordination failed: {error}")
+                                    })?
+                            {
+                                break guard;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    } else {
                         crate::cli::verification_lease::lock_build_artifacts(&target).map_err(
                             |error| format!("build artifact coordination failed: {error}"),
-                        )?,
-                    )
+                        )?
+                    })
                 }
             }
             None if Path::new(&args[0])
@@ -3439,7 +3521,14 @@ fn execute_command_with_artifact_guard(
                     .env
                     .push((key.to_string(), temp.path().to_string_lossy().into_owned()));
             }
-            execute_command_on_daemon(command, &request, endpoint, progress, output_worktree)
+            execute_command_on_daemon(
+                command,
+                &request,
+                endpoint,
+                progress,
+                output_worktree,
+                check,
+            )
         }
         VerificationHost::Inherit => {
             let args = verification_command_arguments(&args, capture);
@@ -3462,7 +3551,7 @@ fn execute_command_with_artifact_guard(
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
             }
-            execute_inherited_command(
+            execute_inherited_command_cancellable(
                 &mut process,
                 temp.path(),
                 command,
@@ -3470,6 +3559,7 @@ fn execute_command_with_artifact_guard(
                 progress,
                 output_worktree,
                 std::time::Instant::now,
+                check,
             )
         }
     };
@@ -3485,6 +3575,7 @@ fn execute_command_with_artifact_guard(
     }
 }
 
+#[cfg(test)]
 fn execute_inherited_command(
     process: &mut std::process::Command,
     temporary_directory: &Path,
@@ -3492,8 +3583,32 @@ fn execute_inherited_command(
     timeout: Option<std::time::Duration>,
     progress: Option<&CommandProgress>,
     output_worktree: Option<&Path>,
-    mut now: impl FnMut() -> std::time::Instant,
+    now: impl FnMut() -> std::time::Instant,
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_inherited_command_cancellable(
+        process,
+        temporary_directory,
+        command,
+        timeout,
+        progress,
+        output_worktree,
+        now,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_inherited_command_cancellable(
+    process: &mut std::process::Command,
+    temporary_directory: &Path,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    progress: Option<&CommandProgress>,
+    output_worktree: Option<&Path>,
+    mut now: impl FnMut() -> std::time::Instant,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    check_cancellation(check)?;
     // Issue #4405: this process runs inside the agent tree, whose
     // launch policy lowers priority; the workload must not inherit
     // that. Issue #4409 removes the inheritance at its source by
@@ -3512,9 +3627,10 @@ fn execute_inherited_command(
             .stderr(fs::File::create(&stderr)?);
         let stdout_reader = fs::File::open(stdout)?;
         let stderr_reader = fs::File::open(stderr)?;
-        let mut spawned = InheritedVerificationChild::spawn(process, timeout.is_some())?;
+        let mut spawned =
+            InheritedVerificationChild::spawn(process, timeout.is_some() || check.is_some())?;
         let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
-        let (status, timed_out) = spawned.wait(timeout, &mut now)?;
+        let (status, timed_out) = spawned.wait_cancellable(timeout, &mut now, check)?;
         let output = std::process::Output {
             status,
             stdout: captured_output_snapshot(&stdout_reader),
@@ -3524,6 +3640,7 @@ fn execute_inherited_command(
     })();
     let output = match output {
         Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => return Err(err.to_string()),
         Err(err) => return spawn_failure_result(output_worktree, command, &err.to_string()),
     };
     let (output, priority, timed_out) = output;
@@ -3607,18 +3724,25 @@ impl InheritedVerificationChild {
         })
     }
 
-    fn wait(
+    fn wait_cancellable(
         &mut self,
         timeout: Option<std::time::Duration>,
         now: &mut impl FnMut() -> std::time::Instant,
+        check: Option<&CancellationCheck<'_>>,
     ) -> io::Result<(std::process::ExitStatus, bool)> {
-        let Some(timeout) = timeout else {
+        if timeout.is_none() && check.is_none() {
             let status = self.spawned.child.wait()?;
             self.reaped = true;
             return Ok((status, false));
-        };
-        let deadline = now() + timeout;
+        }
+        let deadline = timeout.map(|timeout| now() + timeout);
         loop {
+            if let Err(error) = check_cancellation(check) {
+                self.reclaim();
+                let _ = self.spawned.child.wait();
+                self.reaped = true;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, error));
+            }
             #[cfg(unix)]
             let completed = if self.exited_without_reaping()? {
                 // Keep the exited leader waitable until its group is reclaimed:
@@ -3634,7 +3758,7 @@ impl InheritedVerificationChild {
                 self.reaped = true;
                 return Ok((status, false));
             }
-            if now() >= deadline {
+            if deadline.is_some_and(|deadline| now() >= deadline) {
                 self.reclaim();
                 let status = self.spawned.child.wait()?;
                 self.reaped = true;
@@ -3777,16 +3901,21 @@ fn execute_command_on_daemon(
     endpoint: &gwt_core::daemon::DaemonEndpoint,
     progress: Option<&CommandProgress>,
     output_worktree: Option<&Path>,
+    check: Option<&CancellationCheck<'_>>,
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
     use crate::cli::daemon::verification_host::DelegatedRunError;
 
-    let delegated = crate::cli::daemon::verification_host::run(
+    let delegated = crate::cli::daemon::verification_host::run_cancellable(
         endpoint,
         request,
         |pid| progress.map(|progress| progress.start(pid)),
         crate::cli::verification_lease::short_non_cargo_timeout(command),
+        check,
     );
     let (exit_code, signal, mut tail, mut output_streams) = match delegated {
+        Err(DelegatedRunError::Cancelled) => {
+            return Err("verification attempt canceled".to_string())
+        }
         Ok(delegated) => {
             let mut tail = String::new();
             if let Some(reason) = &delegated.accepted.nice_reason {
@@ -3908,6 +4037,7 @@ fn measure_baseline(
     request: &VerificationQuarantineRequest,
     host: &VerificationHost,
     progress: Option<&CommandProgress>,
+    check: Option<&CancellationCheck<'_>>,
 ) -> Result<(i32, String), String> {
     request.validate()?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -3930,13 +4060,14 @@ fn measure_baseline(
             std::ffi::OsStr::new(merge_base_sha),
         ],
     )?;
-    let (exit_code, _, output, _) = execute_command_with_isolation(
+    let (exit_code, _, output, _) = execute_command_cancellable(
         &checkout,
         &request.baseline_command,
         true,
         None,
         host,
         progress,
+        check,
     )?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
@@ -4074,6 +4205,7 @@ pub fn run_verification(
 
 #[derive(Default)]
 struct RunOptions<'a> {
+    attempt: Option<&'a cancellation::Attempt>,
     driver: Option<driver::DriverProvenance>,
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
@@ -4350,6 +4482,11 @@ where
         };
     }
     let record_id = format!("vrr-{}", uuid::Uuid::new_v4().simple());
+    if let Some(attempt) = options.attempt {
+        attempt
+            .mark_running(&record_id)
+            .map_err(|error| error.to_string())?;
+    }
     let watchdog_token = uuid::Uuid::new_v4().simple().to_string();
     // The companion must be ready before commands start. It never inherits
     // the runner's host/target locks (Command uses close-on-exec descriptors).
@@ -4408,6 +4545,11 @@ where
     if let Some(context) = &running.continuation {
         running.planned_missing = context.missing();
     }
+    if let Some(attempt) = options.attempt {
+        let mut document = serde_json::to_value(&running).map_err(|error| error.to_string())?;
+        document["verification_attempt_id"] = attempt.id().into();
+        running = serde_json::from_value(document).map_err(|error| error.to_string())?;
+    }
     crate::cli::trusted_store::with_write_lease(worktree, || {
         if let Some(authority) = authority {
             revalidate_verification_caller_authority(worktree, session_id, authority)?;
@@ -4457,6 +4599,11 @@ where
             .expect("unfinished run")
             .external_terminations =
             interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
+        if let Some(attempt) = options.attempt {
+            attempt.retain_termination_budget_under_lease(
+                running.lifecycle.as_ref().and_then(|life| life.external_terminations),
+            )?;
+        }
         save(worktree, &running)
     })
     .map_err(|error| format!("failed to save verification start: {error}"))?;
@@ -4474,6 +4621,9 @@ where
         on_progress(results.len(), commands.len(), std::time::Duration::ZERO);
     }
     for (position, index) in execution_indices.iter().copied().enumerate() {
+        if let Some(attempt) = options.attempt {
+            attempt.ensure_active().map_err(|error| error.to_string())?;
+        }
         let command = &commands[index];
         let admission = if position == 0 {
             first_admission.take()
@@ -4558,7 +4708,13 @@ where
             None => command.clone(),
         };
         let command_started = std::time::Instant::now();
-        let executed = execute_command_with_isolation(
+        let check_cancelled = || {
+            options
+                .attempt
+                .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
+                .unwrap_or(Ok(false))
+        };
+        let executed = execute_command_cancellable(
             worktree,
             &execution_command,
             false,
@@ -4568,6 +4724,9 @@ where
                 .as_ref()
                 .map(|granted| granted.command_progress())
                 .or(options.command_progress),
+            options
+                .attempt
+                .map(|_| &check_cancelled as &CancellationCheck<'_>),
         );
         if let Some(granted) = &admission {
             granted.publish_progress(1, 1, command_started.elapsed());
@@ -4710,7 +4869,13 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host, options.command_progress)
+                let check = || {
+                    options
+                        .attempt
+                        .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
+                        .unwrap_or(Ok(false))
+                };
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host, options.command_progress, options.attempt.map(|_| &check as &CancellationCheck<'_>))
                 {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
@@ -4791,6 +4956,7 @@ where
 
     crate::cli::trusted_store::with_write_lease(worktree, || {
         interruption::ensure_current(worktree, &record.record_id)?;
+        if let Some(attempt) = options.attempt { attempt.ensure_active()?; }
         if let Some(authority) = authority {
             revalidate_verification_caller_authority(worktree, session_id, authority)?;
         }
@@ -4839,7 +5005,9 @@ where
         }
         record.created_at = Utc::now();
         record.content_hash = compute_content_hash(&record);
-        save(worktree, &record)
+        save(worktree, &record)?;
+        if let Some(attempt) = options.attempt { attempt.complete_under_lease()?; }
+        Ok(())
     })
     .map_err(|err| {
         if err.kind() == ErrorKind::PermissionDenied {
@@ -5411,6 +5579,12 @@ fn evaluate_evidence_snapshot_inner(
             interruption::RunStatus::Deferred => EvidenceStatus::Deferred,
         };
     }
+    match cancellation::finalized_status(worktree, record) {
+        Ok(None | Some(cancellation::AttemptStatus::Completed)) => {}
+        Ok(Some(cancellation::AttemptStatus::Interrupted)) => return EvidenceStatus::Interrupted,
+        Ok(Some(_)) => return EvidenceStatus::Running,
+        Err(error) => return evidence_read_error(&error),
+    }
     if let Some(snapshot) = record.verification_plan_snapshot.as_ref() {
         if record.content_hash.is_empty()
             || snapshot.content_hash.is_empty()
@@ -5928,6 +6102,13 @@ pub(crate) fn evaluate_pr_ready_evidence(
 /// Commands of the `verify.*` JSON operation family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyCommand {
+    Cancel {
+        attempt_id: String,
+        reason: String,
+    },
+    Status {
+        attempt_id: Option<String>,
+    },
     Run {
         commands: Vec<String>,
         /// Issue #3913: bound on the host admission wait (seconds).
@@ -5946,7 +6127,10 @@ pub enum VerifyCommand {
     /// T-130-lite: register the required verification matrix before running.
     /// Full T-130 core: `derive` classifies changed surfaces and derives the
     /// matrix when no explicit commands are given.
-    Plan { commands: Vec<String>, derive: bool },
+    Plan {
+        commands: Vec<String>,
+        derive: bool,
+    },
     /// Explicit CI-backed pre-PR policy; existing full/explicit plans keep
     /// their semantics and the trusted persisted record shape is unchanged.
     PrePrPlan {
@@ -6013,9 +6197,23 @@ pub(super) fn run<E: CliEnv>(
             ))
         })?;
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    if let VerifyCommand::Status { attempt_id } = &command {
+        let coordinator = crate::cli::verification_lease::open_coordinator()?;
+        let value =
+            cancellation::status(&worktree, &session_id, attempt_id.as_deref(), &coordinator)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+        out.push_str(&format!("{value}\n"));
+        return Ok(0);
+    }
     let authority =
         snapshot_verification_caller_authority(&worktree, &session_id).map_err(|err| {
-            SpecOpsError::from(ApiError::Unexpected(verification_entry_refusal(&err)))
+            SpecOpsError::from(ApiError::Unexpected(
+                if matches!(&command, VerifyCommand::Cancel { .. }) {
+                    format!("not your verification attempt: {err}")
+                } else {
+                    verification_entry_refusal(&err)
+                },
+            ))
         })?;
     let command = match command {
         VerifyCommand::Plan { commands, derive } => VerifyCommand::PlanWithOutputs {
@@ -6027,6 +6225,26 @@ pub(super) fn run<E: CliEnv>(
         other => other,
     };
     match command {
+        VerifyCommand::Status { .. } => unreachable!("read-only status handled above"),
+        VerifyCommand::Cancel { attempt_id, reason } => {
+            let coordinator = crate::cli::verification_lease::open_coordinator()?;
+            let key = crate::cli::verification_lease::verification_key(env)?;
+            cancellation::cancel_for_caller(
+                &worktree,
+                &session_id,
+                &attempt_id,
+                &reason,
+                &authority,
+                &coordinator,
+                &key,
+            )
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            let value =
+                cancellation::status(&worktree, &session_id, Some(&attempt_id), &coordinator)
+                    .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            out.push_str(&format!("{value}\n"));
+            Ok(0)
+        }
         VerifyCommand::PrePrPlan {
             commands,
             acceptance_commands,
@@ -6247,6 +6465,42 @@ pub(super) fn run<E: CliEnv>(
             })?;
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
+            let key = crate::cli::verification_lease::verification_key(env)?;
+            let coordinator = crate::cli::verification_lease::open_coordinator()?;
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            let attempt = cancellation::begin_for_caller(
+                &worktree,
+                &session_id,
+                &authority,
+                &key,
+                &commands,
+                &token,
+            )
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            let _attempt_watchdog = if cfg!(test) {
+                None
+            } else {
+                let executable = driver
+                    .as_ref()
+                    .map(|driver| Ok(driver.fixed_path.clone()))
+                    .unwrap_or_else(std::env::current_exe)
+                    .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+                Some(
+                    interruption::Watchdog::start(&worktree, attempt.id(), &token, &executable)
+                        .map_err(|error| {
+                            SpecOpsError::from(ApiError::Unexpected(error.to_string()))
+                        })?,
+                )
+            };
+            out.push_str(&format!(
+                "verify: attempt — {} (inspect with verify.status; cancel with verify.cancel)\n",
+                attempt.id()
+            ));
+            let check_cancelled = || attempt.cancelled().map_err(Into::into);
+            let heavy_attempt = gwt_core::index_coordinator::HeavyAttempt {
+                id: attempt.id(),
+                check_cancelled: &check_cancelled,
+            };
             out.push_str(&host_note);
             let mut admit_command = |command: &str, host: &VerificationHost| {
                 if crate::cli::verification_lease::classify_command(command)
@@ -6254,12 +6508,21 @@ pub(super) fn run<E: CliEnv>(
                 {
                     Ok(None)
                 } else {
-                    crate::cli::verification_lease::admission::admit(
+                    crate::cli::verification_lease::admission::admit_for_attempt(
                         env,
                         &worktree,
                         Some(command),
                         max_wait,
-                        |artifacts| restore_gwtd_after_deferral(&worktree, host, artifacts),
+                        |artifacts| {
+                            let check = || attempt.cancelled().map_err(|error| error.to_string());
+                            restore_gwtd_after_deferral_cancellable(
+                                &worktree,
+                                host,
+                                artifacts,
+                                Some(&check),
+                            )
+                        },
+                        &heavy_attempt,
                     )
                     .map(Some)
                     .map_err(|error| error.to_string())
@@ -6272,10 +6535,11 @@ pub(super) fn run<E: CliEnv>(
                 &authority,
                 &prepared_quarantines,
                 RunOptions {
+                    attempt: Some(&attempt),
                     driver,
                     // Unit CLI fixtures are in-process, not a gwtd executable.
                     // Real runner death is covered by verification_admission_cli_test.
-                    watch_runner: !cfg!(test),
+                    watch_runner: false,
                     user_verification_result: if crate::cli::execution_state::session_launch_route(
                         Some(&session_id),
                     ) == Some(gwt_agent::LaunchRoute::Autonomous)
@@ -6290,6 +6554,9 @@ pub(super) fn run<E: CliEnv>(
                     ..RunOptions::default()
                 },
             );
+            attempt
+                .returned(run.as_ref().err().map(String::as_str), &coordinator)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
             let (record, transcript) =
                 run.map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
             // T-131 core: surface the coverage map of the plan this run

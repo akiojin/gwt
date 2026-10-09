@@ -97,7 +97,7 @@ axum = { version = "0.8", features = ["ws"] }
 tao = "0.37"
 base64.workspace = true
 regex.workspace = true
-quick-xml = "0.39.4"
+quick-xml = "0.42.0"
 rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true

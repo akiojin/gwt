@@ -5395,16 +5395,38 @@ pub fn begin_active_session_launch_handshake(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
 ) -> io::Result<Option<gwt_agent::SessionActiveLaunchHandshake>> {
+    begin_active_session_launch_handshake_classified(sessions_dir, expected).map(|outcome| {
+        match outcome {
+            ActiveSessionLaunchHandshakeOutcome::Acquired(handshake) => Some(*handshake),
+            ActiveSessionLaunchHandshakeOutcome::Conflict
+            | ActiveSessionLaunchHandshakeOutcome::AuthorityRejected => None,
+        }
+    })
+}
+
+#[derive(Debug)]
+pub enum ActiveSessionLaunchHandshakeOutcome {
+    Acquired(Box<gwt_agent::SessionActiveLaunchHandshake>),
+    Conflict,
+    AuthorityRejected,
+}
+
+/// Keep authority refusal distinct from a live exact launch fence. Only the
+/// latter is retryable; neither outcome issues a replacement capability.
+pub fn begin_active_session_launch_handshake_classified(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<ActiveSessionLaunchHandshakeOutcome> {
     let nonce = uuid::Uuid::new_v4().to_string();
     let Some(host_started_at) = crate::process::host_process_start_time(std::process::id()) else {
-        return Ok(None);
+        return Ok(ActiveSessionLaunchHandshakeOutcome::AuthorityRejected);
     };
     with_current_active_session_execution_identity_lease(sessions_dir, expected, || {
         if reconcile_active_launch_handshake_under_lease(sessions_dir, expected)? {
-            return Ok(None);
+            return Ok(ActiveSessionLaunchHandshakeOutcome::Conflict);
         }
         if exact_session_runtime_fences_active_launch(sessions_dir, expected)? {
-            return Ok(None);
+            return Ok(ActiveSessionLaunchHandshakeOutcome::Conflict);
         }
         gwt_agent::begin_session_active_launch_handshake_under_lease(
             sessions_dir,
@@ -5412,9 +5434,13 @@ pub fn begin_active_session_launch_handshake(
             &nonce,
             host_started_at,
         )
+        .map(|handshake| match handshake {
+            Some(handshake) => ActiveSessionLaunchHandshakeOutcome::Acquired(Box::new(handshake)),
+            None => ActiveSessionLaunchHandshakeOutcome::Conflict,
+        })
     })
     .and_then(|result| result.transpose())
-    .map(Option::flatten)
+    .map(|outcome| outcome.unwrap_or(ActiveSessionLaunchHandshakeOutcome::AuthorityRejected))
 }
 
 /// Whether a runtime sidecar proves the process it recorded is gone.
@@ -12993,10 +13019,10 @@ fn finalize_recovery_probes(
     {
         if let Some(guidance) = recovery_context
             .and_then(|context| context.as_ref().ok())
-            .and_then(discarded_canonical_work_guidance)
+            .and_then(terminal_canonical_work_guidance)
         {
-            // This is a human instruction, not an executable recovery operation.
-            // #4074 owns successor Work materialization.
+            // Advertise the existing fresh-launch workflow and its new-Session
+            // prerequisite; execution.continue never moves a terminal Session.
             snapshot
                 .available_recoveries
                 .push("gwt-execute".to_string());
@@ -13152,24 +13178,42 @@ fn execution_recovery_hint(snapshot: &ExecutionDiagnosisSnapshot) -> Option<Stri
         .then(|| RECOVERY_HINT_FRESH_LAUNCH_REQUIRED.to_string())
 }
 
-fn discarded_canonical_work_guidance(
+fn terminal_canonical_work_guidance(
     context: &crate::agent_project_state::ExecutionRecoveryContext,
 ) -> Option<String> {
-    let work_id = gwt_core::workspace_projection::canonical_work_id(
+    let works =
+        gwt_core::workspace_projection::load_workspace_work_items(context.project_state_root())
+            .ok()??;
+    let work_id = gwt_core::workspace_projection::current_work_id(
+        &works,
         context.project_state_root(),
         Some(context.session().branch.as_str()),
         Some(context.worktree()),
     )?;
-    let works_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(context.project_state_root());
-    let works =
-        gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path).ok()??;
-    let work = works.work_items.iter().find(|work| work.id == work_id)?;
-    work.discarded.then(|| {
+    let work = works
+        .work_items
+        .iter()
+        .find(|work| work.id == work_id && work.is_terminal())
+        .or_else(|| {
+            works.work_items.iter().find(|work| {
+                work.is_terminal()
+                    && work
+                        .agents
+                        .iter()
+                        .any(|agent| agent.session_id == context.session().id)
+            })
+        })?;
+    let work_id = &work.id;
+    Some({
+        let owner = work.owner.as_deref().unwrap_or("the linked owner");
+        let terminal_status = if work.discarded { "Discarded" } else { "Done" };
         format!(
-            "canonical Work {work_id} is Discarded; successor Work materialization is required \
-             (owner #4074). Human action: open Issue #4074 in gwt and select Start Work to \
-             arrange implementation. The current Work cannot recover until that support is available."
+            "canonical Work {work_id} is {terminal_status} (terminal); run gwt-execute for {owner} \
+             in a new Session using the regular linked-owner fresh launch \
+             (Launch Agent / Start Work workflow). \
+             The launch coordinator provides successor Work materialization (#4074) and binding \
+             after authenticated readiness. Preserve the old Work \
+             and Session; release the previous live launch before retrying."
         )
     })
 }
@@ -13192,7 +13236,7 @@ pub(crate) fn terminal_recovery_refusal(
         )
         .ok()
         .as_ref()
-        .and_then(discarded_canonical_work_guidance)
+        .and_then(terminal_canonical_work_guidance)
         {
             let refusal = refusal
                 .split_once(
@@ -15813,7 +15857,18 @@ fn run_impl<E: CliEnv>(
                     .flatten()
                     .map(|record| record.owner_number),
             );
-            let mut expected_verification_hash = None;
+            let mut expected_verification_hash =
+                match super::completion_pr::admit(env, &session_id, None, out) {
+                    Ok(hash) => hash,
+                    Err(reason) => {
+                        out.push_str(&format!("execution: completion refused — {reason}\n"));
+                        *refusal = Some(agent_recoverable_refusal(
+                            "completion_pr_not_ready",
+                            "pr.view",
+                        ));
+                        return Ok(2);
+                    }
+                };
             if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
                 let verification = crate::cli::verification_record::load(&worktree)
                     .map_err(|error| {
@@ -15840,6 +15895,13 @@ fn run_impl<E: CliEnv>(
                         "verification_quarantine_not_current",
                         "verify.run",
                     ));
+                    return Ok(2);
+                }
+                if expected_verification_hash
+                    .as_ref()
+                    .is_some_and(|hash| hash != &verification.content_hash)
+                {
+                    out.push_str("execution: completion refused — verification evidence changed after PR validation\n");
                     return Ok(2);
                 }
                 expected_verification_hash = Some(verification.content_hash.clone());
@@ -23529,9 +23591,38 @@ mod tests {
             ledger.current_effective_status(),
             Some(ExecutionControlStatus::Active)
         );
+        let record = load(dir.path()).unwrap().unwrap();
+        assert_eq!(record.primary_session_id, "session-adopting");
+        assert!(integrity_ok(&record));
+        assert_eq!(record.transfers.len(), 1);
+        let stop = crate::cli::hook::execution_control_stop_check::handle_with_input(
+            dir.path(),
+            "{}",
+            Some("session-adopting"),
+        );
+        let crate::cli::hook::HookOutput::StopBlock { reason } = stop else {
+            panic!("an active transferred execution must still gate Stop: {stop:?}");
+        };
+        assert!(!reason.contains("integrity validation"), "{reason}");
+        let diagnosis = diagnose(dir.path(), Some("session-adopting"));
+        assert_eq!(diagnosis.ecr_status, ExecutionDiagnosisState::Active);
         assert_eq!(
-            load(dir.path()).unwrap().unwrap().primary_session_id,
-            "session-adopting"
+            diagnosis
+                .recovery_probes
+                .iter()
+                .find(|probe| probe.operation == "execution.repair")
+                .and_then(|probe| probe.reason.as_deref()),
+            Some("execution_repair_not_corrupt")
+        );
+        let error = repair_corrupt_execution(
+            dir.path(),
+            "session-adopting",
+            "a legitimate transfer needs no corruption repair",
+        )
+        .expect_err("healthy transferred authority must refuse corruption repair");
+        assert!(
+            error.to_string().contains("execution_repair_not_corrupt"),
+            "{error}"
         );
     }
 
@@ -28078,6 +28169,15 @@ exit 1
             assert!(!diagnosis
                 .available_recoveries
                 .contains(&"execution.repair".to_string()));
+            let stop = crate::cli::hook::execution_control_stop_check::handle_with_input(
+                dir.path(),
+                "{}",
+                Some("repair-session"),
+            );
+            let crate::cli::hook::HookOutput::StopBlock { reason } = stop else {
+                panic!("healthy active authority must still gate Stop: {stop:?}");
+            };
+            assert!(!reason.contains("integrity validation"), "{reason}");
             let error = repair_corrupt_execution(
                 dir.path(),
                 "repair-session",
@@ -32175,6 +32275,7 @@ exit 1
                 &mut env,
                 CliCommand::Pr(crate::cli::PrCommand::EditBody {
                     number: 4122,
+                    base: None,
                     title: None,
                     body: Some("recovered handoff body".to_string()),
                     add_labels: Vec::new(),
