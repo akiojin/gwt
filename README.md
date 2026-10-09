@@ -222,9 +222,12 @@ port, updates the saved value, and emits a warning. An explicit `--port <n>`
 applies only to that launch—including `--port 0` for an ephemeral port—and
 never changes the saved implicit port. Pass `--bind 0.0.0.0` to make the embedded UI reachable
 from other hosts on the same LAN or VPN-extended LAN; pair it with an explicit
-`--port` when you need an operator-selected, well-known port. `--no-tray` and
-`--no-open` are accepted today but currently no-op while the rest of SPEC #2920
-Phase 4 lands.
+`--port` when you need an operator-selected, well-known port. `--no-tray`
+starts a temporary server without registering a tray icon. It exits when its
+launching parent ends, or five seconds after its last browser session closes
+(reloads can reconnect during that grace). Before any browser connects, the
+server follows its parent's lifetime. `--no-open` explicitly suppresses browser
+auto-open; startup already suppresses it by default.
 
 `gwt open` is the Linux fallback for desktops that do not run a
 StatusNotifierItem host (e.g. GNOME 3.26+ without the AppIndicator
@@ -420,6 +423,22 @@ between its body and acceptance criteria and its agent's read-only output.
 **Windowize** moves the agent to Canvas. **Hide preview / Show preview** gives
 the board the full width or restores the detail pane; columns scroll horizontally
 instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
+
+**Max active** uses **Auto** for new settings. Its recommendation reflects CPU,
+free memory and disk space, the GUI's CPU use, and live agents in other projects.
+Registered projects without live agents consume no share. **Machine budget**
+shows the limiting resource and distinguishes the Monitor's implementation/review
+limit from the total including PM agents. Auto pauses new admissions while required
+measurements are unavailable; running agents continue.
+Initial measurements of large `target` directories can take several minutes;
+the same pause applies when a previous measurement expires during refresh.
+Enter a positive number to keep a **Manual** override, or select **Use Auto** to
+follow the recommendation again. Existing saved limits remain Manual. Values above
+the recommendation are allowed, with a warning that verification may not finish and
+timing-dependent test failures may block unrelated PRs. Automation uses
+`issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
+`{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
+`max_active_agents_override`, and the shared `agent_capacity` measurement.
 
 **Allowed labels** controls which Issues this terminal's Monitor admits. Add or
 remove one label at a time; an Issue needs any label in the saved list. Matching
@@ -1370,6 +1389,33 @@ gwtd <<'JSON'
 JSON
 ```
 
+Each `verify.run` publishes an attempt before waiting for admission. Inspect
+your latest attempt with `verify.status`, or pass `params.attempt_id` to inspect
+an exact attempt. Its JSON output includes the attempt ID, lifecycle status,
+interruption reason and whether its FIFO reservation remains:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.status","params":{}}
+JSON
+```
+
+Cancel a superseded attempt using the returned ID and a reason:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.cancel","params":{"attempt_id":"<attempt-id>","reason":"superseded matrix"}}
+JSON
+```
+
+Cancellation requires the same project, worktree, session and execution
+authority. Foreign attempts are refused with `not your verification attempt`.
+It records `interrupted`, releases only that attempt's reservation immediately,
+and stops its owned command tree. Runner death also releases its reservation
+without waiting for the reservation TTL. An interruption is neither PASS nor a
+test failure; rerunning the same matrix creates a fresh attempt. A cancellation
+before the first command starts preserves the previous verification record.
+
 Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
 lint, coverage, direct headed browser checks, and pre-push checks run
 directly without a verification lease. Completion still requires canonical
@@ -1427,6 +1473,13 @@ each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
 
 ### PR head verification
+
+To correct a PR targeting the wrong branch, use `pr.edit` with `params.number`
+and `params.base` (for example, `develop`). Base alone is a valid update; the
+existing editing authority checks still apply. To retire an incorrect PR, use
+`pr.close` with `params.number` and optional `params.comment`. A supplied comment
+is recorded before closing; if it fails, the PR stays open. Closing preserves
+the branch and is available without producing authority or verification evidence.
 
 Use `pr.head_check` with `params.base` (for example, `develop`) and optional
 `params.head` to compare a canonical passing verification record with the live

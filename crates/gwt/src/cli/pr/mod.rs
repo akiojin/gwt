@@ -18,9 +18,9 @@ pub(crate) mod types;
 
 #[allow(unused_imports)]
 pub(super) use gh::{
-    comment_on_pr_via_gh, convert_pr_to_draft_via_gh, create_pr_via_gh, edit_or_create_repo_guard,
-    edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh, fetch_pr_checks_via_gh,
-    fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
+    close_pr_via_gh, comment_on_pr_via_gh, convert_pr_to_draft_via_gh, create_pr_via_gh,
+    edit_or_create_repo_guard, edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh,
+    fetch_pr_checks_via_gh, fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
     fetch_pr_review_thread_state_via_gh, fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh,
     mark_pr_ready_via_gh, parse_available_fields, parse_github_remote_url as parse_pr_remote_url,
     parse_pr_checks_items_json, parse_pr_checks_items_response, parse_pr_number_from_url,
@@ -65,6 +65,20 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
         Some("list") => parse_pr_list_args(it.collect::<Vec<_>>().as_slice()),
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
+        Some("close") => {
+            let number = super::parse_required_number(it.next())?;
+            let comment = match it.next().map(String::as_str) {
+                None => None,
+                Some("--comment") => Some(
+                    it.next()
+                        .ok_or(CliParseError::MissingFlag("--comment"))?
+                        .clone(),
+                ),
+                Some(other) => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+            };
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::Close { number, comment })
+        }
         Some("view") => {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
@@ -291,7 +305,7 @@ fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<
 }
 
 /// #4326: use the launch route and measured verification for Ready handoffs.
-fn ready_verification(
+pub(super) fn ready_verification(
     worktree: &std::path::Path,
     session_id: Option<&str>,
     body: &str,
@@ -434,6 +448,8 @@ pub(super) fn run<E: CliEnv>(
     // terminally blocked execution refuses every PR mutation, draft creation
     // and edits included; an active execution keeps the mid-work Draft flow
     // available.
+    // Close is containment, like demoting to Draft: it must remain available
+    // when producing authority or verification is unavailable (Issue #3693).
     let is_pr_mutation = matches!(
         cmd,
         PrCommand::Create { .. }
@@ -663,7 +679,6 @@ pub(super) fn run<E: CliEnv>(
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
                 Some(pr) => {
-                    sync_workspace_pr_metadata(env, &pr, None);
                     render_pr(out, &pr);
                 }
                 None => out.push_str("no current pull request\n"),
@@ -778,12 +793,14 @@ pub(super) fn run<E: CliEnv>(
         }
         PrCommand::Edit {
             number,
+            base,
             title,
             add_labels,
             ..
         }
         | PrCommand::EditBody {
             number,
+            base,
             title,
             add_labels,
             ..
@@ -799,6 +816,7 @@ pub(super) fn run<E: CliEnv>(
                 || {
                     let pr = env.edit_pr(
                         number,
+                        base.as_deref(),
                         title.as_deref(),
                         mutation_body.as_deref(),
                         &add_labels,
@@ -813,6 +831,14 @@ pub(super) fn run<E: CliEnv>(
             )
             .map_err(super::io_as_api_error)?;
             out.push_str("updated pull request\n");
+            render_pr(out, &pr);
+            0
+        }
+        PrCommand::Close { number, comment } => {
+            let pr = env
+                .close_pr(number, comment.as_deref())
+                .map_err(super::io_as_api_error)?;
+            out.push_str("closed pull request\n");
             render_pr(out, &pr);
             0
         }
@@ -1003,7 +1029,7 @@ pub(super) fn run<E: CliEnv>(
     Ok(code)
 }
 
-fn sync_edited_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus) -> std::io::Result<()> {
+fn sync_edited_workspace_pr_metadata<E: CliEnv>(env: &mut E, pr: &PrStatus) -> std::io::Result<()> {
     record_mutated_workspace_pr_metadata(env, pr, None, None, true)
 }
 
@@ -1056,7 +1082,7 @@ fn pr_metadata_record_deadline() -> std::time::Duration {
 }
 
 fn record_mutated_workspace_pr_metadata<E: CliEnv>(
-    env: &E,
+    env: &mut E,
     pr: &PrStatus,
     binding: Option<&gwt_agent::SessionExecutionBinding>,
     requested_head: Option<&str>,
@@ -1070,6 +1096,20 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
     );
     let result = (|| {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        // A reused branch can resolve to a historical merged PR. Identity
+        // alone does not prove that the current generation's source shipped.
+        if pr.state == gwt_git::pr_status::PrState::Merged
+            && !merged_pr_contains_current_head(env, pr.number)
+        {
+            crate::cli::operation_warnings::push(
+                "merged_pr_work_link_skipped",
+                format!(
+                    "PR #{} was updated on GitHub, but its Work association was skipped: the merged PR head could not be proven to contain the current HEAD with no uncommitted source. Check the PR head and local source before retrying the Work association.",
+                    pr.number,
+                ),
+            );
+            return Ok(());
+        }
         // Every successful mutation certifies the exact event returned by its
         // writer, including legacy/unbound edits. Read-only synchronization
         // and agent-authored events do not acquire this producer provenance.
@@ -1105,6 +1145,14 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
         };
         if let Some(event) = event {
             crate::cli::verification_record::certify_pr_delivery_event(&worktree, &event)?;
+            if binding.is_some() && pr.state == gwt_git::pr_status::PrState::Merged {
+                gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+                    &worktree,
+                    &event.work_item_id,
+                    chrono::Utc::now(),
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
         }
         Ok(())
     })();
@@ -1132,12 +1180,33 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
     }
 }
 
-fn sync_workspace_pr_metadata<E: CliEnv>(
-    env: &E,
-    pr: &PrStatus,
-    requested_head: Option<&str>,
-) -> Option<gwt_core::workspace_projection::WorkEvent> {
-    sync_workspace_pr_metadata_for_target(env, pr, requested_head, false)
+fn merged_pr_contains_current_head<E: CliEnv>(env: &mut E, number: u64) -> bool {
+    let Ok(Some(head)) = env.fetch_pr_head_sha(number) else {
+        return false;
+    };
+    if !matches!(head.len(), 40 | 64) || !head.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let clean = gwt_core::process::hidden_command("git")
+        .args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=normal",
+            "--",
+            ".",
+            crate::cli::delivery_paths::BOOKKEEPING_GIT_EXCLUDE,
+        ])
+        .current_dir(&worktree)
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout.is_empty());
+    clean
+        && gwt_core::process::hidden_command("git")
+            .args(["merge-base", "--is-ancestor", "HEAD", &head])
+            .current_dir(&worktree)
+            .output()
+            .is_ok_and(|output| output.status.success())
 }
 
 fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
@@ -1474,12 +1543,20 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let number = number_arg
         .parse()
         .map_err(|_| CliParseError::InvalidNumber((*number_arg).clone()))?;
+    let mut base: Option<String> = None;
     let mut title: Option<String> = None;
     let mut file: Option<String> = None;
     let mut add_labels: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--base" => {
+                i += 1;
+                if i >= args.len() || args[i].trim().is_empty() {
+                    return Err(CliParseError::MissingFlag("--base"));
+                }
+                base = Some(args[i].clone());
+            }
             "--title" => {
                 i += 1;
                 if i >= args.len() {
@@ -1505,11 +1582,12 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
         }
         i += 1;
     }
-    if title.is_none() && file.is_none() && add_labels.is_empty() {
+    if base.is_none() && title.is_none() && file.is_none() && add_labels.is_empty() {
         return Err(CliParseError::Usage);
     }
     Ok(PrCommand::Edit {
         number,
+        base,
         title,
         file,
         add_labels,
@@ -1820,6 +1898,41 @@ mod tests {
         }
     }
 
+    fn seed_prepared_completion_pr(
+        env: &mut crate::cli::TestEnv,
+        repo: &std::path::Path,
+        head_sha: &str,
+    ) {
+        let branch = gwt_git::Repository::open(repo)
+            .unwrap()
+            .current_branch()
+            .unwrap()
+            .unwrap();
+        let value = serde_json::json!({
+            "number": 7, "url": "https://example.com/pr/7", "state": "OPEN", "isDraft": false,
+            "headRefName": branch, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+            "body": "User Verification Result: n/a (autonomous)\nAgent Visual Check: n/a (no UI surface)\n"
+        });
+        let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
+        let mut inventory =
+            gwt_git::pr_status::parse_pr_inventory_json(&format!("[{value}]"), chrono::Utc::now())
+                .unwrap()
+                .remove(0);
+        inventory.unresolved_review_threads = Some(0);
+        inventory.coderabbit_review_complete = Some(true);
+        env.seed_current_pr(Some(pr.clone()));
+        env.seed_pr(7, pr);
+        env.completion_prs.insert(
+            7,
+            gwt_git::pr_status::PrCompletionSnapshot {
+                state: gwt_git::pr_status::PrState::Open,
+                head_sha: head_sha.to_string(),
+                inventory,
+            },
+        );
+    }
+
     #[test]
     fn issue_4979_create_checks_remote_only_commits_before_dispatch() {
         let _env_lock = crate::env_test_lock()
@@ -2125,6 +2238,7 @@ mod tests {
             },
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated")),
                 body: None,
                 add_labels: vec![],
@@ -2277,6 +2391,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated")),
                 body: None,
                 add_labels: vec![s("auto-merge")],
@@ -2330,6 +2445,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated again")),
                 body: None,
                 add_labels: vec![],
@@ -2389,6 +2505,7 @@ mod tests {
                 &mut env,
                 PrCommand::EditBody {
                     number: 7,
+                    base: None,
                     title: Some(s("updated")),
                     body: None,
                     add_labels: vec![],
@@ -2569,6 +2686,7 @@ mod tests {
                 &mut env,
                 PrCommand::EditBody {
                     number: 7,
+                    base: None,
                     title: Some(s("completed update")),
                     body: None,
                     add_labels: vec![],
@@ -2960,7 +3078,7 @@ mod tests {
                     base: s("develop"),
                     head: None,
                     title: s("PR shard delivery"),
-                    body: s("User Verification Result: n/a (autonomous)"),
+                    body: s("User Verification Result: n/a (autonomous)\nAgent Visual Check: n/a (no UI surface)\n"),
                     labels: vec![],
                     draft: false,
                 },
@@ -2969,6 +3087,11 @@ mod tests {
             .unwrap(),
             0,
             "{out}"
+        );
+        seed_prepared_completion_pr(
+            &mut env,
+            &fixture.repo,
+            verified.verified_head.as_deref().unwrap(),
         );
         let items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
             .unwrap()
@@ -3072,7 +3195,7 @@ mod tests {
         // Its metadata must not create another delivery/verification cycle.
         let mut merged_pr = seeded_pr();
         merged_pr.state = gwt_git::pr_status::PrState::Merged;
-        sync_edited_workspace_pr_metadata(&env, &merged_pr).unwrap();
+        sync_edited_workspace_pr_metadata(&mut env, &merged_pr).unwrap();
         for _ in 0..2 {
             let receipt = crate::cli::verification_record::save_work_event_settlement_record(
                 &fixture.repo,
@@ -3086,7 +3209,7 @@ mod tests {
                 receipt.status
             );
             assert!(!receipt.obligation_open);
-            sync_edited_workspace_pr_metadata(&env, &merged_pr).unwrap();
+            sync_edited_workspace_pr_metadata(&mut env, &merged_pr).unwrap();
         }
         assert_eq!(
             crate::cli::verification_record::evaluate_evidence(&fixture.repo, session_id, Some(42)),
@@ -3227,6 +3350,17 @@ mod tests {
             "{verify_out}",
         );
 
+        // #5034: autonomous completion requires a prepared owner PR. This
+        // fixture still exercises Completed receipt/authority and non-Draft
+        // creation; it no longer completes before any PR exists.
+        let verification = crate::cli::verification_record::load(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        seed_prepared_completion_pr(
+            &mut env,
+            &fixture.repo,
+            verification.verified_head.as_deref().unwrap(),
+        );
         let mut completion_out = String::new();
         assert_eq!(
             crate::cli::execution_state::run(
@@ -3405,6 +3539,7 @@ mod tests {
             },
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("updated without receipt")),
                 body: Some(s("updated body")),
                 add_labels: vec![],
@@ -3632,6 +3767,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: Some(s("t2")),
                 body: None,
                 add_labels: vec![],
@@ -3641,6 +3777,33 @@ mod tests {
         .expect("run pr edit while blocked");
         assert_eq!(code, 2, "{out}");
         assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "pr.edit",
+            "params": {"number": 7, "base": "develop"}
+        })
+        .to_string();
+        assert_eq!(crate::cli::dispatch(&mut env, &[s("gwtd")]), 2);
+        assert!(
+            env.pr_edit_call_log.is_empty(),
+            "base edit must not bypass authority"
+        );
+
+        // Issue #3693: containment remains available when producing changes
+        // are blocked, without requiring a new verification record.
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "pr.close",
+            "params": {"number": 7}
+        })
+        .to_string();
+        assert_eq!(crate::cli::dispatch(&mut env, &[s("gwtd")]), 0);
+        assert_eq!(
+            env.fetch_pr(7).unwrap().state,
+            gwt_git::pr_status::PrState::Closed
+        );
+        assert!(env.pr_comments.is_empty(), "a closure comment is optional");
     }
 
     #[test]
@@ -4305,6 +4468,7 @@ mod tests {
             },
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: None,
                 body: Some(s(body)),
                 add_labels: vec![],
@@ -4320,6 +4484,7 @@ mod tests {
             },
             PrCommand::Edit {
                 number: 7,
+                base: None,
                 title: None,
                 file: Some(s("body.md")),
                 add_labels: vec![],
@@ -4347,6 +4512,7 @@ mod tests {
             &mut env,
             PrCommand::EditBody {
                 number: 7,
+                base: None,
                 title: None,
                 body: Some(s(corrected)),
                 add_labels: vec![],
@@ -5060,7 +5226,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_family_current_persists_workspace_pr_metadata() {
+    fn pr_family_current_preserves_workspace_pr_metadata() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5117,16 +5283,10 @@ mod tests {
         let details = projection.git_details.expect("git details");
         assert_eq!(details.branch.as_deref(), Some("work/20260507-0808"));
         assert_eq!(details.base_branch.as_deref(), Some("origin/develop"));
-        assert_eq!(details.pr_number, Some(2538));
-        assert_eq!(details.pr_state.as_deref(), Some("OPEN"));
-        assert_eq!(
-            details.pr_url.as_deref(),
-            Some("https://github.com/akiojin/gwt/pull/2538")
-        );
-        assert_eq!(
-            details.pr_created_at.expect("pr_created_at").to_rfc3339(),
-            "2026-05-07T08:20:00+00:00"
-        );
+        assert_eq!(details.pr_number, None);
+        assert_eq!(details.pr_state, None);
+        assert_eq!(details.pr_url, None);
+        assert_eq!(details.pr_created_at, None);
     }
 
     fn assert_pr_command_writes_work_event_pr_metadata(command: PrCommand) {
@@ -5134,7 +5294,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_metadata_current_targets_work_from_subdirectory() {
+    fn pr_metadata_current_preserves_work_from_subdirectory() {
         assert_pr_metadata_target_from_directory(PrCommand::Current, true, true);
     }
 
@@ -5156,6 +5316,7 @@ mod tests {
         subdirectory: bool,
         detached_delivery: bool,
     ) {
+        let read_only = matches!(command, PrCommand::Current);
         let foreign_ready = matches!(command, PrCommand::Ready { number: 999 });
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -5344,9 +5505,25 @@ mod tests {
                 }
             }
         }
+        let before_current = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("snapshot current");
+        let before_works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("snapshot Works");
         let mut out = String::new();
         let code = run(&mut env, command, &mut out).expect("run pr command");
         assert_eq!(code, 0, "{out}");
+
+        if read_only {
+            assert_eq!(
+                gwt_core::workspace_projection::load_workspace_projection(&repo).unwrap(),
+                before_current
+            );
+            assert_eq!(
+                gwt_core::workspace_projection::load_workspace_work_items(&repo).unwrap(),
+                before_works
+            );
+            return;
+        }
 
         let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
             .expect("load work items")
@@ -5436,7 +5613,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_family_current_writes_work_event_pr_metadata() {
+    fn pr_family_current_preserves_work_event_pr_metadata() {
         assert_pr_command_writes_work_event_pr_metadata(PrCommand::Current);
     }
 
@@ -5456,6 +5633,7 @@ mod tests {
     fn pr_family_edit_writes_work_event_pr_metadata() {
         assert_pr_command_writes_work_event_pr_metadata(PrCommand::EditBody {
             number: 3672,
+            base: None,
             title: Some("Updated PR".to_string()),
             body: None,
             add_labels: vec![],
@@ -5793,6 +5971,7 @@ mod tests {
                 "akiojin/gwt",
                 repo_path,
                 12,
+                None,
                 Some("Edited"),
                 Some("Updated body"),
                 &["tested".to_string()],
@@ -5807,6 +5986,7 @@ mod tests {
                 "akiojin/gwt",
                 repo_path,
                 12,
+                None,
                 Some("Edited"),
                 None,
                 &["no-such-label".to_string()],
@@ -5903,10 +6083,10 @@ mod tests {
         });
     }
 
-    // SPEC-2359 US-37 / T-240: PR state polling auto-done on merged
-
-    #[test]
-    fn pr_family_current_emits_workspace_auto_done_when_pr_is_merged() {
+    // #5041: historical PR reads are observation, explicit delivery is mutation.
+    fn with_merged_pr_work(
+        test: impl FnOnce(&mut crate::cli::TestEnv, &std::path::Path, PrStatus),
+    ) {
         use crate::cli::test_support::ScopedEnvVar;
         use chrono::TimeZone;
 
@@ -5922,23 +6102,21 @@ mod tests {
             .status()
             .expect("init git")
             .success());
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
         env.repo_path = repo.clone();
-        env.seed_current_pr(Some(gwt_git::PrStatus {
-            head_ref_name: String::new(),
-            check_counts: None,
-            number: 9999,
-            title: "Auto-done PR".to_string(),
-            state: gwt_git::pr_status::PrState::Merged,
-            url: "https://github.com/akiojin/gwt/pull/9999".to_string(),
-            created_at: None,
-            ci_status: "SUCCESS".to_string(),
-            mergeable: "MERGEABLE".to_string(),
-            merge_state_status: "CLEAN".to_string(),
-            review_status: "APPROVED".to_string(),
-        }));
+        let head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("initial HEAD");
+        let head = String::from_utf8(head.stdout).unwrap();
+        seed_prepared_completion_pr(&mut env, &repo, head.trim());
+        let mut pr = seeded_pr();
+        pr.state = gwt_git::pr_status::PrState::Merged;
+        env.seed_current_pr(Some(pr.clone()));
 
         let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
@@ -5968,36 +6146,131 @@ mod tests {
         gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
             .expect("seed start event");
 
-        let mut out = String::new();
-        let code = run(&mut env, PrCommand::Current, &mut out).expect("run pr current");
-        assert_eq!(code, 0);
+        test(&mut env, &repo, pr);
+    }
 
-        let projection_after = gwt_core::workspace_projection::load_workspace_projection(&repo)
-            .expect("load projection")
-            .expect("projection");
-        assert_eq!(
-            projection_after
-                .git_details
-                .as_ref()
-                .expect("git details")
-                .pr_state
-                .as_deref(),
-            Some("MERGED")
-        );
+    fn commit_reopened_source(repo: &std::path::Path) {
+        std::fs::write(repo.join("new-source.txt"), "reopened issue source\n").unwrap();
+        for args in [
+            vec!["add", "new-source.txt"],
+            vec!["commit", "-qm", "fix: new source after reopening"],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
 
-        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-            .expect("load work items")
-            .expect("work items");
-        let item = work_items
-            .work_items
-            .iter()
-            .find(|item| item.id == "wi-pr-merge-auto-done")
-            .expect("work item");
-        assert_eq!(
-            item.status_category,
-            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
-            "PR merge must auto-emit Done for the linked Workspace WorkItem",
-        );
+    #[test]
+    fn issue_5041_current_preserves_reopened_work_after_new_commit() {
+        with_merged_pr_work(|env, repo, _pr| {
+            commit_reopened_source(repo);
+            let before_current =
+                gwt_core::workspace_projection::load_workspace_projection(repo).unwrap();
+            let before_works =
+                gwt_core::workspace_projection::load_workspace_work_items(repo).unwrap();
+            let mut out = String::new();
+            assert_eq!(run(env, PrCommand::Current, &mut out).unwrap(), 0);
+            assert!(out.contains("#7 [MERGED]"), "{out}");
+            assert_eq!(
+                gwt_core::workspace_projection::load_workspace_projection(repo).unwrap(),
+                before_current
+            );
+            assert_eq!(
+                gwt_core::workspace_projection::load_workspace_work_items(repo).unwrap(),
+                before_works
+            );
+        });
+    }
+
+    #[test]
+    fn issue_5041_merged_delivery_rejects_new_source() {
+        with_merged_pr_work(|env, repo, pr| {
+            let before = gwt_core::workspace_projection::load_workspace_work_items(repo).unwrap();
+            std::fs::write(repo.join("new-source.txt"), "uncommitted source\n").unwrap();
+            record_mutated_workspace_pr_metadata(env, &pr, None, None, false).unwrap();
+            assert_eq!(
+                gwt_core::workspace_projection::load_workspace_work_items(repo).unwrap(),
+                before
+            );
+            commit_reopened_source(repo);
+            record_mutated_workspace_pr_metadata(env, &pr, None, None, false).unwrap();
+            assert_eq!(
+                gwt_core::workspace_projection::load_workspace_work_items(repo).unwrap(),
+                before
+            );
+        });
+    }
+
+    #[test]
+    fn issue_5041_merged_delivery_requires_a_known_head() {
+        with_merged_pr_work(|env, repo, pr| {
+            env.completion_prs.clear();
+            let before = gwt_core::workspace_projection::load_workspace_work_items(repo).unwrap();
+            record_mutated_workspace_pr_metadata(env, &pr, None, None, false).unwrap();
+            assert_eq!(
+                gwt_core::workspace_projection::load_workspace_work_items(repo).unwrap(),
+                before
+            );
+        });
+    }
+
+    #[test]
+    fn issue_5041_matching_merged_delivery_marks_work_done() {
+        with_merged_pr_work(|env, repo, pr| {
+            record_mutated_workspace_pr_metadata(env, &pr, None, None, false).unwrap();
+            let works = gwt_core::workspace_projection::load_workspace_work_items(repo)
+                .unwrap()
+                .unwrap();
+            let work = works
+                .work_items
+                .iter()
+                .find(|work| work.id == "wi-pr-merge-auto-done")
+                .unwrap();
+            assert_eq!(
+                work.status_category,
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+            );
+            let current = gwt_core::workspace_projection::load_workspace_projection(repo)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                current.git_details.unwrap().pr_state.as_deref(),
+                Some("MERGED")
+            );
+        });
+    }
+
+    #[test]
+    fn issue_5041_bound_merged_delivery_marks_work_done() {
+        with_merged_pr_work(|env, repo, pr| {
+            let session_id = "merged-delivery-session";
+            let identity = initialize_pr_generation_authority(repo, session_id);
+            persist_pr_generation_session(repo, session_id, identity);
+            seed_pr_generation_work(repo, session_id);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .unwrap();
+            let binding = session.execution_binding.as_ref().unwrap();
+            record_mutated_workspace_pr_metadata(env, &pr, Some(binding), None, false).unwrap();
+            let works = gwt_core::workspace_projection::load_workspace_work_items(repo)
+                .unwrap()
+                .unwrap();
+            let work = works
+                .work_items
+                .iter()
+                .find(|work| work.id == "generation-delivery-work")
+                .unwrap();
+            assert_eq!(
+                work.status_category,
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+            );
+        });
     }
 
     #[test]

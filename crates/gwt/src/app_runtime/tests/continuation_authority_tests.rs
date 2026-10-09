@@ -1550,7 +1550,7 @@ fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_st
 
     let events = runtime.handle_launch_complete_and_drain(
         window_id,
-        Err("simulated projection-only spawn failure".to_string()),
+        Err("simulated projection-only spawn failure".into()),
     );
 
     assert!(
@@ -3755,6 +3755,21 @@ fn continue_work_session_start_still_refuses_owner_number_mismatch() {
 #[test]
 fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preserves_blocked_history(
 ) {
+    assert_fresh_execution_preserves_terminal_work(
+        gwt_core::workspace_projection::WorkEventKind::Discard,
+    );
+}
+
+#[test]
+fn fresh_execution_authenticated_session_start_creates_successor_after_done_work() {
+    assert_fresh_execution_preserves_terminal_work(
+        gwt_core::workspace_projection::WorkEventKind::Done,
+    );
+}
+
+fn assert_fresh_execution_preserves_terminal_work(
+    terminal_kind: gwt_core::workspace_projection::WorkEventKind,
+) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3763,6 +3778,10 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number: 2359,
@@ -3900,14 +3919,14 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
                     },
                 );
                 let event = gwt_core::workspace_projection::WorkEvent::new(
-                    gwt_core::workspace_projection::WorkEventKind::Discard,
+                    terminal_kind,
                     projection.id.clone(),
                     Utc::now(),
                 );
                 Ok((projection.id.clone(), vec![other_host, event]))
             },
         )
-        .expect("discard predecessor Work");
+        .expect("close predecessor Work");
     let predecessor_work_snapshot =
         gwt_core::workspace_projection::load_workspace_work_items(&repo)
             .unwrap()
@@ -3915,7 +3934,8 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
             .work_items
             .into_iter()
             .find(|work| work.id == predecessor_work)
-            .expect("discarded predecessor Work");
+            .expect("terminal predecessor Work");
+    assert!(predecessor_work_snapshot.is_terminal());
     assert_eq!(predecessor_work_snapshot.execution_containers.len(), 2);
 
     let mut candidate =
@@ -4032,7 +4052,7 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         "old binding must be stale after fresh activation",
     );
     assert_eq!(
-        fs::read(predecessor_session_path).expect("old Session readback"),
+        fs::read(&predecessor_session_path).expect("old Session readback"),
         predecessor_session_bytes,
         "fresh activation must not rewrite the predecessor Session",
     );
@@ -4045,7 +4065,7 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
             .iter()
             .find(|work| work.id == predecessor_work),
         Some(&predecessor_work_snapshot),
-        "fresh activation must preserve the discarded Work and its Session membership",
+        "fresh activation must preserve the terminal Work and its Session membership",
     );
     let successor = works
         .work_items
@@ -4057,7 +4077,7 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         })
         .expect("fresh Session belongs to a successor Work");
     assert_ne!(successor.id, predecessor_work);
-    assert!(!successor.discarded);
+    assert!(!successor.is_terminal());
     assert!(successor.related_work_item_ids.contains(&predecessor_work));
     save_workspace_launch_projection(
         &repo,
@@ -4086,7 +4106,29 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
             Some(&HashSet::from([predecessor_session_id.to_string()])),
         )
         .is_err(),
-        "a discarded predecessor Session cannot be moved to its successor"
+        "a terminal predecessor Session cannot be moved to its successor"
+    );
+
+    let update = gwt::apply_bound_authenticated_workspace_update(
+        &repo,
+        candidate_session_id,
+        &binding,
+        gwt::AgentWorkspaceUpdateRequest {
+            schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+            claimed_session_id: candidate_session_id.to_string(),
+            observation: gwt::observe_agent_runtime(&repo).expect("observe successor worktree"),
+            intent: gwt::AgentWorkspaceUpdateIntent {
+                current_focus: Some("Continue the next owner slice".to_string()),
+                ..Default::default()
+            },
+        },
+    )
+    .expect("the fresh binding must authorize workspace.update on its successor Work");
+    assert_eq!(update.work_id, successor.id);
+    assert_eq!(
+        fs::read(&predecessor_session_path).expect("old Session readback after update"),
+        predecessor_session_bytes,
+        "successor workspace.update must preserve the predecessor Session",
     );
     let retry_works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .unwrap()

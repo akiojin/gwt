@@ -2812,6 +2812,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
     let target_message = legacy_3272_failure(repo.path());
     let mut prefs = legacy_failed_prefs(repo.path(), 42);
     prefs.max_active_agents = 4;
+    prefs.max_active_agents_mode = gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual;
     prefs.priority_order = vec![99, 45, 44, 43, 42];
     prefs
         .launching_issues
@@ -3055,6 +3056,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     let repo = init_resolvable_git_repo();
     let mut prefs = legacy_failed_prefs(repo.path(), 42);
     prefs.max_active_agents = 2;
+    prefs.max_active_agents_mode = gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual;
     prefs.priority_order = vec![43, 42];
     let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
     monitor.set_gui_connected(true);
@@ -3171,6 +3173,7 @@ fn newer_disk_failure_adoption_cancels_stale_pending_launch_and_reconciles_inbox
         IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 2,
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             legacy_git_launch_failure_migration_version: 0,
             ..IssueMonitorPrefs::default()
         },

@@ -15,6 +15,26 @@ const TRAY_LOCK: &str = include_str!("../src/cli/tray/lock.rs");
 const OPEN_CLI: &str = include_str!("../src/cli/open.rs");
 
 #[test]
+fn no_tray_skips_native_icon_registration() {
+    let icon = MAIN_RS
+        .split_once("let tray_icon_handle = ")
+        .expect("tray handle")
+        .1;
+    let branch = icon
+        .split_once("TrayIconBuilder::new()")
+        .expect("builder")
+        .0;
+    assert!(
+        branch.contains("if tray_args.no_tray {"),
+        "no-tray must branch before native tray registration"
+    );
+    assert!(
+        branch.contains("None"),
+        "the no-tray branch must not register an icon"
+    );
+}
+
+#[test]
 fn startup_tray_contract_does_not_pin_transitive_dependency_versions() {
     let startup_test = include_str!("startup_tray_performance.rs");
     assert!(

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { projectUrlPath, routeWebSocketUrl } from "../frontend-route.js";
+import { createPmWindowModel } from "../pm-chat.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 function functionSource(name) {
@@ -31,6 +32,7 @@ function fixture({ routeProjectKey = null } = {}) {
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
     projectPageMetadata: { resetConnection() {} },
     requestVisiblePmConversations() {}, pmChatViews: new Map(),
+    applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
     opened, renderRouteNotFound() { context.notFoundRendered = true; },

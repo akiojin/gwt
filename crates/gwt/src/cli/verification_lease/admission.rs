@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    CoordinatorError, HeavyHolderKind, HeavyLease, HeavyLeaseStatus, IndexCoordinator,
-    JobAdmission, JobOutcome, JobPriority, TargetJobGuard, VERIFICATION_RESERVATION_TTL,
+    CoordinatorError, HeavyAttempt, HeavyHolderKind, HeavyLease, HeavyLeaseStatus,
+    IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetJobGuard,
+    VERIFICATION_RESERVATION_TTL,
 };
 use gwt_github::{client::ApiError, SpecOpsError};
 
@@ -33,6 +34,7 @@ pub(crate) const MAX_WAIT_SECS: u64 = 1500;
 const _: () = assert!(DEFAULT_MAX_WAIT_SECS <= MAX_WAIT_SECS);
 /// How often the wait re-checks the lease and the host.
 const POLL: Duration = Duration::from_secs(5);
+const CANCELLABLE_POLL: Duration = Duration::from_millis(100);
 /// Our own verification target job only ever contends with a same-worktree
 /// claimant, so claiming it does not need to block.
 const NON_BLOCKING: Duration = Duration::from_millis(250);
@@ -132,6 +134,20 @@ impl Admission {
 
 fn unexpected(message: String) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(message))
+}
+
+fn check_cancellation(attempt: Option<&HeavyAttempt<'_>>) -> Result<(), SpecOpsError> {
+    let Some(attempt) = attempt else {
+        return Ok(());
+    };
+    if (attempt.check_cancelled)().map_err(|error| unexpected(error.to_string()))? {
+        return Err(cancelled(attempt.id));
+    }
+    Ok(())
+}
+
+fn cancelled(attempt_id: &str) -> SpecOpsError {
+    unexpected(format!("verification attempt canceled (attempt {attempt_id}); rerun verify.run with the identical full matrix"))
 }
 
 /// Resolve `params.max_wait_secs` into a bounded duration.
@@ -239,8 +255,23 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
         };
     }
     if !status.held {
+        let head = status
+            .queue
+            .first()
+            .map(|head| {
+                format!(
+                    "; queue head {} (resident: {}, {}, attempt: {})",
+                    head.target.as_deref().unwrap_or("unknown target"),
+                    if head.resident { "yes" } else { "no" },
+                    head.job_status
+                        .map(|status| format!("job {}", status.as_str()))
+                        .unwrap_or_else(|| "job status unpublished".to_string()),
+                    head.attempt_id.as_deref().unwrap_or("legacy"),
+                )
+            })
+            .unwrap_or_else(|| "; queue empty".to_string());
         return HolderNotice {
-            detail: "verification lease was contended".to_string(),
+            detail: format!("verification lease has no current holder{head}"),
             retry_after: None,
         };
     }
@@ -361,7 +392,7 @@ fn deferred(
             "rerun `verify.run` in about {}s (timing hint only; a progressing holder renews its TTL)",
             retry_after.as_secs()
         ),
-        None => "rerun `verify.run` after the current lease holder finishes".to_string(),
+        None => "rerun `verify.run` to recheck admission when the reported blocker clears".to_string(),
     };
     unexpected(format!(
         "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — a deferral is \
@@ -372,9 +403,9 @@ fn deferred(
     ))
 }
 
-fn sleep_until(deadline: Instant) {
+fn sleep_until(deadline: Instant, poll: Duration) {
     let remaining = deadline.saturating_duration_since(Instant::now());
-    std::thread::sleep(remaining.min(POLL));
+    std::thread::sleep(remaining.min(poll));
 }
 
 /// One Board `status` post per admission, and only once the wait has
@@ -420,6 +451,7 @@ impl BoardNotice {
 /// `max_wait`. A wait that outlives the budget answers with a `deferred`
 /// error naming what the host was busy with; the caller reports a granted
 /// admission through `Admission::summary`.
+#[cfg(test)]
 pub(crate) fn admit<E: CliEnv>(
     env: &mut E,
     worktree: &Path,
@@ -427,11 +459,49 @@ pub(crate) fn admit<E: CliEnv>(
     max_wait: Duration,
     on_host_deferred: impl FnOnce(Option<&verification_lease::BuildArtifactGuard>) -> String,
 ) -> Result<Admission, SpecOpsError> {
+    admit_inner(env, worktree, command, max_wait, on_host_deferred, None)
+}
+
+/// Admit only while this caller-owned attempt remains active. Target and
+/// artifact waits poll promptly; host enrollment and refresh are fenced by
+/// the coordinator's queue metadata lock.
+pub(crate) fn admit_for_attempt<E: CliEnv>(
+    env: &mut E,
+    worktree: &Path,
+    command: Option<&str>,
+    max_wait: Duration,
+    on_host_deferred: impl FnOnce(Option<&verification_lease::BuildArtifactGuard>) -> String,
+    attempt: &HeavyAttempt<'_>,
+) -> Result<Admission, SpecOpsError> {
+    admit_inner(
+        env,
+        worktree,
+        command,
+        max_wait,
+        on_host_deferred,
+        Some(attempt),
+    )
+}
+
+fn admit_inner<E: CliEnv>(
+    env: &mut E,
+    worktree: &Path,
+    command: Option<&str>,
+    max_wait: Duration,
+    on_host_deferred: impl FnOnce(Option<&verification_lease::BuildArtifactGuard>) -> String,
+    attempt: Option<&HeavyAttempt<'_>>,
+) -> Result<Admission, SpecOpsError> {
+    check_cancellation(attempt)?;
     let key = verification_lease::verification_key(env)?;
     let coordinator = verification_lease::open_coordinator()?;
     let started = Instant::now();
     let deadline = started + max_wait;
     let mut notice = BoardNotice::default();
+    let poll = if attempt.is_some() {
+        CANCELLABLE_POLL
+    } else {
+        POLL
+    };
     let target = command
         .map(|command| verification_lease::effective_cargo_target(worktree, command, false))
         .transpose()
@@ -449,12 +519,14 @@ pub(crate) fn admit<E: CliEnv>(
         }
         None => Vec::new(),
     };
+    check_cancellation(attempt)?;
 
     // Every invocation owns its locks; matching the worktree is not proof
     // that another run's lease belongs to this invocation.
     let guard = loop {
+        check_cancellation(attempt)?;
         match coordinator
-            .request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING)
+            .request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING.min(poll))
             .map_err(|err| unexpected(format!("verification job admission failed: {err}")))?
         {
             JobAdmission::Owner(guard) => break guard,
@@ -462,6 +534,7 @@ pub(crate) fn admit<E: CliEnv>(
                 // A concurrent canonical run in this same worktree owns
                 // the target job until its command matrix finishes.
                 drop(waiter);
+                check_cancellation(attempt)?;
                 if Instant::now() >= deadline {
                     return Err(deferred(
                         started,
@@ -477,17 +550,20 @@ pub(crate) fn admit<E: CliEnv>(
                     max_wait,
                     "同じ worktree の別 claimant が verification target job を保持",
                 );
-                sleep_until(deadline);
+                sleep_until(deadline, poll);
             }
         }
     };
+    check_cancellation(attempt)?;
     let artifacts = if let Some(target) = &target {
         loop {
+            check_cancellation(attempt)?;
             match verification_lease::try_lock_build_artifacts(target)
                 .map_err(|error| unexpected(format!("build artifact admission failed: {error}")))?
             {
                 Some(guard) => break Some(guard),
                 None => {
+                    check_cancellation(attempt)?;
                     if Instant::now() >= deadline {
                         return Err(deferred(
                             started,
@@ -508,24 +584,59 @@ pub(crate) fn admit<E: CliEnv>(
                             target.display()
                         ),
                     );
-                    sleep_until(deadline);
+                    sleep_until(deadline, poll);
                 }
             }
         }
     } else {
         None
     };
+    check_cancellation(attempt)?;
+    let reserve = || match attempt {
+        Some(attempt) => coordinator.reserve_heavy_for_attempt(
+            &key,
+            JobPriority::ManualRebuild,
+            VERIFICATION_RESERVATION_TTL,
+            Some("verify.run deferred"),
+            attempt,
+        ),
+        None => coordinator.reserve_heavy(
+            &key,
+            JobPriority::ManualRebuild,
+            VERIFICATION_RESERVATION_TTL,
+            Some("verify.run deferred"),
+        ),
+    };
     let mut probe = HolderProbe::default();
     let lease = loop {
+        check_cancellation(attempt)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let acquired = if target.is_some() {
-            guard.acquire_heavy_with_disk_budgets(remaining.min(POLL), LEASE_TTL, &budgets)
-        } else {
-            guard.acquire_exclusive_heavy_with_disk_budget(remaining.min(POLL), LEASE_TTL, &budgets)
+        let acquired = match (target.is_some(), attempt) {
+            (true, Some(attempt)) => guard.acquire_heavy_with_disk_budgets_for_attempt(
+                remaining.min(POLL),
+                LEASE_TTL,
+                &budgets,
+                attempt,
+            ),
+            (false, Some(attempt)) => guard.acquire_exclusive_heavy_with_disk_budget_for_attempt(
+                remaining.min(POLL),
+                LEASE_TTL,
+                &budgets,
+                attempt,
+            ),
+            (true, None) => {
+                guard.acquire_heavy_with_disk_budgets(remaining.min(POLL), LEASE_TTL, &budgets)
+            }
+            (false, None) => guard.acquire_exclusive_heavy_with_disk_budget(
+                remaining.min(POLL),
+                LEASE_TTL,
+                &budgets,
+            ),
         };
         match acquired {
             Ok(lease) => break lease,
             Err(CoordinatorError::Timeout { .. }) => {
+                check_cancellation(attempt)?;
                 let mut holder = describe_holder(&coordinator, &mut probe, worktree);
                 for budget in &budgets {
                     holder.detail.push_str(&format!(
@@ -539,26 +650,24 @@ pub(crate) fn admit<E: CliEnv>(
                 if Instant::now() >= deadline {
                     // Issue #4086 AC-1: the rerun must be admitted before any
                     // background job that queues while recovery is running.
-                    let _ = coordinator.reserve_heavy(
-                        &key,
-                        JobPriority::ManualRebuild,
-                        VERIFICATION_RESERVATION_TTL,
-                        Some("verify.run deferred"),
-                    );
+                    if let Err(CoordinatorError::Cancelled { attempt_id }) = reserve() {
+                        return Err(cancelled(&attempt_id));
+                    }
+                    check_cancellation(attempt)?;
                     // Issue #4982: recover before releasing this worktree's
                     // target guard, so another admitted run cannot rearm the
                     // operational artifact while recovery is in progress.
                     // Issue #5106: lend the artifact boundary to recovery;
                     // reacquiring it through a new FD would deadlock this run.
                     let recovery = on_host_deferred(artifacts.as_ref());
+                    check_cancellation(attempt)?;
                     // A long recovery may outlive the reservation's existing
                     // TTL. Refresh it before reporting the rerun's final state.
-                    let reserved = coordinator.reserve_heavy(
-                        &key,
-                        JobPriority::ManualRebuild,
-                        VERIFICATION_RESERVATION_TTL,
-                        Some("verify.run deferred"),
-                    );
+                    let reserved = reserve();
+                    if let Err(CoordinatorError::Cancelled { attempt_id }) = &reserved {
+                        return Err(cancelled(attempt_id));
+                    }
+                    check_cancellation(attempt)?;
                     let _ = guard.complete(JobOutcome::Failed {
                         message: "host admission deferred".to_string(),
                     });
@@ -591,6 +700,7 @@ pub(crate) fn admit<E: CliEnv>(
                 }
                 notice.maybe_post(env, started, max_wait, &holder.detail);
             }
+            Err(CoordinatorError::Cancelled { attempt_id }) => return Err(cancelled(&attempt_id)),
             Err(err) => {
                 let _ = guard.complete(JobOutcome::Failed {
                     message: err.to_string(),
@@ -601,6 +711,7 @@ pub(crate) fn admit<E: CliEnv>(
             }
         }
     };
+    check_cancellation(attempt)?;
     let mut lease = lease;
     // Issue #4409 AC-4: a waiter needs to know whether this holder escaped the
     // agent process tree, because a holder that did not will take far longer
@@ -633,6 +744,7 @@ pub(crate) fn admit<E: CliEnv>(
         waited: started.elapsed(),
         queue_wait_ms,
     };
+    check_cancellation(attempt)?;
 
     Ok(admission)
 }
@@ -748,6 +860,45 @@ mod tests {
     /// index job's untimed lease is exactly the case that misled agents into
     /// waiting indefinitely.
     #[test]
+    fn a_free_slot_reports_the_absent_queue_head_instead_of_a_holder() {
+        let notice = holder_notice(
+            &HeavyLeaseStatus {
+                queue: vec![gwt_core::index_coordinator::HeavyQueueEntry {
+                    target: Some("project--verification--worktree".into()),
+                    priority: JobPriority::ManualRebuild,
+                    queued_at_ms: 1,
+                    waiting_ms: 200,
+                    resident: false,
+                    attempt_id: Some("deferred-attempt".into()),
+                    job_status: Some(gwt_core::index_coordinator::JobStatus::Failed),
+                }],
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
+        assert!(
+            notice.detail.contains("no current holder"),
+            "{}",
+            notice.detail
+        );
+        assert!(
+            notice
+                .detail
+                .contains("queue head project--verification--worktree"),
+            "{}",
+            notice.detail
+        );
+        assert!(notice.detail.contains("resident: no"), "{}", notice.detail);
+        assert!(
+            notice.detail.contains("attempt: deferred-attempt"),
+            "{}",
+            notice.detail
+        );
+        assert!(notice.detail.contains("job failed"), "{}", notice.detail);
+        assert!(!notice.detail.contains("TTL"), "{}", notice.detail);
+    }
+
+    #[test]
     fn holder_notice_reports_an_eta_only_when_the_holder_has_a_ttl() {
         let timed = holder_notice(
             &HeavyLeaseStatus {
@@ -785,7 +936,7 @@ mod tests {
 
         let free = holder_notice(&HeavyLeaseStatus::default(), None);
         assert_eq!(free.retry_after, None);
-        assert!(free.detail.contains("contended"), "{}", free.detail);
+        assert!(free.detail.contains("no current holder"), "{}", free.detail);
     }
 
     /// Issue #4405 AC-4: a waiter must be able to tell a starved holder from
@@ -1557,6 +1708,60 @@ mod tests {
         lease_root.assert_held("admission must hold the verification lease");
         drop(admission);
         lease_root.assert_free("dropping the admission must release the lease");
+    }
+
+    #[test]
+    fn cancellation_during_deferred_recovery_does_not_rearm_the_reservation() {
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let key = verification_lease::verification_key(&mut env).unwrap();
+        let other = TargetKey::verification("different-project", "worktree");
+        let JobAdmission::Owner(holder) = lease_root
+            .coordinator
+            .request_job(&other, JobPriority::ManualRebuild, Duration::ZERO)
+            .unwrap()
+        else {
+            panic!("private holder target must be free")
+        };
+        let lease = holder
+            .acquire_heavy_with_ttl(Duration::ZERO, LEASE_TTL)
+            .unwrap();
+        let cancelled = std::cell::Cell::new(false);
+        let check = || Ok(cancelled.get());
+        let attempt = gwt_core::index_coordinator::HeavyAttempt {
+            id: "cancelled-recovery",
+            check_cancelled: &check,
+        };
+        let result = super::admit_for_attempt(
+            &mut env,
+            worktree.path(),
+            None,
+            Duration::ZERO,
+            |_| {
+                cancelled.set(true);
+                assert!(lease_root
+                    .coordinator
+                    .clear_heavy_reservation_for_attempt(&key, attempt.id)
+                    .unwrap());
+                String::new()
+            },
+            &attempt,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("verification attempt canceled"));
+        assert!(!lease_root.coordinator.heavy_reservation_path(&key).exists());
+        let status = lease_root.status();
+        assert!(
+            status.held,
+            "canceling the waiting attempt must preserve its unrelated holder"
+        );
+        assert_eq!(status.target.as_deref(), Some(other.file_stem().as_str()));
+        assert!(status.queue.is_empty());
+        drop(lease);
+        holder.complete(JobOutcome::Completed).unwrap();
     }
 
     #[test]

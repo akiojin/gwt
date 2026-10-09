@@ -215,8 +215,11 @@ gwt open ~/src/my-repo              # そのプロジェクトを (必要なら�
 ephemeral port を選ぶ `--port 0` を含め、保存済みの暗黙ポートを変更しません。
 同一 LAN や VPN-extended LAN の別端末からブラウザ UI に接続したい場合は
 `--bind 0.0.0.0` を指定してください。運用者が選んだ既知のポートを使う場合は
-`--port` を併用できます。`--no-tray` / `--no-open` は SPEC #2920 Phase 4 の
-他作業が完了するまで受け取るだけで no-op の状態です。
+`--port` を併用できます。`--no-tray` はトレイを登録しない一時サーバーを起動します。
+起動元の親プロセスが終了するか、最後のブラウザセッションが閉じて5秒経つと終了します
+（この猶予中は再読み込み・再接続できます）。ブラウザが一度も接続していない場合は
+親プロセスの寿命に従います。`--no-open` はブラウザの自動起動を明示的に抑止します。
+フラグなしの起動も、既定でブラウザを自動では開きません。
 
 `gwt open` は Linux の GNOME 3.26+ など system tray を持たない環境向けの
 fallback です。tray アイコンが見えない場合でも `gwt browser URL: ...` が
@@ -395,6 +398,20 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+
+**Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
+GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
+ない登録済みプロジェクトは配分を消費しません。**Machine budget** には制約になった資源を
+表示し、Monitor の実装・レビュー上限と PM を含む総数を区別します。必要な実測値が
+得られない間、Auto は新規起動を待機させます。実行中のエージェントは継続します。
+大きな `target` ディレクトリの初回実測には数分かかる場合があります。
+更新中に前回の実測値が期限切れになった場合も、新規起動は待機します。
+正の数値を入力すると **Manual** の上書きを保存し、**Use Auto** で推奨値への追従に戻せます。
+既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
+検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
+自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+`{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
+`max_active_agents_override`、共有実測値の `agent_capacity` を返します。
 
 **Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
 ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
@@ -1283,6 +1300,32 @@ gwtd <<'JSON'
 JSON
 ```
 
+各 `verify.run` は admission を待つ前に試行記録を作成します。
+`verify.status` で自分の最新の試行を確認し、`params.attempt_id` を渡すと
+特定の試行を確認できます。JSON 出力には試行 ID、状態、中断理由、
+FIFO 予約が残っているかを含みます。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.status","params":{}}
+JSON
+```
+
+不要になった試行は、返された ID と理由を指定して取り消します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.cancel","params":{"attempt_id":"<attempt-id>","reason":"superseded matrix"}}
+JSON
+```
+
+取消には同じ project・worktree・session・execution authority が必要です。
+他者の試行は `not your verification attempt` として拒否します。
+対象を `interrupted` と記録し、その試行の予約だけを直ちに解放して、
+所有する command tree を停止します。runner が終了した場合も予約 TTL を待たずに解放します。
+中断は PASS やテスト失敗とは区別し、同じ行列を再実行すると新しい試行を開始します。
+最初のコマンド開始前に取り消した場合は、以前の検証記録を保持します。
+
 初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
 lint、coverage、直接の headed browser 確認、pre-push 確認は verification
 lease なしでそのまま実行します。完了判定には引き続き canonical な検証証跡が
@@ -1337,6 +1380,13 @@ lease の遷移は
 runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### PR HEAD の検証
+
+PR の対象ブランチを訂正するには、`pr.edit` に `params.number` と `params.base`
+（例: `develop`）を渡します。base だけの更新も可能で、既存の編集権限チェックを
+適用します。誤った PR を取り下げるには、`pr.close` に `params.number` と任意の
+`params.comment` を渡します。コメントを指定すると閉鎖前に記録し、記録に失敗した
+場合は PR を開いたままにします。close はブランチを保持し、実装変更の権限や
+検証証跡がない状態でも利用できます。
 
 `pr.head_check` に `params.base`（例: `develop`）と任意の `params.head` を渡すと、
 PR の作成・編集をせずに、正本の PASS 済み検証記録と live remote HEAD を比較できます。
