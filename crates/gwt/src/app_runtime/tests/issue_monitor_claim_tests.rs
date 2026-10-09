@@ -3457,6 +3457,10 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
 fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
+    // Keep durable recovery assertions independent of CI fsync latency.
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
     let prefs_path = temp.path().join("issue-monitor.json");
     fs::write(&prefs_path, b"{").expect("seed malformed prefs");
 
