@@ -222,9 +222,12 @@ port, updates the saved value, and emits a warning. An explicit `--port <n>`
 applies only to that launch—including `--port 0` for an ephemeral port—and
 never changes the saved implicit port. Pass `--bind 0.0.0.0` to make the embedded UI reachable
 from other hosts on the same LAN or VPN-extended LAN; pair it with an explicit
-`--port` when you need an operator-selected, well-known port. `--no-tray` and
-`--no-open` are accepted today but currently no-op while the rest of SPEC #2920
-Phase 4 lands.
+`--port` when you need an operator-selected, well-known port. `--no-tray`
+starts a temporary server without registering a tray icon. It exits when its
+launching parent ends, or five seconds after its last browser session closes
+(reloads can reconnect during that grace). Before any browser connects, the
+server follows its parent's lifetime. `--no-open` explicitly suppresses browser
+auto-open; startup already suppresses it by default.
 
 `gwt open` is the Linux fallback for desktops that do not run a
 StatusNotifierItem host (e.g. GNOME 3.26+ without the AppIndicator
