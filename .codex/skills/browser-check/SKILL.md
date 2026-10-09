@@ -16,7 +16,11 @@ an old browser tab.
 - Never use `/Applications/GWT.app`, `command -v gwt`, another worktree's
   binary, `gwt serve`, or `gwt --headless`.
 - Never stop, kill, or ask the user to quit their production gwt / `GWT.app`.
-- Always launch this checkout's `<repo-root>/target/debug/gwt`.
+- Always launch this checkout's `<repo-root>/target/debug/gwt` with
+  `--no-tray --no-open`.
+- Record the exact owned PID immediately after launch. Cleanup must run on
+  success, startup/audit/test failure, and owner-shell `EXIT/HUP/INT/TERM`.
+  Never terminate processes by name, command pattern, or another instance's PID.
 - Always isolate `HOME` / `USERPROFILE` so the fresh process owns its own
   `.gwt` state and cannot fall through to the user's tray lock.
 - The URL is valid only if it comes from this fresh process's
@@ -201,6 +205,11 @@ an old browser tab.
      separate prevents an older debug GUI from persisting its disposable
      daemon path while still exercising edited hook behavior in launched
      agents.
+   - Use one persistent Bash owner shell with `set -e` for launch, readiness,
+     hook audit, and automated verification. Keep that shell alive through
+     shutdown; an `EXIT` trap in a short-lived launch shell would immediately
+     stop the fresh server. Do not use `nohup`, `disown`, or a pipeline to
+     launch gwt: `$!` must identify gwt itself, not `tee` or another wrapper.
    - Run:
 
      ```bash
@@ -219,13 +228,48 @@ an old browser tab.
      if [ -n "$CHECK_GH_TOKEN" ]; then
        ENV_ARGS+=(GH_TOKEN="$CHECK_GH_TOKEN" GITHUB_TOKEN="$CHECK_GH_TOKEN")
      fi
+     # browser-check-process-cleanup-begin
+     set -e
+     CHECK_PID=""
+     cleanup_browser_check() {
+       if [ -z "$CHECK_PID" ]; then return 0; fi
+       if kill -0 "$CHECK_PID" 2>/dev/null; then
+         kill -TERM "$CHECK_PID" 2>/dev/null || true
+         for ((CHECK_WAIT=0; CHECK_WAIT<100; CHECK_WAIT++)); do
+           if ! kill -0 "$CHECK_PID" 2>/dev/null; then break; fi
+           sleep 0.1
+         done
+         if kill -0 "$CHECK_PID" 2>/dev/null; then
+           kill -KILL "$CHECK_PID" 2>/dev/null || true
+         fi
+       fi
+       wait "$CHECK_PID" 2>/dev/null || true
+       if kill -0 "$CHECK_PID" 2>/dev/null; then
+         echo "browser-check cleanup failed: owned PID $CHECK_PID remains" >&2
+         return 1
+       fi
+       CHECK_PID=""
+     }
+     trap 'CHECK_EXIT_STATUS=$?; trap - EXIT; cleanup_browser_check || CHECK_EXIT_STATUS=1; exit "$CHECK_EXIT_STATUS"' EXIT
+     trap 'exit 129' HUP
+     trap 'exit 130' INT
+     trap 'exit 143' TERM
+     # browser-check-process-cleanup-end
      # browser-check-launch-begin
      env -u GWT_BIN_PATH "${ENV_ARGS[@]}" \
-       "$CHECKOUT_GWT" --no-tray --no-open 2>&1 | tee "$LOG_FILE"
+       "$CHECKOUT_GWT" --no-tray --no-open > "$LOG_FILE" 2>&1 &
+     CHECK_PID=$!
+     printf 'Fresh gwt PID: %s\n' "$CHECK_PID"
      # browser-check-launch-end
      ```
 
-   - Keep this process running until the user says the check is finished.
+   - Continue Steps 5 and any automated tests in this owner shell. A failure
+     must exit it so the trap terminates and reaps the owned child. Test
+     frameworks must put cleanup in `finally` so evidence failures cannot
+     bypass shutdown.
+   - For manual inspection, finish the owner-shell script with
+     `wait "$CHECK_PID"` after readiness and audit succeed. Keep its tool
+     session running until the user says the check is finished.
    - If stdout says another tray-resident gwt instance is already running, the
      launch is invalid because isolation failed. Do not share that URL.
 
@@ -310,8 +354,13 @@ an old browser tab.
      the isolated home.
 
 8. Shutdown:
-   - When the user says the check is finished, send Ctrl-C to the launched
-     process and wait for it to exit.
+   - When the user says the check is finished, send Ctrl-C to the owner-shell
+     tool session. Its trap terminates only `CHECK_PID`, escalates if needed,
+     waits for exit, and checks that the PID is gone. Wait for the owner shell
+     to exit before reporting completion.
+   - Never assume a shell trap runs after `SIGKILL` or a crash. Keep the
+     `--no-tray` child attached to its owner parent; parent-death behavior
+     must be covered by the real-process verification harness.
    - Report the tested URL and whether shutdown was clean.
 
 ## Guardrails

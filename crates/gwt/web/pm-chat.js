@@ -1,3 +1,54 @@
+import { createUiStateStore } from './ui-state-store.js';
+import { renderUiContent } from './ui-content.js';
+
+// Parsed conversation and raw terminal packets share one immutable window version.
+// The terminal runtime retains responsibility for buffering and snapshot ordering.
+export function createPmWindowModel() {
+  const model = createUiStateStore({ windows: {}, changedWindowId: null });
+  function emptyWindow(windowId, sessionId = null) {
+    return { windowId, sessionId, revision: 0, terminal: null,
+      conversation: { availability: 'waiting', conversation_id: null, messages: [] } };
+  }
+  function bindPmWindowState(windowId, sessionId) {
+    model.update(state => {
+      const previous = state.windows[windowId];
+      if (previous && previous.sessionId === sessionId) return state;
+      const next = previous?.sessionId == null ? { ...emptyWindow(windowId, sessionId), terminal: previous?.terminal || null }
+        : emptyWindow(windowId, sessionId);
+      return { windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
+    });
+  }
+  function applyPmWindowReceiveEvent(event) {
+    model.update(state => {
+      const previous = state.windows[event.id];
+      let next = previous || emptyWindow(event.id);
+      if (event.kind === 'pm_conversation') {
+        if (!previous || event.session_id !== previous.sessionId) return state;
+        const snapshot = event.snapshot;
+        const retainHistory = ['waiting', 'unavailable'].includes(snapshot.availability)
+          && (!snapshot.conversation_id || snapshot.conversation_id === previous.conversation.conversation_id);
+        const messages = retainHistory ? previous.conversation.messages : (snapshot.messages || [])
+          .filter(message => (message.role === 'user' || message.role === 'assistant') && typeof message.text === 'string' && message.text.trim())
+          .map(message => ({ ...message, content: { type: 'text', body: message.text } }));
+        next = { ...next, conversation: { ...snapshot, messages,
+          conversation_id: retainHistory ? previous.conversation.conversation_id : snapshot.conversation_id } };
+      } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
+        next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
+      } else return state;
+      return { windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
+    });
+  }
+  function removePmWindowState(windowId) {
+    model.update(state => {
+      const { [windowId]: removed, ...windows } = state.windows;
+      return removed ? { windows, changedWindowId: windowId } : state;
+    });
+  }
+  function readPmWindowState() { return model.read(); }
+  function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
+  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+}
+
 // Provider-neutral conversation view. The caller owns polling and the terminal.
 export function createPmChat({ document, root, windowId, sessionId, send, onLogVisibility }) {
   let session = sessionId;
@@ -86,23 +137,22 @@ export function createPmChat({ document, root, windowId, sessionId, send, onLogV
       handleSendResult({ ok: false, error: cause.message || 'Message could not be sent.' });
     }
   }
-  function update(snapshot) {
-    if (disposed) return;
+  function update(state) {
+    if (disposed || !state) return;
+    setSession(state.sessionId);
+    root.dataset.stateVersion = String(state.revision);
+    const snapshot = state.conversation;
     const previousAvailability = availability;
     availability = snapshot.availability;
-    const messages = (snapshot.messages || []).filter(message =>
-      (message.role === 'user' || message.role === 'assistant') && typeof message.text === 'string' && message.text.trim());
+    const messages = snapshot.messages;
     const nextDigest = JSON.stringify(messages.map(({ id, role, text }) => [id, role, text]));
     const changedConversation = conversation !== snapshot.conversation_id;
-    // A failed or pending read is not evidence that existing history vanished.
-    const retainHistory = (availability === 'waiting' || availability === 'unavailable')
-      && (!snapshot.conversation_id || !changedConversation);
-    if (!retainHistory && (changedConversation || digest !== nextDigest)) {
+    if (changedConversation || digest !== nextDigest) {
       const atBottom = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop <= 32;
       const previousScroll = transcript.scrollTop;
       const nodes = messages.map(message => {
         const row = element('article', `pm-chat__message pm-chat__message--${message.role}`);
-        row.append(element('div', 'pm-chat__author', message.role === 'user' ? 'You' : 'PM'), element('p', 'pm-chat__text', message.text));
+        row.append(element('div', 'pm-chat__author', message.role === 'user' ? 'You' : 'PM'), renderUiContent(document, message.content, 'pm-chat__text'));
         return row;
       });
       transcript.replaceChildren(...nodes);
@@ -127,7 +177,7 @@ export function createPmChat({ document, root, windowId, sessionId, send, onLogV
     pending = false;
     input.value = '';
     showError('');
-    update({ availability: 'waiting', conversation_id: null, messages: [] });
+    availability = 'waiting';
     showLogs(false);
   }
   function dispose() {
@@ -141,7 +191,7 @@ export function createPmChat({ document, root, windowId, sessionId, send, onLogV
   chatButton.addEventListener('click', showChat);
   logButton.addEventListener('click', showLog);
   form.addEventListener('submit', sendInput);
-  update({ availability: 'waiting', conversation_id: null, messages: [] });
+  update({ sessionId, revision: 0, conversation: { availability: 'waiting', conversation_id: null, messages: [] } });
   showLogs(false);
   return { update, setSession, handleSendResult, dispose };
 }

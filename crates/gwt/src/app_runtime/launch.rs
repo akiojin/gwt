@@ -126,7 +126,12 @@ fn resolve_agent_resource_launch(
     };
     let max_active =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo_path))
-            .map_or(1, |prefs| prefs.max_active_agents);
+            .map_or(1, |prefs| {
+                let mut monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                monitor.refresh_agent_capacity(repo_path);
+                monitor.effective_max_active_agents()
+            });
     let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let resolved = gwt::agent_resource_policy::resolve_agent_resource_policy(
         &settings.agent.resource,
@@ -5908,6 +5913,7 @@ impl AppRuntime {
             .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
             let mut monitor =
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            monitor.refresh_agent_capacity(&project_root_path);
             let now = chrono::Utc::now().to_rfc3339();
             if let Some(snapshot) = self.issue_monitor_window_snapshot_for_tab(tab_id, &now) {
                 let tabs = self.issue_monitor_project_tab_ids(tab_id);

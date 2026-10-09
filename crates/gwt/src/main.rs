@@ -1792,6 +1792,9 @@ enum UserEvent {
         Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
     ),
     DrainAppEvents,
+    TransientBrowserEnded {
+        generation: u64,
+    },
     StartupReady,
     StartupStopped,
     ProjectIndexRefreshRequested {
@@ -2037,6 +2040,9 @@ enum UserEvent {
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
+    },
+    IssueMonitorCapacityChanged {
+        project_root: PathBuf,
     },
     IssueMonitorDaemonStatus {
         project_root: PathBuf,
@@ -3097,6 +3103,8 @@ mod tests {
         let wire = serde_json::to_value(&events[0].event).expect("toast wire");
         assert_eq!(wire["notification_transition"], "needs_human");
         let status = gwt::IssueMonitorStatusView {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
@@ -10038,16 +10046,15 @@ fn main() -> std::io::Result<()> {
     // pane can spawn, and record the value the process actually ended up with.
     log_startup_fd_limit(gwt_core::fd_limit::raise_soft_fd_limit());
 
-    // SPEC #2920 Phase 4 partial — restore `--bind`/`--port` on the GUI
-    // (tray-resident) route so VPN-reachable hosts can run
-    // `gwt --bind 0.0.0.0 --port <n>` without falling back to SSH local
-    // port forwarding. `--no-tray`/`--no-open` are accepted today but
-    // still no-op; the full Tray route takeover lands in the rest of
-    // Phase 4. Parse errors render the canonical usage hint and exit 2.
+    // Parse the tray/transient route before bootstrap and capture the launch
+    // owner now: a parent lost during bootstrap must not become a resident.
     let tray_args = match gwt::cli::tray::parse_tray_argv(&argv) {
         Ok(parsed) => parsed,
         Err(err) => fatal_startup_exit(&mut log_handles, &err.to_string(), 2),
     };
+    let transient_parent = tray_args
+        .no_tray
+        .then(gwt::cli::tray::lifetime::ParentProcess::capture);
 
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
     // update manifest (via the post-click modal's Later flow, or because the
@@ -10358,6 +10365,37 @@ fn main() -> std::io::Result<()> {
     #[cfg(windows)]
     verification_cap_relief::spawn(pty_writers.clone());
     let monitor_projects = Arc::new(RwLock::new(BTreeMap::new()));
+    // Capacity observation belongs to the host, independently of browser clients.
+    // Only open projects supply target candidates; registered projects consume
+    // nothing unless the machine census finds a live PTY.
+    let capacity_projects = Arc::new(RwLock::new(Vec::<PathBuf>::new()));
+    let capacity_roots = capacity_projects.clone();
+    let capacity_proxy = proxy.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("gwt-agent-capacity".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let roots = capacity_roots
+                .read()
+                .map(|projects| projects.clone())
+                .unwrap_or_default();
+            for root in roots {
+                if let Err(error) = gwt::agent_capacity::refresh_machine_capacity(&root) {
+                    tracing::warn!(%error, project_root = %root.display(), "agent capacity observation failed");
+                }
+                // Failed observations must also publish expiry instead of leaving
+                // an old positive Auto limit on a stopped Monitor.
+                if capacity_proxy
+                    .send_event(UserEvent::IssueMonitorCapacityChanged { project_root: root })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+    {
+        tracing::warn!(%error, "agent capacity sampler unavailable; Auto admission remains closed");
+    }
     let monitor_writers = pty_writers.clone();
     gwt::monitor_duplicate_runtime::spawn(monitor_projects.clone(), move || {
         let writers = monitor_writers.read().ok()?;
@@ -10443,7 +10481,10 @@ fn main() -> std::io::Result<()> {
     let tray_error_icon = load_tray_icon_rgba_for_state(true)
         .and_then(|(rgba, w, h)| tray_icon::Icon::from_rgba(rgba, w, h).ok());
     let mut tray_has_error = false;
-    let tray_icon_handle = tray_normal_icon.clone()
+    let tray_icon_handle = if tray_args.no_tray {
+        None
+    } else {
+        tray_normal_icon.clone()
         .and_then(|icon| {
             TrayIconBuilder::new()
                 .with_tooltip(format!("{APP_NAME} — open the browser UI"))
@@ -10458,7 +10499,8 @@ fn main() -> std::io::Result<()> {
                 "tray icon initialisation failed; running in fallback mode (use `gwt open` to launch the browser)"
             );
             None
-        });
+        })
+    };
 
     if tray_icon_handle.is_some() {
         gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::TrayReady);
@@ -10506,6 +10548,32 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    if let Some(parent) = transient_parent {
+        let transient_clients = clients.clone();
+        let transient_proxy = proxy.clone();
+        drop(runtime.handle().spawn(async move {
+            let mut browser = gwt::cli::tray::lifetime::BrowserLifetime::default();
+            loop {
+                if !parent.is_alive() {
+                    tracing::info!(target: "gwt_tray", "transient parent ended; shutting down");
+                    let _ = transient_proxy.send_event(UserEvent::QuitApp {
+                        reason: GuiShutdownReason::QuitApp,
+                    });
+                    break;
+                }
+                let (generation, connected) = transient_clients.browser_session_state();
+                if browser.ended(generation, connected, std::time::Instant::now())
+                    && transient_proxy
+                        .send_event(UserEvent::TransientBrowserEnded { generation })
+                        .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(gwt::cli::tray::lifetime::POLL_INTERVAL).await;
+            }
+        }));
+    }
+
     // SPEC #2920: there is no headless route anymore — the
     // tray-resident process is the only front door. The bounded
     // shutdown backstop is still useful when graceful cleanup stalls,
@@ -10523,6 +10591,7 @@ fn main() -> std::io::Result<()> {
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
 
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
+    let transient_dispatch_clients = clients.clone();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let event = match event {
@@ -10535,6 +10604,11 @@ fn main() -> std::io::Result<()> {
         let mut dispatch_timer = EventLoopDispatchTimer::start(&event);
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
         let event = match event {
+            Event::UserEvent(UserEvent::TransientBrowserEnded { generation }) => {
+                let (current, connected) = transient_dispatch_clients.browser_session_state();
+                if connected || current != generation { return; }
+                Event::UserEvent(UserEvent::QuitApp { reason: GuiShutdownReason::QuitApp })
+            }
             Event::UserEvent(UserEvent::MenuEvent(ref menu))
                 if gwt::cli::tray::menu::MenuAction::from_id(menu.id.as_ref())
                     == Some(gwt::cli::tray::menu::MenuAction::Quit) =>
@@ -10595,6 +10669,9 @@ fn main() -> std::io::Result<()> {
                     ready.set_agent_capability_issuer(server.agent_capability_issuer());
                     ready.set_server_url(browser_url.clone());
                     ready.set_usage_refresh(usage_refresh.clone());
+                    if let Ok(mut roots) = capacity_projects.write() {
+                        *roots = ready.project_contexts().into_iter().map(|context| context.project_root).collect();
+                    }
                     if let Ok(mut projects) = monitor_projects.write() {
                         for context in ready.project_contexts() {
                             projects.insert(context.project_root, ready.sessions_dir.clone());
@@ -11213,6 +11290,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);
             }
+            Event::UserEvent(UserEvent::IssueMonitorCapacityChanged { project_root }) => {
+                clients.dispatch(app.issue_monitor_capacity_changed_events(&project_root));
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
                 project_root,
                 status,
@@ -11818,6 +11898,9 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::MainEventsCleared => {
+                if let Ok(mut roots) = capacity_projects.write() {
+                    *roots = app.project_contexts().into_iter().map(|context| context.project_root).collect();
+                }
                 // Publish project membership even before a Monitor PTY exists.
                 // The worker retains it and needs no GUI round trip per census.
                 if let Ok(mut projects) = monitor_projects.write() {

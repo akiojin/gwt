@@ -1,6 +1,63 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.113.0] - 2026-10-09
+
+### Bug Fixes
+
+- **issue-monitor:** Reconcile physical panes before dispatch
+- **issue-monitor:** Reject duplicate panes below the active cap
+- **issue-monitor:** Keep stale snapshots from blocking unbound launch expiry
+- **verify:** Match recovery fixture platform gates
+- **verify:** Register cancellation operations in catalog
+- **verify:** Retain FIFO on transient enrollment reads
+- **terminal:** Drain unread macos pty output before reaping
+- **execution:** Recover terminal Work through fresh launches
+- **execution:** Guard terminal Work without Session references
+- **execution:** Preserve terminal recovery diagnostics
+- **issue-monitor:** Preserve capacity and observer safety
+- **tray:** Stop transient instances with their launch owner
+- **frontend:** Render PM chat and raw logs from shared window state
+- **issue-monitor:** Expire windowless launch deliveries
+- **issue-monitor:** Retain expired launch diagnostics
+- **pr:** Keep reads from terminalizing active work
+
+### Features
+
+- **issue-monitor:** 実測マシン予算から推奨エージェント数を算出
+- **pr:** PR の base 変更と close による自己復旧を追加
+- **gwtd:** Add run cancellation and queued diagnostics
+- **delivery:** Require owner PR readiness before completion
+- **verify:** Cancel caller-owned verification attempts
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3693 の起動履歴を保全
+- **work:** PR #5212 の配送履歴を記録
+- **work:** Issue #3693 の受入レビュー起動履歴を保全
+- **work:** Record issue 5165 pull request linkage
+- **work:** Record canonical PR 5215 link
+- **work:** Resume machine capacity delivery
+- **work:** Preserve issue 5016 relaunch history
+- **work:** Preserve issue 5016 successor history
+- **work:** Record issue 5016 delivery preparation
+- **work:** Record issue 5140 PR handoff
+
+### Testing
+
+- **daemon:** 起動検証fixtureを環境競合から隔離
+- **issue-monitor:** Provide exact root for failed launch feedback
+- **issue-monitor:** Synchronize daemon claim fixture readiness
+- **issue-monitor:** Set actual queue launch fixture geometry
+- **delivery:** Prepare owner PR in completion fixtures
+- **issue-monitor:** 起動設定 fixture の正値容量を明示
+- ロック競合fixtureのtracing通知を並列実行でも保持
+- **frontend:** Enforce shared PM window delivery contracts
+- **frontend:** Bind raw delivery checks to model subscription
+- **runtime:** Retry busy continuation reconciliation
+- **issue-monitor:** Assert legacy launch stall diagnostics
+- **issue-monitor:** Pin recovery fixture io budget
+
 ## [9.112.1] - 2026-10-08
 
 ### Bug Fixes
