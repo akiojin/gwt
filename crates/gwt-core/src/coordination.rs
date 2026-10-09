@@ -8213,6 +8213,14 @@ mod tests {
             });
         }
         write_prompt_board_fixture(&coordination_dir(dir.path()), &events);
+        load_snapshot(dir.path()).unwrap();
+        let projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(
+            projection.entries.len(),
+            HOT_PROJECTION_ENTRY_LIMIT,
+            "the final status append must start with a full hot projection"
+        );
         post_entry(
             dir.path(),
             escalation_entry(
@@ -8262,6 +8270,14 @@ mod tests {
             });
         }
         write_prompt_board_fixture(&coordination_dir(dir.path()), &events);
+        load_snapshot(dir.path()).unwrap();
+        let projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(
+            projection.entries.len(),
+            HOT_PROJECTION_ENTRY_LIMIT,
+            "the final status append must start with a full hot projection"
+        );
         post_entry(
             dir.path(),
             escalation_entry(
