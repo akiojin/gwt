@@ -9195,6 +9195,17 @@ mod tests {
             status["active_launches"].as_array().unwrap().len()
         );
         assert_eq!(gui_status["max_active_agents"], status["max_active"]);
+        // Issue #5140 AC-3: the legacy launching row reports its stalled
+        // deadline too. Check the live-time diagnostic before comparing the
+        // remaining stable projection.
+        let diagnostic = status["inbox"][2]
+            .as_object_mut()
+            .expect("launching row")
+            .remove("error_message")
+            .expect("stalled launch diagnostic");
+        let diagnostic = diagnostic.as_str().expect("diagnostic text");
+        assert!(diagnostic.starts_with("Launch stalled: no window for "));
+        assert!(diagnostic.ends_with("s (deadline 120s; issue #9)"));
         assert_eq!(
             status,
             serde_json::json!({
