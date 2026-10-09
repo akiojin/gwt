@@ -3,15 +3,74 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 
+async function windowModel() {
+  const module = await import('../pm-chat.js');
+  assert.equal(typeof module.createPmWindowModel, 'function', 'PM views need a shared window model');
+  return module.createPmWindowModel();
+}
+
+test('Chat and raw terminal consume the same immutable version without replaying raw packets', async () => {
+  const model = await windowModel();
+  model.bindPmWindowState('pm', 'session');
+  const chat = [], log = [], packets = [];
+  let previousPacket;
+  model.subscribePmWindowState(state => state.windows.pm, state => chat.push(state));
+  model.subscribePmWindowState(state => state.windows.pm, state => {
+    log.push(state);
+    if (state.terminal && state.terminal !== previousPacket) packets.push(state.terminal);
+    previousPacket = state.terminal;
+  });
+  for (const event of [
+    { kind: 'terminal_snapshot', id: 'pm', data_base64: 'snapshot' },
+    { kind: 'terminal_output', id: 'pm', data_base64: 'first' },
+    { kind: 'pm_conversation', id: 'pm', session_id: 'session', snapshot: { availability: 'ready', conversation_id: 'native', messages: [{ id: '1', role: 'assistant', text: 'Parsed answer' }] } },
+    { kind: 'terminal_output', id: 'pm', data_base64: 'second' },
+  ]) model.applyPmWindowReceiveEvent(event);
+  assert.equal(chat.length, 5);
+  chat.forEach((state, index) => assert.ok(state === log[index], 'both views receive one snapshot'));
+  assert.deepEqual(chat.map(state => state.revision), [1, 2, 3, 4, 5]);
+  assert.deepEqual(packets.map(packet => packet.dataBase64), ['snapshot', 'first', 'second']);
+  assert.deepEqual(chat.at(-1).conversation.messages[0].content, { type: 'text', body: 'Parsed answer' });
+  assert.ok(Object.isFrozen(chat.at(-1).conversation.messages));
+  let remounted;
+  const unsubscribe = model.subscribePmWindowState(state => state.windows.pm, state => { remounted = state; });
+  assert.ok(remounted === chat.at(-1), 'remount reads current state');
+  unsubscribe();
+});
+
+test('canonical history survives failed reads; replacement sessions reject stale conversation and remove state', async () => {
+  const model = await windowModel();
+  model.bindPmWindowState('pm', 'session');
+  const apply = snapshot => model.applyPmWindowReceiveEvent({ kind: 'pm_conversation', id: 'pm', session_id: 'session', snapshot });
+  apply({ availability: 'ready', conversation_id: 'native', messages: [{ id: '1', role: 'assistant', text: 'Keep' }] });
+  apply({ availability: 'unavailable', conversation_id: null, messages: [], detail: 'Disconnected' });
+  assert.equal(model.readPmWindowState().windows.pm.conversation.messages[0].text, 'Keep');
+  assert.equal(model.readPmWindowState().windows.pm.conversation.detail, 'Disconnected');
+  apply({ availability: 'waiting', conversation_id: 'replacement-native', messages: [] });
+  assert.deepEqual(model.readPmWindowState().windows.pm.conversation.messages, []);
+  model.bindPmWindowState('pm', 'replacement');
+  const replacement = model.readPmWindowState().windows.pm;
+  apply({ availability: 'ready', conversation_id: 'native', messages: [{ id: 'old', role: 'assistant', text: 'Stale' }] });
+  assert.ok(model.readPmWindowState().windows.pm === replacement);
+  assert.equal(replacement.terminal, null);
+  assert.equal(replacement.conversation.availability, 'waiting');
+  model.removePmWindowState('pm');
+  assert.equal(model.readPmWindowState().windows.pm, undefined);
+});
+
 async function fixture() {
   const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const sent = [], visibility = [];
   const { createPmChat } = await import('../pm-chat.js');
   const chat = createPmChat({ document, root, windowId: 'pm', sessionId: 'session', send: message => { sent.push(message); return 'sent'; }, onLogVisibility: visible => visibility.push(visible) });
-  const update = (messages = [], availability = 'ready') => chat.update({ conversation_id: 'conversation', availability, messages });
+  const model = await windowModel();
+  model.bindPmWindowState('pm', 'session');
+  model.subscribePmWindowState(state => state.windows.pm, state => chat.update(state));
+  const apply = snapshot => model.applyPmWindowReceiveEvent({ kind: 'pm_conversation', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, snapshot });
+  const update = (messages = [], availability = 'ready') => apply({ conversation_id: 'conversation', availability, messages });
   const submit = () => root.querySelector('form').dispatchEvent(new window.Event('submit', { cancelable: true }));
-  return { root, chat, sent, visibility, update, submit };
+  return { root, chat: { ...chat, update: apply, setSession: session => model.bindPmWindowState('pm', session) }, sent, visibility, update, submit };
 }
 
 test('chat starts with a notice and renders only nonempty conversation text safely', async () => {
