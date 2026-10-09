@@ -133,6 +133,10 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   expect(box!.y + box!.height).toBeLessThanOrEqual(1100);
   await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await expect(popup).toBeVisible();
+  await confirm(page, [3, 4]);
+  await expect(queued).toHaveText("Queued · 2");
+  await expect(popup).toBeVisible();
+  await expect(queued).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
   await page.mouse.move(1590, 1090);
   await expect(popup).not.toBeVisible();
   await page.locator("#op-notifications-button").focus();

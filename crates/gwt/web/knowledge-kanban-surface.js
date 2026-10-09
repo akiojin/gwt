@@ -712,7 +712,16 @@ export function createKnowledgeKanbanSurface({
           event.stopPropagation();
         };
         const leavePopup = () => { if (focused) show(focused); else hide(); };
-        const refresh = () => { if (anchor) show(anchor); };
+        const refresh = () => {
+          if (!anchor) return;
+          const previous = anchor;
+          const key = previous.dataset.issueExplanationKey;
+          const node = previous.isConnected ? previous
+            : key ? root.querySelector(`[data-issue-explanation-key="${key}"]`) : null;
+          if (focused === previous) focused = node;
+          if (hovered === previous) hovered = node;
+          show(node);
+        };
         const pointerDown = () => { pointerActive = true; focused = null; hovered = null; hide(); };
         const pointerEnd = () => { pointerActive = false; };
         const dragStart = () => { dragging = true; pointerDown(); };
@@ -4388,7 +4397,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
         badge.dataset.stateKey = model.primary.key;
-        explainIssueControl(badge, issueStateExplanation(model.primary), null, false);
+        explainIssueControl(badge, issueStateExplanation(model.primary), `row-state-${entry.number}`, false);
         main.appendChild(badge);
         select.appendChild(main);
 
@@ -4402,7 +4411,7 @@ export function createKnowledgeKanbanSurface({
               node.title = item.title;
             }
             if (item.key === "queue") {
-              explainIssueControl(node, `Position ${entry.queue_position} in the launch queue. ${issueQueueSourceExplanation(entry)}`, null, false);
+              explainIssueControl(node, `Position ${entry.queue_position} in the launch queue. ${issueQueueSourceExplanation(entry)}`, `row-queue-${entry.number}`, false);
             }
             secondary.appendChild(node);
           }

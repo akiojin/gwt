@@ -526,7 +526,7 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   event(autonomous, "mouseout");
   assert.equal(popup.hidden, true, "pointer departure must not reopen an Escape-dismissed explanation");
   event(autonomous, "focusout");
-  const heading = root.querySelector('[data-queue-column="queued"] .issue-queue-heading');
+  let heading = root.querySelector('[data-queue-column="queued"] .issue-queue-heading');
   assert.equal(heading.getAttribute("tabindex"), "0", "static headings are keyboard reachable");
   event(heading, "mouseover");
   assert.equal(popup.hidden, false);
@@ -535,6 +535,10 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   assert.equal(popup.hidden, false, "scrolling the anchor into view keeps its explanation readable");
   event(heading, "mouseout", { relatedTarget: popup });
   assert.equal(popup.hidden, false, "the explanation stays visible while reading it");
+  surface.applyIssueMonitorStatus(STATUS);
+  assert.equal(popup.hidden, false, "a monitor redraw keeps a hovered explanation readable");
+  heading = root.querySelector('[data-queue-column="queued"] .issue-queue-heading');
+  assert.equal(heading.getAttribute("aria-describedby"), popup.id, "the redrawn heading owns the visible explanation");
   event(popup, "mouseleave");
   assert.equal(popup.hidden, true);
   event(heading, "focusin");
