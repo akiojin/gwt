@@ -13,7 +13,6 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -975,7 +974,7 @@ fn record_launch_container_detachments_locked(
         }
         for item in &work_items.work_items {
             if item.id == event.work_item_id
-                || item.discarded
+                || item.is_terminal()
                 || projection.agents.iter().any(|agent| {
                     agent.workspace_id.as_deref() == Some(item.id.as_str())
                         || item
@@ -2309,7 +2308,9 @@ fn external_workspace_operation_directory() -> PathBuf {
     crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_RECEIPT_DIR)
 }
 
-fn external_workspace_operation_lock_path(
+/// Locate an external operation's OS lock for observational diagnostics.
+/// The path and its holder metadata do not grant transaction authority.
+pub fn external_workspace_operation_lock_path(
     current_path: &Path,
     work_items_path: &Path,
     operation_id: &str,
@@ -2331,32 +2332,43 @@ fn external_workspace_commit_receipt_path(
     ))
 }
 
-fn is_external_workspace_operation_lock_contended(error: &std::io::Error) -> bool {
-    error.kind() == ErrorKind::WouldBlock
-        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-}
-
 fn try_acquire_external_workspace_operation_lock(
     current_path: &Path,
     work_items_path: &Path,
     operation_id: &str,
-) -> Result<Option<fs::File>> {
+) -> Result<Option<crate::operation_deadline::NamedFileLock>> {
     let lock_path =
         external_workspace_operation_lock_path(current_path, work_items_path, operation_id);
     if let Some(parent) = lock_path.parent() {
         create_dir_all_durable(parent)?;
     }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => Ok(Some(lock)),
-        Err(error) if is_external_workspace_operation_lock_contended(&error) => Ok(None),
+    // Closing only the parent's fd leaves a flock held by a fork child's
+    // inherited open file description. The guard explicitly unlocks on every
+    // return path, including an ambiguous external commit error.
+    // Keep this probe nonblocking: Work -> operation acquisition must not wait
+    // against the finalizer's operation -> Work lock order.
+    match crate::operation_deadline::NamedFileLock::try_acquire(&lock_path, operation_id) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Explain a Busy result for the exact path pair that observed contention.
+/// This reads diagnostic metadata only; it does not confer ownership or retry.
+pub fn external_workspace_operation_retry_hint_at(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation_id: &str,
+) -> String {
+    let lock_path =
+        external_workspace_operation_lock_path(current_path, work_items_path, operation_id);
+    let observed =
+        crate::operation_deadline::NamedFileLock::contention_error(&lock_path, operation_id);
+    format!(
+        "External workspace operation {operation_id} is busy at {}. Wait for the holder to release this OS lock, then retry the same operation ID. {observed}",
+        lock_path.display()
+    )
 }
 
 fn load_external_workspace_commit_receipt(
@@ -5725,7 +5737,7 @@ fn current_canonical_work_item<'a>(
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
     for _ in 0..projection.work_items.len() {
-        if !current.discarded {
+        if !current.is_terminal() {
             break;
         }
         let successor_id = successor_work_id(&current.id);

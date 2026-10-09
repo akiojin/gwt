@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1340,7 +1340,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-service-management",
  "pulldown-cmark",
- "quick-xml",
+ "quick-xml 0.42.0",
  "regex",
  "reqwest",
  "rfd",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "chrono",
  "dunce",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "dirs 7.0.0",
  "serde",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "chrono",
  "fs2",
@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1550,11 +1550,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vt100",
+ "windows",
 ]
 
 [[package]]
 name = "gwt-voice"
-version = "9.112.0"
+version = "9.112.1"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -3057,6 +3058,15 @@ name = "quick-xml"
 version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -4656,7 +4666,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c324a910fd86ebdc364a3e61ec1f11737d3b1d6c273c0239ee8ff4bc0d24b4a"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.39.4",
  "quote",
 ]
 

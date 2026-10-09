@@ -398,7 +398,7 @@ pub(crate) fn run_gc_with_pressure(
 /// owns its exact target. Neither may overlap the target deletion interval.
 fn try_lock_gc_build_artifacts(
     target: &Path,
-) -> std::io::Result<Option<(std::fs::File, std::fs::File)>> {
+) -> std::io::Result<Option<(std::fs::File, super::verification_lease::BuildArtifactGuard)>> {
     let root = gwt_core::index_coordinator::verification_coordinator_root();
     std::fs::create_dir_all(&root)?;
     let barrier = std::fs::OpenOptions::new()
@@ -1157,6 +1157,10 @@ mod tests {
     }
 
     fn check_gc_verification_boundary(legacy_exclusive: bool) {
+        // ScopedGwtHome is thread-local; Git still inherits the process PATH.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -1256,13 +1260,18 @@ mod tests {
                         .open(coordinator.heavy_lock_path())
                         .expect("legacy artifact barrier");
                     fs2::FileExt::try_lock_exclusive(&file).expect("idle legacy lease");
-                    file
+                    (Some(file), None)
                 } else {
-                    crate::cli::verification_lease::try_lock_build_artifacts(
-                        &sibling.join(BUILD_ARTIFACT_DIR),
+                    (
+                        None,
+                        Some(
+                            crate::cli::verification_lease::try_lock_build_artifacts(
+                                &sibling.join(BUILD_ARTIFACT_DIR),
+                            )
+                            .expect("canonical artifact lock")
+                            .expect("idle target"),
+                        ),
                     )
-                    .expect("canonical artifact lock")
-                    .expect("idle target")
                 };
                 verification.replace(Some(guard));
             }
@@ -1300,7 +1309,9 @@ mod tests {
             .borrow_mut()
             .take()
             .expect("verification guard");
-        fs2::FileExt::unlock(&guard).expect("release verification lock");
+        if let Some(legacy) = &guard.0 {
+            fs2::FileExt::unlock(legacy).expect("release verification lock");
+        }
         drop(guard);
         git(
             &sibling,

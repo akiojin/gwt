@@ -158,8 +158,8 @@ test("Drawer renders section bodies through sanitized Markdown helper", () => {
   );
   assert.match(
     appSource,
-    /section\.body_html/,
-    "expected Drawer renderer to use sanitized backend-generated section.body_html",
+    /renderUiContent\(document, markdownContent\(section\), className\)/,
+    "expected Drawer helper to delegate to the shared typed Markdown renderer",
   );
   assert.match(
     appSource,

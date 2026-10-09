@@ -10,7 +10,7 @@ on:
 concurrency:
   # Called workflows inherit github.workflow from the caller. A distinct
   # prefix prevents coverage from cancelling its own Lint workflow.
-  group: coverage-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'report' || github.event.pull_request.number || github.ref }}
+  group: coverage-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'report' || github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
 jobs:

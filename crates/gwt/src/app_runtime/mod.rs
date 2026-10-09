@@ -626,7 +626,8 @@ use launch::{
     validate_issue_monitor_managed_codex_worktree, HostEnvKeySemantics, IssueMonitorTrustCandidate,
 };
 pub(crate) use launch::{
-    continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
+    continue_work_readiness_decision, readiness_hook_config_diagnosis, LaunchPaneDisposition,
+    ReadinessDeadlineDecision,
 };
 pub(crate) use workspace_views::{
     run_active_work_projection_refresh, ActiveWorkProjectionJob, ActiveWorkProjectionRefreshed,
@@ -681,7 +682,10 @@ use workspace_views::{
     workspace_execution_diagnosis_view, workspace_work_agent_view_from_ref,
     workspace_work_event_kind_wire,
 };
-pub(crate) use workspace_views::{ActiveWorkProjectionPrepared, ActiveWorkProjectionRefreshBroker};
+pub(crate) use workspace_views::{
+    ActiveWorkProjectionPrepared, ActiveWorkProjectionRefreshBroker,
+    WorkspaceProjectionPatchPrepared,
+};
 
 struct WorkspaceWorktreeReconcileOutcome {
     local_branches: std::collections::HashSet<String>,
@@ -863,6 +867,8 @@ pub fn build_frontend_sync_events(
                 id,
                 status,
                 detail: Some(detail),
+                error_code: None,
+                retryable: None,
             },
         ));
     }
@@ -1313,6 +1319,9 @@ pub(crate) struct ProjectRuntimeState {
     /// entering disk-backed projection loading on the GUI event loop.
     pub(crate) active_work_projection_cache:
         std::cell::RefCell<HashMap<String, gwt::ActiveWorkProjectionView>>,
+    /// Reject watcher patches prepared before another cache or window mutation.
+    pub(crate) workspace_projection_revision: std::cell::Cell<u64>,
+    pub(crate) workspace_projection_requested_revision: std::cell::Cell<u64>,
     /// Background-serialized wire snapshots paired with the view cache. Tab
     /// changes and frontend hydration reuse these Arcs instead of cloning and
     /// serializing a large Work graph on tao.
@@ -1394,6 +1403,8 @@ pub(crate) fn initial_project_states(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
                     )),
                     active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+                    workspace_projection_revision: Default::default(),
+                    workspace_projection_requested_revision: Default::default(),
                     active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
                     project_index_bootstrap: Default::default(),
                     branch_cleanup_operations: Arc::new(gwt::BranchCleanupOperationStore::new()),
@@ -2905,6 +2916,7 @@ fn run_scheduled_issue_monitor_scan(
     expected_project_tab_id: Option<&str>,
     live_window_ids: Option<&std::collections::BTreeSet<String>>,
     window_snapshot: Option<&gwt::IssueMonitorWindowSnapshot>,
+    window_snapshot_tabs: Option<&std::collections::BTreeSet<String>>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
@@ -2913,6 +2925,7 @@ fn run_scheduled_issue_monitor_scan(
         expected_project_tab_id,
         live_window_ids,
         window_snapshot,
+        window_snapshot_tabs,
         now,
         issue_client_factory,
         ISSUE_MONITOR_SCAN_BUDGET,
@@ -2932,10 +2945,13 @@ fn run_scheduled_issue_monitor_scan(
 fn publish_issue_monitor_window_snapshot(
     project_root: &Path,
     snapshot: &gwt::IssueMonitorWindowSnapshot,
+    project_tab_ids: &std::collections::BTreeSet<String>,
 ) {
-    if let Err(error) =
-        gwt::daemon_publisher::publish_issue_monitor_window_snapshot(project_root, snapshot)
-    {
+    if let Err(error) = gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
+        project_root,
+        snapshot,
+        project_tab_ids,
+    ) {
         tracing::debug!(
             %error,
             "Issue Monitor window snapshot stayed local; no daemon accepted it"
@@ -3004,6 +3020,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     expected_project_tab_id: Option<&str>,
     live_window_ids: Option<&std::collections::BTreeSet<String>>,
     window_snapshot: Option<&gwt::IssueMonitorWindowSnapshot>,
+    window_snapshot_tabs: Option<&std::collections::BTreeSet<String>>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
     scan_budget: std::time::Duration,
@@ -3021,7 +3038,10 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // daemon owns the scan in production and would otherwise never see the
     // window statuses this process is the only one able to read.
     if let Some(snapshot) = window_snapshot {
-        publish_issue_monitor_window_snapshot(project_root, snapshot);
+        let tabs = window_snapshot_tabs
+            .cloned()
+            .unwrap_or_else(|| std::collections::BTreeSet::from([snapshot.project_tab_id.clone()]));
+        publish_issue_monitor_window_snapshot(project_root, snapshot, &tabs);
     }
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
@@ -3062,7 +3082,19 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // Issue #4084: this process is the local driver, so it classifies against
     // the canvas it just observed.
     if let Some(snapshot) = window_snapshot {
-        monitor.record_window_snapshot(snapshot.clone());
+        let tabs = window_snapshot_tabs
+            .cloned()
+            .unwrap_or_else(|| std::collections::BTreeSet::from([snapshot.project_tab_id.clone()]));
+        if let Some(started) = gwt::process::host_process_start_time(std::process::id()) {
+            monitor.record_window_snapshot_from_host(
+                snapshot.clone(),
+                std::process::id(),
+                started,
+                tabs,
+            );
+        } else {
+            monitor.record_window_snapshot_for_tabs(snapshot.clone(), tabs);
+        }
     }
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
@@ -3362,6 +3394,8 @@ impl AppRuntime {
                         gwt_core::workspace_projection::WorkItemsCache::new(),
                     )),
                     active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+                    workspace_projection_revision: Default::default(),
+                    workspace_projection_requested_revision: Default::default(),
                     active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
                     project_index_bootstrap: Default::default(),
                     branch_cleanup_operations: Arc::new(gwt::BranchCleanupOperationStore::new()),
@@ -4415,6 +4449,36 @@ impl AppRuntime {
             .map(|tab| tab.project_root.clone())
     }
 
+    fn issue_monitor_pending_feedback_for_window(
+        &self,
+        window_id: &str,
+        project_root: &Path,
+    ) -> Option<&LaunchFeedbackContext> {
+        let matches_project = |context: &&LaunchFeedbackContext| {
+            context.issue_monitor_issue_number.is_some()
+                && context
+                    .issue_monitor_project_root
+                    .as_deref()
+                    .is_some_and(|root| same_worktree_path(root, project_root))
+        };
+        self.pending_launch_feedback_contexts
+            .get(window_id)
+            .filter(matches_project)
+            .or_else(|| {
+                let pending = self.pending_fresh_execution_launches.get(window_id)?;
+                if !same_worktree_path(&pending.project_root, project_root) {
+                    return None;
+                }
+                pending
+                    .launch_feedback_context
+                    .as_ref()
+                    .filter(matches_project)
+                    .filter(|context| {
+                        context.issue_monitor_issue_number == Some(pending.owner.number)
+                    })
+            })
+    }
+
     fn issue_monitor_tab_id_for_project_root(&self, project_root: &Path) -> Option<String> {
         self.tabs
             .iter()
@@ -4493,6 +4557,67 @@ impl AppRuntime {
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
         let materializer_id = self.issue_monitor_materializer_id.clone();
         let materializer_pid = std::process::id();
+        let tab_id = self.issue_monitor_tab_id_for_project_root(project_root);
+        let snapshot_tabs = tab_id
+            .as_deref()
+            .map(|tab_id| self.issue_monitor_project_tab_ids(tab_id))
+            .unwrap_or_default();
+        let snapshot = tab_id.and_then(|tab_id| {
+            self.issue_monitor_window_snapshot_for_tab(&tab_id, &chrono::Utc::now().to_rfc3339())
+        });
+        let host_started_at = gwt::process::host_process_start_time(materializer_pid);
+        let observe = |monitor: &mut gwt::IssueMonitorState| {
+            if let Some(snapshot) = snapshot.as_ref() {
+                if let Some(started) = host_started_at {
+                    monitor.record_window_snapshot_from_host(
+                        snapshot.clone(),
+                        materializer_pid,
+                        started,
+                        snapshot_tabs.clone(),
+                    );
+                } else {
+                    monitor
+                        .record_window_snapshot_for_tabs(snapshot.clone(), snapshot_tabs.clone());
+                }
+            }
+        };
+        // A rejected idempotent claim can still be present in prefs. Validate
+        // against the current canvas before trusting the daemon readback.
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .map_err(|error| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "launch delivery capacity read failed: {error}"
+            ))
+        })?;
+        let mut preflight =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        observe(&mut preflight);
+        if !preflight.claim_launch_delivery(
+            issue_number,
+            delivery_id,
+            &materializer_id,
+            materializer_pid,
+            materializer_window_id,
+            gwt::process::is_host_process_alive,
+        ) {
+            return Ok(false);
+        }
+        // The daemon must judge this claim against the same current canvas.
+        // Waiting for its periodic scan can strand an existing-pane adoption
+        // at capacity even though this GUI's preflight accepted it.
+        if let Some(snapshot) = snapshot.as_ref() {
+            match gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
+                project_root,
+                snapshot,
+                &snapshot_tabs,
+            ) {
+                Ok(()) => {}
+                Err(error) if error.allows_local_fallback() => {}
+                Err(error) => return Err(error),
+            }
+        }
         let publication = self.publish_issue_monitor_control(
             project_root,
             serde_json::json!({
@@ -4526,6 +4651,7 @@ impl AppRuntime {
             }
             Err(error) if error.allows_local_fallback() => self
                 .commit_local_issue_monitor_control_for_project(project_root, |monitor| {
+                    observe(monitor);
                     monitor.claim_launch_delivery(
                         issue_number,
                         delivery_id,
@@ -5579,7 +5705,29 @@ impl AppRuntime {
         if let Some(failure) = self.provider_quota_holds.get(window_id) {
             return Some(failure.clone());
         }
-        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode)?;
+        let mut failure = runtime_events::classify_issue_monitor_failure(message, session_mode)
+            .filter(|failure| match failure {
+                gwt::IssueMonitorFailure::ProviderUsageLimit { provider, .. } => {
+                    gwt::issue_monitor::usage_provider_for_agent(provider)
+                        == self.quota_provider_for_window(window_id)
+                }
+                _ => true,
+            })?;
+        if let gwt::IssueMonitorFailure::ProviderUsageLimit { evidence, .. } = &mut failure {
+            let recorded_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let mut native_evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                &recorded_at,
+                window_id,
+                message,
+            )
+            .with_poller(
+                self.pane_agent_id(window_id).as_deref(),
+                &self.provider_usage_accounts,
+            );
+            native_evidence.source = "failure_notice".to_string();
+            *evidence = Some(Box::new(native_evidence));
+        }
         let gwt::IssueMonitorFailure::ResumeWriterConflict {
             holder_window_id: None,
         } = failure
@@ -5884,7 +6032,10 @@ impl AppRuntime {
             ))
         });
         let prefs = monitor.as_ref().map(gwt::IssueMonitorState::prefs);
-        let issue_number = issue_number_hint.or_else(|| {
+        let feedback_issue_number = self
+            .issue_monitor_pending_feedback_for_window(window_id, project_root)
+            .and_then(|context| context.issue_monitor_issue_number);
+        let issue_number = issue_number_hint.or(feedback_issue_number).or_else(|| {
             prefs.as_ref().and_then(|prefs| {
                 prefs.failed_issues.iter().find_map(|failed| {
                     (failed.window_id.as_deref() == Some(window_id)).then_some(failed.issue_number)
@@ -5892,13 +6043,35 @@ impl AppRuntime {
             })
         });
         let autoclose_failed_window = issue_number.is_some_and(|issue_number| {
-            prefs.as_ref().is_some_and(|prefs| {
-                prefs.autonomous_mode
-                    && prefs
-                        .autonomous_records
-                        .iter()
-                        .any(|record| record.issue_number == issue_number)
-            })
+            // Issue #5071 AC-9: a committed Monitor bootstrap failure must not
+            // leave a pane behind for the next launch, including default mode.
+            // Exact window ownership keeps unrelated manual diagnostics intact.
+            let monitor_owned_window = feedback_issue_number == Some(issue_number)
+                || prefs.as_ref().is_some_and(|prefs| {
+                    prefs.launched_issues.iter().any(|launched| {
+                        launched.issue_number == issue_number && launched.window_id == window_id
+                    }) || prefs.failed_issues.iter().any(|failed| {
+                        failed.issue_number == issue_number
+                            && failed.window_id.as_deref() == Some(window_id)
+                    })
+                });
+            // The same failure finalizer also receives notices from live
+            // quota/trust-blocked panes and hook errors without a child exit.
+            let runtime_exited = self.runtimes.get(window_id).is_none_or(|runtime| {
+                runtime
+                    .pane
+                    .try_lock()
+                    .ok()
+                    .is_some_and(|pane| pane.last_exit().is_some())
+            });
+            (monitor_owned_window && runtime_exited)
+                || prefs.as_ref().is_some_and(|prefs| {
+                    prefs.autonomous_mode
+                        && prefs
+                            .autonomous_records
+                            .iter()
+                            .any(|record| record.issue_number == issue_number)
+                })
         });
         self.pending_launch_feedback_contexts.remove(window_id);
         let mut events = if emit_local_snapshot {
@@ -5920,6 +6093,32 @@ impl AppRuntime {
             },
         ));
         if autoclose_failed_window {
+            if let Some(pending) = self
+                .pending_fresh_execution_launches
+                .get(window_id)
+                .cloned()
+            {
+                // A fresh launch has not ACKed its Monitor binding yet. Roll
+                // back its exact Prepared candidate before removing the pane;
+                // Activated or unreadable authority remains for reconciliation.
+                if continuation::pending_fresh_execution_activation_status(&pending) != Some(false)
+                {
+                    return events;
+                }
+                events.extend(self.fresh_execution_launch_failed_events_with_pane(
+                    window_id,
+                    message,
+                    launch::LaunchPaneDisposition::Retain,
+                ));
+                if self
+                    .pending_fresh_execution_launches
+                    .contains_key(window_id)
+                    || continuation::pending_fresh_execution_activation_status(&pending)
+                        != Some(false)
+                {
+                    return events;
+                }
+            }
             events.extend(self.close_window_after_issue_monitor_finalize_events(window_id));
         }
         events
@@ -7320,10 +7519,11 @@ impl AppRuntime {
             // wedge, and a check gated behind free capacity could never open it.
             // Only the in-memory canvas snapshot is captured on Tao. Prefs,
             // daemon control, and exact-CAS fallback stay in the scan worker.
+            let project_tab_ids = self.issue_monitor_project_tab_ids(&expected_project_tab_id);
             let live_windows_per_tab = self
                 .tabs
                 .iter()
-                .filter(|tab| tab.project_root == project_root)
+                .filter(|tab| project_tab_ids.contains(&tab.id))
                 .map(|tab| {
                     (
                         tab.id.clone(),
@@ -7458,53 +7658,93 @@ impl AppRuntime {
     /// Issue #4084 AC-1: the complete agent-window canvas of one project tab.
     ///
     /// Absence from this snapshot is what makes a launch binding dead, so it
-    /// must describe the whole tab: a partial list would release live work.
+    /// must describe the whole local project; absence decisions retain the
+    /// anchor tab while capacity includes sibling tabs sharing its state.
+    fn issue_monitor_project_tab_ids(
+        &self,
+        project_tab_id: &str,
+    ) -> std::collections::BTreeSet<String> {
+        let Some(context) = self.project_context(project_tab_id) else {
+            return std::collections::BTreeSet::from([project_tab_id.to_string()]);
+        };
+        self.tabs
+            .iter()
+            .filter(|tab| {
+                self.project_context(&tab.id)
+                    .is_some_and(|candidate| candidate.project_key == context.project_key)
+            })
+            .map(|tab| tab.id.clone())
+            .collect()
+    }
+
     pub(crate) fn issue_monitor_window_snapshot_for_tab(
         &self,
         project_tab_id: &str,
         now: &str,
     ) -> Option<gwt::IssueMonitorWindowSnapshot> {
-        let tab = self.tab(project_tab_id)?;
-        let windows = tab
-            .workspace
-            .persisted()
-            .windows
-            .iter()
-            .filter(|window| window.preset.requires_process())
-            .map(|window| {
-                let window_id = combined_window_id(&tab.id, &window.id);
-                let issue_number = window.linked_issue_number.or_else(|| {
-                    let session_id = window.session_id.as_deref()?;
-                    self.launch_wizard_cache
-                        .session_by_id(session_id)
-                        .and_then(|session| session.linked_issue_number)
-                });
-                gwt::IssueMonitorWindowObservation {
-                    // Use the canonical route resolver: it also recognizes
-                    // legacy Monitor launches stamped Manual (Issue #4510).
-                    monitor_owned: gwt::cli::execution_state::session_launch_route(
-                        window.session_id.as_deref(),
-                    ) == Some(gwt_agent::LaunchRoute::Autonomous),
-                    review_dispatch: self
-                        .issue_monitor_review_dispatch_windows
-                        .contains(&window_id),
-                    // Issue #4584: only a real hold explains itself here.
-                    // `window_details` also carries ordinary launch chatter,
-                    // and a row that always says something is a row nobody
-                    // reads, so the reason is taken from the two maps that
-                    // mean the pane actually stopped.
-                    hold_reason: self.pane_hold_reason(&window_id),
-                    // Issue #4608: the hook-independent liveness signal.
-                    last_output_at: self
-                        .window_last_output_at
-                        .get(&window_id)
-                        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-                    issue_number,
-                    status: window.status,
-                    window_id,
-                }
-            })
-            .collect();
+        self.tab(project_tab_id)?;
+        let tab_ids = self.issue_monitor_project_tab_ids(project_tab_id);
+        let windows =
+            self.tabs
+                .iter()
+                .filter(|tab| tab_ids.contains(&tab.id))
+                .flat_map(|tab| {
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .filter(|window| window.preset.requires_process())
+                        .map(move |window| {
+                            let window_id = combined_window_id(&tab.id, &window.id);
+                            // The pane exists before its provider Session is saved. Keep
+                            // that materialization visible to the Monitor during bootstrap.
+                            let pending = self.issue_monitor_pending_feedback_for_window(
+                                &window_id,
+                                &tab.project_root,
+                            );
+                            let issue_number = pending
+                                .and_then(|context| context.issue_monitor_issue_number)
+                                .or(window.linked_issue_number)
+                                .or_else(|| {
+                                    let session_id = window.session_id.as_deref()?;
+                                    self.launch_wizard_cache
+                                        .session_by_id(session_id)
+                                        .and_then(|session| session.linked_issue_number)
+                                });
+                            gwt::IssueMonitorWindowObservation {
+                                // Use the canonical route resolver: it also recognizes
+                                // legacy Monitor launches stamped Manual (Issue #4510).
+                                monitor_owned: pending.is_some_and(|context| {
+                                    context.issue_monitor_issue_number.is_some()
+                                }) || window.session_id.as_deref().is_some_and(
+                                    |session_id| {
+                                        gwt::cli::execution_state::session_launch_route(Some(
+                                            session_id,
+                                        )) == Some(gwt_agent::LaunchRoute::Autonomous)
+                                    },
+                                ),
+                                review_dispatch: pending
+                                    .is_some_and(|context| context.issue_monitor_review_dispatch)
+                                    || self
+                                        .issue_monitor_review_dispatch_windows
+                                        .contains(&window_id),
+                                // Issue #4584: only a real hold explains itself here.
+                                // `window_details` also carries ordinary launch chatter,
+                                // and a row that always says something is a row nobody
+                                // reads, so the reason is taken from the two maps that
+                                // mean the pane actually stopped.
+                                hold_reason: self.pane_hold_reason(&window_id),
+                                // Issue #4608: the hook-independent liveness signal.
+                                last_output_at: self.window_last_output_at.get(&window_id).map(
+                                    |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                ),
+                                issue_number,
+                                status: window.status,
+                                window_id,
+                            }
+                        })
+                })
+                .collect();
         Some(gwt::IssueMonitorWindowSnapshot {
             project_tab_id: project_tab_id.to_string(),
             observed_at: now.to_string(),
@@ -7545,6 +7785,7 @@ impl AppRuntime {
         let worker_prefs_path = prefs_path.to_path_buf();
         let worker_expected_project_tab_id = expected_project_tab_id.to_string();
         let worker_now = now.to_string();
+        let window_snapshot_tabs = self.issue_monitor_project_tab_ids(expected_project_tab_id);
         let issue_client_factory = self.issue_client_factory.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -7563,6 +7804,7 @@ impl AppRuntime {
                     Some(&worker_expected_project_tab_id),
                     expected_live_windows,
                     window_snapshot.as_ref(),
+                    Some(&window_snapshot_tabs),
                     &worker_now,
                     &issue_client_factory,
                 );
@@ -11742,6 +11984,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_window(&mut self, tab_id: &str, raw_id: &str) {
+        self.invalidate_workspace_projection_patch(tab_id);
         let window_id = combined_window_id(tab_id, raw_id);
         self.invalidate_launch_delivery_ack(&window_id);
         self.pending_launch_completions.remove(&window_id);

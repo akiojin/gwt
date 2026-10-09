@@ -59,7 +59,8 @@ test.describe.serial("Recovery Center live backend", () => {
       "request_id",
       "status",
     ]);
-    expect(["ready", "error"]).toContain(event.status);
+    // A bad Session ledger entry cannot prevent the remaining projection.
+    expect(event.status).toBe("ready");
     expect(Array.isArray(event.items)).toBe(true);
 
     for (const item of event.items) {

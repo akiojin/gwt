@@ -1307,6 +1307,16 @@ fn spawn_issue_monitor_worker_with_lease(
                         .as_ref()
                         .is_some_and(PendingIssueMonitorAuthorityControls::front_is_authorizing)
                     {
+                        // Deadline recovery cannot depend on a remote scan
+                        // completing: it must also run while that lane is stuck.
+                        if expire_daemon_windowless_launches(&prefs_path, &mut monitor) {
+                            let Some(next_revision) = revision.checked_add(1) else {
+                                tracing::error!("issue monitor revision exhausted; stopping worker");
+                                break;
+                            };
+                            revision = next_revision;
+                            publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                        }
                         scan_requested = true;
                     }
                     effect_execution_requested = !monitor.pending_effects().is_empty();
@@ -1937,6 +1947,8 @@ enum IssueMonitorControl {
     /// absence from a fresh snapshot is what makes a binding dead.
     WindowSnapshot {
         snapshot: crate::IssueMonitorWindowSnapshot,
+        host: Option<(u32, u64)>,
+        project_tab_ids: std::collections::BTreeSet<String>,
     },
     /// Issue #4084 AC-5: an operator asked the next scan to release idle
     /// windows (`number: None` releases every releasable row).
@@ -2769,8 +2781,16 @@ fn apply_routine_issue_monitor_control(
             // a possibly newer same-id launch.
             None => false,
         },
-        IssueMonitorControl::WindowSnapshot { snapshot } => {
-            monitor.record_window_snapshot(snapshot);
+        IssueMonitorControl::WindowSnapshot {
+            snapshot,
+            host,
+            project_tab_ids,
+        } => {
+            if let Some((pid, started)) = host {
+                monitor.record_window_snapshot_from_host(snapshot, pid, started, project_tab_ids);
+            } else {
+                monitor.record_window_snapshot_for_tabs(snapshot, project_tab_ids);
+            }
             // A canvas observation is not a durable decision; the next scan
             // reads it. Committing the snapshot itself would rewrite prefs on
             // every GUI tick for nothing.
@@ -3049,6 +3069,10 @@ fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
 ) -> Option<IssueMonitorControl> {
+    let source_pid = payload
+        .get("source_pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
     match crate::runtime_daemon_events::decode_runtime_daemon_event(
         crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
         payload,
@@ -3478,7 +3502,29 @@ fn decode_issue_monitor_control_in_repo(
                 {
                     return None;
                 }
-                return Some(IssueMonitorControl::WindowSnapshot { snapshot });
+                let host = source_pid.and_then(|pid| {
+                    crate::process::host_process_start_time(pid).map(|started| (pid, started))
+                });
+                let project_tab_ids = payload
+                    .get("window_snapshot_project_tabs")
+                    .map(|tabs| {
+                        serde_json::from_value::<std::collections::BTreeSet<String>>(tabs.clone())
+                    })
+                    .transpose()
+                    .ok()?
+                    .unwrap_or_else(|| {
+                        std::collections::BTreeSet::from([snapshot.project_tab_id.clone()])
+                    });
+                if !project_tab_ids.contains(&snapshot.project_tab_id)
+                    || project_tab_ids.iter().any(|tab| tab.trim().is_empty())
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::WindowSnapshot {
+                    snapshot,
+                    host,
+                    project_tab_ids,
+                });
             }
             if let Some(release) = payload.get("idle_release") {
                 let number = match release.get("number") {
@@ -3701,6 +3747,36 @@ fn persist_daemon_issue_monitor_state(
     )
 }
 
+/// Persist deadline recovery independently of the remote scan lane. The
+/// transaction rebases first so it cannot expire a stale predecessor claim.
+fn expire_daemon_windowless_launches(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+) -> bool {
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
+    );
+    let recovery_baseline = monitor.prefs();
+    let mut current = monitor.clone();
+    match crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
+        current.rebase_daemon_driver_prefs(disk);
+        let expired = current.expire_stale_unbound_launches(
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+        *disk = current.prefs();
+        !expired.is_empty()
+    }) {
+        Ok((_, expired)) => {
+            *monitor = current;
+            expired
+        }
+        Err(error) => {
+            tracing::warn!(%error, "issue monitor launch deadline transaction failed");
+            false
+        }
+    }
+}
+
 fn persist_daemon_issue_monitor_state_observed(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -3793,6 +3869,11 @@ fn commit_issue_monitor_scan_if_current(
                 }
             }
             scanned.restore_scanned_launch_session_strategies(&proposed_launch_session_strategies);
+            // Expire the latest committed launch, after rebase: otherwise the
+            // disk-owned launching rows resurrect a slot the scan just freed.
+            scanned.expire_stale_unbound_launches(
+                &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
             *disk = scanned.prefs();
             true
         });
@@ -4689,9 +4770,6 @@ fn scan_issue_monitor_once_blocking(
     ) {
         monitor.rebase_daemon_driver_prefs(&disk);
     }
-    // #3223 follow-up (codex P2): expire claimed-but-never-acked launches past
-    // claim_ttl_secs so a crashed launch cannot hold a slot forever.
-    monitor.expire_stale_unbound_launches(&now);
     let (owner, repo) = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
@@ -13793,11 +13871,28 @@ exit 0
                 status.max_active_agents == 7
             })
             .await;
+        // Issue #5140: the independent poll must free an expired compatibility
+        // launch even while the remote scan is still blocked.
+        while status_rx.try_recv().is_ok() {}
+        let mut stalled = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        stalled.terminal_queue_push(&[42], "test", "2000-01-01T00:00:00Z");
+        stalled.record_candidate(sample_issue_monitor_issue(42));
+        stalled.set_gui_connected(true);
+        assert!(stalled
+            .next_launch_request("2000-01-01T00:00:00Z")
+            .is_some());
+        crate::mutate_issue_monitor_prefs(&prefs_path, |disk| {
+            disk.launching_issues
+                .extend(stalled.prefs().launching_issues);
+        })
+        .expect("seed expired launch during blocked scan");
         let tick_status =
             recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
                 status.max_active_agents == 7
             })
             .await;
+        let timeout_prefs = crate::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload deadline recovery before releasing the scan");
         let scans_started_while_blocked = fs::read_to_string(&scan_started_path)
             .unwrap_or_default()
             .lines()
@@ -13856,6 +13951,17 @@ exit 0
         // every process-global env override has been restored, and the shared
         // env lock has been released. A regression failure therefore cannot
         // poison unrelated env tests in the same test binary.
+        assert!(
+            timeout_prefs
+                .failed_issues
+                .iter()
+                .any(|failure| { failure.issue_number == 42 && failure.message.contains("120s") }),
+            "the poll must fail the windowless launch before the scan completes"
+        );
+        assert!(!timeout_prefs
+            .launching_issues
+            .iter()
+            .any(|launch| launch.issue_number == 42));
         assert!(scan_started, "fake gh scan must be in flight");
         assert!(heartbeat_queued, "worker must receive controls");
         assert!(max_active_queued, "worker must receive controls");
@@ -16468,6 +16574,89 @@ exit 1
     }
 
     #[test]
+    fn issue_5140_scan_commit_expires_only_the_latest_windowless_claim() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let launch = |claim: &str, effect: &str, created_at: &str| {
+            let mut state = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                enabled: true,
+                ..crate::IssueMonitorConfig::default()
+            });
+            state.terminal_queue_push(&[42], "test", created_at);
+            state.record_candidate(sample_issue_monitor_issue(42));
+            assert!(state.apply_confirmed_claim(42, claim, "host/session", effect, created_at));
+            state
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        for (predecessor_compatibility, compatibility) in
+            [(false, false), (true, true), (false, true)]
+        {
+            for (created_at, keep_active) in [("2000-01-01T00:00:00Z", false), (now.as_str(), true)]
+            {
+                let mut monitor =
+                    launch("predecessor", "predecessor-effect", "2000-01-01T00:00:00Z");
+                if predecessor_compatibility {
+                    let mut prefs = monitor.prefs();
+                    prefs.pending_launch_deliveries.clear();
+                    monitor = crate::IssueMonitorState::with_prefs(
+                        crate::IssueMonitorConfig::default(),
+                        prefs,
+                    );
+                    monitor.record_candidate(sample_issue_monitor_issue(42));
+                }
+                let scanned = monitor.clone();
+                let mut latest = launch("current", "current-effect", created_at).prefs();
+                if compatibility {
+                    latest.pending_launch_deliveries.clear();
+                }
+                crate::save_issue_monitor_prefs(&prefs_path, &latest).expect("seed current launch");
+
+                assert!(super::commit_issue_monitor_scan_if_current(
+                    &prefs_path,
+                    &mut monitor,
+                    scanned,
+                    0,
+                ));
+                let persisted =
+                    crate::load_issue_monitor_prefs(&prefs_path).expect("reload scan commit");
+                let restarted = crate::IssueMonitorState::with_prefs(
+                    crate::IssueMonitorConfig::default(),
+                    persisted.clone(),
+                );
+                assert_eq!(monitor.active_count(), usize::from(keep_active));
+                assert_eq!(restarted.active_count(), usize::from(keep_active));
+                if keep_active {
+                    assert_eq!(
+                        persisted.pending_launch_deliveries,
+                        latest.pending_launch_deliveries
+                    );
+                    assert!(persisted.failed_issues.is_empty());
+                    assert!(
+                        persisted.pending_effects.is_empty(),
+                        "a fresh successor must not be released"
+                    );
+                } else {
+                    assert!(persisted.launching_issues.is_empty());
+                    assert!(persisted.pending_launch_deliveries.is_empty());
+                    assert!(persisted.failed_issues[0]
+                        .message
+                        .contains(if compatibility {
+                            "issue #42"
+                        } else {
+                            "launch:current-effect"
+                        }));
+                    assert!(persisted.pending_effects.iter().any(|effect| matches!(
+                    &effect.payload,
+                    crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                        if claim_id == "current" && owner == "host/session"
+                )), "the commit must release the expired delivery's exact claim");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn scan_commit_preserves_fresh_required_marker_from_autonomous_retry() {
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
@@ -16849,6 +17038,7 @@ exit 1
 
         let hub = BroadcastHub::new();
         let shutdown = Arc::new(DaemonShutdown::new());
+        let mut startup_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let worker = spawn_issue_monitor_worker_with_config_and_timeout(
             scope,
             hub.clone(),
@@ -16871,7 +17061,14 @@ exit 1
 
         // Subscribe after the startup publish to prove the recovery error is
         // re-projected for operators that connect later.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        recv_issue_monitor_status_matching(&mut startup_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("authority recovery is blocked"))
+        })
+        .await
+        .expect("startup recovery-blocked status was published");
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let status = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
             status
@@ -16883,7 +17080,11 @@ exit 1
         .expect("recovery-blocked status");
         assert!(!status.enabled);
         assert!(!status.autonomous_mode);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        shutdown.request();
+        tokio::time::timeout(HANG_GUARD, worker)
+            .await
+            .expect("recovery-blocked worker shutdown is bounded")
+            .expect("worker exits cleanly");
         assert!(
             !scan_started.exists(),
             "recovery-blocked worker must not enter its immediate first scan"
@@ -16901,11 +17102,6 @@ exit 1
             shutdown_marker.exists(),
             "corrupt prefs must retain the independent shutdown marker"
         );
-        shutdown.request();
-        tokio::time::timeout(HANG_GUARD, worker)
-            .await
-            .expect("recovery-blocked worker shutdown is bounded")
-            .expect("worker exits cleanly");
     }
 
     #[tokio::test]

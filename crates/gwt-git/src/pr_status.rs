@@ -391,6 +391,9 @@ pub struct PrInventoryFields {
     /// probed — or GitHub did not answer, and is never the same as "no merge
     /// queue".
     pub merge_queue: Option<PrMergeQueueState>,
+    /// Issue #5169 AC-3: whether base protection requires up-to-date checks.
+    /// `None` means the probe did not establish the policy.
+    pub required_status_checks_strict: Option<bool>,
 }
 
 /// Result of classifying one open PR for the PM inventory.
@@ -499,6 +502,9 @@ pub struct PrInventoryItem {
     /// it was probed. An absent key is "unknown", never "no merge queue".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_queue: Option<PrMergeQueueState>,
+    /// Issue #5169 AC-3: measured base-branch strict status-check policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_status_checks_strict: Option<bool>,
     #[serde(default = "default_stale_after_hours")]
     pub stale_after_hours: i64,
     #[serde(default = "default_true")]
@@ -654,6 +660,25 @@ impl PrInventoryHistory {
 }
 
 impl PrInventoryItem {
+    /// #5034: completion applies the Ready predicate to either an open Draft
+    /// or an already Ready PR, without changing the PM inventory taxonomy.
+    pub fn completion_blocker(&self) -> Option<&'static str> {
+        if !self.ci_status.eq_ignore_ascii_case("SUCCESS") {
+            return Some("checks_not_green");
+        }
+        if self.review_status.eq_ignore_ascii_case("CHANGES_REQUESTED") {
+            return Some("changes_requested");
+        }
+        let mut fields = self.fields();
+        fields.is_draft = true;
+        if fields.merge_state_status.eq_ignore_ascii_case("BEHIND")
+            && fields.required_status_checks_strict == Some(false)
+        {
+            fields.merge_state_status = "CLEAN".to_string();
+        }
+        ready_to_promote_blocker(&fields)
+    }
+
     fn fields(&self) -> PrInventoryFields {
         PrInventoryFields {
             number: self.number,
@@ -677,10 +702,18 @@ impl PrInventoryItem {
             fallback_owner_closed: self.owner_issue_closed,
             auto_merge_enabled: self.auto_merge_enabled,
             merge_queue: self.merge_queue.clone(),
+            required_status_checks_strict: self.required_status_checks_strict,
         }
     }
 
     fn apply_held_class(&mut self, class: PrLifecycleClass) {
+        if class == PrLifecycleClass::Behind
+            && self.required_status_checks_strict == Some(false)
+            && self.ci_status.eq_ignore_ascii_case("FAILURE")
+        {
+            self.apply_derived_class(PrLifecycleClass::CiRed);
+            return;
+        }
         self.apply_class_with_source(class, "held");
     }
 
@@ -827,7 +860,10 @@ pub fn classify_pr_lifecycle_with(
         || fields.merge_state_status.eq_ignore_ascii_case("DIRTY")
     {
         PrLifecycleClass::Conflicted
-    } else if fields.merge_state_status.eq_ignore_ascii_case("BEHIND") {
+    } else if fields.merge_state_status.eq_ignore_ascii_case("BEHIND")
+        && !(fields.required_status_checks_strict == Some(false)
+            && fields.ci_status.eq_ignore_ascii_case("FAILURE"))
+    {
         PrLifecycleClass::Behind
     } else if fields.ci_status.eq_ignore_ascii_case("FAILURE") {
         PrLifecycleClass::CiRed
@@ -861,6 +897,8 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         || (fields.closing_issues.is_empty() && fields.fallback_owner_closed);
     let queue_owns_base_sync =
         class == PrLifecycleClass::Behind && merge_queue_owns_base_sync(fields);
+    let base_sync_not_required =
+        class == PrLifecycleClass::Behind && fields.required_status_checks_strict == Some(false);
     let default_action = match (class, fields.is_draft) {
         (PrLifecycleClass::ReadyToPromote, _) => "mark ready".to_string(),
         (PrLifecycleClass::MergeCandidate, true) => "mark ready".to_string(),
@@ -870,6 +908,9 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         }
         (PrLifecycleClass::Conflicted, _) => "relaunch owner to resolve conflict".to_string(),
         (PrLifecycleClass::Behind, _) if queue_owns_base_sync => merge_queue_action(fields),
+        (PrLifecycleClass::Behind, _) if base_sync_not_required => {
+            "leave: base protection does not require up-to-date status checks".to_string()
+        }
         (PrLifecycleClass::Behind, _) => "update-branch".to_string(),
         (PrLifecycleClass::CiRed, _) => "relaunch owner to fix CI".to_string(),
         (PrLifecycleClass::Superseded, _) => {
@@ -892,8 +933,8 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     } else {
         None
     };
-    // Leaving a PR to the queue is advice, not a call: no operation performs it.
-    let default_action_operation = if queue_owns_base_sync {
+    // A queue-managed or non-strict base needs no branch-update operation.
+    let default_action_operation = if queue_owns_base_sync || base_sync_not_required {
         None
     } else {
         default_action_operation(class, fields.is_draft)
@@ -1015,6 +1056,7 @@ fn inventory_item_from_fields(
         age_hours: decision.age_hours,
         auto_merge_enabled: fields.auto_merge_enabled,
         merge_queue: fields.merge_queue,
+        required_status_checks_strict: fields.required_status_checks_strict,
         stale_after_hours: options.stale_after_hours,
         default_action_executable: decision.default_action_executable,
         default_action_operation: decision.default_action_operation.map(str::to_string),
@@ -1105,6 +1147,9 @@ fn inventory_item_from_value(
         merge_queue: value
             .get(GWT_MERGE_QUEUE_KEY)
             .and_then(|queue| serde_json::from_value(queue.clone()).ok()),
+        required_status_checks_strict: value
+            .get(GWT_STRICT_STATUS_CHECKS_KEY)
+            .and_then(serde_json::Value::as_bool),
         closing_issues: value
             .get("closingIssuesReferences")
             .map(parse_closing_issues)
@@ -1182,6 +1227,9 @@ const GWT_REVIEW_STATE_KEY: &str = "gwtReviewState";
 
 /// Key under which a probed [`PrMergeQueueState`] rides along a cached row.
 const GWT_MERGE_QUEUE_KEY: &str = "gwtMergeQueue";
+
+/// Key under which the probed base-branch strict-check policy is cached.
+const GWT_STRICT_STATUS_CHECKS_KEY: &str = "gwtRequiresStrictStatusChecks";
 
 /// Heavy fields of one PR, keyed by the `updated_at` they were fetched for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1962,14 +2010,13 @@ where
     Ok(1)
 }
 
-/// Issue #4872 AC-4: ask GitHub what its merge queue is doing with the rows
-/// that are, or may be held as, `BEHIND`, in one batched call, and attach the
-/// answer to each of them.
+/// Issues #4872 AC-4 / #5169 AC-3: read merge-queue state and base-branch
+/// strict-check protection for rows that are, or may be held as, `BEHIND`.
 ///
-/// Probing only those non-Draft rows keeps the cost bounded the same way the
+/// Probing only those rows keeps the cost bounded the same way the
 /// conflict measurement and the review probe do: an inventory with no such row
 /// spends nothing, and one with any spends a single call however many there
-/// are.
+/// are. Drafts need the protection policy but cannot enter a merge queue.
 ///
 /// A failed probe is not a failed read. The rows stay unannotated, which
 /// classifies them exactly as before the probe existed; a GitHub that does not
@@ -1985,32 +2032,44 @@ fn probe_merge_queue<F>(
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    // A Draft cannot enter the queue, so its answer would change nothing. A
-    // row GitHub has not computed yet is included: the history may hold it as
+    // A row GitHub has not computed yet is included: the history may hold it as
     // `BEHIND`, and that happens right after every landing.
     let field_is = |row: &serde_json::Value, key: &str, expected: &str| {
         row.get(key)
             .and_then(serde_json::Value::as_str)
             .is_some_and(|value| value.eq_ignore_ascii_case(expected))
     };
-    let behind: Vec<u64> = rows
+    let behind: Vec<(u64, bool)> = rows
         .iter()
         .filter(|row| {
-            (field_is(row, "mergeStateStatus", "BEHIND")
+            field_is(row, "mergeStateStatus", "BEHIND")
                 || field_is(row, "mergeStateStatus", "UNKNOWN")
-                || field_is(row, "mergeable", "UNKNOWN"))
-                && row.get("isDraft").and_then(serde_json::Value::as_bool) != Some(true)
+                || field_is(row, "mergeable", "UNKNOWN")
         })
-        .filter_map(|row| row.get("number").and_then(serde_json::Value::as_u64))
+        .filter_map(|row| {
+            row.get("number")
+                .and_then(serde_json::Value::as_u64)
+                .map(|number| {
+                    (
+                        number,
+                        row.get("isDraft").and_then(serde_json::Value::as_bool) == Some(true),
+                    )
+                })
+        })
         .collect();
     if behind.is_empty() {
         return 0;
     }
     let fields = behind
         .iter()
-        .map(|n| {
+        .map(|(n, is_draft)| {
+            let queue_fields = if *is_draft {
+                ""
+            } else {
+                "isMergeQueueEnabled mergeQueueEntry{position state}"
+            };
             format!(
-                "pr_{n}:pullRequest(number:{n}){{isMergeQueueEnabled mergeQueueEntry{{position state}}}}"
+                "pr_{n}:pullRequest(number:{n}){{baseRef{{branchProtectionRule{{requiresStrictStatusChecks}}}} {queue_fields}}}"
             )
         })
         .collect::<Vec<_>>()
@@ -2056,6 +2115,11 @@ where
             continue;
         };
         let answer = &value["data"]["repository"][format!("pr_{number}")];
+        if let Some(strict) =
+            answer["baseRef"]["branchProtectionRule"]["requiresStrictStatusChecks"].as_bool()
+        {
+            row[GWT_STRICT_STATUS_CHECKS_KEY] = serde_json::json!(strict);
+        }
         let Some(enabled) = answer["isMergeQueueEnabled"].as_bool() else {
             continue;
         };
@@ -2227,6 +2291,66 @@ fn probe_review_state<F>(
 where
     F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
 {
+    parse_review_state(&read_review_state_json(
+        repo_path,
+        url,
+        number,
+        REVIEW_STATE_QUERY,
+        run_gh,
+    )?)
+}
+
+// Completion cannot interpret a partial thread list as "all reviews resolved".
+// Keep the Monitor's existing query and parser unchanged.
+const COMPLETION_REVIEW_STATE_QUERY: &str = r#"
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
+      latestReviews(first: 20) { nodes { submittedAt author { login } } }
+      commits(last: 1) { nodes { commit { committedDate } } }
+    }
+  }
+}
+"#;
+
+fn probe_completion_review_state<F>(
+    repo_path: &Path,
+    url: &str,
+    number: u64,
+    run_gh: &F,
+) -> Option<PrReviewState>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let json = read_review_state_json(
+        repo_path,
+        url,
+        number,
+        COMPLETION_REVIEW_STATE_QUERY,
+        run_gh,
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    if value
+        .pointer("/data/repository/pullRequest/reviewThreads/pageInfo/hasNextPage")?
+        .as_bool()
+        != Some(false)
+    {
+        return None;
+    }
+    parse_review_state(&json)
+}
+
+fn read_review_state_json<F>(
+    repo_path: &Path,
+    url: &str,
+    number: u64,
+    query: &str,
+    run_gh: &F,
+) -> Option<String>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
     let (owner, repo) = owner_repo_from_pr_url(url)?;
     let output = run_gh(
         repo_path,
@@ -2234,7 +2358,7 @@ where
             "api",
             "graphql",
             "-f",
-            &format!("query={REVIEW_STATE_QUERY}"),
+            &format!("query={query}"),
             "-f",
             &format!("owner={owner}"),
             "-f",
@@ -2244,7 +2368,7 @@ where
         ],
     )
     .ok()?;
-    output.success.then(|| parse_review_state(&output.stdout))?
+    output.success.then_some(output.stdout)
 }
 
 /// One `gh pr view <n> --json <fields>` for the heavy fields.
@@ -3305,6 +3429,88 @@ pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
 /// Checked variant used by deadline-integral scans.
 pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+/// Fresh, targeted completion evidence. This never reads the PM inventory
+/// cache: a completion decision must describe the current PR head and gates.
+#[derive(Debug, Clone)]
+pub struct PrCompletionSnapshot {
+    pub state: PrState,
+    pub head_sha: String,
+    pub inventory: PrInventoryItem,
+}
+
+pub fn fetch_pr_completion_snapshot(repo_path: &Path, number: u64) -> Result<PrCompletionSnapshot> {
+    fetch_pr_completion_snapshot_with(repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_completion_snapshot_with<F>(
+    repo_path: &Path,
+    number: u64,
+    run_gh: F,
+) -> Result<PrCompletionSnapshot>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number_arg = number.to_string();
+    let fields = "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,body";
+    let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view {number}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view {number} JSON: {error}")))?;
+    let head_sha = value
+        .get("headRefOid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|head| !head.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| GwtError::Other("PR head SHA is unknown".into()))?;
+    if value.get("number").and_then(serde_json::Value::as_u64) != Some(number)
+        || value
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+        || !matches!(
+            value.get("state").and_then(serde_json::Value::as_str),
+            Some("OPEN" | "CLOSED" | "MERGED")
+        )
+        || value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(GwtError::Other(
+            "PR identity, state or Draft status is unknown".into(),
+        ));
+    }
+    let state = parse_pr_status_json(&output.stdout)?.state;
+    let now = Utc::now();
+    if state == PrState::Open {
+        let url = value
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if let Some(review) = probe_completion_review_state(repo_path, url, number, &run_gh) {
+            value[GWT_REVIEW_STATE_KEY] =
+                serde_json::to_value(review).map_err(|error| GwtError::Other(error.to_string()))?;
+        }
+        probe_merge_queue(
+            repo_path,
+            std::slice::from_mut(&mut value),
+            &BudgetLedger::global(),
+            now,
+            &mut |path, args| run_gh(path, args),
+        );
+    }
+    Ok(PrCompletionSnapshot {
+        state,
+        head_sha,
+        inventory: inventory_item_from_value(&value, now, &PrInventoryOptions::default())?,
+    })
 }
 
 fn try_fetch_pr_head_sha_with<F>(
@@ -5166,6 +5372,7 @@ mod tests {
             fallback_owner_closed: false,
             auto_merge_enabled: false,
             merge_queue: None,
+            required_status_checks_strict: None,
             closing_issues: vec![],
             conflict: None,
             unresolved_review_threads: None,
@@ -5190,6 +5397,86 @@ mod tests {
                 .to_string(),
             ..sample_inventory_fields()
         }
+    }
+
+    #[test]
+    fn completion_snapshot_reads_current_pr_and_review_without_inventory_cache() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+            calls.borrow_mut().push(args.join(" "));
+            let stdout = if args[0] == "pr" {
+                serde_json::json!({"number":42,"state":"OPEN","isDraft":false,"headRefName":"work/issue-5034","headRefOid":"verified-head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"}).to_string()
+            } else {
+                serde_json::json!({"data":{"repository":{"pullRequest":{
+                    "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}},
+                    "commits":{"nodes":[{"commit":{"committedDate":"2026-10-09T00:00:00Z"}}]},
+                    "latestReviews":{"nodes":[{"author":{"login":"coderabbitai"},"submittedAt":"2026-10-09T00:01:00Z"}]}
+                }}}}).to_string()
+            };
+            Ok(GhCliOutput { success: true, stdout, stderr: String::new() })
+        }).unwrap();
+        assert_eq!(snapshot.head_sha, "verified-head");
+        assert_eq!(snapshot.inventory.completion_blocker(), None);
+        assert_eq!(calls.borrow().len(), 2);
+        assert!(calls.borrow()[0].starts_with("pr view 42 --json"));
+        assert!(calls.borrow()[1].starts_with("api graphql"));
+        assert!(calls.borrow()[1].contains("pageInfo { hasNextPage }"));
+    }
+
+    #[test]
+    fn completion_snapshot_refuses_unknown_draft_and_unread_review() {
+        let payload = serde_json::json!({"number":42,"state":"OPEN","headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"});
+        let read = |value: serde_json::Value| {
+            fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+                Ok(GhCliOutput {
+                    success: args[0] == "pr",
+                    stdout: value.to_string(),
+                    stderr: "unread review".into(),
+                })
+            })
+        };
+        assert!(read(payload.clone()).is_err());
+        let mut with_draft = payload;
+        with_draft["isDraft"] = serde_json::json!(true);
+        let snapshot = read(with_draft).unwrap();
+        assert_eq!(
+            snapshot.inventory.completion_blocker(),
+            Some("review_threads_unknown")
+        );
+    }
+
+    #[test]
+    fn completion_snapshot_refuses_truncated_review_threads() {
+        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+            let stdout = if args[0] == "pr" {
+                serde_json::json!({"number":42,"state":"OPEN","isDraft":true,"headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"})
+            } else {
+                serde_json::json!({"data":{"repository":{"pullRequest":{
+                    "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":true}},
+                    "latestReviews":{"nodes":[{"author":{"login":"coderabbitai"},"submittedAt":"2026-10-09T00:01:00Z"}]}
+                }}}})
+            };
+            Ok(GhCliOutput { success: true, stdout: stdout.to_string(), stderr: String::new() })
+        }).unwrap();
+        assert_eq!(
+            snapshot.inventory.completion_blocker(),
+            Some("review_threads_unknown")
+        );
+    }
+
+    #[test]
+    fn completion_uses_non_strict_behind_policy_without_changing_promotion_taxonomy() {
+        let mut fields = promotable_fields();
+        fields.merge_state_status = "BEHIND".into();
+        assert_eq!(ready_to_promote_blocker(&fields), Some("behind_base"));
+        let row =
+            |fields| inventory_item_from_fields(fields, Utc::now(), &PrInventoryOptions::default());
+        assert_eq!(
+            row(fields.clone()).completion_blocker(),
+            Some("behind_base")
+        );
+        fields.required_status_checks_strict = Some(false);
+        assert_eq!(row(fields).completion_blocker(), None);
     }
 
     #[test]
@@ -5242,6 +5529,27 @@ mod tests {
         let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
         assert_eq!(decision.class, PrLifecycleClass::CiRed);
         assert_eq!(decision.default_action, "relaunch owner to fix CI");
+    }
+
+    /// Issue #5169 AC-3: avoiding an unnecessary base sync must not hide failed CI.
+    #[test]
+    fn nonstrict_behind_ci_failure_relaunches_owner_instead_of_leaving() {
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        fields.required_status_checks_strict = Some(false);
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::CiRed);
+        assert_eq!(decision.default_action, "relaunch owner to fix CI");
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
+
+        for strict in [Some(true), None] {
+            fields.required_status_checks_strict = strict;
+            let decision = classify_pr_lifecycle(&fields, now_3868());
+            assert_eq!(decision.class, PrLifecycleClass::Behind);
+            assert_eq!(decision.default_action, "update-branch");
+        }
     }
 
     #[test]
@@ -5575,6 +5883,38 @@ mod tests {
             second[0].default_action
         );
         assert_eq!(second[0].default_action_operation, None);
+
+        // A held BEHIND also keeps a measured non-strict policy without a queue.
+        second[0].merge_queue = None;
+        second[0].required_status_checks_strict = Some(false);
+        second[0].apply_held_class(PrLifecycleClass::Behind);
+        assert!(second[0].default_action.starts_with("leave:"));
+        assert_eq!(second[0].default_action_operation, None);
+    }
+
+    /// Issue #5169 AC-3: freshly failed CI remains actionable during an UNKNOWN read.
+    #[test]
+    fn nonstrict_held_behind_ci_failure_is_derived_as_ci_red() {
+        let options = PrInventoryOptions::default();
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        fields.required_status_checks_strict = Some(false);
+        let mut history = PrInventoryHistory::default();
+        let mut first = vec![inventory_item_from_fields(
+            fields.clone(),
+            now_3868(),
+            &options,
+        )];
+        history.observe(&mut first, now_3868(), &options);
+
+        fields.merge_state_status = "UNKNOWN".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        let mut second = vec![inventory_item_from_fields(fields, now_3868(), &options)];
+        history.observe(&mut second, now_3868(), &options);
+        assert_eq!(second[0].lifecycle, "CI-RED");
+        assert_eq!(second[0].lifecycle_source, "derived");
+        assert_eq!(second[0].default_action, "relaunch owner to fix CI");
+        assert!(second[0].default_action_executable);
     }
 
     /// Issue #4872 AC-4: only a probed, enabled queue takes the redo away. A
@@ -6723,6 +7063,77 @@ mod tests {
         );
     }
 
+    fn behind_inventory_with_strict_branch_protection(
+        strict: bool,
+        is_draft: bool,
+    ) -> (PrInventoryItem, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut row = light_row(7, "2026-09-01T00:00:00Z", "BEHIND");
+        row["isDraft"] = serde_json::json!(is_draft);
+        let mut gh = FakeGh::new(vec![row]);
+        let mut protection = serde_json::json!({
+            "baseRef": {"branchProtectionRule": {"requiresStrictStatusChecks": strict}}
+        });
+        if !is_draft {
+            protection["isMergeQueueEnabled"] = serde_json::json!(false);
+            protection["mergeQueueEntry"] = serde_json::Value::Null;
+        }
+        let answer = GhCliOutput {
+            success: true,
+            stderr: String::new(),
+            stdout: serde_json::json!({"data":{"repository":{"pr_7": protection}}}).to_string(),
+        };
+        let (mut read, mut probes) =
+            read_with_merge_queue_answer(tmp.path(), &mut gh, now_3891(), answer);
+        assert_eq!(
+            probes.len(),
+            1,
+            "branch protection shares the batched probe"
+        );
+        assert!(!gh.calls.iter().any(|call| call.ends_with("--json body")));
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let cached = cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891(),
+            &PrInventoryOptions::default(),
+        )
+        .expect("cached protection policy");
+        assert_eq!(cached.source, "cache");
+        assert_eq!(cached.github_calls, 0);
+        assert_eq!(cached.items[0].required_status_checks_strict, Some(strict));
+        assert_eq!(cached.items[0].default_action, read.items[0].default_action);
+        (read.items.remove(0), probes.remove(0))
+    }
+
+    /// Issue #5169 AC-3: non-strict checks do not require base synchronization.
+    #[test]
+    fn inventory_non_strict_branch_protection_leaves_a_behind_pr_without_sync() {
+        let (item, query) = behind_inventory_with_strict_branch_protection(false, false);
+        assert!(
+            item.default_action.starts_with("leave:"),
+            "{}",
+            item.default_action
+        );
+        assert_eq!(item.default_action_operation, None);
+        assert_eq!(item.required_status_checks_strict, Some(false));
+        assert!(query.contains("requiresStrictStatusChecks"), "{query}");
+    }
+
+    /// Issue #5169 AC-3: a strict base still requires the existing branch update.
+    #[test]
+    fn inventory_strict_branch_protection_keeps_a_behind_pr_update_action() {
+        let (item, query) = behind_inventory_with_strict_branch_protection(true, false);
+        assert_eq!(item.default_action, "update-branch");
+        assert_eq!(
+            item.default_action_operation.as_deref(),
+            Some("pr.update_branch")
+        );
+        assert_eq!(item.required_status_checks_strict, Some(true));
+        assert!(query.contains("requiresStrictStatusChecks"), "{query}");
+    }
+
     #[test]
     fn inventory_default_query_is_light_and_hydrates_checks_per_pr() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -7583,35 +7994,22 @@ mod tests {
         assert!(gh.calls.is_empty(), "{:?}", gh.calls);
     }
 
-    /// SPEC #3835 AC-10: a PR that could never be promoted is never probed,
-    /// so the promotion path costs nothing on an inventory without candidates.
+    /// SPEC #3835 AC-10 / Issue #5169 AC-3: a BEHIND Draft reads protection
+    /// without fetching the body or reviews needed only for promotion.
     #[test]
-    fn a_behind_draft_is_never_probed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ledger = BudgetLedger::at(tmp.path());
-        let mut row = light_row(7, "2026-09-01T00:00:00Z", "BEHIND");
-        row["isDraft"] = serde_json::json!(true);
-        let mut gh = FakeGh::new(vec![row]);
-
-        let read = cached_read(
-            tmp.path(),
-            &ledger,
-            &mut gh,
-            now_3891(),
-            &PrInventoryOptions::default(),
-        )
-        .expect("read");
-        assert_eq!(read.items[0].lifecycle, "BEHIND");
+    fn a_behind_draft_probes_only_its_branch_protection() {
+        let (item, query) = behind_inventory_with_strict_branch_protection(false, true);
+        assert_eq!(item.lifecycle, "BEHIND");
         assert_eq!(
-            read.items[0].ready_to_promote_blocker.as_deref(),
+            item.ready_to_promote_blocker.as_deref(),
             Some("behind_base")
         );
-        assert!(
-            !gh.calls
-                .iter()
-                .any(|call| call.contains("graphql") || call.ends_with("--json body")),
-            "{:?}",
-            gh.calls
-        );
+        assert_eq!(item.required_status_checks_strict, Some(false));
+        assert!(item.default_action.starts_with("leave:"));
+        assert_eq!(item.default_action_operation, None);
+        assert_eq!(item.merge_queue, None);
+        assert!(query.contains("requiresStrictStatusChecks"), "{query}");
+        assert!(!query.contains("isMergeQueueEnabled"), "{query}");
+        assert!(!query.contains("reviewThreads"), "{query}");
     }
 }
