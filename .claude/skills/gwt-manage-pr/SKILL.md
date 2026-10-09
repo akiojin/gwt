@@ -229,7 +229,7 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 3. **If the work fails the Ready PR Gate** → create/update only as Draft PR, or return NO ACTION if the user explicitly rejects Draft.
 4. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode. A Ready/non-draft PR still requires the Ready PR Gate.
 5. **If no open PR** → create new PR with `params.draft:true` unless the Ready PR Gate is satisfied.
-6. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+6. **Branch sync:** Being behind `origin/$base` alone never requires a merge before PR creation. Probe with `git merge-tree --write-tree HEAD "origin/$base"`; merge `origin/$base` (never rebase) and re-run `verify.plan` / `verify.run` only when it reports a conflict. Otherwise create the PR at the verified HEAD and sync afterwards with `pr.update_branch` when the base is strict (see `references/create-flow.md` Step 4).
 
 ### PR Title Rules
 

@@ -759,6 +759,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
+            let max_active_auto = match optional_string(params, "max_active_mode")?.as_deref() {
+                None => false,
+                Some("manual") if max_active.is_some() => false,
+                Some("auto") if max_active.is_none() => true,
+                Some(_) => return Err(CliParseError::InvalidJson(
+                    "max_active_mode must be auto (without max_active) or manual (with max_active)"
+                        .to_string(),
+                )),
+            };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
             let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
@@ -769,6 +778,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
+                && !max_active_auto
                 && auto_close_merged_issues.is_none()
                 && auto_apply_updates.is_none()
                 && launch_agent.is_none()
@@ -792,6 +802,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                max_active_auto,
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
@@ -918,17 +929,25 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "pr.edit" => {
             let number = required_u64(params, "number")?;
+            let base = optional_string(params, "base")?;
+            if lookup(params, "base")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(CliParseError::InvalidJson("base must not be empty".into()));
+            }
             let title = optional_string(params, "title")?;
             let body = optional_string(params, "body")?;
             let add_labels = optional_string_vec(params, "add_labels")?;
             // Reject nothing-to-update like the argv path's Usage guard; a
             // silent no-op success would mask caller bugs (e.g. sending
             // pr.create's "labels" key instead of "add_labels").
-            if title.is_none() && body.is_none() && add_labels.is_empty() {
-                return Err(CliParseError::MissingFlag("title|body|add_labels"));
+            if base.is_none() && title.is_none() && body.is_none() && add_labels.is_empty() {
+                return Err(CliParseError::MissingFlag("base|title|body|add_labels"));
             }
             CliCommand::Pr(PrCommand::EditBody {
                 number,
+                base,
                 title,
                 body,
                 add_labels,
@@ -942,6 +961,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
+        }),
+        "pr.close" => CliCommand::Pr(PrCommand::Close {
+            number: required_u64(params, "number")?,
+            comment: optional_string(params, "comment")?,
         }),
         // SPEC #3835 AC-15 / AC-17: the operation behind the `update-branch`
         // default action, which `pr.list` recommended for a year without one.
@@ -983,6 +1006,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
             target: actions_rerun_target(params)?,
         }),
+        "actions.cancel" => CliCommand::Actions(ActionsCommand::Cancel {
+            run_id: required_u64(params, "run_id")?,
+        }),
+        "actions.queued" => CliCommand::Actions(ActionsCommand::Queued),
         "index.status" => CliCommand::Index(IndexCommand::Status),
         "index.cancel" | "index.repair" => {
             if optional_string(params, "scope")?.is_some_and(|scope| scope != "issues") {
@@ -1040,6 +1067,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "discuss.goal_skipped" | "discuss.goal-skipped" => {
             discuss_proposal(params, DiscussEnvelopeAction::GoalSkipped)?
+        }
+        "verify.cancel" => {
+            reject_unknown_params(params, &["attempt_id", "reason"], "verify.cancel")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Cancel {
+                attempt_id: required_string(params, "attempt_id")?,
+                reason: required_string(params, "reason")?,
+            })
+        }
+        "verify.status" => {
+            reject_unknown_params(params, &["attempt_id"], "verify.status")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Status {
+                attempt_id: optional_string(params, "attempt_id")?,
+            })
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
@@ -3056,6 +3096,22 @@ mod tests {
     }
 
     #[test]
+    fn verify_cancel_binds_an_exact_attempt_and_reason() {
+        assert!(parse(&envelope(
+            "verify.cancel",
+            json!({"attempt_id": "vat-example", "reason": "superseded matrix"})
+        ))
+        .is_ok());
+        assert!(parse(&envelope("verify.cancel", json!({"reason": "stop"}))).is_err());
+        assert!(parse(&envelope(
+            "verify.cancel",
+            json!({"attempt_id": "vat-example", "reason": "stop", "target": "foreign"})
+        ))
+        .is_err());
+        assert!(parse(&envelope("verify.status", json!({}))).is_ok());
+    }
+
+    #[test]
     fn verify_run_persists_deferred_user_verification() {
         use crate::cli::verification_record;
         use gwt_core::test_support::ScopedEnvVar;
@@ -4157,6 +4213,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: Some(7),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4171,6 +4228,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4188,6 +4246,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: Some(false),
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4206,6 +4265,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: Some(true),
                 launch_agent: None,
@@ -4213,6 +4273,28 @@ mod tests {
             }),
             "Issue #3906 AC-1: the auto-apply override is settable on its own"
         );
+    }
+
+    #[test]
+    fn agent_capacity_config_envelope_accepts_explicit_auto() {
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "auto"}),
+        );
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "manual", "max_active": 4, "enabled": false}),
+        );
+        for params in [
+            json!({"max_active_mode": "invalid", "max_active": 4}),
+            json!({"max_active_mode": "auto", "max_active": 4}),
+            json!({"max_active_mode": "manual", "enabled": false}),
+        ] {
+            assert!(matches!(
+                err("issue.monitor.config.set", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
     }
 
     /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
@@ -4227,6 +4309,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -4241,6 +4324,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
@@ -4266,6 +4350,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -4750,6 +4835,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -5876,7 +5962,33 @@ mod tests {
         // bugs such as passing pr.create's "labels" key instead of "add_labels").
         assert!(matches!(
             err("pr.edit", json!({"number": 1})),
-            CliParseError::MissingFlag("title|body|add_labels")
+            CliParseError::MissingFlag("base|title|body|add_labels")
+        ));
+        assert!(matches!(
+            ok("pr.edit", json!({"number": 1, "base": "develop"})),
+            CliCommand::Pr(PrCommand::EditBody { base: Some(base), .. }) if base == "develop"
+        ));
+        for params in [
+            json!({"number": 1, "base": " "}),
+            json!({"number": 1, "base": "", "title": "t"}),
+        ] {
+            assert!(matches!(
+                err("pr.edit", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for params in [
+            json!({"number": 9}),
+            json!({"number": 9, "comment": "Wrong base"}),
+        ] {
+            assert!(matches!(
+                ok("pr.close", params),
+                CliCommand::Pr(PrCommand::Close { number: 9, .. })
+            ));
+        }
+        assert!(matches!(
+            err("pr.close", json!({})),
+            CliParseError::MissingFlag("number")
         ));
         for op in [
             "pr.view",
@@ -5913,6 +6025,33 @@ mod tests {
             ),
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody { .. })
         ));
+    }
+
+    #[test]
+    fn issue_4188_actions_cancel_requires_a_run_id() {
+        assert_eq!(
+            ok("actions.cancel", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Cancel { run_id: 5 })
+        );
+        assert!(matches!(
+            err("actions.cancel", json!({})),
+            CliParseError::MissingFlag("run_id")
+        ));
+        assert!(parse(&envelope("actions.cancel", json!({"run_id": "five"}))).is_err());
+        assert!(parse(&envelope(
+            "actions.cancel",
+            json!({"run_id": 5, "job_id": 7})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn issue_4188_actions_queued_takes_no_params() {
+        assert_eq!(
+            ok("actions.queued", json!({})),
+            CliCommand::Actions(ActionsCommand::Queued)
+        );
+        assert!(parse(&envelope("actions.queued", json!({"run_id": 5}))).is_err());
     }
 
     #[test]

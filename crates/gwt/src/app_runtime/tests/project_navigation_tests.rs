@@ -1508,7 +1508,7 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
     );
     assert!(matches!(
         &events[1].event,
-        BackendEvent::TerminalStatus { id, status, detail }
+        BackendEvent::TerminalStatus { id, status, detail, .. }
             if id == &window_id
                 && *status == WindowProcessStatus::Error
                 && detail.as_deref() == Some("boom")

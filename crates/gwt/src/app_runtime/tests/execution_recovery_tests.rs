@@ -2332,17 +2332,14 @@ fn app_runtime_antigravity_missing_binary_launch_error_is_actionable() {
 No viable candidates found in PATH \
 \"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
 
-    let events =
-        runtime.handle_launch_complete_and_drain(window_id.clone(), Err(raw_error.to_string()));
+    let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Err(raw_error.into()));
 
     let detail = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::TerminalStatus { id, status, detail }
-                if id == &window_id && *status == WindowProcessStatus::Error =>
-            {
-                detail.as_deref()
-            }
+            BackendEvent::TerminalStatus {
+                id, status, detail, ..
+            } if id == &window_id && *status == WindowProcessStatus::Error => detail.as_deref(),
             _ => None,
         })
         .expect("terminal status detail");
@@ -2429,17 +2426,14 @@ fn app_runtime_opencode_missing_binary_launch_error_is_actionable() {
 No viable candidates found in PATH \
 \"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
 
-    let events =
-        runtime.handle_launch_complete_and_drain(window_id.clone(), Err(raw_error.to_string()));
+    let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Err(raw_error.into()));
 
     let detail = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::TerminalStatus { id, status, detail }
-                if id == &window_id && *status == WindowProcessStatus::Error =>
-            {
-                detail.as_deref()
-            }
+            BackendEvent::TerminalStatus {
+                id, status, detail, ..
+            } if id == &window_id && *status == WindowProcessStatus::Error => detail.as_deref(),
             _ => None,
         })
         .expect("terminal status detail");
@@ -2626,6 +2620,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             ..queued_issue_monitor_prefs(&[42])
@@ -2841,6 +2836,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             ..queued_issue_monitor_prefs(&[42])
@@ -3002,6 +2998,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 5,
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
@@ -3112,6 +3109,7 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 5,
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
@@ -3184,7 +3182,7 @@ fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_r
     let window_id = combined_window_id("tab-1", "agent-1");
     let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("launch failed before process spawn".to_string()),
+        Err("launch failed before process spawn".into()),
     );
 
     let events =
@@ -3344,7 +3342,7 @@ fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
     assert!(tab.workspace.close_window(&address.raw_id));
 
     let completion_events =
-        runtime.handle_launch_complete_and_drain(window_id, Err("Window not found".to_string()));
+        runtime.handle_launch_complete_and_drain(window_id, Err("Window not found".into()));
 
     assert!(completion_events.iter().any(|event| {
         matches!(

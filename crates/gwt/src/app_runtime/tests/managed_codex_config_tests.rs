@@ -903,7 +903,7 @@ fn open_server_url_events_rejects_when_server_url_unset() {
 }
 
 #[test]
-fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
+fn codex_hook_discovery_mode_keeps_worktree_local_hooks_for_every_codex_version() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     assert_eq!(
@@ -920,11 +920,11 @@ fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
         super::super::codex_hook_discovery_mode_from_detected_codex_version(Some(
             "0.131.0-alpha.21"
         )),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.131.0")),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     // Legacy selector strings are not measured version evidence.
     assert_eq!(
@@ -972,7 +972,7 @@ fn codex_hook_discovery_mode_extracts_installed_codex_version_output() {
 
     assert_eq!(
         super::super::codex_hook_discovery_mode_from_codex_version_output("codex-cli 0.133.0\n"),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_from_codex_version_output("codex 0.130.0\n"),
@@ -1009,7 +1009,7 @@ fn codex_hook_discovery_mode_reuses_canonical_health_evidence() {
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
-        CodexHookDiscoveryMode::WorkspaceHome,
+        CodexHookDiscoveryMode::Both,
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unknown)),
@@ -1032,6 +1032,38 @@ fn docker_codex_hook_discovery_mode_keeps_safe_both_fallback() {
         super::super::codex_hook_discovery_mode_for_launch_config(&config, None),
         CodexHookDiscoveryMode::Both,
     );
+}
+
+/// Issue #5194 AC-1: Codex 0.160 does not read the workspace-home hooks file
+/// from a linked worktree, so a fresh worktree must always receive its own
+/// `.codex/hooks.json` or SessionStart never reaches gwt.
+#[test]
+fn host_codex_launch_writes_worktree_local_hooks_into_a_new_linked_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path().join("home"));
+    let repo = temp.path().join("repo");
+    let gitdir = repo.join("repo.git/worktrees/issue-1");
+    let worktree = repo.join("work/issue-1");
+    fs::create_dir_all(&gitdir).expect("gitdir");
+    fs::create_dir_all(&worktree).expect("worktree");
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .expect("write .git");
+
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .build();
+    let report = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("codex-cli 0.160.0".to_string()),
+    };
+    let mode = super::super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report));
+    gwt_skills::generate_codex_hooks_for_mode(&worktree, mode).expect("generate hooks");
+
+    let local = fs::read_to_string(worktree.join(".codex/hooks.json"))
+        .expect("new linked worktree must receive a worktree-local .codex/hooks.json");
+    assert!(local.contains("SessionStart"), "{local}");
 }
 
 #[test]

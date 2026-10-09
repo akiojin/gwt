@@ -225,6 +225,8 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Explicitly clear the manual concurrency override.
+        max_active_auto: bool,
         /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
         /// stored value untouched).
         auto_close_merged_issues: Option<bool>,
@@ -411,12 +413,14 @@ pub enum PrCommand {
     },
     Edit {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         file: Option<String>,
         add_labels: Vec<String>,
     },
     EditBody {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         body: Option<String>,
         add_labels: Vec<String>,
@@ -429,6 +433,10 @@ pub enum PrCommand {
     },
     Draft {
         number: u64,
+    },
+    Close {
+        number: u64,
+        comment: Option<String>,
     },
     /// SPEC #3835 AC-15: merge the base branch into the PR head so a `BEHIND`
     /// PR can reach `MERGEABLE`. The PM's only way out of `BEHIND`; a conflict
