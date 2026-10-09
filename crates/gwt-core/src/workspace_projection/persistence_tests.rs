@@ -14615,3 +14615,72 @@ fn delete_pending_marker_handle(path: &Path) -> fs::File {
     .expect("mark marker delete-pending");
     file
 }
+
+/// Issue #5208: a contender for `works.lock` used to wait forever when the
+/// caller set no operation deadline, so one long holder silently stalled every
+/// Work writer. The wait is now bounded and the error names the holder.
+#[test]
+fn work_items_lock_wait_without_ambient_deadline_is_bounded_and_names_the_holder() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("project-state/works.json");
+    std::fs::create_dir_all(work_items_path.parent().unwrap()).expect("project-state dir");
+    let holder = crate::operation_deadline::NamedFileLock::acquire_quiet(
+        &work_items_path.with_extension("lock"),
+        WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
+    )
+    .expect("hold works.lock");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let contender_path = work_items_path.clone();
+    std::thread::spawn(move || {
+        WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE
+            .with(|wait| wait.set(Some(std::time::Duration::from_millis(100))));
+        let result = with_workspace_work_items_lock(&contender_path, || Ok(()));
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("works.lock acquisition must not wait forever");
+    let message = result.expect_err("a held works.lock must refuse after the bound");
+    assert!(message.contains("deadline expired"), "{message}");
+    assert!(
+        message.contains(WORKSPACE_WORK_ITEMS_LOCK_OPERATION),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("pid={}", std::process::id())),
+        "the error must name the observed holder: {message}"
+    );
+    drop(holder);
+    with_workspace_work_items_lock(&work_items_path, || Ok(()))
+        .expect("a released works.lock is available again");
+}
+
+/// Issue #5208: the Work items locks are per-handle OS locks, so a thread
+/// that re-acquired one it already held waited on itself forever. Refuse it.
+#[test]
+fn work_items_lock_reacquired_on_the_same_thread_is_refused_instead_of_deadlocking() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("project-state/works.json");
+    std::fs::create_dir_all(work_items_path.parent().unwrap()).expect("project-state dir");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let nested_path = work_items_path.clone();
+    std::thread::spawn(move || {
+        let result = with_workspace_work_items_lock(&nested_path, || {
+            let nested = with_workspace_work_items_lock(&nested_path, || Ok(()));
+            Ok(nested.map_err(|error| error.to_string()))
+        });
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+
+    let nested = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a nested works.lock acquisition must not self-deadlock")
+        .expect("the outer acquisition succeeds");
+    let message = nested.expect_err("the nested acquisition must be refused");
+    assert!(message.contains("already held by this thread"), "{message}");
+    with_workspace_work_items_lock(&work_items_path, || Ok(()))
+        .expect("the outer lock and its registration are released");
+}
