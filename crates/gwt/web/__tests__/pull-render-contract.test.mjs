@@ -126,6 +126,17 @@ test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () 
   }
 });
 
+test("Chat and raw terminal receivers resolve only shared model updates", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const file = 'crates/gwt/web/app.js';
+  const modules = new Map([['crates/gwt/web/pm-chat.js', readFileSync(new URL('../pm-chat.js', import.meta.url), 'utf8')]]);
+  const migrated = findings => findings.filter(finding => finding.root === 'receive'
+    && /^\/(pm_conversation|terminal_output|terminal_snapshot)$/.test(finding.context));
+  assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
+  const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
+  assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
+});
+
 test("unrelated remote advances leave the default comparison stable; explicit CI bases still apply", t => {
   const root = mkdtempSync(join(tmpdir(), "gwt-pull-render-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
