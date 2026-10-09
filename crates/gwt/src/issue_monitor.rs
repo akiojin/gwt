@@ -62,6 +62,9 @@ pub const ISSUE_COMPLETION_MIGRATION_VERSION: u32 = 1;
 const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
 const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
+const WINDOWLESS_LAUNCH_TIMEOUT_SECS: i64 = 120;
+const WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE: &str =
+    "Launch timed out: no window was created within 120s";
 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
@@ -8002,7 +8005,13 @@ impl IssueMonitorState {
         }
         self.autonomous_record(issue_number)
             .and_then(|record| record.last_failure_message.as_deref())
-            == Some(message)
+            .is_some_and(|previous| {
+                previous == message
+                    // Delivery IDs and elapsed time describe the same timeout,
+                    // rather than new information that resets the retry ladder.
+                    || (previous.starts_with(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE)
+                        && message.starts_with(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE))
+            })
     }
 
     /// SPEC #3200 T-022: set the lifecycle phase of an issue's current attempt.
@@ -11337,17 +11346,39 @@ impl IssueMonitorState {
                         .insert(entry.issue_number, claimed_at.clone());
                 }
             }
+            if !self.launched_windows.contains_key(&entry.issue_number)
+                && !disk
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == entry.issue_number)
+            {
+                // Compatibility launches have no delivery identity. Their
+                // committed clock and claim must still replace a stale local
+                // predecessor together. Keep a locally started bare-id clock.
+                if let Some(claimed_at) = &entry.claimed_at {
+                    self.launching_claimed_at
+                        .insert(entry.issue_number, claimed_at.clone());
+                }
+                match disk
+                    .claim_identities
+                    .iter()
+                    .find(|identity| identity.issue_number == entry.issue_number)
+                {
+                    Some(identity) => {
+                        self.claim_identities
+                            .insert(entry.issue_number, identity.clone());
+                    }
+                    None => {
+                        self.claim_identities.remove(&entry.issue_number);
+                    }
+                }
+            }
         }
     }
 
-    /// #3223 follow-up (codex P2 / coderabbit): release claimed-but-unbound
-    /// launches whose claim anchor is older than `claim_ttl_secs`. A crash
-    /// between the claim-save and the launch ACK would otherwise hold a
-    /// max-active slot forever. Entries restored without an anchor (legacy
-    /// bare-id shape) are stamped `now` so their clock starts here. Released
-    /// issues return to `Queued` and re-enter the queue so the next scan can
-    /// relaunch them (mirroring the expired GitHub claim, which lapses after
-    /// the same TTL).
+    /// Release windowless launches after their creation deadline. Compatibility
+    /// rows use their claim anchor; legacy bare-id rows start their clock here.
+    /// Created windows retain the existing claim-TTL recovery contract.
     pub fn expire_stale_unbound_launches(&mut self, now: &str) -> Vec<u64> {
         self.expire_stale_unbound_launches_with(now, crate::process::is_host_process_alive)
     }
@@ -11355,13 +11386,10 @@ impl IssueMonitorState {
     /// [`Self::expire_stale_unbound_launches`] with the materializer liveness
     /// probe injected.
     ///
-    /// Issue #3712 AC-2: a pending delivery is ACK-driven, not TTL-expired —
-    /// but only while the materializer that claimed it can still ACK. When
-    /// that process is gone and `claim_ttl_secs` has lapsed, nothing will ever
-    /// ACK the delivery, and the `launching` row is a slot leak (one held a
-    /// slot for 27 hours with no window). A delivery no materializer has
-    /// claimed yet keeps the ACK-driven contract: a restarting GUI claims it
-    /// on its next tick.
+    /// Issue #5140: a delivery with no created or observed window must release
+    /// its slot after 120 seconds, even while its materializer is alive.
+    /// Created windows retain the ACK-driven contract: only a dead materializer
+    /// and an elapsed claim TTL allow the existing recovery path to requeue them.
     pub fn expire_stale_unbound_launches_with(
         &mut self,
         now: &str,
@@ -11376,6 +11404,35 @@ impl IssueMonitorState {
             .collect();
         let mut expired = Vec::new();
         for issue_number in unbound {
+            if let Some(diagnostic) = self.windowless_launch_stall_at(issue_number, now) {
+                if let Some(delivery) = self
+                    .pending_launch_deliveries
+                    .iter()
+                    .find(|delivery| delivery.issue_number == issue_number)
+                {
+                    // A scan rebase can replace the delivery while the local
+                    // claim identity still describes its predecessor.
+                    ensure_claim_release_effect(
+                        &mut self.pending_effects,
+                        self.effect_authority_epoch,
+                        &delivery.delivery_id,
+                        issue_number,
+                        &delivery.claim_id,
+                        &delivery.claim_owner,
+                    );
+                    self.claim_identities.remove(&issue_number);
+                } else {
+                    self.release_confirmed_claim_for_issue(issue_number);
+                }
+                self.clear_active_tracking(issue_number);
+                self.record_launch_failed_at(
+                    issue_number,
+                    format!("{WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE}; {diagnostic}"),
+                    now,
+                );
+                expired.push(issue_number);
+                continue;
+            }
             if let Some(delivery) = self
                 .pending_launch_deliveries
                 .iter()
@@ -11425,17 +11482,6 @@ impl IssueMonitorState {
                     {
                         continue;
                     }
-                    if stale {
-                        self.active_launches
-                            .retain(|active| *active != issue_number);
-                        self.launching_claimed_at.remove(&issue_number);
-                        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
-                        if !self.queue.contains(&issue_number) {
-                            self.queue.push_back(issue_number);
-                            self.apply_priority_order_to_queue();
-                        }
-                        expired.push(issue_number);
-                    }
                 }
                 None => {
                     // Legacy entry without an anchor: start its clock now.
@@ -11445,6 +11491,37 @@ impl IssueMonitorState {
             }
         }
         expired
+    }
+
+    fn windowless_launch_stall_at(&self, issue_number: u64, now: &str) -> Option<String> {
+        let delivery = self
+            .pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number);
+        if !self.active_launches.contains(&issue_number)
+            || delivery.is_some_and(|delivery| {
+                delivery.materialized_window_id.is_some()
+                    || delivery.workspace_durable_window_id.is_some()
+            })
+            || self.launched_windows.contains_key(&issue_number)
+            || self.has_monitor_runtime_census(issue_number)
+            || self.observed_live_issue_pane(issue_number, now).is_some()
+        {
+            return None;
+        }
+        let created_at = delivery
+            .map(|delivery| &delivery.created_at)
+            .or_else(|| self.launching_claimed_at.get(&issue_number))?;
+        let elapsed = rfc3339_elapsed_secs(created_at, now)?;
+        (elapsed >= WINDOWLESS_LAUNCH_TIMEOUT_SECS).then(|| {
+            let source = delivery.map_or_else(
+                || format!("issue #{issue_number}"),
+                |delivery| format!("delivery {}", delivery.delivery_id),
+            );
+            format!(
+                "Launch stalled: no window for {elapsed}s (deadline {WINDOWLESS_LAUNCH_TIMEOUT_SECS}s; {source})",
+            )
+        })
     }
 
     /// Issue #4802 AC-1: the live implementation pane the latest fresh canvas
@@ -12241,7 +12318,10 @@ impl IssueMonitorState {
                         blocked_by_claim_id: item.blocked_by_claim_id.clone(),
                         exclusion_reason: item.exclusion_reason.clone(),
                         launched_window_id: self.launched_window_id(item.issue.number),
-                        error_message: item.error_message.clone(),
+                        error_message: item
+                            .error_message
+                            .clone()
+                            .or_else(|| self.windowless_launch_stall_at(item.issue.number, now)),
                         // SPEC-3431 FR-068: the autonomous record already carries
                         // the heartbeat that hook arrivals refresh. Surfacing it here
                         // rather than adding a parallel field keeps one clock, so
@@ -21529,12 +21609,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_unbound_launching_claims_expire_after_claim_ttl() {
-        // #3223 follow-up (codex P2 / coderabbit): a crash between the
-        // claim-save and the launch ACK leaves a restored `Launching` claim
-        // with no window. Without an expiry it holds a max-active slot
-        // forever. After claim_ttl_secs it must be released so the next scan
-        // can re-queue and relaunch the issue.
+    fn issue_5140_compatibility_launching_rows_use_the_windowless_deadline() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
@@ -21543,28 +21618,41 @@ mod tests {
             .is_some());
         assert_eq!(monitor.active_count(), 1);
 
-        // Restart (roundtrip) mid-launch: claim restored, still unbound.
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
-        restored.set_gui_connected(true);
-        assert_eq!(restored.active_count(), 1);
-
-        // Before the TTL: retained.
-        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:10:00Z");
-        assert!(expired.is_empty(), "not expired before claim_ttl_secs");
-        assert_eq!(restored.active_count(), 1);
-
-        // After the TTL (default 1800s): released and re-queueable.
-        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:31:00Z");
-        assert_eq!(expired, vec![42], "stale unbound claim expires");
-        assert_eq!(restored.active_count(), 0, "slot released");
-        scan_queued_candidates(&mut restored, &[issue(42)], "2026-07-02T00:31:10Z");
-        assert!(
-            restored
-                .next_launch_request("2026-07-02T00:31:20Z")
-                .is_some(),
-            "the issue is claimable again after expiry"
-        );
+        for anchor in [Some("2026-07-02T00:00:00Z"), None] {
+            let mut prefs = monitor.prefs();
+            assert!(prefs.pending_launch_deliveries.is_empty());
+            prefs.launching_issues[0].claimed_at = anchor.map(str::to_string);
+            let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            restored.record_candidate(issue(42));
+            assert!(restored
+                .expire_stale_unbound_launches("2026-07-02T00:00:00Z")
+                .is_empty());
+            assert!(restored
+                .expire_stale_unbound_launches("2026-07-02T00:01:59Z")
+                .is_empty());
+            let status = restored.agent_status_at("2026-07-02T00:02:00Z");
+            let reason = status.inbox[0]
+                .error_message
+                .as_deref()
+                .expect("legacy launch diagnostic");
+            assert!(reason.contains("120s") && reason.contains("42"), "{reason}");
+            assert_eq!(
+                restored.expire_stale_unbound_launches("2026-07-02T00:03:00Z"),
+                vec![42],
+            );
+            assert_eq!(restored.active_count(), 0, "slot released");
+            assert!(restored.prefs().launching_issues.is_empty());
+            assert_eq!(
+                restored.inbox_item(42).unwrap().state,
+                MonitorInboxState::LaunchFailed
+            );
+            let status = restored.agent_status_at("2026-07-02T00:03:00Z");
+            assert!(status.inbox[0]
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("180s"));
+        }
         // Bound launches never expire this way.
         monitor.complete_active_launch(42, "tab-1::agent-1");
         assert!(monitor
@@ -21572,11 +21660,146 @@ mod tests {
             .is_empty());
     }
 
-    /// Issue #3712 AC-2: a pending delivery is ACK-driven only while the
-    /// materializer that claimed it can still ACK. Once that process is gone
-    /// and the claim TTL has lapsed, the `launching` row is a slot leak (the
-    /// #4141 specimen held a slot for 27 hours with no window) and must return
-    /// to the queue exactly like an unbound claim does.
+    #[test]
+    fn issue_5140_windowless_deliveries_time_out_and_release_their_claim() {
+        for claimed in [false, true] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+            assert!(monitor.apply_confirmed_claim(
+                42,
+                "claim-42",
+                "host/session",
+                "effect-42",
+                "2026-07-02T00:00:00Z",
+            ));
+            if claimed {
+                assert!(monitor.claim_launch_delivery(
+                    42,
+                    "launch:effect-42",
+                    "gui-a",
+                    101,
+                    "tab-1::agent-42",
+                    |_| false,
+                ));
+            }
+            assert!(monitor
+                .expire_stale_unbound_launches_with("2026-07-02T00:01:59Z", |_| true)
+                .is_empty());
+            let status = monitor.agent_status_at("2026-07-02T00:02:00Z");
+            let stalled = status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .unwrap();
+            let reason = stalled
+                .error_message
+                .as_deref()
+                .expect("launch stall diagnostic");
+            assert!(reason.contains("120s"), "{reason}");
+            assert!(reason.contains("launch:effect-42"), "{reason}");
+            assert_eq!(
+                monitor.expire_stale_unbound_launches_with("2026-07-02T00:03:00Z", |_| true),
+                vec![42],
+            );
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::LaunchFailed
+            );
+            let failed = monitor.agent_status_at("2026-07-02T00:03:00Z");
+            let reason = failed.inbox[0].error_message.as_deref().unwrap();
+            assert!(reason.contains("180s"), "{reason}");
+            assert!(reason.contains("launch:effect-42"), "{reason}");
+            assert!(monitor.pending_effects().iter().any(|effect| matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                    if claim_id == "claim-42" && owner == "host/session"
+            )));
+            assert!(!monitor.claim_launch_delivery(
+                42,
+                "launch:effect-42",
+                "gui-a",
+                101,
+                "tab-1::agent-42",
+                |_| false,
+            ));
+            assert!(!monitor.complete_active_launch_delivery(
+                42,
+                "tab-1::agent-42",
+                Some("launch:effect-42"),
+            ));
+        }
+    }
+
+    #[test]
+    fn issue_5140_a_created_window_or_live_runtime_is_not_a_windowless_timeout() {
+        for window_created in [false, true] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+            assert!(monitor.apply_confirmed_claim(
+                42,
+                "claim-42",
+                "host/session",
+                "effect-42",
+                "2026-07-02T00:00:00Z",
+            ));
+            assert!(monitor.claim_launch_delivery(
+                42,
+                "launch:effect-42",
+                "gui-a",
+                101,
+                "tab-1::agent-42",
+                |_| false,
+            ));
+            if window_created {
+                assert!(monitor.mark_launch_delivery_materialized(
+                    42,
+                    "launch:effect-42",
+                    "gui-a",
+                    "tab-1::agent-42",
+                ));
+            } else {
+                monitor.record_monitor_runtime_counts(
+                    101,
+                    1001,
+                    BTreeMap::from([(42, 1)]),
+                    "2026-07-02T00:02:00Z",
+                );
+            }
+            assert!(monitor
+                .expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true)
+                .is_empty());
+            assert_eq!(monitor.active_count(), 1);
+            assert!(monitor.agent_status_at("2026-07-02T00:02:00Z").inbox[0]
+                .error_message
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn issue_5140_timeout_details_do_not_reset_autonomous_failure_escalation() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.autonomous_mode = true;
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        let max = monitor.autonomous_tuning.max_attempts;
+        monitor.autonomous_record_mut(42).attempts = max;
+        monitor.autonomous_record_mut(42).last_failure_message = Some(
+            "Launch timed out: no window was created within 120s; Launch stalled: no window for 120s (deadline 120s; delivery first)".to_string(),
+        );
+        monitor.record_launch_failed_at(
+            42,
+            "Launch timed out: no window was created within 120s; Launch stalled: no window for 180s (deadline 120s; delivery second)",
+            "2026-07-02T00:03:00Z",
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::NeedsHuman
+        );
+    }
+
+    /// Issue #3712 AC-2: an already-created window keeps the ACK-driven
+    /// contract until the materializer dies and the claim TTL has lapsed.
     #[test]
     fn a_pending_delivery_whose_materializer_died_expires_after_claim_ttl() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
@@ -21595,6 +21818,12 @@ mod tests {
             101,
             "tab-1::agent-42",
             |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
         ));
         assert_eq!(monitor.active_count(), 1);
 
@@ -31896,9 +32125,9 @@ mod tests {
         );
         assert!(
             restored
-                .expire_stale_unbound_launches("2026-07-28T01:00:00Z")
+                .expire_stale_unbound_launches("2026-07-28T00:01:59Z")
                 .is_empty(),
-            "a durable delivery is ACK-driven, not TTL-expired"
+            "a durable delivery remains replayable before the window creation deadline"
         );
     }
 

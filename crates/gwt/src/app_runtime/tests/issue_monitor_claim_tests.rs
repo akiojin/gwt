@@ -3513,6 +3513,10 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
 fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
+    // Keep durable recovery assertions independent of CI fsync latency.
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
     let prefs_path = temp.path().join("issue-monitor.json");
     fs::write(&prefs_path, b"{").expect("seed malformed prefs");
 
@@ -3920,6 +3924,54 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
 }
 
 #[test]
+fn issue_5140_expired_fallback_delivery_does_not_authorize_a_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.terminal_queue_push(&[42], "operator", "2000-01-01T00:00:00Z");
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Expired windowless delivery".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        42,
+        "claim-42",
+        "host/session",
+        "effect-42",
+        "2000-01-01T00:00:00Z",
+    ));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed expired delivery");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    assert!(!runtime
+        .claim_issue_monitor_launch_delivery(&repo, 42, "launch:effect-42", "tab-1::agent-1")
+        .expect("fallback claim"));
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload committed state");
+    assert!(prefs.pending_launch_deliveries.is_empty());
+    assert!(prefs.failed_issues.iter().any(|failure| {
+        failure.issue_number == 42 && failure.message.contains("launch:effect-42")
+    }));
+}
+
+#[test]
 fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks() {
     let _env_lock = env_test_lock()
         .lock()
@@ -3955,7 +4007,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         "claim-3165",
         "host/session",
         "effect-3165",
-        "2026-07-28T00:00:00Z",
+        &Utc::now().to_rfc3339(),
     ));
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
@@ -4320,7 +4372,7 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
         "claim-3165",
         "host/session",
         "effect-3165",
-        "2026-07-28T00:00:00Z",
+        &Utc::now().to_rfc3339(),
     ));
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
@@ -4425,7 +4477,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
         "claim-3165",
         "host/session",
         "effect-3165",
-        "2026-07-28T00:00:00Z",
+        &Utc::now().to_rfc3339(),
     ));
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
@@ -4569,7 +4621,7 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         "claim-3165",
         "host/session",
         "effect-3165",
-        "2026-07-28T00:00:00Z",
+        &Utc::now().to_rfc3339(),
     ));
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
@@ -4667,7 +4719,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         "claim-3165",
         "host/session",
         "effect-3165",
-        "2026-07-28T00:00:00Z",
+        &Utc::now().to_rfc3339(),
     ));
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
