@@ -3030,9 +3030,44 @@ pub struct OwnerExecutionDiagnosis {
     /// the recovery route is to release them before launching.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocking_prepared_transactions: Vec<BlockingPreparedTransaction>,
+    /// Issue #5072 AC-3: the holder worktree's obligation and settlement
+    /// facts, read with the same helpers as the checkout-side diagnosis so
+    /// both report the same `warnings`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obligation_revival: Option<ExecutionObligationRevivalDiagnosis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<crate::cli::verification_record::WorkEventSettlementStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_dirty_paths: Vec<crate::cli::verification_record::WorkEventDirtyPath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement_severity: Option<String>,
     pub recommended_recovery: String,
     pub recommended_recovery_reason: String,
     pub warnings: Vec<String>,
+}
+
+/// Issue #5072 AC-3: owner-side copy of the checkout-side obligation and
+/// settlement diagnosis for the holder worktree.
+fn append_holder_worktree_facts(
+    diagnosis: &mut OwnerExecutionDiagnosis,
+    worktree: &Path,
+    session_id: &str,
+) {
+    diagnosis.obligation_revival =
+        obligation_revival_diagnosis(worktree, session_id, &mut diagnosis.warnings);
+    match crate::cli::verification_record::load_work_event_settlement_record(worktree) {
+        Ok(Some(settlement)) => {
+            let live = live_settlement_diagnosis(worktree, settlement.status);
+            diagnosis.warnings.extend(live.warnings);
+            diagnosis.settlement_severity = Some(live.severity);
+            diagnosis.settlement = live.status;
+            diagnosis.settlement_dirty_paths = live.dirty_paths;
+        }
+        Ok(None) => {}
+        Err(error) => diagnosis.warnings.push(format!(
+            "work event settlement record is unreadable: {error}"
+        )),
+    }
 }
 
 /// Issue #3934: diagnose any owner in this repository without owning it.
@@ -3053,6 +3088,10 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         holder_runtime: None,
         reclaimable: false,
         blocking_prepared_transactions: Vec::new(),
+        obligation_revival: None,
+        settlement: None,
+        settlement_dirty_paths: Vec::new(),
+        settlement_severity: None,
         recommended_recovery: "gwt-execute".to_string(),
         recommended_recovery_reason:
             "No execution generation exists for this owner; a fresh launch can take it.".to_string(),
@@ -3137,6 +3176,9 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         diagnosis.holder_session_state = Some(format!("{:?}", holder.status));
         diagnosis.holder_branch = Some(holder.branch.clone());
         diagnosis.holder_worktree = Some(holder.worktree_path.display().to_string());
+        if holder.worktree_path.is_dir() {
+            append_holder_worktree_facts(&mut diagnosis, &holder.worktree_path, &holder_session_id);
+        }
     }
     let holder_identity = holder.as_ref().and_then(|holder| {
         gwt_agent::SessionExecutionIdentity::from_session(holder)
@@ -11774,7 +11816,130 @@ pub enum ExecutionObligationRevivalDiagnosis {
     },
     StatusUnreadable {
         error: String,
+        /// Issue #5072 AC-1: which check failed, with expected and observed
+        /// values and the record path.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        validation: Option<crate::cli::action_obligation::RevivalRecordValidationFailure>,
     },
+}
+
+/// Issue #5072: revival outcome for `session_id`, pushing the matching
+/// warning. Shared by the checkout-side and owner-side diagnoses so both
+/// report the same facts. `None` when no record exists.
+fn obligation_revival_diagnosis(
+    worktree: &Path,
+    session_id: &str,
+    warnings: &mut Vec<String>,
+) -> Option<ExecutionObligationRevivalDiagnosis> {
+    use crate::cli::action_obligation::ObligationRevivalOutcome;
+    match crate::cli::action_obligation::load_revival_record(worktree, session_id) {
+        Ok(Some(record)) => {
+            match &record.result {
+                ObligationRevivalOutcome::Revived { .. } => {}
+                ObligationRevivalOutcome::Deferred { reason } => {
+                    warnings.push(format!("obligation revival deferred: {reason}"));
+                }
+                ObligationRevivalOutcome::PersistFailed { error } => {
+                    warnings.push(format!("obligation revival persistence failed: {error}"));
+                }
+            }
+            Some(record.result.into())
+        }
+        Ok(None) => None,
+        Err(error) => {
+            let validation =
+                crate::cli::action_obligation::revival_record_validation_failure(&error).cloned();
+            let error = error.to_string();
+            warnings.push(format!("obligation revival status is unreadable: {error}"));
+            Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable { error, validation })
+        }
+    }
+}
+
+/// Issue #5072 AC-2: settlement facts after re-checking a persisted
+/// `path_dirty` against the live Work event store.
+struct LiveSettlementDiagnosis {
+    status: Option<crate::cli::verification_record::WorkEventSettlementStatus>,
+    severity: String,
+    dirty_paths: Vec<crate::cli::verification_record::WorkEventDirtyPath>,
+    warnings: Vec<String>,
+}
+
+fn live_settlement_diagnosis(
+    worktree: &Path,
+    status: crate::cli::verification_record::WorkEventSettlementStatus,
+) -> LiveSettlementDiagnosis {
+    use crate::cli::verification_record::{
+        WorkEventDirtyBasis, WorkEventPathState, WorkEventSettlementBlocker,
+        WorkEventSettlementSeverity, WorkEventSettlementStatus,
+    };
+    let severity = |status: &WorkEventSettlementStatus| {
+        match status.severity() {
+            WorkEventSettlementSeverity::Clear => "clear",
+            WorkEventSettlementSeverity::Warning => "warning",
+            WorkEventSettlementSeverity::Blocked => "blocked",
+        }
+        .to_string()
+    };
+    let path_dirty = matches!(
+        status,
+        WorkEventSettlementStatus::Blocked(
+            WorkEventSettlementBlocker::PathDirty { .. }
+                | WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment { .. }
+        )
+    );
+    if !path_dirty {
+        return LiveSettlementDiagnosis {
+            severity: severity(&status),
+            status: Some(status),
+            dirty_paths: Vec::new(),
+            warnings: Vec::new(),
+        };
+    }
+    match crate::cli::verification_record::work_event_dirty_paths(worktree) {
+        Ok(dirty_paths) if dirty_paths.is_empty() => LiveSettlementDiagnosis {
+            status: None,
+            severity: "unknown".to_string(),
+            dirty_paths,
+            warnings: vec![
+                "work event settlement record reports path_dirty, but the Work event store is clean now; the record is stale".to_string(),
+            ],
+        },
+        Ok(dirty_paths) => {
+            let listed = dirty_paths
+                .iter()
+                .map(|dirty| {
+                    let basis = match dirty.basis {
+                        WorkEventDirtyBasis::GitStatusPorcelain => "git_status_porcelain",
+                        WorkEventDirtyBasis::GwtIgnoredShard => "gwt_ignored_shard",
+                    };
+                    let state = match dirty.state {
+                        WorkEventPathState::Staged => "staged",
+                        WorkEventPathState::Unstaged => "unstaged",
+                        WorkEventPathState::Untracked => "untracked",
+                        WorkEventPathState::Deleted => "deleted",
+                    };
+                    format!("{} ({state}, {basis})", dirty.path)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            LiveSettlementDiagnosis {
+                severity: severity(&status),
+                status: Some(status),
+                dirty_paths,
+                warnings: vec![format!("work event settlement path_dirty: {listed}")],
+            }
+        }
+        Err(()) => LiveSettlementDiagnosis {
+            severity: severity(&status),
+            status: Some(status),
+            dirty_paths: Vec::new(),
+            warnings: vec![
+                "work event settlement path_dirty could not be re-checked: git status failed"
+                    .to_string(),
+            ],
+        },
+    }
 }
 
 impl From<crate::cli::action_obligation::ObligationRevivalOutcome>
@@ -11835,6 +12000,10 @@ pub struct ExecutionDiagnosisSnapshot {
     pub work_event_receipt_matches_current_generation: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settlement: Option<crate::cli::verification_record::WorkEventSettlementStatus>,
+    /// Issue #5072 AC-2: the concrete dirty paths behind `path_dirty`, from a
+    /// live scan rather than the persisted record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_dirty_paths: Vec<crate::cli::verification_record::WorkEventDirtyPath>,
     pub settlement_severity: String,
     pub settlement_obligation_open: bool,
     pub open_obligations: Vec<String>,
@@ -12348,6 +12517,7 @@ fn diagnose_with_mode(
         work_event_receipt_generation_id: None,
         work_event_receipt_matches_current_generation: None,
         settlement: None,
+        settlement_dirty_paths: Vec::new(),
         settlement_severity: "unknown".to_string(),
         settlement_obligation_open: false,
         open_obligations: Vec::new(),
@@ -12649,44 +12819,17 @@ fn diagnose_with_mode(
             .into_iter()
             .map(|kind| kind.as_str().to_string())
             .collect();
-        match crate::cli::action_obligation::load_revival_record(worktree, session_id) {
-            Ok(Some(record)) => {
-                snapshot.obligation_revival = Some(record.result.clone().into());
-                match record.result {
-                    crate::cli::action_obligation::ObligationRevivalOutcome::Revived { .. } => {}
-                    crate::cli::action_obligation::ObligationRevivalOutcome::Deferred {
-                        reason,
-                    } => snapshot
-                        .warnings
-                        .push(format!("obligation revival deferred: {reason}")),
-                    crate::cli::action_obligation::ObligationRevivalOutcome::PersistFailed {
-                        error,
-                    } => snapshot
-                        .warnings
-                        .push(format!("obligation revival persistence failed: {error}")),
-                }
-            }
-            Ok(None) => {
-                if !record.recoveries.is_empty() {
-                    snapshot.obligation_revival =
-                        Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable {
-                            error: "revival_outcome_missing_after_reopen".to_string(),
-                        });
-                    snapshot.warnings.push(
-                        "obligation revival status is missing after execution.reopen".to_string(),
-                    );
-                }
-            }
-            Err(error) => {
-                let error = error.to_string();
-                snapshot.obligation_revival =
-                    Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable {
-                        error: error.clone(),
-                    });
-                snapshot
-                    .warnings
-                    .push(format!("obligation revival status is unreadable: {error}"));
-            }
+        snapshot.obligation_revival =
+            obligation_revival_diagnosis(worktree, session_id, &mut snapshot.warnings);
+        if snapshot.obligation_revival.is_none() && !record.recoveries.is_empty() {
+            snapshot.obligation_revival =
+                Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable {
+                    error: "revival_outcome_missing_after_reopen".to_string(),
+                    validation: None,
+                });
+            snapshot
+                .warnings
+                .push("obligation revival status is missing after execution.reopen".to_string());
         }
     }
     match crate::cli::verification_record::load_work_event_settlement_record(worktree) {
@@ -12707,13 +12850,11 @@ fn diagnose_with_mode(
                 )),
             }
             snapshot.settlement_obligation_open = settlement.obligation_open;
-            snapshot.settlement_severity = match settlement.status.severity() {
-                crate::cli::verification_record::WorkEventSettlementSeverity::Clear => "clear",
-                crate::cli::verification_record::WorkEventSettlementSeverity::Warning => "warning",
-                crate::cli::verification_record::WorkEventSettlementSeverity::Blocked => "blocked",
-            }
-            .to_string();
-            snapshot.settlement = Some(settlement.status);
+            let live = live_settlement_diagnosis(worktree, settlement.status);
+            snapshot.warnings.extend(live.warnings);
+            snapshot.settlement_severity = live.severity;
+            snapshot.settlement = live.status;
+            snapshot.settlement_dirty_paths = live.dirty_paths;
         }
         Ok(None) => {}
         Err(error) => snapshot.warnings.push(format!(
@@ -19978,6 +20119,174 @@ mod tests {
             guidance.contains("generation-reaper"),
             "the refusal has to name the route that does apply: {guidance}"
         );
+    }
+
+    /// Issue #5072 AC-1..AC-4: the checkout-side and owner-side diagnoses
+    /// report the same obligation/settlement facts. A clean tree with a valid
+    /// record reports nothing; a foreign revival record carries a structured
+    /// reason; a stale `path_dirty` is dropped, and a real one names its path.
+    #[test]
+    fn checkout_and_owner_diagnosis_share_structured_obligation_and_settlement_facts() {
+        use crate::cli::verification_record::{
+            WorkEventDirtyBasis, WorkEventPathState, WorkEventSettlementBlocker,
+            WorkEventSettlementStatus,
+        };
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "diagnosis-parity-holder";
+        startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let relevant = |warnings: &[String]| {
+            warnings
+                .iter()
+                .filter(|warning| {
+                    warning.contains("obligation revival")
+                        || warning.contains("work event settlement")
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let both = || {
+            (
+                diagnose(worktree.path(), Some(session_id)),
+                diagnose_owner(worktree.path(), owner),
+            )
+        };
+
+        // Clean tree, own (valid) revival record: no diagnostics.
+        crate::cli::action_obligation::revive_deferred(
+            worktree.path(),
+            session_id,
+            &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
+        );
+        let (local, remote) = both();
+        assert!(!matches!(
+            local.obligation_revival,
+            Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable { .. })
+        ));
+        assert!(local.settlement.is_none() && local.settlement_dirty_paths.is_empty());
+        assert_eq!(relevant(&local.warnings), relevant(&remote.warnings));
+        assert_eq!(local.obligation_revival, remote.obligation_revival);
+
+        // A continuation predecessor's record: identity failure, structured.
+        crate::cli::action_obligation::revive_deferred(
+            worktree.path(),
+            "diagnosis-parity-predecessor",
+            &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
+        );
+        let (local, remote) = both();
+        let Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable {
+            validation: Some(ref validation),
+            ..
+        }) = local.obligation_revival
+        else {
+            panic!("structured revival failure: {:?}", local.obligation_revival);
+        };
+        assert_eq!(
+            validation.check,
+            crate::cli::action_obligation::RevivalRecordCheck::Identity
+        );
+        assert_eq!(validation.expected_session_id, session_id);
+        assert_eq!(validation.actual_session_id, "diagnosis-parity-predecessor");
+        assert!(!validation.path.is_empty());
+        assert_eq!(local.obligation_revival, remote.obligation_revival);
+        assert!(!relevant(&local.warnings).is_empty());
+        assert_eq!(relevant(&local.warnings), relevant(&remote.warnings));
+
+        // A persisted path_dirty while `git status --porcelain` is clean.
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-diagnosis-parity",
+            Utc::now(),
+        );
+        event.agent_session_id = Some(session_id.to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-diagnosis-parity".to_string(),
+            project_root: worktree.path().to_path_buf(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(session_id.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at: event.updated_at,
+        };
+        let mut record = crate::cli::verification_record::prepare_work_event_settlement_record(
+            worktree.path(),
+            session_id,
+            &event,
+            &journal,
+        )
+        .expect("prepare settlement record");
+        record.status = WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+            states: vec![WorkEventPathState::Untracked],
+        });
+        crate::cli::verification_record::persist_work_event_settlement_record(
+            worktree.path(),
+            &record,
+        )
+        .expect("persist stale path_dirty");
+        let porcelain = gwt_core::process::hidden_command("git")
+            .args([
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--",
+                ".gwt/work",
+            ])
+            .current_dir(worktree.path())
+            .output()
+            .unwrap();
+        assert!(porcelain.stdout.is_empty(), "{porcelain:?}");
+        let (local, remote) = both();
+        assert!(local.settlement.is_none(), "{:?}", local.settlement);
+        assert!(local.settlement_dirty_paths.is_empty());
+        assert!(local
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("stale")));
+        assert!(remote.settlement.is_none());
+        assert_eq!(relevant(&local.warnings), relevant(&remote.warnings));
+
+        // A real untracked shard: path_dirty names it and its basis.
+        let shard = format!(".gwt/work/events/ab/ab{}.jsonl", "0".repeat(62));
+        fs::create_dir_all(worktree.path().join(".gwt/work/events/ab")).unwrap();
+        fs::write(worktree.path().join(&shard), "{}\n").unwrap();
+        let (local, remote) = both();
+        assert!(matches!(
+            local.settlement,
+            Some(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::PathDirty { .. }
+            ))
+        ));
+        assert_eq!(local.settlement_dirty_paths.len(), 1);
+        assert_eq!(local.settlement_dirty_paths[0].path, shard);
+        assert_eq!(
+            local.settlement_dirty_paths[0].basis,
+            WorkEventDirtyBasis::GitStatusPorcelain
+        );
+        assert!(local
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(&shard)));
+        assert_eq!(local.settlement_dirty_paths, remote.settlement_dirty_paths);
+        assert_eq!(relevant(&local.warnings), relevant(&remote.warnings));
     }
 
     /// The guidance follows the diagnosis rather than hardcoding one route: a
@@ -27489,6 +27798,15 @@ exit 1
             let binding = current_execution_binding(dir.path(), owner)
                 .unwrap()
                 .expect("current execution binding");
+            // A real dirty shard keeps the persisted path_dirty cases live
+            // (Issue #5072 drops a path_dirty the store no longer shows).
+            fs::create_dir_all(dir.path().join(".gwt/work/events/ab")).unwrap();
+            fs::write(
+                dir.path()
+                    .join(format!(".gwt/work/events/ab/ab{}.jsonl", "0".repeat(62))),
+                "{}\n",
+            )
+            .unwrap();
 
             let cases = [
                 (
@@ -29249,7 +29567,7 @@ exit 1
             assert!(matches!(
                 diagnosis.obligation_revival,
                 Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable {
-                    ref error
+                    ref error, ..
                 }) if error == "revival_outcome_missing_after_reopen"
             ));
         }
