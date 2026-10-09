@@ -1092,7 +1092,9 @@ mod tests {
 
     #[test]
     fn absent_shared_snapshot_is_diagnostic_and_never_creates_runtime_files() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let view = project_capacity(temp.path(), &BTreeSet::new(), 0);
@@ -1310,7 +1312,9 @@ mod tests {
 
     #[test]
     fn twenty_thousand_registered_projects_do_not_consume_machine_capacity() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let own = temp.path().join("own");
@@ -1363,7 +1367,9 @@ mod tests {
 
     #[test]
     fn shared_refresh_measures_target_and_writes_an_expiring_snapshot_without_ui_clients() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let root = temp.path().join("project");
@@ -1407,7 +1413,9 @@ mod tests {
 
     #[test]
     fn alternating_open_projects_keep_unfinished_target_walks() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let first = temp.path().join("first");
@@ -1522,7 +1530,9 @@ mod tests {
 
     #[test]
     fn capacity_storage_is_shared_by_projects_within_one_home() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let first = temp.path().join("first");
@@ -1552,7 +1562,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shared_runtime_symlink_does_not_share_mutable_capacity_observations_between_homes() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let production = tempfile::tempdir().unwrap();
         let isolated = tempfile::tempdir().unwrap();
         let _production_home = gwt_core::test_support::ScopedGwtHome::set(production.path());
@@ -1587,7 +1599,9 @@ mod tests {
 
     #[test]
     fn failed_target_remeasurement_invalidates_last_good_sample_and_valid_retry_recovers() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let root = temp.path().join("project");

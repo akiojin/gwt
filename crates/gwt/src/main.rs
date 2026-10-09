@@ -10383,9 +10383,12 @@ fn main() -> std::io::Result<()> {
                 }
                 // Failed observations must also publish expiry instead of leaving
                 // an old positive Auto limit on a stopped Monitor.
-                let _ = capacity_proxy.send_event(UserEvent::IssueMonitorCapacityChanged {
-                    project_root: root,
-                });
+                if capacity_proxy
+                    .send_event(UserEvent::IssueMonitorCapacityChanged { project_root: root })
+                    .is_err()
+                {
+                    return;
+                }
             }
         })
     {

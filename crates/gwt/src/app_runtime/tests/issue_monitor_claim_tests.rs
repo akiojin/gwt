@@ -2795,6 +2795,53 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
         persisted.failed_issues.is_empty(),
         "marker and cleanup are persisted by the final atomic save"
     );
+    #[cfg(not(unix))]
+    {
+        let mut enabled = persisted;
+        enabled.enabled = true;
+        enabled.max_active_agents_mode = gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto;
+        enabled.launch_profile = Some(sample_issue_monitor_launch_profile());
+        gwt::save_issue_monitor_prefs(&prefs_path, &enabled).expect("enable Auto scan");
+        let observed_at = chrono::Utc::now().timestamp() as u64;
+        let measured_root = dunce::canonicalize(&repo).expect("measured project");
+        let machine_state = gwt_core::paths::gwt_home().join("machine-state");
+        fs::create_dir_all(&machine_state).expect("machine state");
+        fs::write(
+            machine_state.join("agent-capacity.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "observed_at": observed_at, "expires_at": observed_at + 30,
+                "performance_cores": 8, "gui_cpu_millicores": 0,
+                "available_ram_bytes": 80, "per_agent_ram_bytes": 10,
+                "free_disk_bytes": 100,
+                "targets": {measured_root.join("target").to_string_lossy(): {"bytes": 10, "observed_at": observed_at}},
+                "disk_observations": {measured_root.to_string_lossy(): {"available_bytes": 100, "observed_at": observed_at}}
+            }))
+            .expect("capacity snapshot"),
+        )
+        .expect("fresh capacity snapshot");
+        let capacity = gwt::agent_capacity::project_capacity(&repo, &Default::default(), 0);
+        assert!(capacity.measurement_complete, "{}", capacity.reason);
+        let probed = Arc::new(Mutex::new(Vec::new()));
+        let _hook = super::super::set_local_completion_probe_test_hook({
+            let probed = Arc::clone(&probed);
+            move |issue_number| {
+                probed.lock().expect("probe log").push(issue_number);
+                Err(gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Deadline(
+                    gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                        gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                        "test stops after reaching the Auto admission probe",
+                    ),
+                ))
+            }
+        });
+        let _events = runtime.local_issue_monitor_events_with_policy(
+            &runtime.test_context(),
+            Some("client-1"),
+            super::super::IssueMonitorScanPolicy::Scan,
+            |_| {},
+        );
+        assert_eq!(probed.lock().expect("probe log").as_slice(), &[43]);
+    }
 }
 
 #[cfg(unix)]

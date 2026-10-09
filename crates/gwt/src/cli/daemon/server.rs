@@ -3115,7 +3115,7 @@ fn decode_issue_monitor_control_in_repo(
                     None | Some(serde_json::Value::Null) => false,
                     Some(value) => match value.as_str()? {
                         "auto" if max_active_agents.is_none() => true,
-                        "manual" => false,
+                        "manual" if max_active_agents.is_some() => false,
                         _ => return None,
                     },
                 };
@@ -10919,6 +10919,16 @@ exit 0
             "max_active_mode":"auto", "max_active_agents":7,
         })))
         .is_none());
+        assert!(decode_issue_monitor_control(payload(serde_json::json!({
+            "max_active_mode":"manual", "allowed_labels":[],
+        })))
+        .is_none());
+        let control = decode_issue_monitor_control(payload(serde_json::json!({
+            "max_active_mode":"manual", "max_active_agents":7, "allowed_labels":[],
+        })))
+        .expect("explicit Manual with its numeric limit");
+        assert!(apply_issue_monitor_control(&mut monitor, control));
+        assert_eq!(monitor.max_active_agents_override(), Some(7));
     }
 
     /// Issue #4037 AC-2 / AC-5: the daemon decodes `update_drain` as part of

@@ -760,13 +760,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
             let max_active_auto = match optional_string(params, "max_active_mode")?.as_deref() {
-                None | Some("manual") => false,
+                None => false,
+                Some("manual") if max_active.is_some() => false,
                 Some("auto") if max_active.is_none() => true,
-                Some(_) => {
-                    return Err(CliParseError::InvalidJson(
-                        "max_active_mode must be auto (without max_active) or manual".to_string(),
-                    ))
-                }
+                Some(_) => return Err(CliParseError::InvalidJson(
+                    "max_active_mode must be auto (without max_active) or manual (with max_active)"
+                        .to_string(),
+                )),
             };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
             let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
@@ -4281,9 +4281,14 @@ mod tests {
             "issue.monitor.config.set",
             json!({"max_active_mode": "auto"}),
         );
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "manual", "max_active": 4, "enabled": false}),
+        );
         for params in [
             json!({"max_active_mode": "invalid", "max_active": 4}),
             json!({"max_active_mode": "auto", "max_active": 4}),
+            json!({"max_active_mode": "manual", "enabled": false}),
         ] {
             assert!(matches!(
                 err("issue.monitor.config.set", params),

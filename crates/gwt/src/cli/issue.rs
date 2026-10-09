@@ -794,7 +794,7 @@ fn launch_capacity(
         .occupied_slot_count
         .unwrap_or_else(|| status.active_launches.len() + status.review_windows.len());
     let reserved = occupied + status.pending_claim_issues.as_ref().map_or(0, Vec::len);
-    let admission_saturated = reserved >= status.max_active;
+    let admission_saturated = reserved >= configured_max_active;
     if !admission_saturated && active_session_count < configured_max_active {
         return None;
     }
@@ -8395,6 +8395,14 @@ mod tests {
             launch_capacity(&status, 1, status.max_active).is_none(),
             "free capacity stays free"
         );
+        let mut stale = status.clone();
+        stale.max_active = 8;
+        stale.occupied_slot_count = Some(3);
+        let capacity = launch_capacity(&stale, 1, 2).expect("refreshed capacity is saturated");
+        assert_eq!(capacity["admission_saturated"], true);
+        assert_eq!(capacity["reported_max_active"], 8);
+        assert_eq!(capacity["configured_max_active"], 2);
+        assert_eq!(capacity["reserved_slot_count"], 3);
     }
 
     #[test]

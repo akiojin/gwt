@@ -1581,6 +1581,7 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
 #[test]
 fn issue_monitor_capacity_waits_for_the_initial_full_projection() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("repo");
     fs::create_dir_all(&root).unwrap();
     let runtime = sample_runtime(

@@ -638,7 +638,11 @@ fn observe_candidates(
                 .collect()
         };
         if children.is_empty() {
-            let host_live = exact_host_identity(&runtime, processes.get(&host_pid).copied());
+            let host_live = processes.get(&host_pid).is_some_and(|started| {
+                runtime
+                    .host_started_at
+                    .is_none_or(|expected| expected == *started)
+            });
             if host_live
                 || runtime
                     .child_pid
@@ -931,7 +935,9 @@ mod tests {
 
     #[test]
     fn machine_roles_use_exact_pm_and_monitor_provenance_and_named_review_scalar() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
