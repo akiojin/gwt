@@ -592,8 +592,7 @@ impl CliEnv for DefaultCliEnv {
                 allowed.iter().filter(|name| crate::cli::actions::is_workflow_filename(name)).cloned().collect::<Vec<_>>().join(", ")
             )));
         }
-        if !self
-            .repo_path
+        if !gwt_core::paths::resolve_current_worktree_root(&self.repo_path)
             .join(".github/workflows")
             .join(&filename)
             .is_file()

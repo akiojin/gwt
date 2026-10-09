@@ -365,6 +365,14 @@ fn dispatch_prepare_release_uses_allowed_loopback_http_and_rejects_invalid_input
         "/../../.github/workflows/prepare-release.yml"
     ));
     let repo = tempfile::tempdir().unwrap();
+    assert!(gwt_core::process::hidden_command("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap()
+        .success());
+    let subdirectory = repo.path().join("crates/gwt");
+    fs::create_dir_all(&subdirectory).unwrap();
     fs::create_dir_all(repo.path().join(".github/workflows")).unwrap();
     fs::write(
         repo.path().join(".github/workflows/日本語 Release.yml"),
@@ -413,12 +421,7 @@ fn dispatch_prepare_release_uses_allowed_loopback_http_and_rejects_invalid_input
         )
         .with_test_endpoints(base.clone(), format!("{base}/graphql"), true)
     });
-    let mut env = DefaultCliEnv::new_with_client_factory(
-        "akiojin",
-        "gwt",
-        repo.path().to_path_buf(),
-        factory,
-    );
+    let mut env = DefaultCliEnv::new_with_client_factory("akiojin", "gwt", subdirectory, factory);
     let mut call = crate::cli::ActionsDispatchCall {
         workflow: "日本語 Release.yml".into(),
         git_ref: "develop".into(),
