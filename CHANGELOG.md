@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.113.1] - 2026-10-09
+
+### Bug Fixes
+
+- **skills:** Create PR at verified HEAD when branch is only behind base
+- **issue:** Issue.spec.create でマーカー無し本文を spec section として保存する
+- **execution:** Works.lock の再入デッドロックを解消し取得に期限を付ける（#5208）
+
 ## [9.113.0] - 2026-10-09
 
 ### Bug Fixes
