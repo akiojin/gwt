@@ -32,7 +32,10 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -859,6 +862,7 @@ type ClientHubDispatchHook = Arc<dyn Fn() + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, ClientRegistration>>>,
+    browser_generation: Arc<AtomicU64>,
     #[cfg(test)]
     before_dispatch_enqueue: Arc<Mutex<Option<ClientHubDispatchHook>>>,
 }
@@ -924,6 +928,9 @@ impl ClientHub {
         scope: ClientScope,
     ) -> Arc<ClientQueue> {
         let queue = Arc::new(ClientQueue::default());
+        if receives_broadcasts {
+            self.browser_generation.fetch_add(1, Ordering::Relaxed);
+        }
         self.clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -965,6 +972,18 @@ impl ClientHub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
+    }
+
+    /// Transient lifetime ignores agent pane sockets and remembers a browser
+    /// even when its entire connection occurs between monitor polls.
+    pub fn browser_session_state(&self) -> (u64, bool) {
+        let connected = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|client| client.receives_broadcasts);
+        (self.browser_generation.load(Ordering::Relaxed), connected)
     }
 
     /// SPEC-3107: lightweight queue pressure snapshot for runtime health.
@@ -2622,6 +2641,20 @@ mod tests {
     use crate::{AttachmentProgressPhase, KnowledgeKind, KnowledgeSemanticRetry};
     use gwt_core::repo_hash::ProjectKey;
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as WireMessage};
+    #[test]
+    fn browser_lifetime_ignores_agent_connections_and_remembers_disconnect() {
+        let clients = ClientHub::default();
+        clients.register_pane("agent".into());
+        assert_eq!(clients.browser_session_state(), (0, false));
+        clients.register_scoped("browser".into(), ClientScope::Hub);
+        assert_eq!(clients.browser_session_state(), (1, true));
+        clients.unregister("browser");
+        assert_eq!(clients.browser_session_state(), (1, false));
+        clients.register_scoped("browser".into(), ClientScope::Hub);
+        clients.unregister("browser");
+        assert_eq!(clients.browser_session_state(), (2, false));
+        assert!(clients.has_clients());
+    }
     fn project_a() -> ProjectKey {
         ProjectKey::parse("0123456789abcdef").unwrap()
     }

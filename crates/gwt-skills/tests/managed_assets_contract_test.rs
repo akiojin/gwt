@@ -318,7 +318,8 @@ fn browser_check_launch_script_unsets_ambient_runtime_override() {
     fs::set_permissions(&fake_gwt, fs::Permissions::from_mode(0o755)).unwrap();
     let log = dir.path().join("launch.log");
     let script = format!(
-        "ENV_ARGS=(GWT_HOOK_BIN=gwtd)\n{}",
+        "ENV_ARGS=(GWT_HOOK_BIN=gwtd)\n{}\n{}\nwait \"$CHECK_PID\"",
+        browser_check_shell_block("process-cleanup"),
         browser_check_shell_block("launch")
     );
     let output = hidden_command("bash")
@@ -330,8 +331,64 @@ fn browser_check_launch_script_unsets_ambient_runtime_override() {
         .expect("run executable fresh GUI launch block");
 
     assert!(output.status.success(), "{:?}", output);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "unset\n");
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("Fresh gwt PID: "));
     assert_eq!(fs::read_to_string(log).unwrap(), "unset\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_cleanup_reaps_owned_pid_on_success_failure_and_signal() {
+    let cleanup = browser_check_shell_block("process-cleanup");
+    let launch = browser_check_shell_block("launch");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwt = dir.path().join("gwt");
+    // Keep executable writer FDs out of this parallel test process (Issue #3521).
+    let written = hidden_command("bash")
+        .args([
+            "-c",
+            "printf '%s' \"$CHECK_FIXTURE_SCRIPT\" > \"$1\"\nchmod +x \"$1\"",
+            "write-fixture",
+        ])
+        .arg(&fake_gwt)
+        .env(
+            "CHECK_FIXTURE_SCRIPT",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CHECK_READY_PIPE\"\nexec sleep 300\n",
+        )
+        .status()
+        .expect("write executable fake gwt");
+    assert!(written.success());
+
+    for (ending, expected_code) in [("exit 0", 0), ("exit 7", 7), ("kill -TERM $$", 143)] {
+        let ready_pipe = dir.path().join(format!("ready-{expected_code}"));
+        let script = format!(
+            "set -e\n{cleanup}\nmkfifo \"$CHECK_READY_PIPE\"\nexec 3<>\"$CHECK_READY_PIPE\"\nENV_ARGS=(CHECK_READY_PIPE=\"$CHECK_READY_PIPE\")\n{launch}\nIFS= read -r -t 10 check_arguments <&3\n[ \"$check_arguments\" = '--no-tray --no-open' ]\n{ending}\n"
+        );
+        let output = hidden_command("bash")
+            .args(["-c", &script])
+            .env("CHECKOUT_GWT", &fake_gwt)
+            .env("CHECK_READY_PIPE", ready_pipe)
+            .env(
+                "LOG_FILE",
+                dir.path().join(format!("launch-{expected_code}.log")),
+            )
+            .output()
+            .expect("run owned browser-check process");
+        assert_eq!(output.status.code(), Some(expected_code), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let pid = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("Fresh gwt PID: "))
+            .expect("launch reports the exact owned PID");
+        let remaining = hidden_command("ps")
+            .args(["-p", pid, "-o", "pid="])
+            .output()
+            .expect("inspect the exact owned PID");
+        assert_eq!(
+            remaining.status.code(),
+            Some(1),
+            "owned PID {pid} remained after {ending}: {remaining:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
