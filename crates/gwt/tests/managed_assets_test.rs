@@ -1,7 +1,4 @@
-use std::{
-    path::Path,
-    sync::{Mutex, OnceLock},
-};
+use std::path::Path;
 
 #[cfg(unix)]
 use std::{path::PathBuf, process::Output};
@@ -1168,9 +1165,8 @@ fn run_browser_check_hook_audit(
     command.output().expect("run browser-check hook audit")
 }
 
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

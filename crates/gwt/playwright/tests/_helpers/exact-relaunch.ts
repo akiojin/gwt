@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -95,16 +95,23 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   console.log('GWT_FAKE_PROVIDER_READY ' + native);
 });
 `;
-  await writeFile(join(bin, "codex"), provider);
-  await chmod(join(bin, "codex"), 0o755);
+  // Only the child holds writable fixture FDs, and exits before any spawn.
+  // Issue #5028: awaiting writeFile cannot prevent sibling fork inheritance.
+  const writeExecutable = (file: string, contents: string) => {
+    const result = spawnSync(process.execPath, ["-e",
+      "const fs = require('node:fs'); fs.writeFileSync(process.argv[1], fs.readFileSync(0)); fs.chmodSync(process.argv[1], 0o755);",
+      file], { input: contents, encoding: "utf8" });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`Fixture executable writer failed: ${result.stderr}`);
+  };
+  writeExecutable(join(bin, "codex"), provider);
   // Hooks resolve `gwtd` through PATH when GWT_BIN_PATH is absent; it must be
   // the checkout build under test, never an installed binary.
   await symlink(gwtd, join(bin, "gwtd"));
   // An accidentally selected package runner must never contact a registry or
   // bypass the fixture's provider. Installed Codex is the intended test route.
   for (const runner of ["bunx", "npx", "npm"]) {
-    await writeFile(join(bin, runner), "#!/bin/sh\necho 'Exact relaunch fixture requires installed Codex' >&2\nexit 64\n");
-    await chmod(join(bin, runner), 0o755);
+    writeExecutable(join(bin, runner), "#!/bin/sh\necho 'Exact relaunch fixture requires installed Codex' >&2\nexit 64\n");
   }
   try {
     const runtime = join(homedir(), ".gwt/runtime");
@@ -125,6 +132,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
     GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: project,
+    GWT_DISABLE_BACKGROUND_INDEX: "1",
   });
   await setup.prepare?.({ home, bin, project, env });
   const status = spawnSync(gwtd, [], {
@@ -155,12 +163,17 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
   }
   async function stop() {
+    const ownedPid = child?.pid;
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
       const deadline = Date.now() + 8_000;
       while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
-      if (current.exitCode === null && current.signalCode === null) current.kill("SIGKILL");
+      if (current.exitCode === null && current.signalCode === null) {
+        current.kill("SIGKILL");
+        const forcedDeadline = Date.now() + 8_000;
+        while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
+      }
     }
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
@@ -177,6 +190,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       if (command.join(" ").includes(home) && Number(pid) !== process.pid) {
         try { process.kill(Number(pid), "SIGTERM"); } catch { /* exited */ }
       }
+    }
+    if (ownedPid) {
+      const remaining = spawnSync("ps", ["-p", String(ownedPid), "-o", "pid="], { encoding: "utf8" });
+      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, ps_status: remaining.status }), contentType: "application/json" });
+      if (remaining.status !== 1) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
     }
     child = undefined;
   }

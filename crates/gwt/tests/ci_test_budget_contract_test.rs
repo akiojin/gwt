@@ -62,6 +62,97 @@ fn read(relative: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
+/// Issue #4135: consolidation must keep every original integration source.
+#[test]
+fn consolidated_gwt_suites_register_every_integration_source_once() {
+    use std::collections::BTreeSet;
+
+    let manifest: toml::Value =
+        toml::from_str(&read("crates/gwt/Cargo.toml")).expect("Cargo manifest");
+    assert_eq!(
+        manifest["package"]
+            .get("autotests")
+            .and_then(toml::Value::as_bool),
+        Some(false)
+    );
+    let targets = manifest["test"].as_array().expect("explicit test targets");
+    assert_eq!(
+        targets.len(),
+        10,
+        "keep link fan-out bounded to ten harnesses"
+    );
+    let modules = regex::Regex::new(r#"#\[path\s*=\s*"([^"\n]+)"\]\s*mod\s+\w+\s*;"#)
+        .expect("source-module pattern");
+    let root = repo_root().join("crates/gwt");
+    let originals: BTreeSet<_> = fs::read_dir(root.join("tests"))
+        .expect("integration sources")
+        .map(|entry| entry.expect("source entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .map(|path| path.canonicalize().expect("original source"))
+        .collect();
+    let mut registered = BTreeSet::new();
+    for target in targets {
+        let source = root.join(target["path"].as_str().expect("test path"));
+        let contents = fs::read_to_string(&source).expect("test harness source");
+        let members = std::iter::once(source.clone()).chain(modules.captures_iter(&contents).map(
+            |capture| {
+                source
+                    .parent()
+                    .expect("harness directory")
+                    .join(&capture[1])
+            },
+        ));
+        for member in members {
+            let member = member.canonicalize().expect("registered source must exist");
+            if originals.contains(&member) {
+                assert!(registered.insert(member), "source registered twice");
+            }
+        }
+    }
+    assert_eq!(
+        registered, originals,
+        "no original test source may disappear"
+    );
+
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
+    let steps = workflow["jobs"]["changes"]["steps"]
+        .as_sequence()
+        .expect("classification steps");
+    let classify = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("classify"))
+        .expect("classification step");
+    assert!(
+        steps[..classify].iter().any(|step| step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            && step.get("if").is_none()),
+        "the consolidated source mapper needs a checkout for pull requests and merge groups"
+    );
+}
+
+/// Separate integration files now share a process and must share its env lock.
+#[test]
+fn consolidated_environment_helpers_use_the_shared_core_lock() {
+    let accessor = regex::Regex::new(r"(?ms)^fn env_(?:test_)?lock\(\)[^{]*\{(.*?)^\}")
+        .expect("environment helper pattern");
+    for entry in fs::read_dir(repo_root().join("crates/gwt/tests")).expect("test sources") {
+        let path = entry.expect("source entry").path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("test source");
+        for helper in accessor.captures_iter(&source) {
+            assert!(
+                helper[1].contains("gwt_core::test_support::env_lock()"),
+                "{} retains a separate process-global environment lock",
+                path.display()
+            );
+        }
+    }
+}
+
 /// The `test:` job body: from its header up to the next top-level job.
 fn rust_job(workflow: &str) -> &str {
     let start = workflow
@@ -191,7 +282,7 @@ fn startup_git_budget_is_required_on_linux_and_windows() {
         .into_iter()
         .find(|(name, _)| name == "Check startup update Git-spawn budget")
         .expect("Windows must run the existing 1500-session Git budget test");
-    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1"));
+    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1"));
     assert!(!step.contains("continue-on-error:"));
     assert!(!step.contains("if:"));
 }
@@ -219,7 +310,7 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     assert!(job.contains("needs: source-sync"));
     assert!(job.contains("if: ${{ !cancelled() }}"));
     let prepare = job
-        .find("cargo test -p gwt --all-features --lib --test gwtd_cli_test --no-run")
+        .find("cargo test -p gwt --all-features --lib --test cli_contracts --no-run")
         .expect("a fresh job must build the guarded gwtd and stress harness");
     assert!(
         prepare

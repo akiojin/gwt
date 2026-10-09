@@ -100,7 +100,29 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     // Issue #4850: the warning sink is per thread; clear whatever an earlier
     // operation on this thread left behind before this one runs.
     super::operation_warnings::take();
-    let outcome = run_collect_governed(env, parsed.command);
+    let mut pr_checks_data = None;
+    let outcome = match parsed.command {
+        CliCommand::Pr(PrCommand::Checks { number }) => env
+            .fetch_pr_checks(number)
+            .map(|report| {
+                pr_checks_data =
+                    Some(serde_json::to_value(&report).expect("PR checks must serialize"));
+                let mut output = String::new();
+                super::pr::render_pr_checks(&mut output, &report);
+                super::governance::GovernedCommandOutput {
+                    exit_code: 0,
+                    output,
+                    refusal: None,
+                }
+            })
+            .map_err(|error| {
+                Box::new(super::governance::GovernedCommandFailure {
+                    error: super::io_as_api_error(error),
+                    refusal: None,
+                })
+            }),
+        command => run_collect_governed(env, command),
+    };
     let warnings = super::operation_warnings::take();
     crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
     match outcome {
@@ -116,6 +138,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "exit_code": code,
                 "output": output,
             });
+            if let Some(data) = pr_checks_data {
+                payload["data"] = data;
+            }
             if let Some(refusal) = refusal.as_ref() {
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
@@ -893,17 +918,25 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "pr.edit" => {
             let number = required_u64(params, "number")?;
+            let base = optional_string(params, "base")?;
+            if lookup(params, "base")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(CliParseError::InvalidJson("base must not be empty".into()));
+            }
             let title = optional_string(params, "title")?;
             let body = optional_string(params, "body")?;
             let add_labels = optional_string_vec(params, "add_labels")?;
             // Reject nothing-to-update like the argv path's Usage guard; a
             // silent no-op success would mask caller bugs (e.g. sending
             // pr.create's "labels" key instead of "add_labels").
-            if title.is_none() && body.is_none() && add_labels.is_empty() {
-                return Err(CliParseError::MissingFlag("title|body|add_labels"));
+            if base.is_none() && title.is_none() && body.is_none() && add_labels.is_empty() {
+                return Err(CliParseError::MissingFlag("base|title|body|add_labels"));
             }
             CliCommand::Pr(PrCommand::EditBody {
                 number,
+                base,
                 title,
                 body,
                 add_labels,
@@ -917,6 +950,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
+        }),
+        "pr.close" => CliCommand::Pr(PrCommand::Close {
+            number: required_u64(params, "number")?,
+            comment: optional_string(params, "comment")?,
         }),
         // SPEC #3835 AC-15 / AC-17: the operation behind the `update-branch`
         // default action, which `pr.list` recommended for a year without one.
@@ -958,6 +995,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
             target: actions_rerun_target(params)?,
         }),
+        "actions.cancel" => CliCommand::Actions(ActionsCommand::Cancel {
+            run_id: required_u64(params, "run_id")?,
+        }),
+        "actions.queued" => CliCommand::Actions(ActionsCommand::Queued),
         "index.status" => CliCommand::Index(IndexCommand::Status),
         "index.cancel" | "index.repair" => {
             if optional_string(params, "scope")?.is_some_and(|scope| scope != "issues") {
@@ -1015,6 +1056,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "discuss.goal_skipped" | "discuss.goal-skipped" => {
             discuss_proposal(params, DiscussEnvelopeAction::GoalSkipped)?
+        }
+        "verify.cancel" => {
+            reject_unknown_params(params, &["attempt_id", "reason"], "verify.cancel")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Cancel {
+                attempt_id: required_string(params, "attempt_id")?,
+                reason: required_string(params, "reason")?,
+            })
+        }
+        "verify.status" => {
+            reject_unknown_params(params, &["attempt_id"], "verify.status")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Status {
+                attempt_id: optional_string(params, "attempt_id")?,
+            })
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
@@ -2376,6 +2430,29 @@ mod tests {
         .to_string()
     }
 
+    #[test]
+    fn issue_5108_pr_checks_envelope_exposes_same_structured_verdict() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(repo.path().to_path_buf());
+        env.seed_pr_checks(12, serde_json::from_value(json!({
+            "summary": "PR #12 | CI: PENDING (1 unfinished) | Merge: BLOCKED | Review: APPROVED",
+            "ci_status": "PENDING", "merge_status": "BLOCKED", "review_status": "APPROVED",
+            "check_counts": {"success":1,"failure":0,"skipped":0,"in_progress":1,"total":2},
+            "checks": []
+        })).unwrap());
+        env.stdin = envelope("pr.checks", json!({"number":12}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(response["data"]["ci_status"], "PENDING");
+        assert_eq!(response["data"]["merge_status"], "BLOCKED");
+        assert_eq!(response["data"]["check_counts"]["in_progress"], 1);
+        assert!(response["output"]
+            .as_str()
+            .unwrap()
+            .contains("CI: PENDING (1 unfinished)"));
+        assert_eq!(env.pr_checks_call_log, vec![12]);
+    }
+
     fn ok(operation: &str, params: Value) -> CliCommand {
         match parse(&envelope(operation, params)) {
             Ok(parsed) => {
@@ -2721,6 +2798,7 @@ mod tests {
                 fallback_owner_closed: false,
                 auto_merge_enabled: false,
                 merge_queue: None,
+                required_status_checks_strict: None,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
@@ -3004,6 +3082,22 @@ mod tests {
             ),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn verify_cancel_binds_an_exact_attempt_and_reason() {
+        assert!(parse(&envelope(
+            "verify.cancel",
+            json!({"attempt_id": "vat-example", "reason": "superseded matrix"})
+        ))
+        .is_ok());
+        assert!(parse(&envelope("verify.cancel", json!({"reason": "stop"}))).is_err());
+        assert!(parse(&envelope(
+            "verify.cancel",
+            json!({"attempt_id": "vat-example", "reason": "stop", "target": "foreign"})
+        ))
+        .is_err());
+        assert!(parse(&envelope("verify.status", json!({}))).is_ok());
     }
 
     #[test]
@@ -5827,7 +5921,33 @@ mod tests {
         // bugs such as passing pr.create's "labels" key instead of "add_labels").
         assert!(matches!(
             err("pr.edit", json!({"number": 1})),
-            CliParseError::MissingFlag("title|body|add_labels")
+            CliParseError::MissingFlag("base|title|body|add_labels")
+        ));
+        assert!(matches!(
+            ok("pr.edit", json!({"number": 1, "base": "develop"})),
+            CliCommand::Pr(PrCommand::EditBody { base: Some(base), .. }) if base == "develop"
+        ));
+        for params in [
+            json!({"number": 1, "base": " "}),
+            json!({"number": 1, "base": "", "title": "t"}),
+        ] {
+            assert!(matches!(
+                err("pr.edit", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for params in [
+            json!({"number": 9}),
+            json!({"number": 9, "comment": "Wrong base"}),
+        ] {
+            assert!(matches!(
+                ok("pr.close", params),
+                CliCommand::Pr(PrCommand::Close { number: 9, .. })
+            ));
+        }
+        assert!(matches!(
+            err("pr.close", json!({})),
+            CliParseError::MissingFlag("number")
         ));
         for op in [
             "pr.view",
@@ -5864,6 +5984,33 @@ mod tests {
             ),
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody { .. })
         ));
+    }
+
+    #[test]
+    fn issue_4188_actions_cancel_requires_a_run_id() {
+        assert_eq!(
+            ok("actions.cancel", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Cancel { run_id: 5 })
+        );
+        assert!(matches!(
+            err("actions.cancel", json!({})),
+            CliParseError::MissingFlag("run_id")
+        ));
+        assert!(parse(&envelope("actions.cancel", json!({"run_id": "five"}))).is_err());
+        assert!(parse(&envelope(
+            "actions.cancel",
+            json!({"run_id": 5, "job_id": 7})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn issue_4188_actions_queued_takes_no_params() {
+        assert_eq!(
+            ok("actions.queued", json!({})),
+            CliCommand::Actions(ActionsCommand::Queued)
+        );
+        assert!(parse(&envelope("actions.queued", json!({"run_id": 5}))).is_err());
     }
 
     #[test]

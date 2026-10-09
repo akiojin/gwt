@@ -1143,6 +1143,16 @@ remain with their originating project when you switch projects.
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### Session history
+
+gwt keeps recent Session history in `~/.gwt/sessions/`. Background cleanup
+runs on the first ledger view and at most once every 24 hours, removing
+stopped history with startup restore disabled after 30 days of inactivity.
+Saved windows and Sessions needed by runtime, recovery, or unfinished work
+remain protected. Old abandoned write temporaries are also removed.
+See [Issue #5025](https://github.com/akiojin/gwt/issues/5025) for the
+retention policy and unreadable-record handling.
+
 ### macOS filesystem activity and Spotlight
 
 The per-worktree index watcher excludes the root `target/` directory's
@@ -1244,6 +1254,52 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
+### CI throughput measurements
+
+With Python 3.11+, authenticated `gh`, and local Git history for the merged PRs,
+collect the latest 25 develop merges and save their input data:
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --limit 25 --save target/ci-throughput.json
+python scripts/ci_throughput.py --input target/ci-throughput.json
+```
+
+Run collection from this checkout (or specify `--root`). Fetch missing history
+before collecting; for a shallow clone, use `git fetch --unshallow origin develop`.
+`--before 2026-10-08T00:30:00Z` fixes the inclusive merge cutoff, and
+`--workflow lint.yml` measures Lint using the same collection and replay path.
+Replay needs neither GitHub access nor Git history. The saved baseline is:
+
+```bash
+python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
+```
+
+The JSON reports PR creation-to-merge time, each PR's latest successful final-head
+workflow attempt, base synchronizations per merge, runner waits, and per-job
+durations. Durations are in minutes; p50 is the median and p90 is nearest rank.
+Workflow duration is `run_started_at` to `updated_at`; job duration is `started_at`
+to `completed_at`. Runner wait is job `created_at` to `started_at`, after dependency
+scheduling. All jobs and required jobs have separate wait distributions. Missing
+samples remain unavailable; rerun jobs whose creation time follows their reused
+execution time retain their duration but have unavailable runner waits.
+
+The fixed 25-PR baseline reproduces p50 **130.27 minutes** from creation to merge
+and **32.43 minutes** per Test attempt. Base synchronizations use merges whose
+second parent belongs to the base's first-parent history: **115/25 = 4.6**.
+The report also shows the historical `Merge ... develop` subject filter's
+**110/25 = 4.4**, which omits five synchronizations with custom subjects.
+
+### Shared frontend state (SPEC-5016)
+
+Migrated frontend domains use `web/ui-state-store.js` to own immutable data. Receive
+handlers update the model; views subscribe to selectors and render the committed
+snapshot. Retain each unsubscribe function for views that can be removed. Keep
+DOM nodes and renderer functions outside the model. Notifications also run for
+unfocused windows, without a focus or animation-frame trigger. The shared
+`ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
+the content type. See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
+the migration inventory and acceptance criteria.
+
 ### Capacity for heavy verification
 
 Only canonical `verify.run` acquires the host-wide verification lease.
@@ -1254,6 +1310,29 @@ Heavy commands. Heavy commands retain their relative order; gwt artifact
 restoration runs last. An admission timeout before the first remaining command
 starts preserves any predecessor without writing a replacement record. Later
 timeouts retain completed results in an incomplete, non-PASS deferred record.
+
+The following short non-Cargo gates are Light and run without a Heavy lease:
+
+| Command | Resource bound |
+| --- | --- |
+| `git diff --check` (including `--cached`) | Checks whitespace in a diff |
+| `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | Reads an existing coverage JSON; does not run tests |
+| `actionlint` without custom checker options, `shellcheck`, `yamllint` | Static analysis of workflow, shell, or YAML files |
+| `taplo check`, `taplo fmt --check` | TOML validation or formatting checks |
+| `typos` | Static spelling checks |
+
+These gates have a 60-second execution timeout on both local and daemon hosts.
+A timeout records a failure (exit 124), preserves diagnostic output, and stops
+the command's process tree. Fix the reported command and rerun the full matrix.
+Existing markdownlint and scoped Cargo classification is unchanged. Unknown
+commands, script wrappers, the coverage producer `coverage-summary.mjs`, Cargo
+builds or broad tests, and headed Playwright remain Heavy.
+`actionlint -shellcheck` / `-pyflakes` overrides also remain Heavy because they
+can launch arbitrary wrappers. Bounded commands reclaim descendants on normal
+completion as well as on timeout.
+The Node reader also remains Heavy when its effective `NODE_OPTIONS` is nonempty,
+because those options can preload arbitrary modules. An explicit `NODE_OPTIONS=`
+disables inherited options and retains Light classification.
 
 Retry with the same full requested matrix and headed E2E nominations. `verify.run`
 automatically resumes only a valid admission-deferred record with identical
@@ -1290,6 +1369,33 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.status","params":{}}
 JSON
 ```
+
+Each `verify.run` publishes an attempt before waiting for admission. Inspect
+your latest attempt with `verify.status`, or pass `params.attempt_id` to inspect
+an exact attempt. Its JSON output includes the attempt ID, lifecycle status,
+interruption reason and whether its FIFO reservation remains:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.status","params":{}}
+JSON
+```
+
+Cancel a superseded attempt using the returned ID and a reason:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.cancel","params":{"attempt_id":"<attempt-id>","reason":"superseded matrix"}}
+JSON
+```
+
+Cancellation requires the same project, worktree, session and execution
+authority. Foreign attempts are refused with `not your verification attempt`.
+It records `interrupted`, releases only that attempt's reservation immediately,
+and stops its owned command tree. Runner death also releases its reservation
+without waiting for the reservation TTL. An interruption is neither PASS nor a
+test failure; rerunning the same matrix creates a fresh attempt. A cancellation
+before the first command starts preserves the previous verification record.
 
 Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
 lint, coverage, direct headed browser checks, and pre-push checks run
@@ -1348,6 +1454,13 @@ each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
 
 ### PR head verification
+
+To correct a PR targeting the wrong branch, use `pr.edit` with `params.number`
+and `params.base` (for example, `develop`). Base alone is a valid update; the
+existing editing authority checks still apply. To retire an incorrect PR, use
+`pr.close` with `params.number` and optional `params.comment`. A supplied comment
+is recorded before closing; if it fails, the PR stays open. Closing preserves
+the branch and is available without producing authority or verification evidence.
 
 Use `pr.head_check` with `params.base` (for example, `develop`) and optional
 `params.head` to compare a canonical passing verification record with the live
@@ -1422,14 +1535,15 @@ decision a periodic read would get right now.
 To cut a release, trigger the **Prepare Release** workflow from GitHub
 Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
 and bumps the version, regenerates the `CHANGELOG`, and opens a
-`develop → main` Release PR — so you can release from any branch without
+`release/vX.Y.Z → main` Release PR from that frozen develop commit. Later
+develop merges leave the release head and its CI unchanged. You can release from any branch without
 switching to `develop` locally. The `bump` input is `auto` (default),
 `patch`, `minor`, or `major`. `auto` never produces a major release:
 breaking markers in commits are only listed in the Release PR body, and a
 major bump requires choosing `major` explicitly. Review and merge the
 generated Release PR;
 merging to `main` then runs the release pipeline (tag, GitHub Release,
-cross‑platform binaries). The manual fallback procedure lives in
+cross‑platform binaries). Release recovery instructions live in
 `.claude/commands/release.md`.
 
 The Release PR body is reference-only: it lists delivered Issues as bare

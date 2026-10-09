@@ -1,9 +1,13 @@
 name: Build
 
 on:
+  push:
+    branches: [develop]
   pull_request:
     branches: [develop, main]
-  # Issue #4872: develop lands through a GitHub merge queue. The queue re-tests
+  # Issue #4872: retain merge-queue compatibility for organization repositories.
+  # Issue #5169: this User-owned repository uses non-strict protection and
+  # develop push CI. The queue re-tests
   # each pull request on the latest base under this event, and a required
   # check nobody reports for it stays pending forever, so every job here runs
   # for the queue exactly as it does for a pull request. Pinned by
@@ -19,7 +23,7 @@ on:
 # only this PR's older run of this workflow. Pinned by
 # crates/gwt/tests/ci_concurrency_contract_test.rs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
 jobs:
@@ -173,3 +177,10 @@ jobs:
         continue-on-error: true
       - name: Check macOS compilation
         run: cargo check -p gwt-core -p gwt
+
+  report-post-merge-failure:
+    needs: [build, check-windows, check-macos]
+    if: ${{ github.event_name == 'push' && failure() }}
+    permissions:
+      issues: write
+    uses: ./.github/workflows/post-merge-ci.yml

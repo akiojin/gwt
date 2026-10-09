@@ -34,8 +34,35 @@ pub(super) fn run<E: CliEnv>(
     }
     let mut completion_verification_hash = None;
     let mut completion_session_id = None;
-    if matches!(&action, SkillStateAction::Complete { .. }) {
+    if let SkillStateAction::Complete { spec } = &action {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+        let owning_active_build = gwt_core::skill_state::load(&worktree, SKILL_NAME)
+            .map_err(|error| {
+                gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
+                    error.to_string(),
+                ))
+            })?
+            .is_some_and(|state| {
+                state.active
+                    && state.session_id.trim() == session_id.trim()
+                    && state.owner_spec.is_none_or(|owner| owner == *spec)
+            });
+        match if owning_active_build {
+            super::completion_pr::admit(env, session_id.trim(), Some(*spec), out)
+        } else {
+            Ok(None)
+        } {
+            Ok(Some(hash)) => {
+                completion_verification_hash = Some(hash);
+                completion_session_id = Some(session_id.trim().to_string());
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                out.push_str(&format!("{VERB}: completion refused — {reason}\n"));
+                return Ok(2);
+            }
+        }
         // SPEC #3590 FR-026: an unsettled Work event log is a warning only.
         if let Some(warning) =
             crate::cli::verification_record::work_event_settlement_refusal(&worktree)
@@ -89,6 +116,14 @@ pub(super) fn run<E: CliEnv>(
                 ));
                 return Ok(2);
             }
+            if completion_verification_hash.as_ref().is_some_and(|hash| {
+                verification
+                    .as_ref()
+                    .is_none_or(|record| &record.content_hash != hash)
+            }) {
+                out.push_str("build: completion refused — verification evidence changed after PR validation\n");
+                return Ok(2);
+            }
             completion_verification_hash = verification.map(|record| record.content_hash.clone());
             completion_session_id = Some(session_id);
         }
@@ -107,8 +142,7 @@ pub(super) fn run<E: CliEnv>(
         let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&worktree)
             .ok_or_else(|| {
                 gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
-                    "typed quarantine build completion requires canonical trusted storage"
-                        .to_string(),
+                    "verified build completion requires canonical trusted storage".to_string(),
                 ))
             })?;
         let result = crate::cli::trusted_store::with_write_lease_for_resolved_dir(
@@ -120,7 +154,7 @@ pub(super) fn run<E: CliEnv>(
                 .is_none_or(|record| record.content_hash != expected_hash)
             {
                 out.push_str(
-                    "build: completion refused — typed quarantine verification evidence changed after live PR validation\n",
+                    "build: completion refused — verification evidence changed after live PR validation\n",
                 );
                 return Ok(Ok(2));
             }
@@ -133,7 +167,7 @@ pub(super) fn run<E: CliEnv>(
                 session_id,
                 expected_owner,
             );
-            if evidence != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+            if !matches!(evidence, crate::cli::verification_record::EvidenceStatus::Fresh | crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine) {
                 out.push_str(&format!(
                     "build: completion refused — {}\n",
                     evidence.describe()
@@ -2042,11 +2076,13 @@ format_version: Some(1),
                 lease_id: None,
                 worktree_fingerprint: plan.worktree_fingerprint.clone(),
                 verified_head: None,
+                driver: None,
                 commands: vec![crate::cli::verification_record::VerificationCommandResult {
                     admission: None,
                     headed_e2e: None,
                     nextest: None,
                     terminated_by_signal: None,
+                    output_streams: Vec::new(),
                     command: command.clone(),
                     exit_code: 101,
                     output_tail: format!(

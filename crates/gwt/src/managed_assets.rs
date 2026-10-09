@@ -1994,8 +1994,8 @@ fn is_bunx_temp_executable(path: &Path) -> bool {
         .any(|segment| segment.starts_with("bunx-"))
 }
 
-/// Whether `path` is a gwt build output owned by one checkout
-/// (`<root>/target/[<triple>/]{debug,release}/gwt[d]`).
+/// Whether `path` is a gwt build output
+/// (`<target-dir>/[<triple>/]{debug,release}/gwt[d]`, any `CARGO_TARGET_DIR`).
 ///
 /// #3567: the hook generator asks the same question when it decides whether a
 /// resolved binary may be written into another worktree's config, so both sides

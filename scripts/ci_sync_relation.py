@@ -116,8 +116,8 @@ def classify(repo, before, head, base):
 def event_relation(repo, event):
     pr = event.get("pull_request", {})
     group = event.get("merge_group", {})
-    head = pr.get("head", {}).get("sha") or group.get("head_sha")
-    base = pr.get("base", {}).get("sha") or group.get("base_sha")
+    head = pr.get("head", {}).get("sha") or group.get("head_sha") or event.get("after")
+    base = pr.get("base", {}).get("sha") or group.get("base_sha") or event.get("before")
     before = event.get("before")
     if event.get("action") == "synchronize":
         if before:
@@ -126,8 +126,8 @@ def event_relation(repo, event):
         result.update(classification="unprovable", base_only=None,
                       diagnostic="Synchronize event has no previous HEAD to compare")
         return result
-    # Open/reopen and merge-group events have no earlier PR source to prove.
-    # They start normally; merge groups have distinct refs/concurrency groups.
+    # Open/reopen, merge-group and develop push events start normally. Pushes
+    # use their own commit range and have separate concurrency groups.
     result = classify(repo, head, head, base)
     if result["classification"] == "matched":
         result.update(classification="initial", base_only=False)

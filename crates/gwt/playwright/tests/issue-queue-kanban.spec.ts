@@ -18,7 +18,10 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
   if (!liveUrl) await installEmbeddedRoutes(page);
-  await installBackend(page, { includeAgent: info.title.startsWith("T-7a:") });
+  await installBackend(page, {
+    includeAgent: info.title.startsWith("T-7a:"),
+    observeSkipped: info.title.startsWith("four columns preserve"),
+  });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
@@ -43,6 +46,10 @@ async function drag(page: Page, number: number, target: Locator) {
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {
   await expect(page.locator("[data-queue-column]")).toHaveCount(4);
   await expect(column(page,"backlog")).toContainText("First backlog issue");
+  await expect(row(page,1)).toContainText("Skipped");
+  await expect(row(page,1)).toContainText("not selected in this terminal queue");
+  await expect(row(page,1)).toBeVisible();
+  await page.screenshot({path:test.info().outputPath("queue-observations.png")});
   await expect(column(page,"queued")).toContainText("operator");
   await expect(column(page,"queued")).toContainText("auto-refill");
   await expect(column(page,"active")).toContainText("Running issue");
@@ -293,16 +300,56 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect(page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true})).toHaveValue("5");
 });
 
-async function installBackend(page: Page, { includeAgent = false } = {}) {
+test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
+  await confirm(page, [99, 3, 4]);
+  await page.evaluate(() => (window as any).__queueInbox([{issue:{number:3},state:"launched"}]));
+  await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
+  await expect(column(page, "active").locator('[data-issue-number="3"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages.filter((message:any) =>
+    message.kind === "load_knowledge_bridge").length)).toBeGreaterThan(1);
+  await expect(column(page, "active").locator('[data-issue-number="3"]')).toBeVisible();
+  const move = row(page, 4).locator('[data-action="move-up"]');
+  if (!await move.isVisible()) await row(page, 4).locator('.knowledge-row-menu summary').click();
+  await move.click();
+  await expect.poll(async () => (await messages(page)).at(-1)).toEqual({kind:"issue_monitor_queue_move",issue_number:4,position:1});
+});
+
+test("an unfocused Issue window reflects a launch while animation frames are suspended", async ({ page }, info) => {
+  await page.evaluate(() => (window as any).__queueAddForeground());
+  await expect(page.locator('[data-id="tab-queue::console"]')).toHaveClass(/focused/);
+  await expect(page.locator('[data-id="tab-queue::issue-1"]')).not.toHaveClass(/focused/);
+  const elapsed = await page.evaluate(async () => {
+    const scheduleFrame = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    const start = performance.now();
+    const rendered = new Promise<number>(resolve => {
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector('[data-queue-column="active"] [data-issue-number="3"]')) return;
+        observer.disconnect();
+        resolve(performance.now() - start);
+      });
+      observer.observe(document.body, {childList:true,subtree:true});
+    });
+    (window as any).__queueInbox([{issue:{number:3},state:"launched"}]);
+    try { return await rendered; } finally { window.requestAnimationFrame = scheduleFrame; }
+  });
+  expect(elapsed, 'model-to-view update without a focus or animation frame').toBeLessThanOrEqual(1000);
+  await info.attach('unfocused-render-timing', {body:JSON.stringify({elapsed_ms:elapsed,limit_ms:1000}),contentType:'application/json'});
+  await expect(page.locator('[data-id="tab-queue::issue-1"]')).not.toHaveClass(/focused/);
+  await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
+});
+
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey, includeAgent})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
       launch_profile_source:"saved",launch_profile_summary:"Fixture agent",terminal_queue_auto_refill:false,
       terminal_queue_auto_refill_limit:3,terminal_queue:[{number:3,queued_by:"operator"},{number:4,queued_by:"auto-refill"}],queue_len:2};
     const entries=[
-      {number:1,title:"First backlog issue"},{number:2,title:"Second backlog issue"},
+      {number:1,title:"First backlog issue",...(observeSkipped ? {labels:["gwt-queued"],monitor_state:"skipped",
+        exclusion_reason:"not selected in this terminal queue"} : {})},{number:2,title:"Second backlog issue"},
       {number:3,title:"Operator queued issue",monitor_state:"queued",queue_position:1,queued_by:"operator"},
       {number:4,title:"Auto-refilled issue",monitor_state:"queued",queue_position:2,queued_by:"auto-refill"},
       {number:5,title:"Running issue",monitor_state:"launched"},{number:6,title:"Completed issue",state:"closed"},
@@ -313,19 +360,27 @@ async function installBackend(page: Page, { includeAgent = false } = {}) {
       constructor(public readonly url:string) { super(); fixture.__queueConfirm=(numbers:number[],extra:any)=>{
         Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
-      }; fixture.__queueRefreshDetail=()=>this.emit({...fixture.__queueLastDetail,
+      }; fixture.__queueAddForeground=()=>{
+        const workspace=fixture.__queueWorkspace;
+        workspace.tabs[0].workspace.windows.push({id:"tab-queue::console",title:"Console",preset:"console",
+          geometry:{x:1000,y:80,width:500,height:500},z_index:2,status:"running",persist:true,minimized:false,maximized:false});
+        this.emit({kind:"workspace_state",workspace});
+      }; fixture.__queueInbox=(items:unknown[])=>this.dispatchEvent(new MessageEvent("message",{
+        data:JSON.stringify({kind:"issue_monitor_inbox",items})
+      })); fixture.__queueRefreshDetail=()=>this.emit({...fixture.__queueLastDetail,
         detail:{...fixture.__queueLastDetail.detail,title:"Refreshed issue"}});
         setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
       emit(payload:unknown) {const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}
       send(raw:string) {
         const message=JSON.parse(raw);fixture.__queueMessages.push(message);
-        if(message.kind==="frontend_ready") this.emit({kind:"workspace_state",workspace:{app_version:"playwright",tabs:[{
+        if(message.kind==="frontend_ready") { fixture.__queueWorkspace={app_version:"playwright",tabs:[{
           id:"tab-queue",title:"Queue fixture",project_root:"/fixture",project_key:projectKey,kind:"git",
           workspace:{viewport:{x:0,y:0,zoom:1},windows:[{id:"tab-queue::issue-1",title:"Issues",preset:"issue",
             geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false},
             ...(includeAgent ? [{id:"tab-queue::agent-5",session_id:"agent-5-session",title:"Issue 5 agent",preset:"agent",agent_id:"codex",
               geometry:{x:80,y:80,width:900,height:600},z_index:2,status:"running",persist:true,minimized:false,maximized:false,
-              placement:{kind:"issue_preview",issue_window_id:"tab-queue::issue-1",issue_number:5}}] : [])]} }],active_tab_id:"tab-queue",recent_projects:[]}});
+              placement:{kind:"issue_preview",issue_window_id:"tab-queue::issue-1",issue_number:5}}] : [])]} }],active_tab_id:"tab-queue",recent_projects:[]};
+          this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace}); }
         else if(message.kind==="list_issue_monitor") this.emit({kind:"issue_monitor_status",status});
         else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) this.emit({kind:"knowledge_entries",id:message.id,knowledge_kind:"issue",request_id:message.request_id,entries,selected_number:null,refresh_enabled:true});
         else if(message.kind==="select_knowledge_bridge_entry") {
@@ -336,5 +391,5 @@ async function installBackend(page: Page, { includeAgent = false } = {}) {
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey, includeAgent});
+  },{projectKey, includeAgent, observeSkipped});
 }

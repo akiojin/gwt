@@ -25,7 +25,6 @@ short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_does_not_inherit_u
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_forwards_failed_stderr_to_agent_console
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_never_exposes_nonstandard_secret_environment_names
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_sync_entrypoint_is_safe_inside_tokio_runtime
-short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_timeout_kills_pipe_holding_descendant
 short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_trace_and_failure_surfaces_never_expose_command_metadata_secrets
 short-wall-clock|crates/gwt-agent/src/prepare.rs|windows_runner_probe_job_kills_dead_root_pipe_descendant_before_marker
 short-wall-clock|crates/gwt-agent/src/session.rs|hook_metadata_backfills_project_state_root_without_overwriting_authority
@@ -94,18 +93,7 @@ short-wall-clock|crates/gwt-terminal/tests/pty_start_gate_test.rs|start_gate_pol
 short-wall-clock|crates/gwt-terminal/tests/pty_start_gate_test.rs|wait_for_path
 short-wall-clock|crates/gwt/src/app_runtime/persist_dispatcher.rs|suppresses_identical_snapshot_while_pending
 short-wall-clock|crates/gwt/src/app_runtime/persist_dispatcher.rs|worker_waits_full_coalesce_window_before_writing
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|agent_pane_close_bypasses_a_contended_pane_lock
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|app_runtime_status_thread_reports_process_exit_without_reader_eof
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retries
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|bootstrap_hands_its_worktree_inventory_to_the_startup_ingest
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|close_finalizer_falls_back_when_blocking_spawner_fails
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|close_finalizer_queues_on_process_worker_when_both_schedulers_fail
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|concurrent_same_operation_waiters_share_one_prepared_delivery
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|insert_exited_test_pane_runtime
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|issue_3777_serialization_profile_attributes_serializer_latency
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|real_agent_pane_websocket_stays_responsive_after_peer_close
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_prepare_completions
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_knowledge_view_dispatch
@@ -161,7 +149,6 @@ short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_resolver_picks_u
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_with_resolver_picks_up_endpoint_after_initial_failure
 short-wall-clock|crates/gwt/src/embedded_server.rs|accepted_self_close_send_timeout_still_finalizes_exactly_once
 short-wall-clock|crates/gwt/src/embedded_server.rs|handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing
-short-wall-clock|crates/gwt/src/embedded_server.rs|handle_frontend_message_forwards_non_terminal_events_to_proxy
 short-wall-clock|crates/gwt/src/index_search.rs|repair_spawn_failure_rolls_back_admission_and_notifies_waiters
 short-wall-clock|crates/gwt/src/index_worker.rs|aggregated_status_cache_recomputes_after_ttl_expires
 short-wall-clock|crates/gwt/src/index_worker.rs|project_index_git_context_does_not_fall_through_an_expired_deadline
@@ -210,7 +197,6 @@ short-wall-clock|crates/gwt/tests/stable_server_port.rs|wait_until_ready
 short-wall-clock|crates/gwt/tests/startup_failure_observability.rs|wait_with_deadline
 short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|canonical_command_parks
 short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|spawn_sibling_heavy
-short-wall-clock|crates/gwt/tests/verification_admission_cli_test.rs|start
 short-wall-clock|crates/gwt/tests/verification_lease_cli_test.rs|legacy_holder_can_still_be_observed_and_released
 short-wall-clock|crates/gwt/tests/workspace_cli_test.rs|drop
 short-wall-clock|crates/gwt/tests/workspace_cli_test.rs|start
@@ -252,8 +238,6 @@ unlocked-process-env|crates/gwt/src/cli/update/tests.rs|run_check_only_returns_z
 unlocked-process-env|crates/gwt/src/gui_single_instance.rs|with_force_env
 unlocked-process-env|crates/gwt/src/index_worker.rs|drop
 unlocked-process-env|crates/gwt/src/index_worker.rs|set
-unlocked-process-env|crates/gwt/tests/autonomous_live_gh.rs|autonomous_merge_pipeline_executes_through_mock_gh
-unlocked-process-env|crates/gwt/tests/autonomous_live_gh.rs|cleanup
 unlocked-process-env|crates/gwt/tests/board_reminder_hook_test.rs|drop
 unlocked-process-env|crates/gwt/tests/board_reminder_hook_test.rs|set
 unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|drop
@@ -262,7 +246,6 @@ unlocked-process-env|crates/gwt/tests/daemon_runtime_hook_test.rs|unset
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|drop
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|remove
 unlocked-process-env|crates/gwt/tests/hook_health_test.rs|set
-unlocked-process-env|crates/gwt/tests/hook_runtime_state_test.rs|handle_is_noop_when_env_var_is_unset
 unlocked-process-env|crates/gwt/tests/hook_workflow_policy_test.rs|actionable_unassigned_agent_can_mutate_without_forced_workspace_affiliation
 unlocked-process-env|crates/gwt/tests/hook_workflow_policy_test.rs|actionable_unassigned_agent_can_run_workspace_ensure_command
 unlocked-process-env|crates/gwt/tests/hook_workflow_policy_test.rs|assigned_agent_without_ensured_container_is_not_bricked_by_title_guard

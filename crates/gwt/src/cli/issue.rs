@@ -589,7 +589,7 @@ fn attach_issue_cache_status(
 fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
-) {
+) -> serde_json::Value {
     let escalated = match gwt_core::coordination::load_escalation_store(project_root) {
         Ok(store) => store.open_owner_issue_numbers(),
         Err(error) => {
@@ -669,6 +669,10 @@ fn merge_board_escalations_into_needs_human(
     }) {
         status.last_error = None;
     }
+    // Keep the two inputs separate: an open Board request does not change
+    // the monitor's lifecycle or mean that its running launch has failed.
+    let monitor_needs_human = status.needs_human.clone();
+    let mut board_escalations = Vec::new();
     for issue_number in escalated {
         // Issue #3602: Board is immutable coordination history, while
         // `needs_human` is a current-action projection. Suppress only when the
@@ -681,11 +685,18 @@ fn merge_board_escalations_into_needs_human(
         {
             continue;
         }
+        board_escalations.push(issue_number);
         if !status.needs_human.contains(&issue_number) {
             status.needs_human.push(issue_number);
         }
     }
     status.needs_human.sort_unstable();
+    serde_json::json!({
+        "monitor": monitor_needs_human,
+        "board_escalations": board_escalations,
+        "runtime_fields": ["inbox", "active_launches"],
+        "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Do not requeue an active launch to clear a Board request; resolve its escalation.",
+    })
 }
 
 /// Issue #4413 AC-4: the `gui_status.state` of a projection this process
@@ -714,8 +725,13 @@ fn run_monitor_status<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let mut status = load_monitor_agent_status(&project_root)?;
-    merge_board_escalations_into_needs_human(&project_root, &mut status);
+    // Physical observations are separate from Monitor admission reservations.
+    let inventory = crate::session_inventory::observe_sessions(
+        &project_root,
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let (mut status, capacity) =
+        load_monitor_agent_status(&project_root, inventory.sessions.len())?;
     attach_github_budget(&mut status);
     attach_disk_space(&project_root, &mut status);
     attach_build_artifact_gc(&project_root, &mut status);
@@ -723,14 +739,13 @@ fn run_monitor_status<E: CliEnv>(
     attach_spotlight(&mut status);
     attach_provider_usage(&mut status);
     attach_issue_cache_status(&project_root, &mut status);
-    // Keep the existing owner slots and add physical observations without
-    // changing the meaning of active_launches or feeding admission.
-    let inventory = crate::session_inventory::observe_sessions(
-        &project_root,
-        &gwt_core::paths::gwt_sessions_dir(),
-    );
+    let needs_human_authority =
+        merge_board_escalations_into_needs_human(&project_root, &mut status);
     let mut output =
         serde_json::to_value(&status).map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    if !status.needs_human.is_empty() {
+        output["needs_human_authority"] = needs_human_authority;
+    }
     output["project_root"] = serde_json::json!(project_root);
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
@@ -747,6 +762,9 @@ fn run_monitor_status<E: CliEnv>(
     output["urgent_queue"] = serde_json::to_value(prefs.urgent_queue.projection(&effective_queue))
         .expect("urgent queue serializes");
     output["active_session_count"] = serde_json::json!(inventory.sessions.len());
+    if let Some(capacity) = capacity {
+        output["launch_capacity"] = capacity;
+    }
     output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
     output["session_observation"] = serde_json::json!({
         "complete": inventory.uncertainties.is_empty(),
@@ -761,6 +779,38 @@ fn run_monitor_status<E: CliEnv>(
     );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #4248 AC-5: show saturation and its inputs without changing admission
+/// or mistaking physical process observations for the monitor's reservations.
+fn launch_capacity(
+    status: &crate::IssueMonitorAgentStatus,
+    active_session_count: usize,
+    configured_max_active: usize,
+) -> Option<serde_json::Value> {
+    let occupied = status
+        .occupied_slot_count
+        .unwrap_or_else(|| status.active_launches.len() + status.review_windows.len());
+    let reserved = occupied + status.pending_claim_issues.as_ref().map_or(0, Vec::len);
+    let admission_saturated = reserved >= status.max_active;
+    if !admission_saturated && active_session_count < configured_max_active {
+        return None;
+    }
+    Some(serde_json::json!({
+        "reason": if admission_saturated { "max_active_saturated" } else { "active_sessions_at_capacity" },
+        "reported_max_active": status.max_active,
+        "configured_max_active": configured_max_active,
+        "source": status.source,
+        "reserved_slot_count": reserved,
+        "admission_saturated": admission_saturated,
+        "active_session_count": active_session_count,
+        "implementation_launches": status.active_launches,
+        "review_windows": status.review_windows,
+        "pending_claim_issues": status.pending_claim_issues,
+        "reservation_snapshot": "before_control_and_closed_issue_reconciliation",
+        "session_details_field": "active_sessions",
+        "guidance": "Reservations and reported_max_active come from one Monitor snapshot before control identity and closed-Issue action reconciliation. Reservations are occupied_slot_count plus pending_claim_issues (older publishers use active_launches plus review_windows). Top-level active_launches and inbox remain the control authority; configured_max_active is the current durable setting. Reported owners may include stale or closed rows. Physical active_sessions are separate observations, not an admission counter. Inspect active_sessions and session_row_mismatch; do not requeue running work to free capacity.",
+    }))
 }
 
 /// Issue #4862: where the inbox row and the live sessions disagree.
@@ -820,13 +870,15 @@ fn session_row_mismatch(
 /// prefs and the local Issue cache.
 fn load_monitor_agent_status(
     project_root: &std::path::Path,
-) -> Result<crate::IssueMonitorAgentStatus, SpecOpsError> {
+    active_session_count: usize,
+) -> Result<(crate::IssueMonitorAgentStatus, Option<serde_json::Value>), SpecOpsError> {
     let published = crate::daemon_publisher::read_issue_monitor_status(project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
     let authority =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    let configured_max_active = prefs.max_active_agents.max(1);
     if let Some(published) = published {
         let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(published)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
@@ -834,8 +886,11 @@ fn load_monitor_agent_status(
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
         status.source = crate::IssueMonitorStatusSource::Daemon;
+        // Keep reported counts and owners together before durable identity
+        // replacement and closed-Issue filtering change the action projection.
+        let capacity = launch_capacity(&status, active_session_count, configured_max_active);
         attach_monitor_control_identity(&authority, &mut status);
-        return Ok(status);
+        return Ok((status, capacity));
     }
     // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
     // Reaching this branch at all means no live daemon holds the projection.
@@ -857,9 +912,11 @@ fn load_monitor_agent_status(
     // field added to the snapshot had to be added twice or the two branches
     // would silently disagree about what a caller can rely on.
     let mut status = monitor.agent_status_at(&now);
+    status.source = crate::IssueMonitorStatusSource::DegradedCache;
+    let capacity = launch_capacity(&status, active_session_count, configured_max_active);
     attach_monitor_control_identity(&authority, &mut status);
     mark_degraded_cache_projection(&mut status);
-    Ok(status)
+    Ok((status, capacity))
 }
 
 /// Issue #4413: label a projection this process rebuilt from preferences and
@@ -1138,7 +1195,7 @@ fn monitor_priority_reply(
         "priority_order": priority_order,
         "note": "priority_order only orders Issues already in the Issue Monitor inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
     });
-    if let Ok(status) = load_monitor_agent_status(project_root) {
+    if let Ok((status, _)) = load_monitor_agent_status(project_root, 0) {
         let not_in_inbox = placed
             .iter()
             .filter(|number| !status.inbox.iter().any(|row| row.issue_number == **number))
@@ -1301,7 +1358,7 @@ fn run_monitor_queue_push<E: CliEnv>(
             let claim = gwt_github::issue_auto_claim::ClaimComment {
                 comment_id: None,
                 claim_id: format!("gwt-queue:{}:{}", number, uuid::Uuid::new_v4()),
-                owner: crate::process::current_hostname(),
+                owner: crate::process::current_claim_owner(),
                 issue_number: *number,
                 status: gwt_github::issue_auto_claim::ClaimStatus::Queued,
                 heartbeat_at: now.clone(),
@@ -6139,6 +6196,58 @@ mod tests {
         }
     }
 
+    /// Issue #5080 AC-3: the actual mutation readback and status scanner must
+    /// agree even when no terminal queue membership was written.
+    #[test]
+    fn queue_label_inbox_coverage_label_scan_status_integration() {
+        let isolation = TempDir::new().expect("isolated home");
+        let _home = ScopedGwtHome::set(isolation.path().join("home"));
+        let (_repo, mut env) = seeded_edit_env(&["bug"]);
+        env.cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&env.repo_path);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["gwt-queued".to_string()],
+                confirm_queue: true,
+                confirm_design_gate: false,
+                confirm_auto_merge: false,
+            },
+            &mut out,
+        )
+        .expect("label mutation");
+        assert_eq!(code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["changed"],
+            true
+        );
+        // Offline status takes the shared scan path over the canonical cache.
+        out.clear();
+        run_monitor_status(&env, None, &mut out).expect("status after scan");
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let row = status["inbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["issue_number"] == 7)
+            .expect("labelled state row");
+        assert_eq!(row["state"], "skipped");
+        assert_eq!(
+            row["exclusion_reason"],
+            "not selected in this terminal queue"
+        );
+        assert_eq!(status["inbox_coverage"]["github_target_count"], 1);
+        assert_eq!(
+            status["inbox_coverage"]["missing_issue_numbers"],
+            serde_json::json!([])
+        );
+        assert_eq!(status["inbox_coverage"]["source"], "cache");
+        assert!(status["queue"].as_array().unwrap().is_empty());
+    }
+
     /// Issue #3865 AC-2: title / body / labels are each optional and only the
     /// supplied fields change; the local cache reflects the write.
     #[test]
@@ -7846,6 +7955,61 @@ mod tests {
         assert_eq!(queued_numbers(&repo), vec![4812]);
     }
 
+    /// #5133 AC-1/AC-4: queue.push and the Monitor run in different processes.
+    #[test]
+    fn queue_push_claim_launches_on_the_next_scan_from_another_monitor_pid() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        queue_push_issue(&mut env, 5133, None);
+        let (code, _) = run_queue_push(&mut env, vec![5133], false);
+        assert_eq!(code, 0);
+        let claims = gwt_github::issue_auto_claim::extract_claim_comments(
+            &env.client.comments(IssueNumber(5133)),
+        );
+        let queued = claims.first().expect("queue.push wrote a claim");
+        assert_eq!(queued.owner, crate::process::current_claim_owner());
+        let (host_user, _) = queued.owner.rsplit_once(':').expect("host:user:pid");
+        let monitor_owner = format!("{host_user}:{}", u64::from(std::process::id()) + 1);
+        let mut prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .expect("persisted queue");
+        prefs.enabled = true;
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        let now = queued.heartbeat_at.as_str();
+        crate::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[crate::IssueMonitorIssue {
+                number: 5133,
+                title: "queued issue".to_string(),
+                labels: vec!["bug".to_string(), "gwt-queued".to_string()],
+                state: crate::IssueMonitorIssueState::Open,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
+                body: None,
+                url: None,
+                updated_at: None,
+            }],
+            crate::IssueMonitorCandidateSource::Live,
+            &repo,
+            now,
+        );
+        let launches = monitor.claim_next_launch_requests(&env.client, &monitor_owner, now);
+        assert_eq!(launches.len(), 1, "our live queue claim must permit launch");
+        assert_eq!(launches[0].issue_number, 5133);
+        assert_eq!(
+            monitor.inbox_item(5133).expect("inbox row").state,
+            crate::MonitorInboxState::Launching
+        );
+        assert_eq!(
+            monitor.agent_status_at(now).last_scan_at.as_deref(),
+            Some(now)
+        );
+    }
+
     /// SPEC #4093 AC-8 (Issue #3737 AC-4): `launch_now` inside a GitHub
     /// refusal window names the window and its resume time instead of
     /// answering as if the scan will read GitHub right now.
@@ -8050,6 +8214,108 @@ mod tests {
             status["needs_human"],
             serde_json::json!([2338]),
             "an agent blocked on #2338 must be findable without reading its pane: {out}"
+        );
+    }
+
+    /// Issue #4248 AC-1 / AC-3: an unresolved Board request may coexist
+    /// with a running launch, but must not masquerade as a runtime failure.
+    #[test]
+    fn issue_monitor_status_explains_board_escalation_on_a_launched_issue() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &crate::IssueMonitorPrefs {
+                max_active_agents: 1,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 2338,
+                    window_id: "project::running".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed monitor");
+        let cache =
+            Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo));
+        let cached = IssueSnapshot {
+            number: IssueNumber(2338),
+            title: "Running Issue".to_string(),
+            body: String::new(),
+            labels: vec![],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-10-05T00:00:00Z"),
+            comments: vec![],
+        };
+        cache.write_snapshot(&cached).expect("cache issue");
+        gwt_core::coordination::post_entry(
+            &repo,
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Codex",
+                gwt_core::coordination::BoardEntryKind::Blocked,
+                "事象: 判断待ち\n原因: scope\n依頼: 裁定\n再開条件: 裁定済み",
+                None,
+                None,
+                vec![],
+                vec!["2338".to_string()],
+            ),
+        )
+        .expect("post escalation");
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).expect("status");
+        let status: serde_json::Value = serde_json::from_str(&out).expect("status JSON");
+
+        assert_eq!(status["active_launches"], serde_json::json!([2338]));
+        assert_eq!(status["needs_human"], serde_json::json!([2338]));
+        let running = status["inbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["issue_number"] == 2338)
+            .expect("running row");
+        assert_eq!(running["state"], "launched");
+        assert_eq!(status["launch_capacity"]["reason"], "max_active_saturated");
+        assert_eq!(status["launch_capacity"]["reserved_slot_count"], 1);
+        assert_eq!(
+            status["launch_capacity"]["implementation_launches"],
+            serde_json::json!([2338])
+        );
+        let authority = &status["needs_human_authority"];
+        assert_eq!(authority["monitor"], serde_json::json!([]));
+        assert_eq!(authority["board_escalations"], serde_json::json!([2338]));
+        assert_eq!(
+            authority["runtime_fields"],
+            serde_json::json!(["inbox", "active_launches"])
+        );
+        assert!(authority["guidance"]
+            .as_str()
+            .is_some_and(|text| text.contains("does not override") && text.contains("requeue")));
+    }
+
+    /// AC-5: physical saturation must be visible even when the admission
+    /// projection has fewer reservations, without changing slot accounting.
+    #[test]
+    fn launch_capacity_distinguishes_observed_sessions_from_admission() {
+        let status: crate::IssueMonitorAgentStatus = serde_json::from_value(serde_json::json!({
+            "queue": [42], "active_launches": [7], "occupied_slot_count": 1,
+            "pending_claim_issues": [], "max_active": 2, "enabled": true,
+            "autonomous_mode": true, "has_launch_profile": true, "stall_reason": null,
+        }))
+        .expect("monitor snapshot");
+        let before = status.clone();
+        let capacity = launch_capacity(&status, 2, status.max_active).expect("observed saturation");
+        assert_eq!(capacity["reason"], "active_sessions_at_capacity");
+        assert_eq!(capacity["admission_saturated"], false);
+        assert_eq!(capacity["active_session_count"], 2);
+        assert_eq!(capacity["reserved_slot_count"], 1);
+        assert_eq!(capacity["session_details_field"], "active_sessions");
+        assert_eq!(status, before, "diagnosis must not change admission");
+        assert!(
+            launch_capacity(&status, 1, status.max_active).is_none(),
+            "free capacity stays free"
         );
     }
 
@@ -8429,6 +8695,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
@@ -8519,6 +8786,7 @@ mod tests {
                 pane_hold_reason: None,
                 runtime_consistency: None,
             }],
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
@@ -8660,6 +8928,7 @@ mod tests {
                     pane_state: None,
                     runtime_consistency: None,
                 }],
+                inbox_coverage: None,
                 closure_held: Vec::new(),
                 last_error: None,
                 last_scan_at: None,
@@ -8741,6 +9010,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
@@ -9016,6 +9286,12 @@ mod tests {
                         "tier_input": 0,
                     },
                 ],
+                "inbox_coverage": {
+                    "github_target_count": 0,
+                    "inbox_row_count": 0,
+                    "missing_issue_numbers": [],
+                    "source": "cache",
+                },
                 // Issue #3633 AC-5: this branch rebuilds the queue from the
                 // local Issue cache, which is a projection and not a scan. It
                 // used to stamp the literal string `gwtd-status` into
@@ -9261,7 +9537,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
-                max_active_agents: 2,
+                max_active_agents: 3,
                 launched_issues: vec![
                     crate::IssueMonitorLaunchedIssue {
                         issue_number: 43,
@@ -9270,6 +9546,10 @@ mod tests {
                     crate::IssueMonitorLaunchedIssue {
                         issue_number: 44,
                         window_id: "tab-1::missing".to_string(),
+                    },
+                    crate::IssueMonitorLaunchedIssue {
+                        issue_number: 46,
+                        window_id: "tab-1::closed".to_string(),
                     },
                 ],
                 launched_claims: [
@@ -9287,7 +9567,7 @@ mod tests {
         )
         .expect("save prefs");
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
-        gwt_github::Cache::new(cache_root)
+        gwt_github::Cache::new(cache_root.clone())
             .write_snapshot(&IssueSnapshot {
                 number: IssueNumber(42),
                 title: "Claimed elsewhere".to_string(),
@@ -9298,6 +9578,17 @@ mod tests {
                 comments: Vec::new(),
             })
             .expect("write stale cache candidate");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(46),
+                title: "Closed but still reserved".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Closed,
+                updated_at: UpdatedAt::new("2026-08-03T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write closed cache entry");
 
         let scope = gwt_core::daemon::RuntimeScope::from_project_root(
             &repo,
@@ -9376,7 +9667,9 @@ mod tests {
                         "connections": 1,
                         "issue_monitor": {
                             "queue": [],
-                            "active_launches": [43, 45],
+                            "active_launches": [43, 45, 46, 47],
+                            "occupied_slot_count": 4,
+                            "pending_claim_issues": [],
                             "needs_human": [43, 45],
                             "inbox": [{
                                 "issue_number": 43,
@@ -9389,6 +9682,11 @@ mod tests {
                                 "state": "launched",
                                 "claim_id": "released-claim",
                                 "launched_window_id": "tab-1::released"
+                            }, {
+                                "issue_number": 46,
+                                "state": "launched",
+                                "github_state": "closed",
+                                "launched_window_id": "tab-1::closed"
                             }],
                             "max_active": 1,
                             "enabled": false,
@@ -9422,7 +9720,20 @@ mod tests {
         assert!(status["inbox"][0]["delivery_id"].is_null());
         assert_eq!(status["inbox"][0]["state"], "launched");
         assert_eq!(status["active_launches"], serde_json::json!([43, 44]));
-        assert_eq!(status["max_active"], 2);
+        assert_eq!(status["max_active"], 3);
+        assert_eq!(status["launch_capacity"]["reserved_slot_count"], 4);
+        assert_eq!(
+            status["launch_capacity"]["reservation_snapshot"],
+            "before_control_and_closed_issue_reconciliation"
+        );
+        assert_eq!(status["launch_capacity"]["reported_max_active"], 1);
+        assert_eq!(status["launch_capacity"]["configured_max_active"], 3);
+        assert_eq!(status["launch_capacity"]["source"], "daemon");
+        assert_eq!(
+            status["launch_capacity"]["implementation_launches"],
+            serde_json::json!([43, 45, 46, 47]),
+            "control identity and closed-Issue action filtering must not hide reported reservations"
+        );
         assert_eq!(status["needs_human"], serde_json::json!([]));
         let rows = status["inbox"].as_array().expect("inbox rows");
         let missing = rows
@@ -11294,6 +11605,7 @@ mod tests {
                 pane_hold_reason: None,
                 runtime_consistency: None,
             }],
+            inbox_coverage: None,
             closure_held: Vec::new(),
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
@@ -12727,6 +13039,8 @@ mod tests {
                         issue_number: Some(42),
                         window_id: Some("tab-1::agent-42".to_string()),
                         screen_text: Some("You've hit your usage limit".to_string()),
+                        screen_region: Some("provider_response".to_string()),
+                        matched_pattern: Some("codex_usage_limit".to_string()),
                         account_id: None,
                         poller_observed_at: None,
                         poller_state: Some("ok".to_string()),
@@ -12767,6 +13081,17 @@ mod tests {
             listed["provider_quota_holds"][0]["evidence"]["screen_text"],
             "You've hit your usage limit"
         );
+        let evidence = &listed["provider_quota_holds"][0]["evidence"];
+        assert_eq!(evidence["window_id"], "tab-1::agent-42");
+        assert_eq!(evidence["screen_region"], "provider_response");
+        assert_eq!(evidence["matched_pattern"], "codex_usage_limit");
+        let mut legacy = evidence.clone();
+        legacy.as_object_mut().unwrap().remove("screen_region");
+        legacy.as_object_mut().unwrap().remove("matched_pattern");
+        let legacy: crate::IssueMonitorProviderQuotaHoldEvidence =
+            serde_json::from_value(legacy).expect("legacy evidence remains readable");
+        assert_eq!(legacy.screen_region, None);
+        assert_eq!(legacy.matched_pattern, None);
         assert_eq!(
             listed["provider_quota_holds"][0]["evidence"]["poller_windows"][0]["used_percent"],
             26

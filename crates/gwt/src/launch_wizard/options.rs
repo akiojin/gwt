@@ -1382,19 +1382,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_agent_options_runs_detection_and_derives_availability() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _env = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let executable = dir.path().join("agy");
-        std::fs::write(&executable, "#!/bin/sh\nprintf '1.2.3\\n'\n").expect("write agy stub");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("stub metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("chmod stub");
+        gwt_core::test_support::write_executable_script(
+            &executable,
+            "#!/bin/sh\nprintf '1.2.3\\n'\n",
+        )
+        .expect("write agy stub");
         // PATH is replaced wholesale so no real agent leaks in, but tests that
         // spawn `git` or `sh` without the env lock still run concurrently;
         // keep both reachable through the scoped PATH (Issue #4497).
@@ -1512,14 +1509,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wizard_detection_uses_the_active_profile_path() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         for (directory, version) in [("old", "2.1.153"), ("new", "2.1.156")] {
             let bin = temp.path().join(directory);
             std::fs::create_dir(&bin).unwrap();
             let executable = bin.join("claude");
-            std::fs::write(&executable, format!("#!/bin/sh\nprintf '{version}\\n'\n")).unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Issue #5028: sibling forks must never inherit a writable CLI fd.
+            gwt_core::test_support::write_executable_script(
+                &executable,
+                &format!("#!/bin/sh\nprintf '{version}\\n'\n"),
+            )
+            .unwrap();
             let environment = (
                 std::collections::HashMap::from([(
                     "PATH".into(),

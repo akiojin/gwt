@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test.describe("Project tabs", () => {
@@ -10,6 +12,71 @@ test.describe("Project tabs", () => {
     expect(browserErrors.get(page)).toEqual([]);
   });
   test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("live watcher applies a burst of projection updates to the pane title", async ({ page }, testInfo) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const projectionPath = process.env.GWT_PLAYWRIGHT_PROJECTION_PATH;
+    const projectRoot = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT;
+    test.skip(!base || !projectionPath || !projectRoot, "requires browser-check isolated watcher fixture");
+    await withLiveGwtBackendLock(base!, testInfo, async () => {
+      const errors = collectBrowserErrors(page);
+      const patches: any[] = [];
+      let windowId = "";
+      page.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "active_work_projection_patch") patches.push(event.projection);
+        if (event.kind === "workspace_state") {
+          for (const tab of event.workspace.tabs) {
+            const window = (tab.workspace?.windows ?? []).find((entry) => entry.preset === "shell");
+            if (window) windowId = window.id;
+          }
+        }
+      }));
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell", bounds: { x: 80, y: 80, width: 720, height: 420 } });
+      await expect.poll(() => windowId).not.toBe("");
+      const saved = await readFile(projectionPath!, "utf8");
+      const projection = JSON.parse(saved);
+      const sessionId = randomUUID();
+      const now = new Date().toISOString();
+      projection.agents = [{ session_id: sessionId, window_id: windowId, agent_id: "codex", display_name: "Codex",
+        status_category: "active", current_focus: "Watcher preparation", title_summary: "Watcher purpose 0",
+        worktree_path: projectRoot, branch: "work/watcher", last_board_entry_id: null,
+        affiliation_status: "assigned", updated_at: now }];
+      projection.status_category = "active";
+      projection.updated_at = now;
+      const writeProjection = async (contents: string) => {
+        const staging = `${projectionPath}.watcher-test`;
+        await writeFile(staging, contents);
+        // Windows readers can briefly deny replacement. Retry only that file
+        // operation; application assertions and the whole test run stay strict.
+        await expect.poll(async () => {
+          try {
+            await rename(staging, projectionPath!);
+            return null;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (process.platform !== "win32" || (code !== "EPERM" && code !== "EBUSY")) throw error;
+            return code;
+          }
+        }, { timeout: 5000, intervals: [100, 200, 500] }).toBeNull();
+      };
+      try {
+        for (let index = 1; index <= 10; index++) {
+          projection.agents[0].title_summary = `Watcher purpose ${index}`;
+          await writeProjection(JSON.stringify(projection));
+        }
+        await expect(page.locator(`.workspace-window[data-id="${windowId}"] .title-text`)).toContainText("Watcher purpose 10");
+        await expect.poll(() => patches.some((patch) => patch.agents.some((agent) =>
+          agent.session_id === sessionId && agent.title_summary === "Watcher purpose 10"))).toBe(true);
+        await page.screenshot({ path: testInfo.outputPath("watcher.png"), fullPage: true });
+        expect(errors).toEqual([]);
+      } finally {
+        await writeProjection(saved);
+        await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
+      }
+    });
+  });
 
   test("live checkout bootstraps a project-scoped connection and accepts terminal input", async ({ page }, testInfo) => {
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;

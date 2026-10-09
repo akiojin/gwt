@@ -8,6 +8,8 @@ authors.workspace = true
 description = "Canvas-based floating terminal GUI for Git Worktree Manager"
 publish = false
 default-run = "gwt"
+# Issue #4135: original tests/*.rs are modules in the explicit suites below.
+autotests = false
 
 [[bin]]
 name = "gwt"
@@ -16,6 +18,46 @@ path = "src/main.rs"
 [[bin]]
 name = "gwtd"
 path = "src/bin/gwtd.rs"
+
+[[test]]
+name = "ci_contracts"
+path = "tests/suites/ci_contracts_test.rs"
+
+[[test]]
+name = "cli_contracts"
+path = "tests/suites/cli_contracts_test.rs"
+
+[[test]]
+name = "coordination_tests"
+path = "tests/suites/coordination_tests_test.rs"
+
+[[test]]
+name = "hook_contracts"
+path = "tests/suites/hook_contracts_test.rs"
+
+[[test]]
+name = "runtime_tests"
+path = "tests/suites/runtime_tests_test.rs"
+
+[[test]]
+name = "open_cli_integration"
+path = "tests/open_cli_integration.rs"
+
+[[test]]
+name = "project_restore_integration"
+path = "tests/project_restore_integration.rs"
+
+[[test]]
+name = "stable_server_port"
+path = "tests/stable_server_port.rs"
+
+[[test]]
+name = "startup_tray_performance"
+path = "tests/startup_tray_performance.rs"
+
+[[test]]
+name = "windows_agent_launch_e2e"
+path = "tests/windows_agent_launch_e2e.rs"
 
 [dependencies]
 # Optional: only compiled for the test-only `test-gh-guard` feature below.
@@ -55,7 +97,7 @@ axum = { version = "0.8", features = ["ws"] }
 tao = "0.37"
 base64.workspace = true
 regex.workspace = true
-quick-xml = "0.39.4"
+quick-xml = "0.42.0"
 rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true

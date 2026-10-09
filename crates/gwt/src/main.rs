@@ -49,6 +49,7 @@ mod repo_browser;
 mod runtime_health_poller;
 mod runtime_support;
 mod session_ledger_cache;
+mod session_retention;
 mod update_front_door;
 mod usage_poller;
 // Unix has no tree-wide CPU cap to lift (Issue #4405).
@@ -1210,15 +1211,8 @@ fn spawn_workspace_projection_watcher(
                 "workspace projection watcher could not ensure watch dir (will retry on first write)"
             );
         }
-        let Some(projection_file_name) = projection_path
-            .file_name()
-            .map(std::borrow::ToOwned::to_owned)
-        else {
-            return;
-        };
-
-        let mut debouncer = match notify_debouncer_mini::new_debouncer(
-            Duration::from_millis(250),
+        let mut debouncer = match notify_debouncer_mini::new_debouncer_opt::<_, notify::RecommendedWatcher>(
+            workspace_projection_debounce_config(),
             move |res: notify_debouncer_mini::DebounceEventResult| {
                 if let Ok(events) = res {
                     let paths: Vec<PathBuf> = events.into_iter().map(|event| event.path).collect();
@@ -1255,17 +1249,8 @@ fn spawn_workspace_projection_watcher(
         while let Ok(message) = rx.recv() {
             match message {
                 WorkspaceProjectionWatcherMessage::Changed(paths) => {
-                    if paths
-                        .iter()
-                        .any(|path| path.file_name() == Some(projection_file_name.as_os_str()))
-                    {
-                        tracing::info!(
-                            project_root = %project_root.display(),
-                            "workspace projection watcher detected current.json change"
-                        );
-                        if let Some(event) = load_workspace_projection_user_event(&project_root) {
-                            proxy.send(event);
-                        }
+                    if let Some(event) = workspace_projection_watch_event(&project_root, &paths) {
+                        proxy.send(event);
                     }
                 }
                 WorkspaceProjectionWatcherMessage::Stop => break,
@@ -1283,6 +1268,21 @@ fn spawn_workspace_projection_watcher(
         tx: stop_tx,
         join_handle: Some(join_handle),
     })
+}
+
+fn workspace_projection_debounce_config() -> notify_debouncer_mini::Config {
+    notify_debouncer_mini::Config::default().with_timeout(Duration::from_millis(250))
+}
+
+fn workspace_projection_watch_event(project_root: &Path, paths: &[PathBuf]) -> Option<UserEvent> {
+    if !paths
+        .iter()
+        .any(|path| path.file_name().is_some_and(|name| name == "current.json"))
+    {
+        return None;
+    }
+    tracing::info!(project_root = %project_root.display(), "workspace projection watcher detected current.json change");
+    load_workspace_projection_user_event(project_root)
 }
 
 /// Issue #4406: Board refreshes run off the GUI event loop, one per project at
@@ -1804,6 +1804,9 @@ enum UserEvent {
     },
     Frontend {
         client_id: ClientId,
+        // Snapshot the immutable registration for queue coalescing only.
+        // Dispatch still rechecks the live connection and window ownership.
+        client_scope: Option<app_runtime::ClientScope>,
         event: FrontendEvent,
         received_at: std::time::Instant,
     },
@@ -1994,6 +1997,7 @@ enum UserEvent {
         project_root: PathBuf,
         projection: Option<Box<gwt_core::workspace_projection::WorkspaceProjection>>,
     },
+    WorkspaceProjectionPatchPrepared(Box<app_runtime::WorkspaceProjectionPatchPrepared>),
     WorkspaceStateLoadFailed {
         project_root: PathBuf,
         error: gwt_core::WorkspaceStateLoadError,
@@ -2078,6 +2082,8 @@ enum UserEvent {
     /// Completion of an off-event-loop physical answer submit to an exact
     /// live pane. Durable delivery acknowledgment begins only on this event.
     IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
+    PmWakeDeliveryComplete(app_runtime::pm::PmWakeDelivery),
+    IssueMonitorScheduledScanPrepared(Box<app_runtime::PreparedScheduledIssueMonitorScan>),
     /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
     /// Issue Monitor launch the daemon already released (daemon → GUI).
     IssueMonitorIdlePaneClose {
@@ -3442,6 +3448,74 @@ mod tests {
     }
 
     #[test]
+    fn workspace_projection_ten_notifications_trigger_one_reload() {
+        struct BurstWatcher(Box<dyn notify::EventHandler>);
+        impl notify::Watcher for BurstWatcher {
+            fn new<F: notify::EventHandler>(
+                handler: F,
+                _config: notify::Config,
+            ) -> notify::Result<Self> {
+                Ok(Self(Box::new(handler)))
+            }
+            fn watch(&mut self, path: &Path, _mode: notify::RecursiveMode) -> notify::Result<()> {
+                for _ in 0..10 {
+                    self.0
+                        .handle_event(Ok(notify::Event::new(notify::EventKind::Modify(
+                            notify::event::ModifyKind::Any,
+                        ))
+                        .add_path(path.join("current.json"))));
+                }
+                Ok(())
+            }
+            fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+            fn kind() -> notify::WatcherKind {
+                notify::WatcherKind::NullWatcher
+            }
+        }
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&root);
+        gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
+        let path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&root);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = reloads.clone();
+        let mut debouncer = notify_debouncer_mini::new_debouncer_opt::<_, BurstWatcher>(
+            super::workspace_projection_debounce_config(),
+            move |result: notify_debouncer_mini::DebounceEventResult| {
+                let paths = result
+                    .unwrap()
+                    .into_iter()
+                    .map(|event| event.path)
+                    .collect::<Vec<_>>();
+                if let Some(event) = super::workspace_projection_watch_event(&root, &paths) {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tx.send(event).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        debouncer
+            .watcher()
+            .watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive)
+            .unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            UserEvent::WorkspaceProjectionLoaded { .. }
+        ));
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn workspace_projection_watcher_drop_sends_stop_to_thread() {
         let (tx, rx) = std::sync::mpsc::channel();
         let stopped = Arc::new(Mutex::new(false));
@@ -4029,7 +4103,7 @@ mod tests {
         ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
-            gwt::BackendEvent::TerminalStatus { id, status, detail }
+            gwt::BackendEvent::TerminalStatus { id, status, detail, .. }
                 if id == "tab-1::shell-1"
                     && *status == WindowProcessStatus::Ready
                     && detail.as_deref() == Some("Shell ready")
@@ -4469,6 +4543,7 @@ mod tests {
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
+            work_merge_status_cache: Default::default(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
@@ -4797,7 +4872,7 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 &event.event,
-                BackendEvent::TerminalStatus { id, status, detail }
+                BackendEvent::TerminalStatus { id, status, detail, .. }
                     if id == &window_id
                         && *status == WindowProcessStatus::Ready
                         && detail.as_deref() == Some("Paused")
@@ -6088,7 +6163,7 @@ mod tests {
 
         let failed_launch = runtime.handle_launch_complete_and_drain(
             "tab-1::missing".to_string(),
-            Err("launch failed".to_string()),
+            Err("launch failed".into()),
         );
         assert!(
             failed_launch.is_empty(),
@@ -10674,6 +10749,7 @@ fn main() -> std::io::Result<()> {
                 client_id,
                 event,
                 received_at,
+                ..
             }) => {
                 // Resolve the immutable registration again after queueing: a disconnected
                 // client cannot retain input authority through the fallback queue.
@@ -10974,6 +11050,12 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkspaceStateLoadFailed { project_root, error }) => {
                 clients.dispatch(app.handle_workspace_state_load_failed(&project_root, error));
             }
+            Event::UserEvent(UserEvent::WorkspaceProjectionPatchPrepared(prepared)) => {
+                if let Some(dispatch) = app.apply_workspace_projection_patch(*prepared) {
+                    clients.dispatch_prepared_active_work(
+                        dispatch.payload, DispatchTarget::Project(dispatch.context.project_key));
+                }
+            }
             Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
                 let commit = app.handle_active_work_projection_prepared(*prepared);
                 let mut dispatch_ms = 0;
@@ -11124,6 +11206,12 @@ fn main() -> std::io::Result<()> {
                     outcome,
                 ));
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledScanPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_scheduled_scan_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
+                app.pm_wake_delivery_complete(delivery);
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
                 project_root,

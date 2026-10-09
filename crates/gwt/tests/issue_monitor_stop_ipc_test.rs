@@ -34,9 +34,8 @@ use tempfile::TempDir;
 
 const NOW: &str = "2026-08-09T05:00:00Z";
 
-fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
