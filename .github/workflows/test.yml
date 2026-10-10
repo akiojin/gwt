@@ -411,8 +411,18 @@ jobs:
         env:
           GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
           GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          GWT_FLAKE_LOG_DIR: ${{ runner.temp }}/gwt-flake-logs
         run: scripts/ci-flake-detect.sh
         timeout-minutes: 45
+      - name: Upload flake diagnostics even on failure or cancellation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: flake-detection-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gwt-flake-logs
+          if-no-files-found: ignore
+          retention-days: 14
+        timeout-minutes: 5
 
   test-python-runner:
     name: Test (Python runner)

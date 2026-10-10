@@ -10806,6 +10806,28 @@ mod tests {
         );
         drop(lease);
         drop(guard);
+        // Issue #4998: a concurrent fork may retain the legacy heavy lock
+        // after its owner drops it. Observe kernel release before ZERO retry.
+        let probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(coordinator.heavy_lock_path())
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while let Err(error) = fs2::FileExt::try_lock_exclusive(&probe) {
+            assert_eq!(
+                error.raw_os_error(),
+                fs2::lock_contended_error().raw_os_error(),
+                "heavy release probe failed: {error}"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "legacy heavy lock still held after release"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Unlock explicitly so inherited copies cannot retain the probe lock.
+        fs2::FileExt::unlock(&probe).unwrap();
         crate::cli::run_collect(&mut env, run()).unwrap();
         let retried = load(dir.path()).unwrap().unwrap();
         assert_eq!(retried.commands.len(), 2, "retry runs the entire matrix");
