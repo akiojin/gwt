@@ -450,6 +450,11 @@ pub struct VerificationRunData {
     /// Planned commands the run did not execute (diagnostic for the gates).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planned_missing: Vec<String>,
+    /// Requested commands never admitted or run because an earlier command
+    /// already failed raw (Issue #5094). Such a run can never become Ready
+    /// evidence; rerun the full registered matrix instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_after_failure: Vec<String>,
     /// Integrity hash of the exact verification-plan snapshot consumed by
     /// this run. Semantic identity is compared separately (#4707).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -4353,10 +4358,12 @@ where
     }
     // Keep the operational artifact restore as the final matrix occurrence.
     let mut effective_commands = commands.to_vec();
-    if let Some(restoration) = gwtd_artifact_restoration(worktree, commands) {
+    let restoration = gwtd_artifact_restoration(worktree, commands);
+    if let Some(restoration) = restoration {
         effective_commands.push(restoration.to_string());
     }
     let commands = effective_commands.as_slice();
+    let restoration_index = restoration.map(|_| commands.len() - 1);
     let request = authority.map(|authority| {
         continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
     });
@@ -4569,6 +4576,7 @@ where
         created_at: started_at,
         plan_covered: false,
         planned_missing: commands.to_vec(),
+        skipped_after_failure: Vec::new(),
         verification_plan_snapshot: plan_snapshot.clone(),
         verification_plan_hash: plan_snapshot
             .as_ref()
@@ -4661,11 +4669,19 @@ where
     if let Some(on_progress) = options.on_progress.as_mut() {
         on_progress(results.len(), commands.len(), std::time::Duration::ZERO);
     }
+    // Issue #5094: once a blocking raw FAIL settles the run as non-PASS,
+    // later commands neither wait for admission nor occupy a host slot.
+    let mut failed_raw: Option<String> = None;
+    let mut skipped_after_failure = Vec::new();
     for (position, index) in execution_indices.iter().copied().enumerate() {
         if let Some(attempt) = options.attempt {
             attempt.ensure_active().map_err(|error| error.to_string())?;
         }
         let command = &commands[index];
+        if failed_raw.is_some() && Some(index) != restoration_index {
+            skipped_after_failure.push(command.clone());
+            continue;
+        }
         let admission = if position == 0 {
             first_admission.take()
         } else if let Some(admit) = options.admit_command.as_mut() {
@@ -4834,6 +4850,22 @@ where
             nextest,
             terminated_by_signal,
         });
+        // A failure a plan-bound quarantine may still waive keeps the matrix
+        // going; its verdict is decided after every command has run.
+        let quarantine_candidate = terminated_by_signal.is_none()
+            && prepared_quarantines.iter().any(|prepared| {
+                prepared.request.failed_command == *command
+                    && plan_snapshot
+                        .as_ref()
+                        .is_some_and(|plan| plan.quarantines.contains(&prepared.request))
+            });
+        if exit_code != 0
+            && failed_raw.is_none()
+            && Some(index) != restoration_index
+            && !quarantine_candidate
+        {
+            failed_raw = Some(command.clone());
+        }
         if let Some(context) = running.continuation.as_mut() {
             context.command_indices.push(index);
             running.planned_missing = context.missing();
@@ -4851,6 +4883,15 @@ where
         }
     }
     after_commands();
+    if let Some(failed) = &failed_raw {
+        if !skipped_after_failure.is_empty() {
+            transcript.push_str(&format!(
+                "verify: fail-fast — {} command(s) skipped after raw FAIL of `{failed}`: {}; fix the failure and rerun the full registered matrix with verify.run\n",
+                skipped_after_failure.len(),
+                skipped_after_failure.join(", ")
+            ));
+        }
+    }
     let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
     let visual_passed = headed_e2e_passed(&results);
     if has_headed_e2e {
@@ -4987,6 +5028,7 @@ where
         created_at: Utc::now(),
         plan_covered,
         planned_missing,
+        skipped_after_failure,
         verification_plan_snapshot: plan_snapshot
             .clone()
             .filter(|_| !verification_plan_hash.is_empty()),
@@ -5697,6 +5739,11 @@ fn evaluate_evidence_snapshot_inner(
         .any(|command| command.headed_e2e.is_some())
         && !record.headed_e2e_passed()
     {
+        return EvidenceStatus::Failing;
+    }
+    // Issue #5094: commands skipped after a raw FAIL never ran, so neither
+    // quarantine nor Board adjudication can turn the run into evidence.
+    if !record.skipped_after_failure.is_empty() {
         return EvidenceStatus::Failing;
     }
     let has_typed_quarantine = if record.all_passed {
@@ -6898,6 +6945,7 @@ pub(crate) mod tests {
             created_at: Utc::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
+            skipped_after_failure: Vec::new(),
             verification_plan_hash: String::new(),
             verification_plan_snapshot: None,
             plan_derived: false,
@@ -8399,6 +8447,53 @@ mod tests {
         assert_eq!(load(dir.path()).unwrap().unwrap(), persisted);
     }
 
+    // Issue #5094 AC-2: fail-fast still restores the operational gwtd.
+    #[cfg(not(windows))]
+    #[test]
+    fn raw_failure_still_runs_gwtd_artifact_restoration() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src/bin")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            package.join("src/lib.rs"),
+            "#[test] fn fails() { panic!() }\n",
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-fail",
+            &[
+                "cargo test -p gwt --lib".to_string(),
+                "git --version".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
+        assert!(!record.all_passed, "{transcript}");
+        assert_eq!(record.skipped_after_failure, vec!["git --version"]);
+    }
+
     // Re-entered in child processes so this regression also runs on Windows.
     #[test]
     fn verification_output_holder_fixture() {
@@ -8512,29 +8607,41 @@ mod tests {
     #[test]
     fn external_signal_termination_is_counted_apart_from_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let (record, transcript) = run_verification(
-            dir.path(),
-            "sess-signal",
-            &[
-                r#"sh -c "kill -TERM $$""#.to_string(),
-                "false".to_string(),
-                "definitely-not-a-real-binary-xyz".to_string(),
-                "git --version".to_string(),
-            ],
-        )
-        .unwrap();
+        let commands = [
+            r#"sh -c "kill -TERM $$""#.to_string(),
+            "false".to_string(),
+            "definitely-not-a-real-binary-xyz".to_string(),
+            "git --version".to_string(),
+        ];
+        let (record, transcript) = run_verification(dir.path(), "sess-signal", &commands).unwrap();
 
         assert!(!record.all_passed, "an interrupted run must never pass");
+        assert_eq!(record.commands.len(), 1, "{transcript}");
+        assert_eq!(record.skipped_after_failure, commands[1..]);
         assert_eq!(record.commands[0].exit_code, -1);
         assert_eq!(record.commands[0].terminated_by_signal, Some(15));
-        assert_eq!(record.commands[1].terminated_by_signal, None);
-        assert_eq!(record.commands[2].exit_code, -1);
-        assert_eq!(record.commands[2].terminated_by_signal, None);
+        // Fail-fast stops this matrix; observe the other outcome types in
+        // independent runs without weakening their accounting assertions.
+        let mut results = record.commands.clone();
+        for command in &commands[1..] {
+            let independent_dir = tempfile::tempdir().unwrap();
+            let (independent, output) = run_verification(
+                independent_dir.path(),
+                "sess-single-outcome",
+                std::slice::from_ref(command),
+            )
+            .unwrap();
+            assert_eq!(independent.commands.len(), 1, "{output}");
+            results.extend(independent.commands.iter().cloned());
+        }
+        assert_eq!(results[1].terminated_by_signal, None);
+        assert_eq!(results[2].exit_code, -1);
+        assert_eq!(results[2].terminated_by_signal, None);
         assert!(
             transcript.contains("exit: -1 (terminated by external signal 15)"),
             "{transcript}"
         );
-        let counts = RunOutcomeCounts::of(&record.commands);
+        let counts = RunOutcomeCounts::of(&results);
         assert_eq!(
             (counts.passed, counts.failed, counts.interrupted),
             (1, 2, 1)
@@ -8660,6 +8767,7 @@ mod tests {
             created_at: Utc::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
+            skipped_after_failure: Vec::new(),
             verification_plan_hash: String::new(),
             verification_plan_snapshot: None,
             plan_derived: false,
@@ -8789,6 +8897,90 @@ mod tests {
         assert_ne!(record.commands[1].exit_code, 0);
         // Latest record persisted.
         assert!(!load(dir.path()).unwrap().unwrap().all_passed);
+    }
+
+    // Issue #5094: a raw FAIL already settles the run as non-PASS, so later
+    // commands must neither wait for admission nor occupy a host slot.
+    #[test]
+    fn raw_failure_stops_admitting_and_running_later_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec![
+            "git --version".to_string(),
+            "git definitely-not-a-subcommand".to_string(),
+            "git --exec-path".to_string(),
+        ];
+        let mut admitted = Vec::new();
+        let mut admit = |command: &str, _: &VerificationHost| {
+            admitted.push(command.to_string());
+            Ok(None)
+        };
+        let (record, transcript) = run_verification_inner(
+            dir.path(),
+            "sess-fail-fast",
+            &commands,
+            None,
+            &[],
+            RunOptions {
+                admit_command: Some(&mut admit),
+                ..RunOptions::default()
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(admitted, commands[..2].to_vec());
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert!(!record.all_passed);
+        assert_eq!(record.skipped_after_failure, vec!["git --exec-path"]);
+        assert!(
+            transcript.contains("skipped after raw FAIL"),
+            "{transcript}"
+        );
+        assert!(integrity_ok(&load(dir.path()).unwrap().unwrap()));
+    }
+
+    // Issue #5094 AC-3: Board adjudication of the failing command cannot turn
+    // a truncated matrix into Ready evidence; the skipped commands never ran.
+    #[test]
+    fn truncated_run_is_rejected_even_with_adjudication() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let command = "git definitely-not-a-subcommand".to_string();
+        let (record, _) = plan_and_run(
+            dir.path(),
+            "sess-truncated",
+            &[command.clone(), "git --version".to_string()],
+        );
+        let decision = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Decision,
+            format!(
+                "Verification record: {}\nFailing command: {command}\nReason: unrelated known failure",
+                record.record_id
+            ),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let decision_id = decision.id.clone();
+        gwt_core::coordination::post_entry(dir.path(), decision).unwrap();
+        run_verify_cli_as(
+            dir.path(),
+            "sess-truncated",
+            VerifyCommand::Adjudicate {
+                record_id: record.record_id.clone(),
+                command,
+                board_entry_id: decision_id,
+            },
+        )
+        .expect("attach Board decision");
+        assert_eq!(
+            evaluate_pr_ready_evidence(dir.path(), "sess-truncated", None),
+            Err(EvidenceStatus::Failing)
+        );
     }
 
     #[test]
@@ -10254,8 +10446,13 @@ mod tests {
         let (_code, out) = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
-                commands: std::iter::once("cargo test -p gwt --test issue-4196-absent")
-                    .chain(short_gates)
+                // The absent target fails raw, so it runs last: #5094 skips
+                // every command after a blocking raw FAIL.
+                commands: short_gates
+                    .into_iter()
+                    .chain(std::iter::once(
+                        "cargo test -p gwt --test issue-4196-absent",
+                    ))
                     .map(str::to_owned)
                     .collect(),
                 headed_e2e_commands: vec![],
