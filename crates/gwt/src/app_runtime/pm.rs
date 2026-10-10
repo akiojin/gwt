@@ -21,6 +21,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -125,17 +126,36 @@ pub(crate) struct PmWakeDecision {
     project_root: PathBuf,
     pub(crate) window_id: String,
     pub(crate) prompt: String,
+    idle_notifications: std::collections::BTreeMap<String, String>,
+}
+
+/// Issue #3932: retain pane-scoped edges independently of the single composer
+/// slot used by other wakes. At most one retry and delivery are outstanding.
+#[derive(Default)]
+pub(crate) struct AgentIdleWakes {
+    running: HashSet<String>,
+    pending: std::collections::BTreeMap<String, String>,
+    retry_scheduled: bool,
+    delivery_in_flight: Option<(String, Arc<AtomicBool>)>,
 }
 
 impl PmWakeDecision {
     /// Resolve escalation subjects at the physical delivery boundary, including
     /// wakes held while the PM composer contains unsent input.
     pub(crate) fn delivery_prompt(&self) -> String {
-        let prompt = format!(
+        let mut prompt = format!(
             "{}{}\r",
             self.prompt.trim_end_matches('\r'),
             open_escalation_prompt_section(&self.project_root)
         );
+        if !self.idle_notifications.is_empty() && prompt.len() > 960 {
+            let mut end = 959;
+            while !prompt.is_char_boundary(end) {
+                end -= 1;
+            }
+            prompt.truncate(end);
+            prompt.push('\r');
+        }
         #[cfg(test)]
         delivery_tests::record_prompt(&prompt);
         prompt
@@ -911,6 +931,14 @@ impl AppRuntime {
         now: &str,
     ) -> Option<PmWakeDecision> {
         let context = self.project_context_for_root(project_root)?;
+        if self
+            .project_state(&context)?
+            .pm_agent_idle_wakes
+            .delivery_in_flight
+            .is_some()
+        {
+            return None;
+        }
         let signals = pm_wake_signals(inbox);
         let Some(seen) = self.project_state(&context)?.pm_wake_seen.get(project_root) else {
             self.project_state_mut(&context)?
@@ -991,6 +1019,7 @@ impl AppRuntime {
         Some(PmWakeDecision {
             project_root: project_root.to_path_buf(),
             window_id,
+            idle_notifications: Default::default(),
             prompt: format!(
                 "[gwt] Monitor activity while the PM was idle ({}). Reconcile now: fresh \
                  `issue.monitor.status`, triage new items, inventory PRs with `pr.list` \
@@ -1000,6 +1029,271 @@ impl AppRuntime {
                 reasons.join(", "),
             ),
         })
+    }
+
+    /// Observe the final composed edge, after approval and quota overlays.
+    /// Arm only on an observed running hook; the launch-time Running placeholder
+    /// followed by SessionStart is not a finished Agent turn.
+    pub(super) fn observe_pm_agent_idle_transition(
+        &mut self,
+        window_id: &str,
+        current: WindowProcessStatus,
+    ) {
+        let Some(address) = self.window_lookup.get(window_id) else {
+            return;
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return;
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return;
+        };
+        let context = self.project_context_for_root(&tab.project_root);
+        let observed_running = current == WindowProcessStatus::Running
+            && self.window_hook_states.get(window_id) == Some(&WindowProcessStatus::Running);
+        let label = (window.preset == WindowPreset::Agent && current == WindowProcessStatus::Idle)
+            .then(|| {
+                let title = window.purpose_title.as_deref().unwrap_or(&window.title);
+                let title: String = title
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(96)
+                    .collect();
+                match window.linked_issue_number {
+                    Some(number) => format!("{title} (#{number})"),
+                    None => title,
+                }
+            });
+        let Some(context) = context else { return };
+        let Some(state) = self.project_state_mut(&context) else {
+            return;
+        };
+        if current != WindowProcessStatus::Idle {
+            if let Some((pm_id, permit)) = &state.pm_agent_idle_wakes.delivery_in_flight {
+                if pm_id == window_id {
+                    permit.store(false, Ordering::Release);
+                }
+            }
+        }
+        let was_running = state.pm_agent_idle_wakes.running.remove(window_id);
+        if observed_running {
+            state
+                .pm_agent_idle_wakes
+                .running
+                .insert(window_id.to_string());
+        }
+        if current != WindowProcessStatus::Idle {
+            state.pm_agent_idle_wakes.pending.remove(window_id);
+        } else if let Some(label) = label.filter(|_| was_running) {
+            state
+                .pm_agent_idle_wakes
+                .pending
+                .insert(window_id.to_string(), label);
+        }
+        self.request_pm_agent_idle_wake(&context, false);
+    }
+
+    pub(super) fn forget_pm_agent_idle_window(&mut self, window_id: &str) {
+        for state in self.project_states.values_mut() {
+            if let Some((pm_id, permit)) = &state.pm_agent_idle_wakes.delivery_in_flight {
+                if pm_id == window_id {
+                    permit.store(false, Ordering::Release);
+                }
+            }
+            state.pm_agent_idle_wakes.running.remove(window_id);
+            state.pm_agent_idle_wakes.pending.remove(window_id);
+        }
+    }
+
+    fn request_pm_agent_idle_wake(&mut self, context: &super::ProjectContext, delayed: bool) {
+        let Some(state) = self.project_state_mut(context) else {
+            return;
+        };
+        if state.pm_agent_idle_wakes.pending.is_empty() || state.pm_agent_idle_wakes.retry_scheduled
+        {
+            return;
+        }
+        state.pm_agent_idle_wakes.retry_scheduled = true;
+        let context = context.clone();
+        let proxy = self.proxy.clone();
+        if !delayed {
+            proxy.send(UserEvent::PmAgentIdleWake { context });
+        } else if let Err(error) = thread::Builder::new()
+            .name("gwt-agent-idle-wake".into())
+            .spawn({
+                let context = context.clone();
+                move || {
+                    thread::sleep(Duration::from_secs(1));
+                    proxy.send(UserEvent::PmAgentIdleWake { context });
+                }
+            })
+        {
+            if let Some(state) = self.project_state_mut(&context) {
+                state.pm_agent_idle_wakes.retry_scheduled = false;
+            }
+            tracing::warn!(%error, "could not schedule retained Agent idle wake");
+        }
+    }
+
+    pub(crate) fn pm_agent_idle_wake_decision_at(
+        &mut self,
+        project_root: &Path,
+        now: &str,
+    ) -> Option<PmWakeDecision> {
+        let context = self.project_context_for_root(project_root)?;
+        let state = self.project_state(&context)?;
+        if state.pm_agent_idle_wakes.pending.is_empty()
+            || state.pm_agent_idle_wakes.delivery_in_flight.is_some()
+        {
+            return None;
+        }
+        let enabled = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .map(|prefs| prefs.enabled)
+        .unwrap_or(false);
+        let prefs =
+            pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(project_root))
+                .ok()?;
+        let pm_window = prefs
+            .registration
+            .as_ref()
+            .and_then(|registration| self.live_pm_window_id(&registration.session_id));
+        let Some(window_id) = pm_window.filter(|_| enabled) else {
+            self.project_state_mut(&context)?
+                .pm_agent_idle_wakes
+                .pending
+                .clear();
+            return None;
+        };
+        let stale: Vec<_> = self
+            .project_state(&context)?
+            .pm_agent_idle_wakes
+            .pending
+            .keys()
+            .filter(|id| {
+                **id == window_id || self.window_status(id) != Some(WindowProcessStatus::Idle)
+            })
+            .cloned()
+            .collect();
+        for id in stale {
+            self.project_state_mut(&context)?
+                .pm_agent_idle_wakes
+                .pending
+                .remove(&id);
+        }
+        let loop_state = pm_registry::load_pm_loop_state(
+            &pm_registry::pm_loop_state_path_for_repo_path(project_root),
+        )
+        .unwrap_or_default();
+        // A real busy turn must finish; the old stuck-Running override is not
+        // permission to inject a new Agent idle notification into that turn.
+        if !pm_wake_loop_is_quiet(
+            &loop_state,
+            prefs.settings.loop_interval_secs_clamped(),
+            now,
+        ) || matches!(
+            self.window_status(&window_id),
+            Some(WindowProcessStatus::Running | WindowProcessStatus::Waiting)
+        ) || self.pane_has_unsent_user_input(&window_id)
+            || self
+                .project_state(&context)?
+                .pending_pm_wakes
+                .contains_key(&window_id)
+        {
+            return None;
+        }
+        let mut prompt = String::new();
+        let mut idle_notifications = std::collections::BTreeMap::new();
+        for (id, label) in &self.project_state(&context)?.pm_agent_idle_wakes.pending {
+            let entry = format!("[gwt] Agent idle: {label}");
+            if prompt.len() + entry.len() > 800 {
+                break;
+            }
+            if !prompt.is_empty() {
+                prompt.push_str(" | ");
+            }
+            prompt.push_str(&entry);
+            idle_notifications.insert(id.clone(), label.clone());
+        }
+        if idle_notifications.is_empty() {
+            return None;
+        }
+        for id in idle_notifications.keys() {
+            self.project_state_mut(&context)?
+                .pm_agent_idle_wakes
+                .pending
+                .remove(id);
+        }
+        prompt.push_str(". Reconcile pane.list and issue.monitor.status; steer the idle agents.\r");
+        Some(PmWakeDecision {
+            project_root: project_root.to_path_buf(),
+            window_id,
+            prompt,
+            idle_notifications,
+        })
+    }
+
+    pub(crate) fn pm_agent_idle_wake_events(&mut self, context: &super::ProjectContext) {
+        if !self.project_context_is_current(context) {
+            return;
+        }
+        self.project_state_mut(context)
+            .unwrap()
+            .pm_agent_idle_wakes
+            .retry_scheduled = false;
+        if self
+            .project_state(context)
+            .unwrap()
+            .pm_agent_idle_wakes
+            .delivery_in_flight
+            .is_some()
+        {
+            return;
+        }
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        if let Some(decision) = self.pm_agent_idle_wake_decision_at(&context.project_root, &now) {
+            self.project_state_mut(context)
+                .unwrap()
+                .pm_agent_idle_wakes
+                .delivery_in_flight =
+                Some((decision.window_id.clone(), Arc::new(AtomicBool::new(true))));
+            let result = self.write_pm_wake_prompt(&decision);
+            if result == Ok(PmWakeWrite::Queued) {
+                return;
+            }
+            self.project_state_mut(context)
+                .unwrap()
+                .pm_agent_idle_wakes
+                .delivery_in_flight = None;
+            match result {
+                Ok(PmWakeWrite::Deferred) => {
+                    self.restore_pm_agent_idle_notifications(context, &decision)
+                }
+                Err(error) => tracing::warn!(%error, "Agent idle wake injection failed"),
+                Ok(PmWakeWrite::Injected | PmWakeWrite::Queued) => {}
+            }
+        }
+        self.request_pm_agent_idle_wake(context, true);
+    }
+
+    fn restore_pm_agent_idle_notifications(
+        &mut self,
+        context: &super::ProjectContext,
+        decision: &PmWakeDecision,
+    ) {
+        if let Some(state) = self.project_state_mut(context) {
+            for (id, label) in &decision.idle_notifications {
+                state
+                    .pm_agent_idle_wakes
+                    .pending
+                    .entry(id.clone())
+                    .or_insert_with(|| label.clone());
+            }
+        }
     }
 
     /// FR-108(b) (T-201, Issue #3505): the periodic wake — re-arm a quiet
@@ -1048,6 +1342,14 @@ impl AppRuntime {
         now: &str,
         standing_durable_work: Option<bool>,
     ) -> Option<PmWakeDecision> {
+        if self
+            .project_state_for_root(project_root)?
+            .pm_agent_idle_wakes
+            .delivery_in_flight
+            .is_some()
+        {
+            return None;
+        }
         if !monitor.config.enabled {
             return None;
         }
@@ -1087,6 +1389,7 @@ impl AppRuntime {
         Some(PmWakeDecision {
             project_root: project_root.to_path_buf(),
             window_id,
+            idle_notifications: Default::default(),
             prompt: format!(
                 "[gwt] Scheduled supervision tick: reconcile now — read a fresh \
                  `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
@@ -1900,6 +2203,9 @@ impl AppRuntime {
             .map(|pane| pane.has_unsent_user_input())
             .unwrap_or(false);
         if unsent {
+            if !decision.idle_notifications.is_empty() {
+                return Ok(PmWakeWrite::Deferred);
+            }
             let state = self
                 .project_state_for_root_mut(&decision.project_root)
                 .ok_or_else(|| "PM wake project is closed".to_string())?;
@@ -1913,6 +2219,13 @@ impl AppRuntime {
             .map(|state| state.context.clone())
             .ok_or_else(|| "PM wake project is closed".to_string())?;
         let proxy = self.proxy.for_project(context.clone());
+        let idle_permit = if decision.idle_notifications.is_empty() {
+            None
+        } else {
+            self.project_state(&context)
+                .and_then(|state| state.pm_agent_idle_wakes.delivery_in_flight.as_ref())
+                .map(|(_, permit)| Arc::clone(permit))
+        };
         let worker_decision = decision.clone();
         self.blocking_tasks.try_spawn(move || {
             // Resolve current subjects at physical delivery, after any time spent
@@ -1924,7 +2237,11 @@ impl AppRuntime {
                 .map(|pane| pane.has_unsent_user_input())
                 .map_err(|error| error.to_string())
                 .and_then(|unsent| {
-                    if unsent {
+                    if unsent
+                        || idle_permit
+                            .as_ref()
+                            .is_some_and(|permit| !permit.load(Ordering::Acquire))
+                    {
                         Ok(PmWakeWrite::Deferred)
                     } else {
                         super::pty_io::write_pane_input_then_submit(&pane, &prompt)
@@ -1938,19 +2255,57 @@ impl AppRuntime {
                 result,
             }));
         })?;
-        if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
-            state.pending_pm_wakes.remove(&decision.window_id);
+        if decision.idle_notifications.is_empty() {
+            if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+                state.pending_pm_wakes.remove(&decision.window_id);
+            }
         }
         Ok(PmWakeWrite::Queued)
     }
 
     pub(crate) fn pm_wake_delivery_complete(&mut self, delivery: PmWakeDelivery) {
-        if !self.project_context_is_current(&delivery.context)
-            || self
-                .runtimes
-                .get(&delivery.decision.window_id)
-                .is_none_or(|runtime| !Arc::ptr_eq(&runtime.pane, &delivery.pane))
-        {
+        if !self.project_context_is_current(&delivery.context) {
+            return;
+        }
+        let same_pane = self
+            .runtimes
+            .get(&delivery.decision.window_id)
+            .is_some_and(|runtime| Arc::ptr_eq(&runtime.pane, &delivery.pane));
+        if !delivery.decision.idle_notifications.is_empty() {
+            self.project_state_mut(&delivery.context)
+                .unwrap()
+                .pm_agent_idle_wakes
+                .delivery_in_flight = None;
+            if !same_pane {
+                self.request_pm_agent_idle_wake(&delivery.context, true);
+                return;
+            }
+            match &delivery.result {
+                Ok(PmWakeWrite::Deferred) => {
+                    self.restore_pm_agent_idle_notifications(&delivery.context, &delivery.decision)
+                }
+                Ok(PmWakeWrite::Injected) => {
+                    let loop_path = pm_registry::pm_loop_state_path_for_repo_path(
+                        &delivery.context.project_root,
+                    );
+                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    if let Err(error) = pm_registry::save_pm_loop_state(
+                        &loop_path,
+                        &pm_registry::PmLoopState {
+                            last_wake_at: Some(now),
+                            ..Default::default()
+                        },
+                    ) {
+                        tracing::warn!(%error, "Agent idle wake could not re-arm PM loop");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "Agent idle wake delivery failed"),
+                _ => {}
+            }
+            self.request_pm_agent_idle_wake(&delivery.context, true);
+            return;
+        }
+        if !same_pane {
             return;
         }
         match delivery.result {
@@ -2631,6 +2986,45 @@ mod delivery_tests {
     };
     use crate::app_runtime::{AppEventProxy, BlockingTaskSpawner};
 
+    #[test]
+    fn pm_wake_idle_delivery_preserves_the_existing_composer_slot() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        let held = PmWakeDecision {
+            project_root: repo.clone(),
+            window_id: window_id.clone(),
+            prompt: "HELD-WAKE\r".into(),
+            idle_notifications: Default::default(),
+        };
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pending_pm_wakes
+            .insert(window_id.clone(), held.clone());
+        let idle = PmWakeDecision {
+            prompt: "[gwt] Agent idle: worker\r".into(),
+            idle_notifications: [("worker".into(), "worker".into())].into(),
+            ..held.clone()
+        };
+        assert_eq!(
+            runtime.write_pm_wake_prompt(&idle).unwrap(),
+            PmWakeWrite::Queued
+        );
+        assert_eq!(
+            runtime
+                .project_state_for_root(&repo)
+                .unwrap()
+                .pending_pm_wakes
+                .get(&window_id),
+            Some(&held)
+        );
+    }
+
     thread_local! {
         static PROMPTS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
     }
@@ -2675,6 +3069,7 @@ mod delivery_tests {
         runtime.blocking_tasks = spawner;
         let capture = PromptCapture::begin();
         let decision = PmWakeDecision {
+            idle_notifications: Default::default(),
             project_root: repo,
             window_id: window_id.clone(),
             prompt: "WORKER-WAKE\r".to_string(),
@@ -2713,6 +3108,7 @@ mod delivery_tests {
         runtime.blocking_tasks = spawner;
         let capture = PromptCapture::begin();
         let decision = PmWakeDecision {
+            idle_notifications: Default::default(),
             project_root: repo,
             window_id: window_id.clone(),
             prompt: "WORKER-WAKE\r".to_string(),
@@ -2756,6 +3152,7 @@ mod delivery_tests {
         runtime.blocking_tasks = spawner;
         let capture = PromptCapture::begin();
         let decision = PmWakeDecision {
+            idle_notifications: Default::default(),
             project_root: repo,
             window_id: window_id.clone(),
             prompt: "WORKER-WAKE\r".to_string(),
