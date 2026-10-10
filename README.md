@@ -835,6 +835,34 @@ phase (Validate -> Backup -> Bareify -> Worktrees -> Submodules -> Tracking ->
 Cleanup -> Done). On success the project tab reloads onto the new branch
 worktree without restarting the app.
 
+## Share local Board milestones through GitHub Discussions
+
+To share `decision`, `blocked`, and `handoff` posts across machines, keep the
+**Local** Board provider and add a binding to `.gwt/work/board.toml`:
+
+```toml
+provider = "local"
+
+[github_discussion]
+owner = "your-org"
+repo = "your-repo"
+number = 123
+```
+
+Use the same existing Discussion on each machine, with GitHub Discussions enabled
+and `gh` authenticated for read/write access. Board reads and posts schedule
+background synchronization at most once a minute. To synchronize explicitly and
+inspect the latest result, send `{"schema_version":1,"operation":"board.sync","params":{}}`
+to `gwtd` on stdin. `status` and `claim` stay local; the shared kinds cannot be
+changed through configuration. Imported posts appear in the existing Board feed.
+
+Synchronization is best effort: it sends the current local window of up to 500
+posts, so older unsent posts that leave that window during a long outage are not
+backfilled. Rate limits, expired authentication, and network errors leave the
+local Board usable and are reported by `board.sync`; failures retry after five
+minutes, subject to the shared GitHub budget. An offline peer receives saved
+comments when it next synchronizes. Remove `[github_discussion]` to disable sharing.
+
 ## Board providers (Local / Slack / Teams)
 
 The coordination **Board** can be backed by one of three providers, selected in

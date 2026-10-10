@@ -187,6 +187,47 @@ fn board_post_dispatches_under_remote_provider_config_via_local_fallback() {
     assert_ok(&post, "board.post under isolated HOME");
 }
 
+#[test]
+fn local_board_succeeds_when_discussion_worker_cannot_start() {
+    use gwt_core::{
+        coordination::{AuthorKind, BoardEntry, BoardEntryKind},
+        test_support::{env_lock, ScopedEnvVar},
+    };
+    let _lock = env_lock().lock().unwrap();
+    let fixture = fixture();
+    let _home = ScopedEnvVar::set("HOME", fixture.home.path());
+    let _profile = ScopedEnvVar::set("USERPROFILE", fixture.home.path());
+    let unavailable = fixture.home.path().join("unavailable-worker");
+    std::fs::write(&unavailable, "not an executable").unwrap();
+    let _bin = ScopedEnvVar::set("GWT_BIN_PATH", &unavailable);
+    assert!(hidden_command(&unavailable).spawn().is_err());
+    let work = fixture.project.path().join(".gwt/work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        work.join("board.toml"),
+        "provider = 'local'\n[github_discussion]\nowner = 'example'\nrepo = 'project'\nnumber = 42\n",
+    )
+    .unwrap();
+    let entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "agent",
+        BoardEntryKind::Decision,
+        "local milestone survives",
+        None,
+        None,
+        vec![],
+        vec![],
+    );
+    gwt::board_provider::post_entry(fixture.project.path(), entry.clone()).unwrap();
+    assert_eq!(
+        gwt::board_provider::load_snapshot(fixture.project.path())
+            .unwrap()
+            .board
+            .entries,
+        [entry]
+    );
+}
+
 fn recovery_report(response: &Value) -> Value {
     let output = response
         .get("output")

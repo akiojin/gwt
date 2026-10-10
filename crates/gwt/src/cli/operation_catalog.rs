@@ -62,6 +62,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "board.sync",
+        aliases: &[],
+    },
+    Operation {
         name: "branch.prune_merged",
         aliases: &["branch.prune-merged"],
     },

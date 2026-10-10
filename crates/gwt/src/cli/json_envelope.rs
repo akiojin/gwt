@@ -460,6 +460,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
+        "board.sync" => {
+            reject_unknown_params(params, &[], "board.sync")?;
+            CliCommand::Board(BoardCommand::Sync)
+        }
         "board.config.show" | "board.config-show" => {
             CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
         }
@@ -5038,6 +5042,16 @@ mod tests {
             ),
             CliCommand::Board(_)
         ));
+    }
+
+    #[test]
+    fn board_sync_is_available_without_enabling_external_io() {
+        let command = ok("board.sync", json!({}));
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(&mut env, command).unwrap();
+        assert_eq!(code, 0);
+        assert!(output.contains("disabled"), "{output}");
     }
 
     #[test]
