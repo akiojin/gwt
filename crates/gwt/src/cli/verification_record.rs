@@ -8123,6 +8123,28 @@ pub(crate) mod tests {
         assert!(paths.iter().all(|path| !Path::new(path).exists()));
     }
 
+    #[test]
+    fn non_admitted_cargo_reports_failed_target_resolution() {
+        let worktree = tempfile::tempdir().unwrap();
+        fs::write(worktree.path().join("Cargo.toml"), "invalid manifest").unwrap();
+        for (command, isolated_baseline) in [
+            ("cargo test -p target-fixture --lib regression", false),
+            ("cargo build -p gwt --bin gwtd --target-dir target", true),
+        ] {
+            let error = execute_command_with_isolation(
+                worktree.path(),
+                command,
+                isolated_baseline,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+            .unwrap_err();
+            assert!(error.contains("Cargo target resolution failed"), "{error}");
+            assert!(error.contains("Cargo.toml"), "{error}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn non_admitted_cargo_rejects_unresolved_artifact_target() {
@@ -8130,7 +8152,7 @@ pub(crate) mod tests {
         let cargo = worktree.path().join("cargo");
         gwt_core::test_support::write_executable_script(
             &cargo,
-            "#!/bin/sh\ncase \"$*\" in metadata*--format-version*) exit 1;; esac\nprintf '%s\\n' \"$*\" >> executed\n",
+            "#!/bin/sh\ncase \"$*\" in metadata*--format-version*) if [ -f metadata.json ]; then cat metadata.json; exit 0; else exit 1; fi;; esac\nprintf '%s\\n' \"$*\" >> executed\n",
         )
         .unwrap();
         let execute = |arguments: &str| {
@@ -8157,8 +8179,22 @@ pub(crate) mod tests {
             assert!(
                 result
                     .unwrap_err()
-                    .contains("Cargo artifact target is unresolved"),
+                    .contains("Cargo target resolution failed"),
                 "{arguments}"
+            );
+        }
+        for (metadata, diagnostic) in [
+            ("not JSON", "invalid metadata JSON"),
+            ("{}", "target_directory"),
+            (r#"{"target_directory":42}"#, "target_directory"),
+            (r#"{"target_directory":""}"#, "target_directory"),
+        ] {
+            fs::write(worktree.path().join("metadata.json"), metadata).unwrap();
+            let error = execute("build -p gwt --bin gwtd").unwrap_err();
+            assert!(error.contains(diagnostic), "{error}");
+            assert!(
+                !worktree.path().join("executed").exists(),
+                "invalid metadata must not spawn the artifact workload"
             );
         }
         for arguments in ["--config test fmt --all --check", "metadata --no-deps"] {
