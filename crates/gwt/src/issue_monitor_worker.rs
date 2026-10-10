@@ -5314,6 +5314,7 @@ exit 0
                 enabled: true,
                 autonomous_mode: true,
                 max_active_agents: 3,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 ..crate::IssueMonitorPrefs::default()
             },
         );

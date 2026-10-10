@@ -2256,6 +2256,57 @@ body {
   margin-left: auto;
 }
 
+/* Issue #3620 agent capacity */
+.knowledge-monitor-capacity,
+.knowledge-monitor-capacity-warning {
+  flex-basis: 100%;
+  min-width: 0;
+  font-size: var(--type-xs);
+  overflow-wrap: anywhere;
+}
+
+.knowledge-monitor-capacity {
+  color: var(--color-text-muted);
+}
+
+.knowledge-monitor-capacity > summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+
+.knowledge-monitor-capacity > summary:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.knowledge-monitor-capacity-content {
+  display: grid;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+}
+
+.knowledge-monitor-capacity-content p,
+.knowledge-monitor-capacity-warning {
+  margin: 0;
+}
+
+.knowledge-monitor-capacity-content ul {
+  margin: 0;
+  padding-left: var(--space-4);
+}
+
+.knowledge-monitor-capacity-warning {
+  color: var(--color-state-needs-input);
+  border-left: 2px solid var(--color-state-needs-input);
+  padding-left: var(--space-2);
+}
+
+.knowledge-monitor-capacity[hidden],
+.knowledge-monitor-capacity-warning[hidden] {
+  display: none;
+}
+/* /Issue #3620 agent capacity */
+
 .issue-new-body {
   display: grid;
   gap: var(--space-3);

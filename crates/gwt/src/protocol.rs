@@ -41,6 +41,19 @@ where
     }
 }
 
+fn deserialize_positive_capacity_override<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<usize>::deserialize(deserializer)?;
+    if value == Some(0) {
+        return Err(serde::de::Error::custom("manual capacity must be positive"));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileContentMode {
@@ -897,7 +910,8 @@ pub enum FrontendEvent {
         usage_threshold_percent: Option<u8>,
     },
     SetIssueMonitorMaxActiveAgents {
-        max_active_agents: usize,
+        #[serde(deserialize_with = "deserialize_positive_capacity_override")]
+        max_active_agents: Option<usize>,
     },
     SetIssueMonitorAllowedLabels {
         allowed_labels: Vec<String>,
@@ -2008,6 +2022,10 @@ pub enum BackendEvent {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
     },
     /// Client-scoped reply to [`FrontendEvent::PaneSendInput`]
     /// (SPEC-3050 FR-005: failures must be explicit, never silent).

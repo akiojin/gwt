@@ -53,6 +53,63 @@ test.describe("PM conversation", () => {
         const id = await pane.getAttribute("data-id");
         expect(id).toBeTruthy();
         const refresh = () => sendLiveGwtEvent(page, { kind: "load_pm_conversation", id });
+        // Parsed conversation and RAW PTY are distinct data in one window version.
+        // Hide the pane and hold animation frames: neither subscription may need focus.
+        const revisions = await page.evaluate(async ({ id, session }) => {
+          const pane = document.querySelector<HTMLElement>(`.workspace-window[data-id="${id}"]`)!;
+          const chat = pane.querySelector<HTMLElement>('.pm-chat')!;
+          const log = pane.querySelector<HTMLElement>('.pm-conversation-log')!;
+          const socket = (window as any).__gwtPlaywrightSockets.find((socket: WebSocket) =>
+            socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has('repo_hash')) as WebSocket;
+          if (!socket) throw new Error('Active project socket missing');
+          const originalFrame = window.requestAnimationFrame;
+          const heldFrames: FrameRequestCallback[] = [];
+          const before = Number(chat.dataset.stateVersion);
+          const versions: string[][] = [];
+          const start = performance.now();
+          pane.hidden = true;
+          window.requestAnimationFrame = callback => -heldFrames.push(callback);
+          try {
+            for (const event of [
+              { kind: 'terminal_snapshot', id, data_base64: btoa('RAW snapshot\r\n') },
+              { kind: 'pm_conversation', id, session_id: session, snapshot: { availability: 'ready', conversation_id: 'pm-chat-claude', messages: [{ id: 'shared', role: 'assistant', text: 'Parsed shared-state answer' }] } },
+              { kind: 'terminal_output', id, data_base64: btoa('RAW appended\r\n') },
+            ]) {
+              await new Promise<void>((resolve, reject) => {
+                const observer = new MutationObserver(() => {
+                  observer.disconnect();
+                  clearTimeout(deadline);
+                  resolve();
+                });
+                const deadline = setTimeout(() => { observer.disconnect(); reject(new Error('Hidden window did not update')); }, 1000);
+                observer.observe(chat, { attributes: true, attributeFilter: ['data-state-version'] });
+                socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
+              });
+              versions.push([chat.dataset.stateVersion!, log.dataset.stateVersion!]);
+            }
+            socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+              kind: 'pm_conversation', id, session_id: 'stale-session',
+              snapshot: { availability: 'ready', messages: [{ id: 'stale', role: 'assistant', text: 'Stale answer' }] },
+            }) }));
+            await new Promise(resolve => setTimeout(resolve, 150));
+            return { before, versions, after: Number(chat.dataset.stateVersion), elapsed: performance.now() - start };
+          } finally {
+            pane.hidden = false;
+            window.requestAnimationFrame = originalFrame;
+            heldFrames.forEach(callback => originalFrame(callback));
+          }
+        }, { id, session: SESSION });
+        expect(revisions.versions).toEqual([1, 2, 3].map(offset => [String(revisions.before + offset), String(revisions.before + offset)]));
+        expect(revisions.after).toBe(revisions.before + 3);
+        expect(revisions.elapsed).toBeLessThan(1000);
+        await expect(chat).toContainText('Parsed shared-state answer');
+        await expect(chat).not.toContainText('RAW');
+        await pane.getByRole("button", { name: "Execution log", exact: true }).click();
+        await expect(pane.locator('.xterm')).toContainText('RAW snapshot');
+        await expect(pane.locator('.xterm')).toContainText('RAW appended');
+        await pane.getByRole("button", { name: "Chat", exact: true }).click();
+        await refresh();
+        await expect(chat).toContainText('Review the proposed change');
         appendFileSync(claudePath, lines([
           claude("silent", "assistant", [{ type: "thinking", thinking: "hidden-thinking" }]),
           claude("silent-stop", "user", "hidden-stop-contract", { isMeta: true }),

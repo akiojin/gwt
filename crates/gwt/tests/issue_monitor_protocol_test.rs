@@ -4,6 +4,31 @@ use gwt::{
 };
 
 #[test]
+fn agent_capacity_override_wire_accepts_auto_and_rejects_non_positive() {
+    let automatic = serde_json::json!({
+        "kind": "set_issue_monitor_max_active_agents",
+        "max_active_agents": null,
+    });
+    let event: FrontendEvent = serde_json::from_value(automatic.clone())
+        .expect("null explicitly restores automatic capacity");
+    assert!(matches!(
+        event,
+        FrontendEvent::SetIssueMonitorMaxActiveAgents {
+            max_active_agents: None
+        }
+    ));
+    for invalid in [serde_json::json!(0), serde_json::json!(-1)] {
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "set_issue_monitor_max_active_agents", "max_active_agents": invalid,
+            }))
+            .is_err(),
+            "a manual limit must be positive"
+        );
+    }
+}
+
+#[test]
 fn frontend_issue_monitor_allowed_labels_use_snake_case_wire_shape() {
     for labels in [
         serde_json::json!(["Server", "backend"]),
@@ -152,7 +177,7 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     assert!(matches!(
         event,
         FrontendEvent::SetIssueMonitorMaxActiveAgents {
-            max_active_agents: 3
+            max_active_agents: Some(3)
         }
     ));
 
@@ -229,6 +254,8 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             auto_apply_updates: false,
             enabled: true,
             state: "scanning".to_string(),

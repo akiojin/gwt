@@ -2028,7 +2028,7 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_project_client_and_star
     )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::TerminalStatus { id, status, detail }
+        BackendEvent::TerminalStatus { id, status, detail, .. }
             if id == &window_id
                 && *status == WindowProcessStatus::Ready
                 && detail.as_deref() == Some("Shell ready")
@@ -2791,6 +2791,15 @@ fn app_runtime_issue_monitor_launch_places_agent_window_in_issue_preview() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 1,
+            ..Default::default()
+        },
+    )
+    .expect("seed positive Monitor pane capacity");
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -2846,6 +2855,15 @@ fn app_runtime_issue_monitor_launch_falls_back_to_canvas_without_issue_window() 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 1,
+            ..Default::default()
+        },
+    )
+    .expect("seed positive Monitor pane capacity");
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -2964,6 +2982,15 @@ fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 1,
+            ..Default::default()
+        },
+    )
+    .expect("seed positive Monitor pane capacity");
     let tab = sample_project_tab(
         "tab-1",
         "Repo",

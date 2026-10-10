@@ -2673,6 +2673,38 @@ fn is_certified_pr_delivery_event(worktree: &Path, relative: &[u8]) -> bool {
 }
 
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
+    let mut states = work_event_dirty_paths(worktree)?
+        .into_iter()
+        .map(|dirty| dirty.state)
+        .collect::<Vec<_>>();
+    states.sort_unstable();
+    states.dedup();
+    Ok(states)
+}
+
+/// Why a Work event path was judged dirty (Issue #5072 AC-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventDirtyBasis {
+    /// Reported by `git status --porcelain=v1`.
+    GitStatusPorcelain,
+    /// An ignored canonical shard that `git status` hides; gwt still requires
+    /// it to be force-added and delivered.
+    GwtIgnoredShard,
+}
+
+/// One concrete dirty Work event path and the evidence behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkEventDirtyPath {
+    pub path: String,
+    pub state: WorkEventPathState,
+    pub basis: WorkEventDirtyBasis,
+}
+
+/// Live scan of the Work event store: every dirty path with its basis.
+/// An empty list means `git status` is clean for the store and no ignored
+/// canonical shard is pending.
+pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDirtyPath>, ()> {
     let output = gwt_core::process::hidden_command("git")
         .args([
             "status",
@@ -2689,28 +2721,35 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
         return Err(());
     }
     let stdout = String::from_utf8(output.stdout).map_err(|_| ())?;
-    let mut states = Vec::new();
+    let mut dirty = Vec::new();
     for line in stdout.lines() {
         let bytes = line.as_bytes();
         if bytes.len() < 3 {
             return Err(());
         }
         let (index, worktree_state) = (bytes[0], bytes[1]);
+        let mut push = |state| {
+            dirty.push(WorkEventDirtyPath {
+                path: line[3..].to_string(),
+                state,
+                basis: WorkEventDirtyBasis::GitStatusPorcelain,
+            });
+        };
         if index == b'?' && worktree_state == b'?' {
             if is_certified_pr_delivery_event(worktree, &bytes[3..]) {
                 continue;
             }
-            states.push(WorkEventPathState::Untracked);
+            push(WorkEventPathState::Untracked);
             continue;
         }
         if index == b'D' || worktree_state == b'D' {
-            states.push(WorkEventPathState::Deleted);
+            push(WorkEventPathState::Deleted);
         }
         if index != b' ' && index != b'D' {
-            states.push(WorkEventPathState::Staged);
+            push(WorkEventPathState::Staged);
         }
         if worktree_state != b' ' && worktree_state != b'D' {
-            states.push(WorkEventPathState::Unstaged);
+            push(WorkEventPathState::Unstaged);
         }
     }
     let ignored = gwt_core::process::hidden_command("git")
@@ -2729,20 +2768,22 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
     if !ignored.status.success() {
         return Err(());
     }
-    if ignored
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .any(|path| {
-            classify_path(path) == DeliveryPath::WorkEventShard
-                && !is_certified_pr_delivery_event(worktree, path)
-        })
-    {
-        states.push(WorkEventPathState::Untracked);
-    }
-    states.sort_unstable();
-    states.dedup();
-    Ok(states)
+    dirty.extend(
+        ignored
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .filter(|path| {
+                classify_path(path) == DeliveryPath::WorkEventShard
+                    && !is_certified_pr_delivery_event(worktree, path)
+            })
+            .map(|path| WorkEventDirtyPath {
+                path: String::from_utf8_lossy(path).into_owned(),
+                state: WorkEventPathState::Untracked,
+                basis: WorkEventDirtyBasis::GwtIgnoredShard,
+            }),
+    );
+    Ok(dirty)
 }
 
 fn event_commit_has_non_bookkeeping_change(

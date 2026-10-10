@@ -867,6 +867,8 @@ pub fn build_frontend_sync_events(
                 id,
                 status,
                 detail: Some(detail),
+                error_code: None,
+                retryable: None,
             },
         ));
     }
@@ -1302,6 +1304,8 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) issue_monitor_scheduled_scans_in_flight: HashSet<PathBuf>,
     /// Renewals have their own lane so slow scans cannot delay live claims.
     pub(crate) issue_monitor_claim_renewals_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// Latest published read model; capacity refreshes preserve scan/queue authority.
+    pub(crate) issue_monitor_status_cache: std::cell::RefCell<Option<gwt::IssueMonitorStatusView>>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
@@ -1399,6 +1403,7 @@ pub(crate) fn initial_project_states(
                     pending_launch_wizard_materializations: HashMap::new(),
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
+                    issue_monitor_status_cache: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
@@ -2343,7 +2348,7 @@ fn prepare_local_issue_monitor_claim_proposals(
     {
         return;
     }
-    let active_cap = monitor.config.max_active.max(1);
+    let active_cap = monitor.effective_max_active_agents();
     if monitor.active_count() >= active_cap {
         return;
     }
@@ -3358,7 +3363,7 @@ fn observe_local_claim_candidates(
     // FR-057: no launch profile means no claim, so the frontier is empty and
     // the scan spends no probe on it — the same gate the daemon scan applies.
     let claimable_cap = if monitor.has_launch_profile() {
-        monitor.config.max_active.max(1)
+        monitor.effective_max_active_agents()
     } else {
         0
     };
@@ -3585,6 +3590,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     }
 
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    monitor.refresh_agent_capacity(project_root);
     // Issue #4084: this process is the local driver, so it classifies against
     // the canvas it just observed.
     if let Some(snapshot) = window_snapshot {
@@ -3699,6 +3705,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         &prefs_path,
         &mut monitor,
         |latest| {
+            latest.refresh_agent_capacity(project_root);
             latest.expire_stale_unbound_launches(now);
             // Issue #3883 AC-2/AC-3: restore tracking for agent windows that
             // are still on the canvas, inside the transaction that persists
@@ -3898,6 +3905,7 @@ impl AppRuntime {
                     pending_launch_wizard_materializations: HashMap::new(),
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
+                    issue_monitor_status_cache: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
@@ -5170,7 +5178,11 @@ impl AppRuntime {
                         gwt::process::is_host_process_alive,
                     )
                 })
-                .map(|(_monitor, accepted)| accepted),
+                .map(|(monitor, accepted)| {
+                    accepted
+                        && monitor.pending_launch_delivery_id(issue_number).as_deref()
+                            == Some(delivery_id)
+                }),
             Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
                 Ok(false)
             }
@@ -6922,6 +6934,7 @@ impl AppRuntime {
                     let mut status = monitor.status_view();
                     self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
                     self.fill_update_drain_blocking(&mut status, &monitor);
+                    self.remember_issue_monitor_status(project_root, &status);
                     events.push(OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::IssueMonitorStatus {
@@ -7332,6 +7345,7 @@ impl AppRuntime {
                 gwt::IssueMonitorConfig::default(),
                 prefs.clone(),
             );
+            monitor.refresh_agent_capacity(project_root);
             let result = mutation(&mut monitor);
             Self::apply_local_issue_monitor_fallback_projection(
                 &mut monitor,
@@ -7672,7 +7686,9 @@ impl AppRuntime {
                     // gui_status; their subscriber frames still supply it.
                     return status
                         .gui_status
-                        .map(|status| {
+                        .map(|mut status| {
+                            self.retain_missing_issue_monitor_capacity(project_root, &mut status);
+                            self.remember_issue_monitor_status(Some(project_root), &status);
                             vec![OutboundEvent::reply(
                                 client_id,
                                 BackendEvent::IssueMonitorStatus {
@@ -7739,6 +7755,7 @@ impl AppRuntime {
                 // claim anchor exceeded claim_ttl_secs so a crash cannot leak a slot.
                 monitor.expire_stale_unbound_launches(&now);
             });
+        monitor.refresh_agent_capacity(&project_root);
         if policy == IssueMonitorScanPolicy::CacheOnly {
             let (cached_issues, cache_error, origin_error) = {
                 // Remote resolution performs `git rev-parse` followed by
@@ -8714,6 +8731,7 @@ impl AppRuntime {
             &now,
             standing_durable_work,
         ));
+        self.remember_issue_monitor_status(Some(&project_root), &status);
         events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorStatus {
@@ -8799,15 +8817,105 @@ impl AppRuntime {
     pub(crate) fn issue_monitor_daemon_status_events(
         &self,
         project_root: &Path,
-        status: Box<gwt::IssueMonitorStatusView>,
+        mut status: Box<gwt::IssueMonitorStatusView>,
     ) -> Vec<OutboundEvent> {
+        self.retain_missing_issue_monitor_capacity(project_root, &mut status);
         self.replace_knowledge_terminal_queue(project_root, &status.terminal_queue);
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };
+        self.remember_issue_monitor_status(Some(project_root), &status);
         vec![OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorStatus { status },
+        )]
+    }
+
+    /// A daemon frame without capacity fields has no provenance for an Auto
+    /// transition. Keep the last known capacity while accepting its new queue
+    /// and diagnostics; the next successful prefs read still owns the mode.
+    fn retain_missing_issue_monitor_capacity(
+        &self,
+        project_root: &Path,
+        status: &mut gwt::IssueMonitorStatusView,
+    ) {
+        if status.max_active_agents_override.is_some()
+            || status.agent_capacity != gwt::agent_capacity::AgentCapacity::default()
+        {
+            return;
+        }
+        if let Some(state) = self.project_state_for_root(project_root) {
+            let cached = state.issue_monitor_status_cache.borrow();
+            if let Some(cached) = cached.as_ref() {
+                status.agent_capacity = cached.agent_capacity.clone();
+                status.max_active_agents = cached.max_active_agents;
+                status.max_active_agents_override = cached.max_active_agents_override;
+            }
+        }
+    }
+
+    fn remember_issue_monitor_status(
+        &self,
+        project_root: Option<&Path>,
+        status: &gwt::IssueMonitorStatusView,
+    ) {
+        if let Some(state) = project_root.and_then(|root| self.project_state_for_root(root)) {
+            state
+                .issue_monitor_status_cache
+                .replace(Some(status.clone()));
+        }
+    }
+
+    /// Capacity has its own cadence even while the Monitor is stopped. This
+    /// reads only the local machine observation, never a scan or control lane.
+    pub(crate) fn issue_monitor_capacity_changed_events(
+        &self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        self.issue_monitor_capacity_changed_events_with(project_root, |root| {
+            gwt::agent_capacity::project_capacity(root, &Default::default(), 0)
+        })
+    }
+
+    fn issue_monitor_capacity_changed_events_with(
+        &self,
+        project_root: &Path,
+        read_capacity: impl FnOnce(&Path) -> gwt::agent_capacity::AgentCapacity,
+    ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
+        let Some(mut status) = self
+            .project_state_for_root(project_root)
+            .and_then(|state| state.issue_monitor_status_cache.borrow().clone())
+        else {
+            // Initial List owns the full read model; do not invent queue data.
+            return Vec::new();
+        };
+        // An older live daemon can omit override provenance. Durable prefs,
+        // not that omission, own the Manual choice, just as in CLI status.
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let mut capacity = match gwt::load_issue_monitor_prefs(&prefs_path) {
+            Ok(prefs) => {
+                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "capacity display could not read Monitor prefs; retaining last valid mode");
+                let mut cached = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+                cached.set_max_active_agents_override(status.max_active_agents_override);
+                cached
+            }
+        };
+        capacity.set_agent_capacity(read_capacity(project_root));
+        status.agent_capacity = capacity.status_view().agent_capacity;
+        status.max_active_agents_override = capacity.max_active_agents_override();
+        status.max_active_agents = capacity.effective_max_active_agents();
+        self.remember_issue_monitor_status(Some(project_root), &status);
+        vec![OutboundEvent::project(
+            context.project_key,
+            BackendEvent::IssueMonitorStatus {
+                status: Box::new(status),
+            },
         )]
     }
 
@@ -8833,12 +8941,16 @@ impl AppRuntime {
         &self,
         client_id: Option<&str>,
         project_root: Option<&Path>,
-        monitor: gwt::IssueMonitorState,
+        mut monitor: gwt::IssueMonitorState,
     ) -> Vec<OutboundEvent> {
+        if let Some(root) = project_root {
+            monitor.refresh_agent_capacity(root);
+        }
         let context = project_root.and_then(|root| self.project_context_for_root(root));
         let mut status = monitor.status_view();
         self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
         self.fill_update_drain_blocking(&mut status, &monitor);
+        self.remember_issue_monitor_status(project_root, &status);
         let status_event = BackendEvent::IssueMonitorStatus {
             status: Box::new(status),
         };
@@ -10796,6 +10908,7 @@ impl AppRuntime {
                                 Some(project_root.as_path()),
                             );
                             self.fill_update_drain_blocking(&mut status, &monitor);
+                            self.remember_issue_monitor_status(Some(&project_root), &status);
                             events.push(OutboundEvent::reply(
                                 client_id.clone(),
                                 BackendEvent::IssueMonitorStatus {
@@ -10894,7 +11007,8 @@ impl AppRuntime {
                     publication,
                     "max-active",
                     |monitor| {
-                        monitor.set_max_active_agents(max_active_agents);
+                        monitor.set_max_active_agents_override(max_active_agents);
+                        monitor.refresh_agent_capacity(&context.project_root);
                     },
                 )
             }

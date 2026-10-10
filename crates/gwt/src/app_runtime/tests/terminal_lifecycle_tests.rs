@@ -732,6 +732,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
                     gwt::cli::verification_record::WorkEventSettlementBlocker::MissingUpstream,
                 ),
             ),
+            settlement_dirty_paths: Vec::new(),
             settlement_severity: "warning".to_string(),
             settlement_obligation_open: true,
             open_obligations: vec!["user_verification".to_string()],
