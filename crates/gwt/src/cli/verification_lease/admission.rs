@@ -1219,8 +1219,13 @@ mod tests {
             paths
         }
 
+        #[cfg(unix)]
         fn is_free(&self) -> bool {
-            self.lock_paths().iter().all(|path| {
+            self.locks_are_free(&self.lock_paths())
+        }
+
+        fn locks_are_free(&self, paths: &[PathBuf]) -> bool {
+            paths.iter().all(|path| {
                 let probe = std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -1261,9 +1266,20 @@ mod tests {
         /// honest: a lease that is genuinely never released never becomes
         /// free, so a real regression still fails here.
         fn assert_free(&self, context: &str) {
+            self.assert_locks_free(&self.lock_paths(), context);
+        }
+
+        /// Issue #4998: a deferred run releases its own target while another
+        /// target intentionally retains the heavy lease. Observe only the
+        /// caller's kernel lock, preserving that holder and the FIFO queue.
+        fn assert_target_free(&self, key: &TargetKey, context: &str) {
+            self.assert_locks_free(&[self.coordinator.target_lock_path(key)], context);
+        }
+
+        fn assert_locks_free(&self, paths: &[PathBuf], context: &str) {
             let deadline = Instant::now() + RELEASE_OBSERVATION_BUDGET;
             loop {
-                if self.is_free() {
+                if self.locks_are_free(paths) {
                     return;
                 }
                 assert!(
@@ -1764,6 +1780,55 @@ mod tests {
         holder.complete(JobOutcome::Completed).unwrap();
     }
 
+    /// Issue #4998 AC-2: exercise the actual deferred-admission assertions
+    /// while unrelated fork/exec windows can inherit their target lock.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "20 admissions with two concurrent spawners; run explicitly for Issue #4998"]
+    fn deferred_readmission_with_two_concurrent_spawners() {
+        use std::os::unix::process::CommandExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let spawners: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        while !stop.load(Ordering::Acquire) {
+                            let mut command = std::process::Command::new("/bin/true");
+                            command.env_clear();
+                            // Model a stalled fork/exec window so the regression
+                            // need not wait thousands of runs for a rare overlap.
+                            // No assertion depends on this 100ms delay's duration.
+                            // SAFETY: poll is async-signal-safe and touches no Rust
+                            // locks, allocator, or destructors in the fork child.
+                            unsafe {
+                                command.pre_exec(|| {
+                                    libc::poll(std::ptr::null_mut(), 0, 100);
+                                    Ok(())
+                                });
+                            }
+                            assert!(command.status().unwrap().success());
+                        }
+                    })
+                })
+                .collect();
+            let result = std::panic::catch_unwind(|| {
+                for iteration in 0..20 {
+                    admit_defers_when_another_target_holds_the_lease();
+                    eprintln!("deferred readmission iteration {} passed", iteration + 1);
+                }
+            });
+            stop.store(true, Ordering::Release);
+            for spawner in spawners {
+                spawner.join().unwrap();
+            }
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
+        });
+    }
+
     #[test]
     fn admit_defers_when_another_target_holds_the_lease() {
         let lease_root = IsolatedLeaseRoot::new();
@@ -1866,10 +1931,16 @@ mod tests {
                 Some("later arrival"),
             )
             .unwrap();
+        lease_root.assert_target_free(&key, "a deferred run must release its caller target");
         let again = super::admit(&mut env, worktree.path(), None, Duration::ZERO, recover)
             .unwrap_err()
             .to_string();
-        assert_eq!(recovery_calls.get(), 2);
+        assert_eq!(
+            recovery_calls.get(),
+            2,
+            "the next admission must enter host deferral: {again}; {}",
+            lease_root.describe()
+        );
         assert!(again.contains("next_turn_reserved: yes"), "{again}");
         let after = lease_root.coordinator.heavy_lease_status().unwrap().queue;
         assert_eq!(after.len(), 2);
