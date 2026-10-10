@@ -25,6 +25,7 @@
 import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 function settingsTabId(windowId, tabId) {
   return `settings-${windowId}-tab-${tabId}`;
@@ -426,23 +427,29 @@ export function createSettingsSurface({
         statusKind: "",
       };
       const settingsWindowBodies = new Set();
-      let supportedAgents = null;
-      let agentAutoUpdate = false;
-      const supportedAgentMaintenance = new Map();
+      const supportedAgentsModel = createUiStateStore({
+        agents: null,
+        autoUpdate: false,
+        maintenanceByAgent: {},
+      });
 
       function supportedAgentPanelOptions() {
+        const state = supportedAgentsModel.read();
         return {
-          autoUpdate: agentAutoUpdate,
-          maintenanceByAgent: supportedAgentMaintenance,
+          autoUpdate: state.autoUpdate,
+          maintenanceByAgent: new Map(Object.entries(state.maintenanceByAgent)),
           send(message) {
             if (message.kind === "maintain_supported_agent") {
-              supportedAgentMaintenance.set(message.agent_id, {
-                pending: true,
-                message: message.action === "install" ? "Installing…" : "Updating…",
-              });
-              renderSupportedAgentPanels();
-            } else if (message.kind === "set_agent_auto_update") {
-              supportedAgentMaintenance.delete("");
+              supportedAgentsModel.update(current => ({
+                ...current,
+                maintenanceByAgent: {
+                  ...current.maintenanceByAgent,
+                  [message.agent_id]: {
+                    pending: true,
+                    message: message.action === "install" ? "Installing…" : "Updating…",
+                  },
+                },
+              }));
             }
             send(message);
           },
@@ -453,27 +460,37 @@ export function createSettingsSurface({
         purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) {
           const panel = body.querySelector("[data-settings-panel='supported-agents']");
-          if (panel) renderSupportedAgentsPanel(panel, supportedAgents, supportedAgentPanelOptions());
+          if (panel) renderSupportedAgentsPanel(panel, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
         }
       }
 
       function applySupportedAgentList(event) {
-        supportedAgents = event.agents;
-        agentAutoUpdate = event.auto_update === true;
-        if (event.maintenance_pending) {
-          supportedAgentMaintenance.set("", { pending: true, message: "Agent maintenance is in progress." });
-        } else {
-          for (const [id, result] of supportedAgentMaintenance) {
-            if (result.pending) supportedAgentMaintenance.delete(id);
+        supportedAgentsModel.update(state => {
+          const maintenanceByAgent = { ...state.maintenanceByAgent };
+          delete maintenanceByAgent[""];
+          if (event.maintenance_pending) {
+            maintenanceByAgent[""] = { pending: true, message: "Agent maintenance is in progress." };
+          } else {
+            for (const [id, result] of Object.entries(maintenanceByAgent)) {
+              if (result.pending) delete maintenanceByAgent[id];
+            }
           }
-        }
-        renderSupportedAgentPanels();
+          return {
+            agents: event.agents,
+            autoUpdate: event.auto_update === true,
+            maintenanceByAgent,
+          };
+        });
       }
 
       function applySupportedAgentMaintenance(event) {
-        supportedAgentMaintenance.set(event.agent_id, event);
-        renderSupportedAgentPanels();
+        supportedAgentsModel.update(state => ({
+          ...state,
+          maintenanceByAgent: { ...state.maintenanceByAgent, [event.agent_id]: event },
+        }));
       }
+
+      supportedAgentsModel.subscribe(state => state, renderSupportedAgentPanels);
 
       function requestSupportedAgentRefresh() {
         purgeDetachedSettingsBodies();
@@ -618,7 +635,7 @@ export function createSettingsSurface({
         settingsWindowBodies.add(body);
 
         renderSystemPanel(panelSystem);
-        renderSupportedAgentsPanel(panelSupportedAgents, supportedAgents, supportedAgentPanelOptions());
+        renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
         send({ kind: "list_supported_agents" });
         renderUsagePanel(panelUsage);
         // Always request fresh system settings on open so the dropdown

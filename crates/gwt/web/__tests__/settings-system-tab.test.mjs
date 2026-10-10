@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -103,41 +104,47 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   assert.match(panel.textContent, /next.*startup/i);
   assert.match(panel.textContent, /npm/i);
   assert.match(panel.textContent, /agent windows/i);
-  options.maintenanceByAgent = new Map([["opencode", { pending: true, message: "Installing OpenCode…" }]]);
-  render(panel, agents, options);
+  const supportedAgentsModel = createUiStateStore({
+    agents, autoUpdate: false, maintenanceByAgent: {},
+  });
+  const handlers = Function("supportedAgentsModel", "send", `
+    ${extractFunctionSource(settingsSource, "supportedAgentPanelOptions")}
+    ${extractFunctionSource(settingsSource, "applySupportedAgentList")}
+    ${extractFunctionSource(settingsSource, "applySupportedAgentMaintenance")}
+    return { supportedAgentPanelOptions, applySupportedAgentList, applySupportedAgentMaintenance };
+  `)(supportedAgentsModel, message => messages.push(message));
+  let renders = 0;
+  supportedAgentsModel.subscribe(state => state, state => {
+    renders += 1;
+    render(panel, state.agents, handlers.supportedAgentPanelOptions());
+  });
+  handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: true, message: "Installing OpenCode…" });
   assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, true);
   assert.equal(panel.querySelector('[aria-label="Update Grok Build"]').disabled, true);
-  const applySnapshot = Function("supportedAgentMaintenance", "renderSupportedAgentPanels", `
-    let supportedAgents;
-    let agentAutoUpdate = false;
-    ${extractFunctionSource(settingsSource, "applySupportedAgentList")}
-    return applySupportedAgentList;
-  `)(options.maintenanceByAgent, () => render(panel, agents, options));
-  applySnapshot({ agents, auto_update: false, maintenance_pending: false });
+  handlers.applySupportedAgentList({ agents, auto_update: false, maintenance_pending: false });
   assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false,
     "an authoritative snapshot recovers a missed completion notification");
-  options.maintenanceByAgent.set("", {
+  handlers.applySupportedAgentMaintenance({ agent_id: "",
     pending: false, success: false, message: "Cannot save automatic updates. Check configuration permissions and retry.",
   });
-  render(panel, agents, options);
   assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, false);
   assert.match(panel.querySelector('[role="alert"]').textContent, /Cannot save automatic updates/);
-  const retryOptions = Function("supportedAgentMaintenance", "renderSupportedAgentPanels", "send", `
-    const agentAutoUpdate = false;
-    ${extractFunctionSource(settingsSource, "supportedAgentPanelOptions")}
-    return supportedAgentPanelOptions();
-  `)(options.maintenanceByAgent, () => render(panel, agents, options), () => {});
-  retryOptions.send({ kind: "set_agent_auto_update", enabled: true });
-  applySnapshot({ agents, auto_update: true, maintenance_pending: false });
+  const retry = panel.querySelector('[aria-label="Automatically update agents"]');
+  retry.checked = true;
+  const rendersBeforeRetry = renders;
+  retry.dispatchEvent(new Event("change"));
+  assert.equal(renders, rendersBeforeRetry, "a local toggle waits for an authoritative reply before rendering");
+  assert.equal(retry.checked, true);
+  handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.ok(!panel.querySelector('[role="alert"]'), "a successful retry clears the prior setting-save error");
-  options.maintenanceByAgent.set("opencode", { pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
-  render(panel, agents, options);
+  assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
+  handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
   assert.match(panel.querySelector('[role="alert"]').textContent, /Check your connection and retry/);
   assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false);
   agents[1].installed_version = "grok 2.0.0";
   agents[1].update_available = false;
   agents[1].up_to_date = true;
-  render(panel, agents, options);
+  handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.match(panel.querySelector('[data-agent-id="grok"]').textContent, /Latest/);
   assert.equal(panel.querySelector('[aria-label="Update Grok Build"]'), null);
 });

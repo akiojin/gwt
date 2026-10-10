@@ -10,6 +10,7 @@ fn request(action: &str) -> FrontendEvent {
 #[test]
 fn maintenance_refuses_starting_agent_panes_without_scheduling_a_worker() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent",
@@ -33,6 +34,7 @@ fn maintenance_refuses_starting_agent_panes_without_scheduling_a_worker() {
 #[test]
 fn maintenance_reserves_admission_before_the_worker_and_refuses_agent_launches() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent",
@@ -67,6 +69,7 @@ fn maintenance_reserves_admission_before_the_worker_and_refuses_agent_launches()
 #[test]
 fn automatic_update_setting_is_saved_without_starting_maintenance() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -134,6 +137,7 @@ fn automatic_update_setting_is_saved_without_starting_maintenance() {
 #[test]
 fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab_with_window(
         "tab-1",
         "pm",
@@ -176,6 +180,7 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
 #[test]
 fn agent_maintenance_interlock_holds_self_update_quiescence() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     runtime.agent_maintenance.busy = true;
     let (panes, _) = runtime.capture_update_quiescence_inputs();
@@ -193,6 +198,7 @@ fn agent_maintenance_interlock_holds_self_update_quiescence() {
 #[test]
 fn maintenance_worker_admission_failure_releases_the_launch_guard() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
     let events = runtime.handle_frontend_event("settings".into(), request("install"));
@@ -274,6 +280,7 @@ fn finish_startup_worker(
 #[test]
 fn startup_updates_only_installed_npm_agents_and_refreshes_catalog_after_completion() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, tasks) = startup_fixture(temp.path(), Some("1.2.3"), "1.2.4", false);
     runtime.start_agent_auto_update();
     assert!(
@@ -315,6 +322,7 @@ fn startup_does_not_install_missing_current_or_unknown_version_agents_and_failur
         (Some("1.2.3"), true),
     ] {
         let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, events, tasks) =
             startup_fixture(temp.path(), installed, "1.2.4", fail_update);
         runtime.start_agent_auto_update();
@@ -337,6 +345,7 @@ fn startup_does_not_install_missing_current_or_unknown_version_agents_and_failur
 #[test]
 fn startup_disabled_or_pending_launch_does_not_schedule_updates() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -357,6 +366,7 @@ fn startup_disabled_or_pending_launch_does_not_schedule_updates() {
 #[test]
 fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab_with_window_at(
         "tab-1",
         "paused",
@@ -416,6 +426,7 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
 #[test]
 fn supported_agent_catalog_drops_out_of_order_snapshots_and_reconciles_pending() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let catalog = || BackendEvent::SupportedAgentList {
