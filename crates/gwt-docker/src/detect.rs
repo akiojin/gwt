@@ -954,13 +954,38 @@ esac
         let previous_bin = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", "/this-binary-does-not-exist-gwt-test");
 
-        let events = Arc::new(Mutex::new(Vec::<CapturedEvent>::new()));
-        let layer = CaptureLayer {
-            events: Arc::clone(&events),
+        let warm_probe_without_subscriber = || {
+            std::thread::spawn(|| {
+                let _ = docker_probe_diagnostics_with_binary(
+                    OsStr::new("/this-binary-does-not-exist-gwt-test"),
+                    &["--version"],
+                    "uncaptured warmup",
+                );
+            })
+            .join()
+            .expect("subscriber-free probe thread");
         };
-        let subscriber = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(subscriber, || {
-            let _ = docker_available();
+        // With one live Dispatch, tracing-core initializes callsite interest from
+        // the registering thread's default. Keep a second Dispatch alive so a
+        // subscriber-free sibling cannot cache Interest::never for our capture.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let captures = [true, false].map(|subscriber_first| {
+            if !subscriber_first {
+                warm_probe_without_subscriber();
+            }
+            let events = Arc::new(Mutex::new(Vec::<CapturedEvent>::new()));
+            let subscriber =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(CaptureLayer {
+                    events: Arc::clone(&events),
+                }));
+            if subscriber_first {
+                warm_probe_without_subscriber();
+            }
+            tracing::dispatcher::with_default(&subscriber, || {
+                let _ = docker_available();
+            });
+            let captured = events.lock().unwrap().clone();
+            (subscriber_first, captured)
         });
 
         match previous_bin {
@@ -968,22 +993,25 @@ esac
             None => std::env::remove_var("GWT_DOCKER_BIN"),
         }
 
-        let captured = events.lock().unwrap().clone();
-        let info_events: Vec<_> = captured
-            .iter()
-            .filter(|event| event.level == Level::INFO && event.target == "gwt::launch::probe")
-            .collect();
-        assert!(
-            !info_events.is_empty(),
-            "expected at least one INFO event with target gwt::launch::probe; captured = {:?}",
-            captured
-        );
-        let event = info_events[0];
-        assert_eq!(
-            event.fields.get("label").map(String::as_str),
-            Some("docker CLI")
-        );
-        assert!(event.fields.contains_key("attempted_binary"));
+        for (subscriber_first, captured) in captures {
+            let info_events: Vec<_> = captured
+                .iter()
+                .filter(|event| event.level == Level::INFO && event.target == "gwt::launch::probe")
+                .collect();
+            assert!(
+                !info_events.is_empty(),
+                "expected INFO probe event (subscriber_first={subscriber_first}); captured = {captured:?}"
+            );
+            let event = info_events[0];
+            assert_eq!(
+                event.fields.get("label").map(String::as_str),
+                Some("docker CLI")
+            );
+            assert_eq!(
+                event.fields.get("attempted_binary").map(String::as_str),
+                Some("/this-binary-does-not-exist-gwt-test")
+            );
+        }
     }
 
     fn docker_test_lock() -> &'static std::sync::Mutex<()> {
