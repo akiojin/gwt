@@ -60,6 +60,11 @@ fn persist_stall(event: &str, elapsed: Duration, started_at: DateTime<Utc>) {
         .with_cpu()
         .without_tasks();
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
+    // Windows creates a cold counter on the first refresh and cannot update it
+    // until the minimum interval elapses. Establish its baseline before timing
+    // the sample; otherwise CPU is averaged from zero (since system boot).
+    thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
     let sample_started = Instant::now();
     thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
@@ -295,7 +300,12 @@ mod tests {
             if !records.is_empty() || Instant::now() >= deadline {
                 break records;
             }
-            thread::sleep(Duration::from_millis(100));
+            // Keep a core busy throughout sampling so a cold Windows CPU
+            // counter (averaged since boot) cannot masquerade as this interval.
+            let busy_until = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < busy_until {
+                std::hint::spin_loop();
+            }
         };
         // The ledger row must exist before the GUI handler returns.
         assert_eq!(records.len(), 1, "missing live dispatch stall record");
@@ -307,10 +317,10 @@ mod tests {
         assert_eq!(row.context["version"], env!("CARGO_PKG_VERSION"));
         assert!(row.context["elapsed_ms"].parse::<u64>().unwrap() >= 6000);
         assert!(row.context["rss_bytes"].parse::<u64>().unwrap() > 0);
-        assert!(row.context["cpu_percent"]
-            .parse::<f32>()
-            .unwrap()
-            .is_finite());
+        let cpu_percent = row.context["cpu_percent"].parse::<f32>().unwrap();
+        assert!(cpu_percent.is_finite());
+        #[cfg(windows)]
+        assert!(cpu_percent > 1.0, "busy interval reported {cpu_percent}%");
         assert!(row.context["cpu_sample_ms"].parse::<u64>().unwrap() > 0);
         for key in ["started_at", "detected_at", "resources_sampled_at"] {
             chrono::DateTime::parse_from_rfc3339(&row.context[key]).unwrap();
