@@ -4443,7 +4443,9 @@ impl Drop for HeldWorkspaceWorkItemsLocks {
     }
 }
 
-pub(crate) fn with_workspace_current_and_work_items_lock<T>(
+/// Run an authority operation under the Workspace assignment and WorkItems
+/// locks, recovering any pending Workspace transaction first.
+pub fn with_workspace_current_and_work_items_lock<T>(
     current_path: &Path,
     work_items_path: &Path,
     operation: impl FnOnce() -> Result<T>,
