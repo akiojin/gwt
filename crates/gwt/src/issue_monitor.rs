@@ -310,6 +310,8 @@ pub enum IssueMonitorEffectPayload {
         #[serde(default)]
         owner: String,
     },
+    /// Retire the queue label only after an executor confirms GitHub Closed.
+    RemoveQueueLabel { issue_number: u64 },
     ArmAutoMerge {
         issue_number: u64,
         pr_number: u64,
@@ -645,6 +647,7 @@ fn revoke_uncommitted_effects_for_closed_issue(
                 );
             }
             IssueMonitorEffectPayload::ReleaseClaim { .. }
+            | IssueMonitorEffectPayload::RemoveQueueLabel { .. }
             | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
             | IssueMonitorEffectPayload::SettleMergedIssue { .. } => {}
@@ -818,6 +821,7 @@ fn advance_effect_authority(
                 )
             }
             IssueMonitorEffectPayload::ReleaseClaim { .. }
+            | IssueMonitorEffectPayload::RemoveQueueLabel { .. }
             | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
             | IssueMonitorEffectPayload::SettleMergedIssue { .. } => continue,
@@ -7671,6 +7675,7 @@ impl IssueMonitorState {
             .iter()
             .copied()
             .chain(self.queue.iter().copied())
+            .chain(self.stored_local_terminal_queue_numbers())
             .chain(self.inbox.iter().map(|item| item.issue.number))
             .chain(self.failed_issues.keys().copied())
             .chain(self.autonomous_records.keys().copied())
@@ -7701,6 +7706,7 @@ impl IssueMonitorState {
                             Some(*issue_number)
                         }
                         IssueMonitorEffectPayload::ReleaseClaim { .. }
+                        | IssueMonitorEffectPayload::RemoveQueueLabel { .. }
                         | IssueMonitorEffectPayload::DisarmAutoMerge { .. } => None,
                     }),
             )
@@ -7723,6 +7729,33 @@ impl IssueMonitorState {
     }
 
     fn clear_closed_issue_current_state(&mut self, issue_number: u64) {
+        if self.issue_is_closed(issue_number)
+            && (self
+                .stored_local_terminal_queue_numbers()
+                .any(|number| number == issue_number)
+                || self.queue.contains(&issue_number)
+                || self.active_launches.contains(&issue_number)
+                || (!self.closure_held.contains(&issue_number)
+                    && self
+                        .inbox
+                        .iter()
+                        .any(|item| item.issue.number == issue_number)))
+            && !self.pending_effects.iter().any(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::RemoveQueueLabel { issue_number: pending_issue }
+                        if pending_issue == issue_number
+                )
+            })
+        {
+            let generation = self.closure_records[&issue_number].generation;
+            self.pending_effects
+                .push(PendingIssueMonitorEffect::prepared(
+                    format!("remove-queue-label:{issue_number}:{generation}"),
+                    self.effect_authority_epoch,
+                    IssueMonitorEffectPayload::RemoveQueueLabel { issue_number },
+                ));
+        }
         let removed_banner = self
             .failed_issues
             .get(&issue_number)
@@ -14849,6 +14882,14 @@ impl IssueMonitorState {
         self.apply_priority_order_to_inbox();
     }
 
+    /// Stored membership, including entries hidden by admission/display filters.
+    fn stored_local_terminal_queue_numbers(&self) -> impl Iterator<Item = u64> + '_ {
+        self.terminal_queues
+            .get(&crate::process::current_hostname())
+            .into_iter()
+            .flat_map(|queue| queue.entries.iter().map(|entry| entry.number))
+    }
+
     /// Ordered membership used by every local launch admission path.
     pub fn local_terminal_queue_numbers(&self) -> Vec<u64> {
         self.urgent_queue_projection(&crate::process::current_hostname())
@@ -14900,8 +14941,7 @@ impl IssueMonitorState {
 
     fn retire_completed_terminal_queue(&mut self) {
         let retired = self
-            .local_terminal_queue_numbers()
-            .into_iter()
+            .stored_local_terminal_queue_numbers()
             .filter(|number| {
                 self.issue_is_closed(*number)
                     || self.completion_records.get(number).is_some_and(|record| {
@@ -17224,24 +17264,35 @@ impl IssueMonitorState {
         }
     }
 
+    /// Retire a confirmed GitHub close through the same revision fence as scans.
+    pub fn record_closed(&mut self, issue_number: u64, issue_updated_at: Option<String>) {
+        self.transition_issue_closure(
+            issue_number,
+            IssueClosureState::Closed,
+            IssueClosureEvidence::ExplicitRevision,
+            issue_updated_at,
+        );
+        self.retire_completed_terminal_queue();
+    }
+
     /// Issue #4770: `issue.reopen` reopened `issue_number` on GitHub. A scan
     /// that observed the close left a durable `Closed` record, and nothing but
     /// the next complete Live scan would ever lift it, so the operator's
     /// requeue right after the reopen was refused. Only this Issue's record is
     /// transitioned, through the same revision fence a scan observation uses:
     /// a reopen older than the recorded close changes nothing. Returns whether
-    /// the Issue is no longer held closed.
+    /// this observation lifted the close hold.
     pub fn record_reopened(&mut self, issue_number: u64, issue_updated_at: Option<String>) -> bool {
-        if !self.issue_is_closed(issue_number) {
-            return false;
-        }
+        let was_closed = self.issue_is_closed(issue_number);
+        // A newer Open can arrive before the close control it supersedes.
+        // Retain its revision even when no Closed record has arrived yet.
         self.transition_issue_closure(
             issue_number,
             IssueClosureState::Reopened,
             IssueClosureEvidence::ExplicitRevision,
             issue_updated_at,
         );
-        !self.issue_is_closed(issue_number)
+        was_closed && !self.issue_is_closed(issue_number)
     }
 
     /// Issue #4770: the Issue was reopened after a scan observed its close and
@@ -17294,6 +17345,7 @@ impl IssueMonitorState {
         );
         self.closure_reopen_tombstones.remove(&issue_number);
         self.clear_closed_issue_current_state(issue_number);
+        self.retire_completed_terminal_queue();
     }
 
     /// issue → work branch for every currently active (launched) Issue. Uses
@@ -30786,6 +30838,80 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_close_retires_label_excluded_terminal_membership() {
+        let mut monitor = label_allowlist_monitor(&["Server"]);
+        monitor.terminal_queue_push(&[7], "operator", "2026-09-01T00:00:00Z");
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-09-01T00:00:00Z");
+        assert!(monitor.label_excluded_issues.contains(&7));
+        assert!(monitor
+            .prefs()
+            .terminal_queues
+            .values()
+            .any(|queue| { queue.entries.iter().any(|entry| entry.number == 7) }));
+        monitor.record_closed(7, Some("2026-09-01T00:01:00Z".to_string()));
+        assert!(
+            monitor
+                .prefs()
+                .terminal_queues
+                .values()
+                .all(|queue| { queue.entries.iter().all(|entry| entry.number != 7) }),
+            "close must retire stored membership even when the display filters it"
+        );
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            effect.payload,
+            IssueMonitorEffectPayload::RemoveQueueLabel { issue_number: 7 }
+        )));
+    }
+
+    #[test]
+    fn complete_live_absence_prepares_one_durable_queue_label_cleanup() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut monitor = label_allowlist_monitor(&["Server"]);
+        monitor.terminal_queue_push(&[7], "operator", "2026-09-01T00:00:00Z");
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-09-01T00:00:00Z");
+        assert!(monitor.label_excluded_issues.contains(&7));
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[],
+            IssueMonitorCandidateSource::Live,
+            repo.path(),
+            "2026-09-01T00:01:00Z",
+        );
+        let cleanup = monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                serde_json::to_value(&effect.payload).unwrap()["kind"] == "remove_queue_label"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cleanup.len(),
+            1,
+            "closure must durably propose label cleanup"
+        );
+        assert_eq!(
+            serde_json::to_value(&cleanup[0].payload).unwrap()["issue_number"],
+            7
+        );
+        assert!(monitor.local_terminal_queue_numbers().is_empty());
+        assert!(monitor.inbox_item(7).is_none());
+        let mut restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut restarted,
+            &[],
+            IssueMonitorCandidateSource::Live,
+            repo.path(),
+            "2026-09-01T00:02:00Z",
+        );
+        assert_eq!(
+            restarted.pending_effects().len(),
+            1,
+            "repeated observation must not duplicate cleanup"
+        );
+    }
+
+    #[test]
     fn complete_live_absence_closes_an_orphan_auto_merge_grant() {
         let repo = tempfile::tempdir().expect("tempdir");
         let attempting = pending_arm_effect(
@@ -38197,6 +38323,14 @@ mod tests {
         assert!(
             monitor.inbox_item(42).is_none(),
             "AC-1: a close settlement releases the Issue"
+        );
+        assert!(
+            monitor
+                .prefs()
+                .terminal_queues
+                .values()
+                .all(|queue| { queue.entries.iter().all(|entry| entry.number != 42) }),
+            "AC-1: confirmed close retires stored membership before another scan"
         );
         assert_eq!(
             monitor
