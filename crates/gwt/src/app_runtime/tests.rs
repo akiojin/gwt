@@ -2724,7 +2724,7 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
     init_repo_with_initial_commit(&repo);
-    let repo = fs::canonicalize(repo).expect("canonical repo");
+    let repo = dunce::canonicalize(repo).expect("canonical repo");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.blocking_tasks = BlockingTaskSpawner::queued().0;

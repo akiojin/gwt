@@ -179,7 +179,6 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
                     "pane_lock_failed",
                     vec!["lock_wait_us", "outcome", "stage", "window_id"],
                 ),
-                ("registry_lock_poisoned", vec!["stage", "window_id"]),
                 (
                     "registry_replacement_barrier_spawn_failed",
                     vec!["outcome", "stage", "window_id"],
