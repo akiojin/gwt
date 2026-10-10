@@ -3563,6 +3563,10 @@ fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
 fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
+    // Rebase assertions depend on a successful commit, not CI fsync latency.
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
     let prefs_path = temp.path().join("issue-monitor.json");
     let stale_record = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Implementing, 1);
     let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
