@@ -33,6 +33,8 @@ pub enum ErrorKind {
     /// Issue #4666: sustained verification contention, for PM observation
     /// only. This does not interrupt the holder or fail its verification.
     VerificationCongestion,
+    /// A GUI dispatch is still active beyond the long-stall threshold.
+    GuiEventLoopStall,
 }
 
 /// Optional locators so a ledger row can be triaged back to a launch.

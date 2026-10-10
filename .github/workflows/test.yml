@@ -624,6 +624,10 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
         timeout-minutes: 15
+      - name: Run GUI dispatch stall diagnostic regressions
+        run: |
+          node scripts/ci-windows-tests.mjs run gwt bin gwt dispatch_watchdog::tests:: -- --test-threads=1
+        timeout-minutes: 15
       - name: Run priority roundtrip from Normal and BelowNormal launchers
         run: node scripts/ci-windows-tests.mjs run gwt-core test process_priority_roundtrip -- --nocapture
         timeout-minutes: 15

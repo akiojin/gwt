@@ -10641,6 +10641,7 @@ fn main() -> std::io::Result<()> {
     let transient_dispatch_clients = clients.clone();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
+        let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
         let event = match event {
             Event::UserEvent(UserEvent::DrainAppEvents) => {
                 let Some(event) = proxy.take_next() else { return; };
@@ -10649,7 +10650,7 @@ fn main() -> std::io::Result<()> {
             event => event,
         };
         let mut dispatch_timer = EventLoopDispatchTimer::start(&event);
-        let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
+        watchdog_guard.set_event(dispatch_timer.label.as_str());
         let event = match event {
             Event::UserEvent(UserEvent::TransientBrowserEnded { generation }) => {
                 let (current, connected) = transient_dispatch_clients.browser_session_state();
@@ -10926,6 +10927,7 @@ fn main() -> std::io::Result<()> {
                 // handler that freezes the GUI is diagnosable, and inter-event
                 // timestamps reveal CPU starvation by background indexers.
                 let dispatch_kind = frontend_event_kind_label(&event);
+                watchdog_guard.set_event(dispatch_kind.as_str());
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event_in_scope(client_id, event, &scope);
                 let completed_at = std::time::Instant::now();
