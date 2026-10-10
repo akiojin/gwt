@@ -4858,6 +4858,7 @@ where
                     "missing"
                 }
                 .to_string(),
+                artifacts: Vec::new(),
             })
         });
         if headed_e2e
