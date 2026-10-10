@@ -9,7 +9,7 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -32,6 +32,7 @@ pub struct FakeIssueClient {
     next_comment_id: Arc<AtomicU64>,
     next_owner_comment_id: Arc<AtomicU64>,
     clock: Arc<AtomicU64>,
+    rfc3339_timestamps: Arc<AtomicBool>,
     /// Failure-injection countdown for `create_comment`: `-1` disables the
     /// knob; `n >= 0` allows `n` more successful creates, then fails.
     fail_create_comment_after: Arc<std::sync::atomic::AtomicI64>,
@@ -132,10 +133,16 @@ impl FakeIssueClient {
             next_comment_id: Arc::new(AtomicU64::new(1)),
             next_owner_comment_id: Arc::new(AtomicU64::new(1)),
             clock: Arc::new(AtomicU64::new(1)),
+            rfc3339_timestamps: Arc::new(AtomicBool::new(false)),
             fail_create_comment_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             corrupt_next_create_comment: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fail_next_issue_patch: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Opt into comparable revisions from a fixed logical epoch, without wall time.
+    pub fn use_rfc3339_timestamps(&self) {
+        self.rfc3339_timestamps.store(true, Ordering::SeqCst);
     }
 
     /// Failure injection: the next `patch_body` / `patch_title` /
@@ -434,6 +441,14 @@ impl FakeIssueClient {
 
     fn tick(&self) -> UpdatedAt {
         let next = self.clock.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.rfc3339_timestamps.load(Ordering::SeqCst) {
+            let epoch = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+                .expect("fixed logical epoch");
+            return UpdatedAt(
+                (epoch + chrono::Duration::seconds(next as i64))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
+        }
         UpdatedAt(format!("t{next}"))
     }
 

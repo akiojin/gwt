@@ -1420,6 +1420,7 @@ pub(crate) struct ProjectRuntimeState {
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
     pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    pub(crate) pm_agent_idle_wakes: pm::AgentIdleWakes,
     /// Issue #3702: one coalesced wake waiting for the PM composer to submit
     /// or clear. Keyed by the live PM window id.
     pub(crate) pending_pm_wakes: HashMap<String, pm::PmWakeDecision>,
@@ -1467,6 +1468,7 @@ pub(crate) fn initial_project_states(
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
+                    pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
@@ -3972,6 +3974,7 @@ impl AppRuntime {
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
+                    pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
@@ -8610,7 +8613,9 @@ impl AppRuntime {
     /// for each enabled canonical project scope. GitHub and claim I/O stays
     /// off tao's event loop, while the in-flight set drops duplicate ticks.
     pub(crate) fn issue_monitor_scheduled_tick_events(&mut self) -> Vec<OutboundEvent> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // Keep the capture clock as precise as close/launch observations so
+        // same-second scans cannot precede a canvas they actually followed.
+        let now = chrono::Utc::now().to_rfc3339();
         self.issue_monitor_scheduled_tick_events_at(&now)
     }
 
@@ -8802,8 +8807,30 @@ impl AppRuntime {
         project_tab_id: &str,
         now: &str,
     ) -> Option<gwt::IssueMonitorWindowSnapshot> {
+        self.issue_monitor_window_snapshot_with_session_metadata(
+            project_tab_id,
+            now,
+            |session_id| {
+                (
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number),
+                    gwt::cli::execution_state::session_launch_route(Some(session_id))
+                        == Some(gwt_agent::LaunchRoute::Autonomous),
+                )
+            },
+        )
+    }
+
+    fn issue_monitor_window_snapshot_with_session_metadata(
+        &self,
+        project_tab_id: &str,
+        now: &str,
+        session_metadata: impl Fn(&str) -> (Option<u64>, bool),
+    ) -> Option<gwt::IssueMonitorWindowSnapshot> {
         self.tab(project_tab_id)?;
         let tab_ids = self.issue_monitor_project_tab_ids(project_tab_id);
+        let session_metadata = &session_metadata;
         let windows =
             self.tabs
                 .iter()
@@ -8822,27 +8849,19 @@ impl AppRuntime {
                                 &window_id,
                                 &tab.project_root,
                             );
+                            let (session_issue, monitor_owned) = window
+                                .session_id
+                                .as_deref()
+                                .map(session_metadata)
+                                .unwrap_or_default();
                             let issue_number = pending
                                 .and_then(|context| context.issue_monitor_issue_number)
                                 .or(window.linked_issue_number)
-                                .or_else(|| {
-                                    let session_id = window.session_id.as_deref()?;
-                                    self.launch_wizard_cache
-                                        .session_by_id(session_id)
-                                        .and_then(|session| session.linked_issue_number)
-                                });
+                                .or(session_issue);
                             gwt::IssueMonitorWindowObservation {
-                                // Use the canonical route resolver: it also recognizes
-                                // legacy Monitor launches stamped Manual (Issue #4510).
                                 monitor_owned: pending.is_some_and(|context| {
                                     context.issue_monitor_issue_number.is_some()
-                                }) || window.session_id.as_deref().is_some_and(
-                                    |session_id| {
-                                        gwt::cli::execution_state::session_launch_route(Some(
-                                            session_id,
-                                        )) == Some(gwt_agent::LaunchRoute::Autonomous)
-                                    },
-                                ),
+                                }) || monitor_owned,
                                 review_dispatch: pending
                                     .is_some_and(|context| context.issue_monitor_review_dispatch)
                                     || self
@@ -9018,7 +9037,7 @@ impl AppRuntime {
                 return reply(false, Some("monitor_state_unavailable"));
             }
         }
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = chrono::Utc::now().to_rfc3339();
         // Issue #4084: an on-demand scan classifies idle windows too, so the
         // PM's `scan_now` frees a slot the same way the periodic tick does.
         let window_snapshot =
@@ -10979,6 +10998,7 @@ impl AppRuntime {
             FrontendEvent::SetPmAutoStart { enabled } => {
                 self.set_pm_auto_start_events(context, enabled)
             }
+            FrontendEvent::SetPmPaused { paused } => self.set_pm_paused_events(context, paused),
             FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
                 self.set_pm_loop_interval_events(context, loop_interval_secs)
             }
@@ -13443,10 +13463,12 @@ impl AppRuntime {
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
         }
+        self.observe_pm_agent_idle_transition(window_id, composed);
         Some(composed)
     }
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
+        self.forget_pm_agent_idle_window(window_id);
         self.invalidate_launch_delivery_ack(window_id);
         self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);

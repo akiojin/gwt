@@ -12590,7 +12590,9 @@ pub fn session_launch_route(session_id: Option<&str>) -> Option<gwt_agent::Launc
     Some(session_launch_route_from_session(&session))
 }
 
-fn session_launch_route_from_session(session: &gwt_agent::Session) -> gwt_agent::LaunchRoute {
+/// Resolve a previously loaded Session without reading durable state.
+#[must_use]
+pub fn session_launch_route_from_session(session: &gwt_agent::Session) -> gwt_agent::LaunchRoute {
     if session.launch_route != gwt_agent::LaunchRoute::Autonomous
         && launched_by_issue_monitor(session)
     {

@@ -6728,6 +6728,11 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-state-idle);
 }
 
+/* Issue 3812: pausing coordination does not change the PM pane's residency. */
+.op-rail__item--pm[data-pm-paused="true"] .op-rail__pm-dot {
+  background: var(--color-state-idle);
+}
+
 /* Canvas launcher (FR-018). Bottom-LEFT: .fleet-minimap owns bottom-right. */
 .canvas-pm-launcher {
   position: absolute;

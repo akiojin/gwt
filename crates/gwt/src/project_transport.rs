@@ -1425,15 +1425,35 @@ async fn workspace_update_handler(
             "workspace_update_requires_active_execution_authority",
         );
     };
+    let operation_id = match headers.get(crate::workspace_update_receipt::OPERATION_HEADER) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .filter(|id| crate::workspace_update_receipt::validate_operation_id(id).is_ok())
+        {
+            Some(id) => Some(id.to_string()),
+            None => {
+                return workspace_update_error_response(
+                    StatusCode::BAD_REQUEST,
+                    AgentWorkspaceUpdateError::new(
+                        AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                        "invalid workspace operation_id",
+                    ),
+                )
+            }
+        },
+        None => None,
+    };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
     let mutation_project_root = project_root.clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::apply_bound_authenticated_workspace_update(
+        crate::apply_bound_authenticated_workspace_update_with_operation_id(
             &mutation_project_root,
             &session_id,
             &execution_binding,
             request,
+            operation_id.as_deref(),
         )
     })
     .await;

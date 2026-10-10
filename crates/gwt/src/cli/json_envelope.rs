@@ -449,6 +449,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?))
         }
         "workspace.update" => workspace_update(params)?,
+        "workspace.receipt" => CliCommand::Workspace(WorkspaceCommand::Receipt {
+            operation_id: required_string(params, "operation_id")?,
+        }),
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
@@ -1443,6 +1446,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
+        }),
+        "pm.pause" | "pm.resume" => CliCommand::Pm(crate::cli::pm::PmCommand::SetPaused {
+            project_root: optional_string(params, "project_root")?,
+            paused: envelope.operation == "pm.pause",
         }),
         "pm.stop" | "pm.deregister" => CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
             project_root: optional_string(params, "project_root")?,
@@ -5572,6 +5579,93 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn pm_pause_and_resume_are_mutating_json_operations() {
+        for operation in ["pm.pause", "pm.resume"] {
+            assert!(matches!(ok(operation, json!({})), CliCommand::Pm(_)));
+            assert!(matches!(
+                ok(operation, json!({"project_root": "/tmp/project"})),
+                CliCommand::Pm(_)
+            ));
+            assert!(
+                !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(operation)
+            );
+        }
+    }
+
+    #[test]
+    fn pm_pause_resume_preserve_registration_and_rearm_only_on_transition() {
+        use crate::pm_registry;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let original: pm_registry::PmPrefs = serde_json::from_value(json!({
+            "settings": {"auto_start": true},
+            "registration": {"session_id":"resident", "agent_id":"codex", "worktree_path":repo}
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&path, &original).unwrap();
+        let loop_path = pm_registry::pm_loop_state_path_for_repo_path(&repo);
+        let clock = pm_registry::PmLoopState {
+            last_wake_at: Some("2026-10-10T00:00:00Z".into()),
+            last_user_prompt_at: Some("2026-10-10T00:01:00Z".into()),
+            ..Default::default()
+        };
+        pm_registry::save_pm_loop_state(&loop_path, &clock).unwrap();
+        for operation in ["pm.pause", "pm.pause", "pm.resume", "pm.resume", "pm.pause"] {
+            let (_, out) = crate::cli::run_collect(&mut env, ok(operation, json!({}))).unwrap();
+            let report: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(report["paused"], operation == "pm.pause");
+            assert_eq!(report["registered"], true);
+            assert_eq!(report["auto_start"], true);
+            assert_eq!(
+                pm_registry::load_pm_prefs(&path).unwrap().registration,
+                original.registration
+            );
+            if operation == "pm.resume" {
+                assert!(pm_registry::load_pm_loop_state(&loop_path)
+                    .unwrap()
+                    .last_wake_at
+                    .is_none());
+                assert_eq!(
+                    pm_registry::load_pm_loop_state(&loop_path)
+                        .unwrap()
+                        .last_user_prompt_at,
+                    clock.last_user_prompt_at,
+                    "Resume must preserve the active user conversation gate"
+                );
+            }
+        }
+        crate::cli::run_collect(&mut env, ok("pm.resume", json!({}))).unwrap();
+        pm_registry::save_pm_loop_state(&loop_path, &clock).unwrap();
+        crate::cli::run_collect(&mut env, ok("pm.resume", json!({}))).unwrap();
+        assert_eq!(
+            pm_registry::load_pm_loop_state(&loop_path).unwrap(),
+            clock,
+            "repeated Resume must not re-arm an already active loop"
+        );
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "unrelated-agent");
+        assert!(
+            crate::cli::run_collect(&mut env, ok("pm.pause", json!({}))).is_err(),
+            "an unrelated Agent must not control the PM"
+        );
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        let (_, out) = crate::cli::run_collect(&mut env, ok("pm.pause", json!({}))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["paused"],
+            true,
+            "the registered PM remains authorized"
+        );
     }
 
     // Issue #4249 FR-003: the PM self-description is a read-only diagnostic.

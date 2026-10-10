@@ -887,9 +887,6 @@ fn derive_and_register_plan_for_caller(
             None => crate::cli::verify_derivation::derive_excluding(worktree, &generated_outputs),
         }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-        if let Some(reason) = derived.unsupported_reason() {
-            return Err(io::Error::new(ErrorKind::InvalidData, reason));
-        }
         validate_quarantine_requests(&quarantines, &derived.commands)?;
         let fingerprint_after =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
@@ -7334,12 +7331,19 @@ pub(crate) mod tests {
         assert_eq!(loaded.surfaces, derived.surfaces);
         assert!(plan_integrity_ok(&loaded));
 
-        // Issue #4968: unknown source cannot pass through the fallback matrix.
-        // Declared generated outputs above must remain exempt from this gate.
-        let script = dir.path().join("scripts/no-tests.mjs");
-        fs::create_dir_all(script.parent().unwrap()).unwrap();
-        fs::write(script, "export {};\n").unwrap();
-        let error = derive_and_register_plan_for_caller(
+        // #5197: unknown sources register a conservative fallback; generated
+        // outputs remain excluded. Both reported extensions are in the change.
+        let unknown_paths = [
+            "scripts/pull-render-baseline.json",
+            "scripts/verify-fallback.spec.cjs",
+            "scripts/no-tests.mjs",
+        ];
+        for path in unknown_paths {
+            let source = dir.path().join(path);
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::write(&source, "").unwrap();
+        }
+        let (derived, fallback) = derive_and_register_plan_for_caller(
             dir.path(),
             "sess-cov",
             vec!["artifacts/report.json".to_string()],
@@ -7347,16 +7351,19 @@ pub(crate) mod tests {
             &authority,
             None,
         )
-        .expect_err("unsupported source must refuse automatic registration");
-        assert!(
-            error.contains("unsupported(scripts/no-tests.mjs)"),
-            "{error}"
-        );
-        assert!(error.contains("params.commands"), "{error}");
-        assert_eq!(
-            load_plan(dir.path()).unwrap().unwrap().content_hash,
-            plan.content_hash
-        );
+        .expect("unknown source must register a workspace fallback");
+        for path in unknown_paths {
+            assert!(derived
+                .surfaces
+                .contains(&format!("fallback(workspace:{path})")));
+        }
+        assert!(!derived
+            .surfaces
+            .iter()
+            .any(|s| s.contains("artifacts/report.json")));
+        assert!(fallback.commands.iter().any(|c| c.contains("--workspace")));
+        assert!(plan_integrity_ok(&fallback));
+        assert_eq!(load_plan(dir.path()).unwrap().unwrap(), fallback);
 
         let commands = vec!["git --version".to_string()];
         register_plan_for_caller(
@@ -7451,7 +7458,10 @@ pub(crate) mod tests {
                 .iter()
                 .any(|s| s.starts_with("ci-delegated(")));
             assert!(plan.commands.contains(&acceptance[0]));
-            assert!(derived.unsupported_reason().is_none(), "{derived:?}");
+            assert!(
+                !derived.surfaces.iter().any(|s| s.starts_with("fallback(")),
+                "{derived:?}"
+            );
             assert!(plan_integrity_ok(&plan));
             assert_eq!(load_plan(worktree).unwrap().unwrap(), plan);
         });
