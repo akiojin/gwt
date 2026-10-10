@@ -14,6 +14,79 @@ fn empty(availability: PmConversationAvailability, detail: &str) -> PmConversati
 }
 
 impl AppRuntime {
+    pub(super) fn load_pm_reports_events(
+        &self,
+        context: &ProjectContext,
+        client_id: ClientId,
+        window_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(session_id) = self.pm_chat_session_id(window_id).map(str::to_owned) else {
+            return vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::PmReports {
+                    id: window_id.to_owned(),
+                    session_id: None,
+                    reports: Vec::new(),
+                    error: Some("This window has no registered PM.".to_owned()),
+                },
+            )];
+        };
+        let Some(address) = self.window_lookup.get(window_id) else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return Vec::new();
+        };
+        let project_root = tab.project_root.clone();
+        let window_id = window_id.to_owned();
+        let proxy = self.proxy.for_project(context.clone());
+        self.blocking_tasks.spawn(move || {
+            let (reports, error) = match gwt_core::pm_report::load_reports(&project_root) {
+                Ok(reports) => (
+                    reports
+                        .into_iter()
+                        .map(gwt::protocol::PmReportView::from)
+                        .collect(),
+                    None,
+                ),
+                Err(error) => (
+                    Vec::new(),
+                    Some(format!("PM reports could not be loaded: {error}")),
+                ),
+            };
+            proxy.send(UserEvent::PmReportsLoaded {
+                client_id,
+                window_id,
+                session_id,
+                reports,
+                error,
+            });
+        });
+        Vec::new()
+    }
+
+    pub(crate) fn pm_reports_loaded_events(
+        &self,
+        client_id: ClientId,
+        window_id: &str,
+        session_id: &str,
+        reports: Vec<gwt::protocol::PmReportView>,
+        error: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        if self.pm_chat_session_id(window_id) != Some(session_id) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::PmReports {
+                id: window_id.to_owned(),
+                session_id: Some(session_id.to_owned()),
+                reports,
+                error,
+            },
+        )]
+    }
+
     fn pm_chat_session_id(&self, window_id: &str) -> Option<&str> {
         let address = self.window_lookup.get(window_id)?;
         let tab = self.tab(&address.tab_id)?;

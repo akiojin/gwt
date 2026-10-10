@@ -167,6 +167,17 @@ impl ErrorRecord {
 /// Append `record` to today's ledger file. Fail-open callers should use
 /// [`record_fail_open`].
 pub fn record(record: ErrorRecord) -> io::Result<ErrorRecord> {
+    record_inner(record, false)
+}
+
+/// Append only if no ledger row already has the caller-supplied ID.
+/// The check and append share a filesystem lock across dates and processes.
+/// Returns the supplied record even when a duplicate prevents appending it.
+pub fn record_once(record: ErrorRecord) -> io::Result<ErrorRecord> {
+    record_inner(record, true)
+}
+
+fn record_inner(record: ErrorRecord, once: bool) -> io::Result<ErrorRecord> {
     if record.scope == ErrorScope::Project && !has_project_root(&record.target) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -177,7 +188,7 @@ pub fn record(record: ErrorRecord) -> io::Result<ErrorRecord> {
     if crate::test_support::gwt_home_override().is_none() {
         return Ok(record);
     }
-    append_record(&record)?;
+    append_record(&record, once)?;
     Ok(record)
 }
 
@@ -195,6 +206,13 @@ pub fn list_since(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord>> 
     if crate::test_support::gwt_home_override().is_none() {
         return Ok(Vec::new());
     }
+    let lock = match open_ledger_lock() {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    // Do not diagnose a partially written row while an appender holds the ledger.
+    fs2::FileExt::lock_shared(&lock)?;
     read_ledger_files(since)
 }
 
@@ -204,6 +222,15 @@ fn ledger_dir() -> PathBuf {
 
 fn ledger_path_for_date(date: NaiveDate) -> PathBuf {
     ledger_dir().join(format!("{LEDGER_FILE_PREFIX}.{date}.jsonl"))
+}
+
+fn open_ledger_lock() -> io::Result<fs::File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(ledger_dir().join("errors.lock"))
 }
 
 /// Strip terminal escapes, redact credentials, and bound the length of a
@@ -270,21 +297,29 @@ fn redact_secrets(message: &str) -> String {
     redacted
 }
 
-fn append_record(record: &ErrorRecord) -> io::Result<()> {
+fn append_record(record: &ErrorRecord, once: bool) -> io::Result<()> {
     let dir = ledger_dir();
     fs::create_dir_all(&dir)?;
+    let lock = open_ledger_lock()?;
+    // A timed-out operation still needs to append its failure. Only waiting
+    // for another writer should consume/refuse the caller's deadline.
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .or_else(|_| crate::operation_deadline::lock_exclusive(&lock))?;
+    if once
+        && read_ledger_files(None)?
+            .iter()
+            .any(|row| row.id == record.id)
+    {
+        return Ok(());
+    }
     let path = ledger_path_for_date(record.recorded_at.date_naive());
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true) // Windows file locking requires read access with append mode.
-        .append(true)
-        .open(path)?;
-    fs2::FileExt::lock_exclusive(&file)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, record).map_err(json_io_error)?;
     file.write_all(b"\n")?;
     Ok(())
 }
 
+// Callers hold the ledger lock: shared for listing, exclusive for record_once.
 fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord>> {
     let dir = ledger_dir();
     let mut paths = match fs::read_dir(&dir) {
@@ -307,8 +342,6 @@ fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord
     let mut records = Vec::new();
     for path in paths {
         let file = fs::File::open(&path)?;
-        // Do not diagnose a partially written row while an appender holds the file.
-        fs2::FileExt::lock_shared(&file)?;
         for (index, line) in BufReader::new(file).split(b'\n').enumerate() {
             let line = line?;
             if line.iter().all(u8::is_ascii_whitespace) {
@@ -412,6 +445,53 @@ mod tests {
         assert_eq!(listed[0].target.session_id.as_deref(), Some("sess-1"));
         assert_eq!(listed[0].target.project_root.as_deref(), Some("/tmp/repo"));
         assert_eq!(listed[0].schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn expired_operation_still_records_diagnostics_without_lock_contention() {
+        let (_dir, _home) = isolated_home();
+        let _deadline =
+            crate::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+        record(sample(ErrorKind::CacheRefreshFailure, "refresh timed out"))
+            .expect("an expired operation can still append its failure");
+        record_once(sample(ErrorKind::DaemonFault, "unconfirmed shrink"))
+            .expect("an expired readback can still record its diagnostic");
+        assert_eq!(list_since(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn record_once_deduplicates_concurrent_writers_across_dates() {
+        let (dir, _home) = isolated_home();
+        let home = dir.path().join("gwt-home");
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let writers = (1..=2)
+                .map(|day| {
+                    let home = &home;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let _home = ScopedGwtHome::set(home);
+                        let mut row = sample(ErrorKind::DaemonFault, "inbox population shrank");
+                        row.id = "shrink-event".to_string();
+                        row.recorded_at = Utc.with_ymd_and_hms(2026, 8, day, 0, 0, 0).unwrap();
+                        barrier.wait();
+                        record_once(row).expect("record once")
+                    })
+                })
+                .collect::<Vec<_>>();
+            for writer in writers {
+                writer.join().expect("writer did not panic");
+            }
+        });
+
+        let rows = list_since(None).expect("list");
+        assert_eq!(rows.len(), 1, "the same ID is recorded only once");
+        assert_eq!(rows[0].id, "shrink-event");
+        record(rows[0].clone()).expect("ordinary append with the same ID");
+        assert_eq!(
+            list_since(None).expect("list after ordinary append").len(),
+            2
+        );
     }
 
     #[test]

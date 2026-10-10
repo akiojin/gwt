@@ -13,6 +13,7 @@ use crate::autonomous_handoff::{
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use gwt_github::{
     client::OwnerMutationResult,
@@ -20662,8 +20663,8 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     let mut previous_inbox = monitor
         .inbox
         .iter()
-        .map(|item| item.issue.number)
-        .collect::<BTreeSet<_>>();
+        .map(|item| (item.issue.number, item.issue.clone()))
+        .collect::<BTreeMap<_, _>>();
     let delabelled_observations = issues
         .iter()
         .filter(|issue| {
@@ -20741,25 +20742,83 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     if let Some(diagnosis) = drive_diagnosis {
         monitor.last_error = Some(diagnosis);
     }
-    // Admission exclusions and explicitly delabelled passive observations are
-    // expected removals; other shrink still reports lost scan data.
-    previous_inbox.retain(|number| {
-        monitor.inbox_item(*number).is_some()
-            || (!monitor.label_excluded_issues.contains(number)
-                && !delabelled_observations.contains(number))
+    if monitor.inbox.len() >= previous_inbox.len() {
+        return summary;
+    }
+    let previous_count = previous_inbox.len();
+    // Identify the observation before filtering expected removals. Proposal and
+    // commit scans (including different drivers and times) share this ID.
+    let identity = serde_json::json!([
+        issue_monitor_prefs_path_for_repo_path(project_root)
+            .display()
+            .to_string(),
+        previous_inbox.keys().collect::<Vec<_>>(),
+        monitor
+            .inbox
+            .iter()
+            .map(|item| item.issue.number)
+            .collect::<BTreeSet<_>>(),
+        previous_inbox
+            .iter()
+            .filter(|(number, _)| monitor.inbox_item(**number).is_none())
+            .map(|(number, issue)| (number, &issue.updated_at))
+            .collect::<Vec<_>>()
+    ]);
+    let event_id = format!(
+        "issue-monitor-shrink:{:x}",
+        Sha256::digest(identity.to_string())
+    );
+    // Live absence retires membership, but is not proof of GitHub Closed for
+    // fault classification. Confirm missing rows with the existing bounded
+    // readback; unreadable/Open rows remain faults rather than disappearing.
+    let mut remote = None;
+    let mut probes = 0;
+    previous_inbox.retain(|number, issue| {
+        if monitor.inbox_item(*number).is_some() {
+            return true;
+        }
+        if monitor.label_excluded_issues.contains(number)
+            || delabelled_observations.contains(number)
+            || issues.iter().any(|observed| {
+                observed.number == *number && observed.state == IssueMonitorIssueState::Closed
+            })
+        {
+            return false;
+        }
+        if source != IssueMonitorCandidateSource::Live
+            || probes >= crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT
+            || !crate::issue_monitor_worker::readback_fan_out_has_budget()
+        {
+            return true;
+        }
+        probes += 1;
+        let Some((owner, repo)) = remote
+            .get_or_insert_with(|| {
+                crate::issue_monitor_worker::github_remote_owner_and_repo(project_root).ok()
+            })
+            .as_ref()
+        else {
+            return true;
+        };
+        !crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
+            project_root,
+            owner,
+            repo,
+            issue,
+        )
+        .is_ok_and(|refreshed| refreshed.state == IssueMonitorIssueState::Closed)
     });
-    if monitor.inbox.len() < previous_inbox.len() {
-        let previous_count = previous_inbox.len();
-        let removed = previous_inbox
-            .into_iter()
-            .filter(|number| monitor.inbox_item(*number).is_none())
-            .collect::<Vec<_>>();
+    let removed = previous_inbox
+        .into_keys()
+        .filter(|number| monitor.inbox_item(*number).is_none())
+        .collect::<Vec<_>>();
+    if !removed.is_empty() {
         let message = format!(
             "issue monitor inbox population shrank: {} -> {}; removed issues: {removed:?}; source: {source:?}",
             previous_count,
             monitor.inbox.len(),
         );
-        gwt_core::error_ledger::record_fail_open(
+        let mut record = gwt_core::error_ledger::ErrorRecord::new(
             gwt_core::error_ledger::ErrorKind::DaemonFault,
             &message,
             gwt_core::error_ledger::ErrorTarget {
@@ -20767,6 +20826,10 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
                 ..Default::default()
             },
         );
+        record.id = event_id;
+        if let Err(error) = gwt_core::error_ledger::record_once(record) {
+            tracing::warn!(error = %error, "error ledger append failed");
+        }
         monitor.record_scan_error(now, &message);
         summary.errors.push(message);
     }

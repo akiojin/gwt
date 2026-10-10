@@ -724,6 +724,12 @@ export function createTerminalAttachments({
         return pointWindow?.dataset?.id || null;
       }
 
+      function eventTargetsPmReports(event) {
+        const windowId = workspaceWindowIdFromDropEvent(event);
+        return Boolean(windowId && workspaceWindowElement(windowId)
+          ?.querySelector(".pm-chat:not(.pm-chat--logs)"));
+      }
+
       function agentWindowIdFromDropEvent(event) {
         const windowId = workspaceWindowIdFromDropEvent(event);
         if (!windowId || !terminalMap.has(windowId)) {
@@ -777,7 +783,7 @@ export function createTerminalAttachments({
           }
           event.preventDefault();
           event.stopPropagation();
-          if (agentWindowIdFromDropEvent(event)) {
+          if (!eventTargetsPmReports(event) && agentWindowIdFromDropEvent(event)) {
             event.dataTransfer.dropEffect = "copy";
           } else {
             event.dataTransfer.dropEffect = "none";
@@ -794,6 +800,7 @@ export function createTerminalAttachments({
           }
           event.preventDefault();
           event.stopPropagation();
+          if (eventTargetsPmReports(event)) return;
           const windowId = agentWindowIdFromDropEvent(event);
           if (!windowId) {
             showFileDropAlert(FILE_DROP_AGENT_TARGET_MESSAGE);
