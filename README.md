@@ -1020,6 +1020,17 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
+The PM window's **Reports** view shows explicit Markdown reports with their kind,
+time, and a **Copy** button. It is read-only; use **Execution log** for terminal
+interaction. Reports survive restarts in
+`~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`, with no automatic
+expiry or count limit. Each non-empty report is limited to 64 KiB.
+
+A registered PM can publish through `pm.report.post` with `kind` (`progress`,
+`decision`, or `blocker`) and `body`; `pm.report.list` reads the saved history.
+These use the standard gwtd JSON envelope. A successful post confirms the report
+was saved and read back; failures return an explicit error.
+
 The resident PM starts in a gwt-owned runtime directory. Repository skills,
 hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are
 not loaded as PM configuration. Implementation agents keep their normal
