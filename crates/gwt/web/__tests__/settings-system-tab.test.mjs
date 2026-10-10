@@ -53,14 +53,14 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
-test("Supported Agents renders installed versions, unavailable versions, and missing agents distinctly", () => {
+test("Supported Agents renders the catalog, identifiers, versions, and install actions", () => {
   const { document } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section");
   const render = loadFunction("renderSupportedAgentsPanel");
   render(panel, [
     { id: "claude", name: "Claude Code", installed: true, installed_version: "2.1.0" },
     { id: "codex", name: "Codex", installed: true, installed_version: null },
-    { id: "grok", name: "Grok Build", installed: false, installed_version: null },
+    { id: "grok", name: "Grok Build", installed: false, installed_version: null, install_supported: true },
   ]);
   const rows = panel.querySelectorAll("[data-agent-id]");
   assert.equal(rows.length, 3);
@@ -68,10 +68,78 @@ test("Supported Agents renders installed versions, unavailable versions, and mis
   assert.match(rows[1].textContent, /Codex.*Installed.*Unknown \(version unavailable\)/);
   assert.match(rows[2].textContent, /Grok Build.*Not installed/);
   assert.doesNotMatch(rows[2].textContent, /Unknown/);
-  assert.equal(panel.querySelectorAll("th[scope='col']").length, 3);
+  assert.match(rows[0].textContent, /\(claude\)/);
+  assert.equal(rows[2].querySelector("button")?.getAttribute("aria-label"), "Install Grok Build");
+  assert.equal(panel.querySelectorAll("th[scope='col']").length, 5);
   render(panel, null);
   assert.match(panel.textContent, /Loading agent detection/);
   assert.equal(panel.querySelectorAll("[data-agent-id]").length, 0);
+});
+
+test("Supported Agents sends maintenance requests and exposes failures and automatic update conditions", () => {
+  const { document, Event } = parseHTML("<html><body><section></section></body></html>");
+  const panel = document.querySelector("section");
+  const render = loadFunction("renderSupportedAgentsPanel");
+  const messages = [];
+  const agents = [
+    { id: "opencode", name: "OpenCode", installed: false, install_supported: true },
+    { id: "grok", name: "Grok Build", installed: true, installed_version: "1.0.0", available_version: "2.0.0", update_available: true },
+  ];
+  const options = { send: (message) => messages.push(message), autoUpdate: false };
+  render(panel, agents, options);
+  const install = panel.querySelector('[aria-label="Install OpenCode"]');
+  assert.ok(install, "a missing supported agent needs an Install action");
+  install.click();
+  panel.querySelector('[aria-label="Update Grok Build"]').click();
+  const automatic = panel.querySelector('[aria-label="Automatically update agents"]');
+  assert.equal(automatic.checked, false);
+  automatic.checked = true;
+  automatic.dispatchEvent(new Event("change"));
+  assert.deepEqual(messages, [
+    { kind: "maintain_supported_agent", agent_id: "opencode", action: "install" },
+    { kind: "maintain_supported_agent", agent_id: "grok", action: "update" },
+    { kind: "set_agent_auto_update", enabled: true },
+  ]);
+  assert.match(panel.textContent, /next.*startup/i);
+  assert.match(panel.textContent, /npm/i);
+  assert.match(panel.textContent, /agent windows/i);
+  options.maintenanceByAgent = new Map([["opencode", { pending: true, message: "Installing OpenCode…" }]]);
+  render(panel, agents, options);
+  assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, true);
+  assert.equal(panel.querySelector('[aria-label="Update Grok Build"]').disabled, true);
+  const applySnapshot = Function("supportedAgentMaintenance", "renderSupportedAgentPanels", `
+    let supportedAgents;
+    let agentAutoUpdate = false;
+    ${extractFunctionSource(settingsSource, "applySupportedAgentList")}
+    return applySupportedAgentList;
+  `)(options.maintenanceByAgent, () => render(panel, agents, options));
+  applySnapshot({ agents, auto_update: false, maintenance_pending: false });
+  assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false,
+    "an authoritative snapshot recovers a missed completion notification");
+  options.maintenanceByAgent.set("", {
+    pending: false, success: false, message: "Cannot save automatic updates. Check configuration permissions and retry.",
+  });
+  render(panel, agents, options);
+  assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, false);
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Cannot save automatic updates/);
+  const retryOptions = Function("supportedAgentMaintenance", "renderSupportedAgentPanels", "send", `
+    const agentAutoUpdate = false;
+    ${extractFunctionSource(settingsSource, "supportedAgentPanelOptions")}
+    return supportedAgentPanelOptions();
+  `)(options.maintenanceByAgent, () => render(panel, agents, options), () => {});
+  retryOptions.send({ kind: "set_agent_auto_update", enabled: true });
+  applySnapshot({ agents, auto_update: true, maintenance_pending: false });
+  assert.ok(!panel.querySelector('[role="alert"]'), "a successful retry clears the prior setting-save error");
+  options.maintenanceByAgent.set("opencode", { pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
+  render(panel, agents, options);
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Check your connection and retry/);
+  assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false);
+  agents[1].installed_version = "grok 2.0.0";
+  agents[1].update_available = false;
+  agents[1].up_to_date = true;
+  render(panel, agents, options);
+  assert.match(panel.querySelector('[data-agent-id="grok"]').textContent, /Latest/);
+  assert.equal(panel.querySelector('[aria-label="Update Grok Build"]'), null);
 });
 
 test("Supported Agents uses the shared Settings tab and refreshes from its backend snapshot", () => {
@@ -79,6 +147,19 @@ test("Supported Agents uses the shared Settings tab and refreshes from its backe
   assert.match(settingsSource, /linkSettingsPanel\(panelSupportedAgents, windowData\.id, "supported-agents"\)/);
   assert.match(settingsSource, /send\(\{\s*kind:\s*"list_supported_agents"\s*\}\)/);
   assert.match(appSource, /case "supported_agent_list":[\s\S]{0,200}applySupportedAgentList\(event\)/);
+  assert.match(appSource, /case "supported_agent_maintenance":[\s\S]{0,200}applySupportedAgentMaintenance\(event\)/);
+  assert.match(extractFunctionSource(appSource, "handleSocketOpen"), /requestSupportedAgentRefresh\(\)/);
+  const messages = [];
+  const bodies = new Set();
+  const refresh = Function("settingsWindowBodies", "purgeDetachedSettingsBodies", "send", `
+    ${extractFunctionSource(settingsSource, "requestSupportedAgentRefresh")}
+    return requestSupportedAgentRefresh;
+  `)(bodies, () => {}, message => messages.push(message));
+  refresh();
+  assert.equal(messages.length, 0, "reconnect without Settings does not probe agent metadata");
+  bodies.add({});
+  refresh();
+  assert.deepEqual(messages, [{ kind: "list_supported_agents" }]);
 });
 
 test("Supported Agents table uses Operator tokens in both themes", () => {

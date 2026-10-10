@@ -117,6 +117,8 @@ impl OutboundEvent {
                     | BackendEvent::SystemSettingsError { .. }
                     | BackendEvent::AutostartStatus { .. }
                     | BackendEvent::AutostartError { .. }
+                    | BackendEvent::SupportedAgentList { .. }
+                    | BackendEvent::SupportedAgentMaintenance { .. }
                     | BackendEvent::UpdateState(_)
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
@@ -2748,6 +2750,37 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn supported_agent_notifications_are_host_global_and_project_events_stay_scoped() {
+        use super::{DispatchTarget, OutboundEvent};
+        use crate::BackendEvent;
+        for event in [
+            BackendEvent::SupportedAgentList {
+                agents: Vec::new(),
+                auto_update: false,
+                maintenance_pending: false,
+            },
+            BackendEvent::SupportedAgentMaintenance {
+                agent_id: "codex".into(),
+                pending: false,
+                success: Some(true),
+                message: "Updated".into(),
+                before_version: None,
+                after_version: Some("1.2.3".into()),
+            },
+        ] {
+            assert!(matches!(
+                OutboundEvent::broadcast(event).target,
+                DispatchTarget::All
+            ));
+        }
+        assert!(std::panic::catch_unwind(|| OutboundEvent::broadcast(
+            BackendEvent::CloneProjectError {
+                message: "project error".into()
+            }
+        ))
+        .is_err());
+    }
     use super::*;
     use crate::{AttachmentProgressPhase, KnowledgeKind, KnowledgeSemanticRetry};
     use gwt_core::repo_hash::ProjectKey;

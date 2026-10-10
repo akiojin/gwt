@@ -36,6 +36,7 @@ pub(super) use gwt::session_launch::apply_resume_identity_to_session;
 use gwt::session_launch::{initialize_launch_session, persist_finalized_launch_session};
 use gwt_agent::resolve_host_runner_health_checked;
 
+use super::agent_maintenance;
 use super::continuation::{
     abort_prepared_execution_and_remove_exact_session,
     bind_durable_launch_recovery_session_identity, clear_durable_launch_recovery,
@@ -45,6 +46,7 @@ use super::continuation::{
     persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
     resolve_split_workspace_state_external_commit, DurableLaunchRecoveryKind,
 };
+
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
@@ -3370,6 +3372,47 @@ impl LaunchWizardMemoryCache {
         self.agent_options = Self::spawn_agent_options_detection();
     }
 
+    /// Refresh after a Host installer in the same active-profile environment.
+    /// Called on the maintenance worker so every version probe stays off Tao.
+    pub(super) fn refresh_agent_options_for_profile(&mut self, config_path: &Path, cwd: &Path) {
+        // A completion can immediately refresh an open wizard. Resolve its
+        // ledger here as well, before that cache is handed back to Tao.
+        self.sessions();
+        let mut options: Vec<_> = self
+            .agent_options()
+            .into_iter()
+            .filter(|agent| agent.custom_agent.is_some())
+            .collect();
+        match gwt_agent::LaunchEnvironment::from_active_profile(
+            config_path,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        ) {
+            Ok(environment) => {
+                let (env, remove_env) = environment.into_parts();
+                let detected = gwt_agent::builtin_agent_descriptors()
+                    .iter()
+                    .filter_map(|descriptor| {
+                        gwt_agent::AgentDetector::detect_by_command_with_environment(
+                            descriptor.command,
+                            &env,
+                            &remove_env,
+                            Some(cwd),
+                        )
+                    })
+                    .collect();
+                options.extend(
+                    gwt::build_builtin_agent_options(detected)
+                        .into_iter()
+                        .filter(|agent| agent.available),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot refresh agents in the active Host profile")
+            }
+        }
+        self.agent_options = Arc::new(Mutex::new(AgentOptionsSlot::Ready(options)));
+    }
+
     pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
         let mut slot = self
             .agent_options
@@ -3404,6 +3447,14 @@ impl LaunchWizardMemoryCache {
                     id: descriptor.command.to_string(),
                     name: descriptor.display_name.to_string(),
                     installed: detected.is_some(),
+                    available_version: None,
+                    update_check_error: None,
+                    update_available: false,
+                    up_to_date: false,
+                    install_supported: !matches!(
+                        descriptor.distribution,
+                        gwt_agent::DistributionRoute::None
+                    ),
                     installed_version: detected
                         .and_then(|agent| agent.installed_version.as_deref())
                         .map(str::trim)
@@ -3927,7 +3978,6 @@ fn update_issue_branch_link_with_cache_dir(
         }
         Err(error) => return Err(format!("failed to read issue linkage store: {error}")),
     };
-
     match issue_number {
         Some(issue_number) => {
             store.branches.insert(branch_name.to_string(), issue_number);
@@ -5305,6 +5355,13 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.register_window(tab_id, raw_id);
         let window_id = combined_window_id(tab_id, raw_id);
+        if preset.is_agent_terminal() && self.agent_maintenance.busy {
+            let detail = agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string();
+            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+            self.window_details
+                .insert(window_id.clone(), detail.clone());
+            return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
+        }
         if !preset.requires_process() {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
             return self.status_events(window_id, WindowProcessStatus::Running, None);
@@ -5812,6 +5869,9 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
+        if self.agent_maintenance.busy {
+            return Err(agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string());
+        }
         let context = self
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;

@@ -556,6 +556,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ListSupportedAgents => {
             FrontendUserActionLog::new("list_supported_agents", "settings")
         }
+        FrontendEvent::MaintainSupportedAgent { agent_id, .. } => {
+            FrontendUserActionLog::new("maintain_supported_agent", "settings").agent(agent_id)
+        }
+        FrontendEvent::SetAgentAutoUpdate { enabled } => {
+            FrontendUserActionLog::new("set_agent_auto_update", "settings").force(*enabled)
+        }
         FrontendEvent::ListCustomAgentPresets => {
             FrontendUserActionLog::new("list_custom_agent_presets", "custom_agents")
         }

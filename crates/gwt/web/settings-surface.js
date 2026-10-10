@@ -39,8 +39,8 @@ function linkSettingsPanel(panel, windowId, tabId) {
   panel.setAttribute("aria-labelledby", settingsTabId(windowId, tabId));
 }
 
-// SPEC #1921 L3: a read-only view of the existing built-in detection snapshot.
-function renderSupportedAgentsPanel(panel, agents) {
+// SPEC #5017: maintain the built-in catalog without changing launch profiles.
+function renderSupportedAgentsPanel(panel, agents, options) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   if (agents === null) {
@@ -51,6 +51,38 @@ function renderSupportedAgentsPanel(panel, agents) {
     panel.appendChild(loading);
     return;
   }
+  const send = options?.send || (() => {});
+  const maintenance = options?.maintenanceByAgent || new Map();
+  const busy = Array.from(maintenance.values()).some((entry) => entry.pending);
+  const automaticLabel = document.createElement("label");
+  automaticLabel.className = "settings-checkbox-label";
+  const automatic = document.createElement("input");
+  automatic.type = "checkbox";
+  automatic.className = "settings-checkbox";
+  automatic.setAttribute("aria-label", "Automatically update agents");
+  automatic.checked = options?.autoUpdate === true;
+  automatic.disabled = busy;
+  automatic.addEventListener("change", () => {
+    send({ kind: "set_agent_auto_update", enabled: automatic.checked });
+  });
+  automaticLabel.appendChild(automatic);
+  automaticLabel.appendChild(document.createTextNode("Automatically update agents"));
+  panel.appendChild(automaticLabel);
+  const help = document.createElement("p");
+  help.className = "settings-help";
+  help.textContent = "At the next app startup, update installed npm agents with a known newer version. "
+    + "Updates require no open agent windows or pending launches, including the Project Manager. "
+    + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
+    + "close them and retry. Update failures leave launches available.";
+  panel.appendChild(help);
+  const globalResult = maintenance.get("");
+  if (globalResult?.message) {
+    const status = document.createElement("p");
+    status.className = "settings-status";
+    status.setAttribute("role", globalResult.success === false ? "alert" : "status");
+    status.textContent = globalResult.message;
+    panel.appendChild(status);
+  }
   const table = document.createElement("table");
   table.className = "settings-supported-agents";
   table.setAttribute("aria-label", "Supported agents and installed versions");
@@ -58,7 +90,7 @@ function renderSupportedAgentsPanel(panel, agents) {
   const header = document.createElement("tr");
   head.appendChild(header);
   table.appendChild(head);
-  for (const label of ["Agent", "Status", "Installed version"]) {
+  for (const label of ["Agent", "Status", "Installed version", "Available version", "Actions"]) {
     const cell = document.createElement("th");
     cell.setAttribute("scope", "col");
     cell.textContent = label;
@@ -72,17 +104,52 @@ function renderSupportedAgentsPanel(panel, agents) {
     row.dataset.agentId = agent.id;
     const version = agent.installed_version?.trim();
     const values = [
-      agent.name,
+      `${agent.name} (${agent.id})`,
       agent.installed ? "Installed" : "Not installed",
       agent.installed
         ? version || "Unknown (version unavailable)"
         : "Not installed",
+      agent.available_version
+        ? agent.up_to_date
+          ? `${agent.available_version} · Latest`
+          : agent.available_version
+        : agent.update_check_error || "Version check unavailable",
     ];
     for (const value of values) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.appendChild(cell);
     }
+    const actions = document.createElement("td");
+    const action = !agent.installed && agent.install_supported
+      ? "install"
+      : agent.installed && agent.update_available ? "update" : null;
+    if (action) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "wizard-button";
+      const label = `${action === "install" ? "Install" : "Update"} ${agent.name}`;
+      button.textContent = label;
+      button.setAttribute("aria-label", label);
+      button.disabled = busy;
+      button.addEventListener("click", () => {
+        send({ kind: "maintain_supported_agent", agent_id: agent.id, action });
+      });
+      actions.appendChild(button);
+    }
+    const result = maintenance.get(agent.id);
+    if (result?.message) {
+      const status = document.createElement("p");
+      status.className = "settings-status";
+      status.setAttribute("role", result.success === false ? "alert" : "status");
+      status.textContent = result.message;
+      if (result.before_version || result.after_version) {
+        status.textContent += ` Before: ${result.before_version || "Unknown (version unavailable)"}. `
+          + `After: ${result.after_version || "Unknown (version unavailable)"}.`;
+      }
+      actions.appendChild(status);
+    }
+    row.appendChild(actions);
   }
   panel.appendChild(table);
 }
@@ -360,14 +427,57 @@ export function createSettingsSurface({
       };
       const settingsWindowBodies = new Set();
       let supportedAgents = null;
+      let agentAutoUpdate = false;
+      const supportedAgentMaintenance = new Map();
 
-      function applySupportedAgentList(event) {
-        supportedAgents = event.agents;
+      function supportedAgentPanelOptions() {
+        return {
+          autoUpdate: agentAutoUpdate,
+          maintenanceByAgent: supportedAgentMaintenance,
+          send(message) {
+            if (message.kind === "maintain_supported_agent") {
+              supportedAgentMaintenance.set(message.agent_id, {
+                pending: true,
+                message: message.action === "install" ? "Installing…" : "Updating…",
+              });
+              renderSupportedAgentPanels();
+            } else if (message.kind === "set_agent_auto_update") {
+              supportedAgentMaintenance.delete("");
+            }
+            send(message);
+          },
+        };
+      }
+
+      function renderSupportedAgentPanels() {
         purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) {
           const panel = body.querySelector("[data-settings-panel='supported-agents']");
-          if (panel) renderSupportedAgentsPanel(panel, supportedAgents);
+          if (panel) renderSupportedAgentsPanel(panel, supportedAgents, supportedAgentPanelOptions());
         }
+      }
+
+      function applySupportedAgentList(event) {
+        supportedAgents = event.agents;
+        agentAutoUpdate = event.auto_update === true;
+        if (event.maintenance_pending) {
+          supportedAgentMaintenance.set("", { pending: true, message: "Agent maintenance is in progress." });
+        } else {
+          for (const [id, result] of supportedAgentMaintenance) {
+            if (result.pending) supportedAgentMaintenance.delete(id);
+          }
+        }
+        renderSupportedAgentPanels();
+      }
+
+      function applySupportedAgentMaintenance(event) {
+        supportedAgentMaintenance.set(event.agent_id, event);
+        renderSupportedAgentPanels();
+      }
+
+      function requestSupportedAgentRefresh() {
+        purgeDetachedSettingsBodies();
+        if (settingsWindowBodies.size) send({ kind: "list_supported_agents" });
       }
       let pendingAddFromPreset = null;
       let editingCustomAgentId = null;
@@ -508,7 +618,7 @@ export function createSettingsSurface({
         settingsWindowBodies.add(body);
 
         renderSystemPanel(panelSystem);
-        renderSupportedAgentsPanel(panelSupportedAgents, supportedAgents);
+        renderSupportedAgentsPanel(panelSupportedAgents, supportedAgents, supportedAgentPanelOptions());
         send({ kind: "list_supported_agents" });
         renderUsagePanel(panelUsage);
         // Always request fresh system settings on open so the dropdown
@@ -1624,6 +1734,8 @@ export function createSettingsSurface({
         applyCustomAgentDeleted,
         applyCustomAgentError,
         applySupportedAgentList,
+        applySupportedAgentMaintenance,
+        requestSupportedAgentRefresh,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,

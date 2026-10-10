@@ -1406,6 +1406,7 @@ fn sample_runtime_with_events(
         project_log_scopes: HashMap::new(),
         proxy,
         blocking_tasks,
+        agent_maintenance: Default::default(),
         sessions_dir,
         launch_wizard_cache,
 
@@ -9084,6 +9085,8 @@ mod incarnation_claiming {
 }
 
 // Runtime acceptance tests, grouped by behavior. Shared fixtures stay above.
+#[cfg(test)]
+mod agent_maintenance_tests;
 #[cfg(test)]
 mod board_tests;
 #[cfg(test)]
