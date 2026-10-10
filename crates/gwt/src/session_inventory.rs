@@ -61,7 +61,7 @@ pub fn observe_machine_sessions(sessions_dir: &Path) -> MachineSessionInventory 
     let mut inventory = SessionInventory::default();
     let candidates = read_candidates_scope(None, sessions_dir, None, &mut inventory);
     let attribution = candidate_attribution(&candidates);
-    let resources = observe_live_candidates(candidates, &mut inventory, true);
+    let resources = observe_live_candidates(candidates, &mut inventory, true, false);
     inventory.uncertainties.retain(|uncertainty| {
         if !uncertainty.reason.starts_with("session_unreadable:") {
             return true;
@@ -203,6 +203,7 @@ pub fn observe_sessions(project_root: &Path, sessions_dir: &Path) -> SessionInve
 
 /// Observe one Session before cross-Session process deduplication. Recovery
 /// callers hold its Session lease and must also check every uncertainty.
+/// A live host without recorded identity remains uncertain for recovery.
 pub(crate) fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
     observe_sessions_filtered(
         session
@@ -221,7 +222,7 @@ fn observe_sessions_filtered(
 ) -> SessionInventory {
     let mut inventory = SessionInventory::default();
     let candidates = read_candidates(project_root, sessions_dir, session_id, &mut inventory);
-    observe_live_candidates(candidates, &mut inventory, false);
+    observe_live_candidates(candidates, &mut inventory, false, session_id.is_some());
     inventory
 }
 
@@ -229,6 +230,7 @@ fn observe_live_candidates(
     candidates: Vec<RuntimeCandidate>,
     inventory: &mut SessionInventory,
     measure_resources: bool,
+    require_host_absence: bool,
 ) -> MachineProcessResources {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     if candidates.is_empty() && inventory.uncertainties.is_empty() {
@@ -388,7 +390,31 @@ fn observe_live_candidates(
         .filter(|candidate| {
             !runtime_from_previous_boot(&candidate.runtime, boot_epoch, tokens_are_epoch)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if require_host_absence {
+        // Census absence alone does not authorize abandoning another Session.
+        for candidate in &candidates {
+            if candidate
+                .runtime
+                .host_started_at
+                .filter(|started| *started > 0)
+                .is_none()
+                && candidate
+                    .runtime
+                    .child_pid
+                    .zip(candidate.runtime.child_started_at)
+                    .filter(|(pid, started)| *pid > 0 && *started > 0)
+                    .is_none()
+                && processes.contains_key(&candidate.host_pid)
+            {
+                inventory.uncertain(
+                    &candidate.path,
+                    Some(&candidate.session.id),
+                    "host_identity_missing_for_recovery".to_string(),
+                );
+            }
+        }
+    }
     observe_candidates(
         candidates,
         &processes,
