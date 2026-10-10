@@ -67,6 +67,252 @@ fn app_runtime_monitor_resume_from_terminal_owner_retains_execution_authority() 
     }
 }
 
+/// Issue #5254 / SPEC #4074 AC-1, AC-6: Monitor retries must publish the
+/// successor Work at authenticated readiness before the new agent can mutate it.
+#[test]
+fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    for (case, settlement, terminal_kind) in [
+        (
+            "blocked-discarded",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "Monitor predecessor failed".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
+            "completed-done",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
+    ] {
+        let mut fixture = monitor_relaunch_fixture_with_settlement(
+            temp.path(),
+            case,
+            MonitorProviderConversationFixture::Present,
+            MonitorNativeHolderFixture::None,
+            true,
+            settlement,
+        );
+        let source_path = fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id));
+        let source_bytes = fs::read(&source_path).expect("predecessor Session bytes");
+        let predecessor_active = ActiveAgentSession {
+            session_id: fixture.source_session_id.clone(),
+            branch_name: "work/issue-3165".to_string(),
+            worktree_path: fixture.worktree.clone(),
+            agent_project_root: fixture.worktree.display().to_string(),
+            ..sample_active_agent_session("tab-1", "predecessor-window")
+        };
+        save_workspace_launch_projection(
+            &fixture.project_root,
+            &predecessor_active,
+            Some("origin/develop"),
+            Some(fixture.execution_owner.number),
+            Some(fixture.execution_owner),
+            None,
+            WorkspaceLaunchProjectionKind::StartWork,
+            Some(&HashSet::from([fixture.source_session_id.clone()])),
+        )
+        .expect("publish predecessor Work");
+        let predecessor_id =
+            gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
+                &fixture.project_root,
+                &fixture.worktree,
+                |projection, _, _| {
+                    let event = gwt_core::workspace_projection::WorkEvent::new(
+                        terminal_kind,
+                        projection.id.clone(),
+                        Utc::now(),
+                    );
+                    Ok((projection.id.clone(), vec![event]))
+                },
+            )
+            .expect("terminalize predecessor Work");
+        // Launch starts shared-event intake. Exercise that rebuild before the
+        // readiness handshake so the predecessor's local close must survive it.
+        let project_key = gwt_core::paths::resolve_project_scope(&fixture.project_root).hash;
+        let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+            &fixture.project_root,
+            &gwt_core::paths::gwt_workspace_work_items_path(&project_key),
+            &gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key),
+        );
+        assert!(intake.load_error.is_none(), "{case}: {intake:?}");
+        let predecessor =
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap()
+                .work_items
+                .into_iter()
+                .find(|work| work.id == predecessor_id)
+                .expect("terminal predecessor Work");
+        assert!(predecessor.is_terminal(), "{case}");
+
+        prepare_monitor_relaunch(
+            &mut fixture,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+        let (window_id, result) =
+            take_monitor_launch_complete_event(case, &fixture.recorded_events);
+        let completion = result.expect("Monitor fresh launch preparation");
+        let session_id = completion.1.clone();
+        assert_ne!(session_id, fixture.source_session_id, "{case}");
+        let readiness_nonce = completion
+            .0
+            .env
+            .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+            .cloned()
+            .expect("Monitor successor readiness nonce");
+        fixture
+            .runtime
+            .handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
+        assert!(fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&window_id));
+        let (spawner, _) = BlockingTaskSpawner::queued();
+        fixture.runtime.blocking_tasks = spawner;
+        let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
+        ready.continuation_readiness_nonce = Some(readiness_nonce);
+        ready.project_root = Some(fixture.project_root.display().to_string());
+        ready.branch = Some("work/issue-3165".to_string());
+        fixture.runtime.handle_runtime_hook_event(ready);
+        let events = commit_pending_fresh_execution(&mut fixture.runtime);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event.event,
+                BackendEvent::TerminalStatus {
+                    status: WindowProcessStatus::Error,
+                    ..
+                }
+            )),
+            "{case}: fresh readiness must commit, not roll back: {events:?}",
+        );
+        assert!(!fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&window_id));
+        let candidate =
+            gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+                .expect("committed successor Session");
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(
+                &fixture.worktree,
+                fixture.execution_owner,
+            )
+            .expect("committed successor execution"),
+            Some(
+                candidate
+                    .execution_binding
+                    .expect("committed successor Session binding")
+                    .identity,
+            ),
+            "{case}: readiness must activate the candidate before Work readback",
+        );
+
+        let works =
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap();
+        let successor_id = gwt_core::workspace_projection::current_work_id(
+            &works,
+            &fixture.project_root,
+            Some("work/issue-3165"),
+            Some(&fixture.worktree),
+        )
+        .expect("current canonical Work");
+        let successor = works
+            .work_items
+            .iter()
+            .find(|work| work.id == successor_id)
+            .expect("successor Work");
+        assert_ne!(successor_id, predecessor_id, "{case}");
+        assert!(!successor.is_terminal(), "{case}");
+        assert!(successor.related_work_item_ids.contains(&predecessor_id));
+        let projection =
+            gwt_core::workspace_projection::load_workspace_projection(&fixture.project_root)
+                .unwrap()
+                .unwrap();
+        let assigned = projection
+            .latest_agent_for_session(&session_id)
+            .expect("successor Session assignment");
+        assert!(assigned.is_assigned(), "{case}");
+        assert_eq!(
+            assigned.workspace_id.as_deref(),
+            Some(successor_id.as_str())
+        );
+
+        let _current_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session_id);
+        let mut env = gwt::cli::TestEnv::new(fixture.worktree.clone());
+        gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Workspace(gwt::cli::WorkspaceCommand::Ensure {
+                agent_session: session_id.clone(),
+                title_summary: "Monitor successor Work".to_string(),
+                current_focus: None,
+                spec: Some(fixture.execution_owner.number),
+                issue: None,
+                topic: None,
+                boundary: None,
+            }),
+        )
+        .expect("Monitor successor workspace.ensure must be accepted");
+        assert!(String::from_utf8(env.stdout)
+            .unwrap()
+            .contains(&successor_id));
+        let session =
+            gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+                .unwrap();
+        let update = gwt::apply_bound_authenticated_workspace_update(
+            &fixture.project_root,
+            &session_id,
+            session.execution_binding.as_ref().unwrap(),
+            gwt::AgentWorkspaceUpdateRequest {
+                schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session_id.clone(),
+                observation: gwt::observe_agent_runtime(&fixture.worktree).unwrap(),
+                intent: gwt::AgentWorkspaceUpdateIntent {
+                    current_focus: Some("Monitor successor accepted".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("Monitor successor workspace.update must be accepted");
+        assert_eq!(update.work_id, successor_id, "{case}");
+        assert_eq!(fs::read(&source_path).unwrap(), source_bytes, "{case}");
+        let updated =
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            updated
+                .work_items
+                .iter()
+                .find(|work| work.id == predecessor_id),
+            Some(&predecessor),
+            "{case}: preserve terminal Work and Session membership",
+        );
+        fixture
+            .runtime
+            .stop_window_runtime_without_session_projection(&window_id);
+    }
+}
+
 /// SPEC #3165 T-226 / FR-102: provider ownership is a fail-closed preflight;
 /// only a present rollout owned by the selected worktree may exact Resume.
 #[test]

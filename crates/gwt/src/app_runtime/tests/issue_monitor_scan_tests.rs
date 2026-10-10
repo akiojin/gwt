@@ -1401,6 +1401,8 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo");
     init_repo_with_initial_commit(&repo);
+    // Issue #3812: pausing the PM must not pause Monitor scan/claim/launch.
+    gwt::pm_registry::set_pm_paused(&repo, true).expect("pause PM only");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(
         &prefs_path,

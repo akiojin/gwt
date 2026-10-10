@@ -4360,10 +4360,9 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(js.contains("view.controller.update(state)"));
     assert!(js.contains("view.unsubscribe()"));
     assert!(js.contains("view.controller.dispose()"));
-    assert!(js.contains("kind: \"load_pm_conversation\", id: windowData.id"));
-    assert!(js.contains("window.setInterval(requestVisiblePmConversations, 5000)"));
-    assert!(js.contains("case \"pm_conversation\""));
-    assert!(js.contains("case \"pane_send_result\""));
+    assert!(js.contains("kind: \"load_pm_reports\", id: windowData.id"));
+    assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
+    assert!(js.contains("case \"pm_reports\""));
     assert!(
         js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
     );

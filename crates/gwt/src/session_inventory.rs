@@ -61,7 +61,7 @@ pub fn observe_machine_sessions(sessions_dir: &Path) -> MachineSessionInventory 
     let mut inventory = SessionInventory::default();
     let candidates = read_candidates_scope(None, sessions_dir, None, &mut inventory);
     let attribution = candidate_attribution(&candidates);
-    let resources = observe_live_candidates(candidates, &mut inventory, true);
+    let resources = observe_live_candidates(candidates, &mut inventory, true, false);
     inventory.uncertainties.retain(|uncertainty| {
         if !uncertainty.reason.starts_with("session_unreadable:") {
             return true;
@@ -203,6 +203,7 @@ pub fn observe_sessions(project_root: &Path, sessions_dir: &Path) -> SessionInve
 
 /// Observe one Session before cross-Session process deduplication. Recovery
 /// callers hold its Session lease and must also check every uncertainty.
+/// A live host without recorded identity remains uncertain for recovery.
 pub(crate) fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
     observe_sessions_filtered(
         session
@@ -221,7 +222,7 @@ fn observe_sessions_filtered(
 ) -> SessionInventory {
     let mut inventory = SessionInventory::default();
     let candidates = read_candidates(project_root, sessions_dir, session_id, &mut inventory);
-    observe_live_candidates(candidates, &mut inventory, false);
+    observe_live_candidates(candidates, &mut inventory, false, session_id.is_some());
     inventory
 }
 
@@ -229,6 +230,7 @@ fn observe_live_candidates(
     candidates: Vec<RuntimeCandidate>,
     inventory: &mut SessionInventory,
     measure_resources: bool,
+    require_host_absence: bool,
 ) -> MachineProcessResources {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     if candidates.is_empty() && inventory.uncertainties.is_empty() {
@@ -300,13 +302,25 @@ fn observe_live_candidates(
                 .environ()
                 .iter()
                 .filter_map(|entry| entry.to_str())
-                .find_map(|entry| entry.strip_prefix("GWT_SESSION_ID="))?;
+                .find_map(|entry| entry.strip_prefix("GWT_SESSION_ID="))
+                .unwrap_or_default();
             Some(LegacyProcessObservation {
                 pid: pid.as_u32(),
                 parent_pid,
+                parent_may_be_host: system
+                    .process(sysinfo::Pid::from_u32(parent_pid))
+                    .is_none_or(|parent| {
+                        let name = Path::new(parent.name())
+                            .file_stem()
+                            .and_then(|name| name.to_str());
+                        name.is_none_or(|name| {
+                            name.eq_ignore_ascii_case("gwt") || name.eq_ignore_ascii_case("gwtd")
+                        })
+                    }),
                 started_at: crate::process::snapshot_process_start_identity(pid.as_u32(), process),
                 session_id: session_id.to_string(),
-                cwd: process.cwd()?.to_path_buf(),
+                // Retain present children even when attribution is unreadable.
+                cwd: process.cwd().map(Path::to_path_buf).unwrap_or_default(),
             })
         })
         .collect::<Vec<_>>();
@@ -376,7 +390,31 @@ fn observe_live_candidates(
         .filter(|candidate| {
             !runtime_from_previous_boot(&candidate.runtime, boot_epoch, tokens_are_epoch)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if require_host_absence {
+        // Census absence alone does not authorize abandoning another Session.
+        for candidate in &candidates {
+            if candidate
+                .runtime
+                .host_started_at
+                .filter(|started| *started > 0)
+                .is_none()
+                && candidate
+                    .runtime
+                    .child_pid
+                    .zip(candidate.runtime.child_started_at)
+                    .filter(|(pid, started)| *pid > 0 && *started > 0)
+                    .is_none()
+                && processes.contains_key(&candidate.host_pid)
+            {
+                inventory.uncertain(
+                    &candidate.path,
+                    Some(&candidate.session.id),
+                    "host_identity_missing_for_recovery".to_string(),
+                );
+            }
+        }
+    }
     observe_candidates(
         candidates,
         &processes,
@@ -425,9 +463,10 @@ struct RuntimeCandidate {
 struct LegacyProcessObservation {
     pid: u32,
     parent_pid: u32,
+    parent_may_be_host: bool,
     started_at: u64,
-    session_id: String,
-    cwd: PathBuf,
+    session_id: String, // Empty when the environment is unavailable.
+    cwd: PathBuf,       // Empty when the working directory is unavailable.
 }
 
 fn normalized(path: &Path) -> PathBuf {
@@ -632,18 +671,30 @@ fn observe_candidates(
                         && process.session_id == session.id
                         && process.pid > 0
                         && process.started_at > 0
+                        && !process.cwd.as_os_str().is_empty()
                         && normalized(&process.cwd) == worktree
                 })
                 .map(|process| (process.pid, process.started_at))
                 .collect()
         };
         if children.is_empty() {
-            let host_live = processes.get(&host_pid).is_some_and(|started| {
-                runtime
-                    .host_started_at
-                    .is_none_or(|expected| expected == *started)
+            let host_may_match = processes.get(&host_pid).is_some_and(|started| {
+                *started == 0
+                    || runtime
+                        .host_started_at
+                        .is_none_or(|expected| expected == *started)
             });
-            if host_live
+            let unidentified_child = host_may_match
+                && legacy_processes.iter().any(|process| {
+                    process.parent_pid == host_pid
+                        && processes.contains_key(&process.pid)
+                        && (process.session_id.is_empty() || process.session_id == session.id)
+                        && (!process.session_id.is_empty() || process.parent_may_be_host)
+                });
+            // A legacy namespace PID may now belong to an unrelated process.
+            // Require Host provenance or actual child evidence, not PID alone.
+            if exact_host_identity(&runtime, processes.get(&host_pid).copied())
+                || unidentified_child
                 || runtime
                     .child_pid
                     .is_some_and(|pid| processes.contains_key(&pid) || group_alive(pid))
@@ -1151,6 +1202,88 @@ mod tests {
     }
 
     #[test]
+    fn restarted_legacy_sidecars_without_host_proof_or_children_are_historical() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        for (index, status) in [
+            AgentStatus::Running,
+            AgentStatus::Idle,
+            AgentStatus::Stopped,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("old-{index}");
+            save_runtime(&sessions, temp.path(), temp.path(), &id, None);
+            let path = gwt_agent::runtime_state_path_for_pid(&sessions, 100, &id);
+            let mut runtime = SessionRuntimeState::load(&path).unwrap();
+            runtime.host_started_at = None;
+            runtime.status = status; // Historical status is not proof.
+            runtime.save(&path).unwrap();
+        }
+        save_runtime(&sessions, temp.path(), temp.path(), "live", Some((201, 20)));
+        let mut observed = SessionInventory::default();
+        let candidates = read_candidates(temp.path(), &sessions, None, &mut observed);
+        let processes = BTreeMap::from([(100, 99), (201, 20), (202, 0)]);
+        observe_candidates(
+            candidates,
+            &processes,
+            &processes,
+            |_| false,
+            &mut observed,
+            &[LegacyProcessObservation {
+                pid: 202,
+                parent_pid: 100,
+                parent_may_be_host: false,
+                started_at: 0,
+                session_id: String::new(),
+                cwd: PathBuf::new(),
+            }],
+        );
+        assert_eq!(observed.sessions.len(), 1);
+        assert_eq!(observed.sessions[0].session_id, "live");
+        assert!(
+            observed.uncertainties.is_empty(),
+            "namespace PID presence is not Host proof"
+        );
+    }
+
+    #[test]
+    fn present_legacy_child_with_unreadable_metadata_remains_uncertain() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(&sessions, temp.path(), temp.path(), "legacy", None);
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, 100, "legacy");
+        let mut runtime = SessionRuntimeState::load(&path).unwrap();
+        runtime.host_started_at = None;
+        runtime.save(&path).unwrap();
+        let mut inventory = SessionInventory::default();
+        let candidates = read_candidates(temp.path(), &sessions, None, &mut inventory);
+        let processes = BTreeMap::from([(100, 10), (201, 0)]);
+        observe_candidates(
+            candidates,
+            &processes,
+            &processes,
+            |_| false,
+            &mut inventory,
+            &[LegacyProcessObservation {
+                pid: 201,
+                parent_pid: 100,
+                parent_may_be_host: true,
+                started_at: 0,
+                session_id: String::new(),
+                cwd: PathBuf::new(),
+            }],
+        );
+        assert!(inventory.sessions.is_empty());
+        assert_eq!(
+            inventory.uncertainties.len(),
+            1,
+            "unreadable child is not absent"
+        );
+    }
+
+    #[test]
     fn legacy_live_host_without_child_identity_reports_uncertainty() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions = temp.path().join("sessions");
@@ -1176,6 +1309,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions = temp.path().join("sessions");
         save_runtime(&sessions, temp.path(), temp.path(), "legacy", None);
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, 100, "legacy");
+        let mut runtime = SessionRuntimeState::load(&path).unwrap();
+        runtime.host_started_at = None;
+        runtime.save(&path).unwrap();
         let mut session = Session::load(&sessions.join("legacy.toml")).unwrap();
         session.launch_origin = SessionLaunchOrigin::Unknown;
         session.restore_source_session_id = None;
@@ -1194,6 +1331,7 @@ mod tests {
             |(pid, parent_pid, session_id, cwd)| LegacyProcessObservation {
                 pid,
                 parent_pid,
+                parent_may_be_host: true,
                 started_at: 20,
                 session_id: session_id.to_string(),
                 cwd: cwd.to_path_buf(),
@@ -1236,6 +1374,8 @@ mod tests {
         );
         assert!(observed.uncertainties.is_empty());
 
+        runtime.host_started_at = Some(10);
+        runtime.save(&path).unwrap();
         processes.insert(100, 99);
         assert!(
             observe(&processes).sessions.is_empty(),

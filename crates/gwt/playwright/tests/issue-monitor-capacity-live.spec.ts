@@ -146,6 +146,58 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await expectOverride(page, manual);
         await expect(mode).toHaveText("Manual");
         await expect(input).toHaveValue(String(manual));
+        await test.step("Issue #5227: grouped diagnostics preserve saved Manual 9", async () => {
+          // The UI edit/save/reload path is covered above. Establish this
+          // diagnostic fixture through the real backend before projecting it.
+          await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 9 });
+          await expectOverride(page, 9);
+          await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
+            .toMatchObject({ max_active_agents_mode: "manual", max_active_agents: 9 });
+          await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+          const saved = await expectOverride(page, 9);
+          await expect(mode).toHaveText("Manual");
+          await expect(input).toHaveValue("9");
+          const diskReason = "Disk measurement unavailable; check that the worktree volume is mounted and free at least 4 GiB.";
+          const reason = `inventory_uncertain: child_identity_missing ×37; ${diskReason}`;
+          try {
+            // Exercise the existing incoming-status renderer. Rust tests cover
+            // inventory aggregation; the real backend above owns persistence.
+            await page.evaluate(status => {
+              const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+                candidate.readyState === WebSocket.OPEN && candidate.url.includes("repo_hash="));
+              if (!socket) throw new Error("the live Project socket is unavailable");
+              const fixture = new MessageEvent("message", { data: JSON.stringify({ kind: "issue_monitor_status", status }) });
+              // Keep periodic live measurements from replacing this projection
+              // during assertions. Navigation below removes the page-local filter.
+              socket.addEventListener("message", (event: MessageEvent) => {
+                if (event !== fixture && JSON.parse(String(event.data)).kind === "issue_monitor_status") {
+                  event.stopImmediatePropagation();
+                }
+              }, { capture: true });
+              socket.dispatchEvent(fixture);
+            }, { ...saved, agent_capacity: {
+              ...saved.agent_capacity, measurement_complete: false, machine_budget: null,
+              recommended_worker_limit: 0, reason,
+              constraints: [{ resource: "disk", capacity: null, binding: true, reason: diskReason }],
+            } });
+            await expect(warning).toBeVisible();
+            await expect(warning).toContainText("Manual limit 9 is unchanged.");
+            await expect(warning).toContainText(reason);
+            const text = await warning.textContent() ?? "";
+            expect([...text].length, "complete warning has at most 700 Unicode characters").toBeLessThanOrEqual(700);
+            expect(text.split("child_identity_missing")).toHaveLength(2);
+            expect(text.split("×37")).toHaveLength(2);
+            await expect(budget.locator('[data-role="capacity-reason"]')).toHaveText(reason);
+            await expect(mode).toHaveText("Manual");
+            await expect(input).toHaveValue("9");
+            await expect(warning).toBeInViewport({ ratio: 1 });
+            await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
+            await testInfo.attach(`grouped-capacity-warning-${testInfo.project.name}`, { body: await surface.screenshot(), contentType: "image/png" });
+          } finally {
+            await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+            await expectOverride(page, 9);
+          }
+        });
         await surface.getByRole("button", { name: "Use Auto", exact: true }).click();
         const restored = await expectOverride(page, null);
         await expect(mode).toHaveText("Auto");

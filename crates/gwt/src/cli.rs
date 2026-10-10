@@ -159,6 +159,8 @@ pub enum DaemonCommand {
 /// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
+    /// Read the outcome of one update without contacting or mutating the Host.
+    Receipt { operation_id: String },
     /// `workspace.update` — update Workspace current projection and journal.
     Update {
         title: Option<String>,

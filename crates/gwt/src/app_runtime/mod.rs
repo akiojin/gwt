@@ -566,6 +566,7 @@ struct RuntimeStopThreads {
 
 mod issue_monitor_delivery_ack;
 pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
+pub(crate) mod agent_maintenance;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
@@ -1420,6 +1421,7 @@ pub(crate) struct ProjectRuntimeState {
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
     pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    pub(crate) pm_agent_idle_wakes: pm::AgentIdleWakes,
     /// Issue #3702: one coalesced wake waiting for the PM composer to submit
     /// or clear. Keyed by the live PM window id.
     pub(crate) pending_pm_wakes: HashMap<String, pm::PmWakeDecision>,
@@ -1467,6 +1469,7 @@ pub(crate) fn initial_project_states(
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
+                    pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
@@ -1740,6 +1743,7 @@ pub struct AppRuntime {
     pub(crate) project_log_scopes: HashMap<String, gwt_core::logging::ProjectLogScope>,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
+    pub(crate) agent_maintenance: agent_maintenance::AgentMaintenanceState,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
@@ -1856,6 +1860,7 @@ pub struct AppRuntime {
     /// One background terminal-convergence scan at a time.
     pub(crate) terminal_convergence_scan_in_flight: bool,
     pub(crate) update_drain_scan_in_flight: bool,
+    pub(crate) update_drain_host_blockers: Option<Vec<gwt::update_drain::UpdateBlocker>>,
     /// Grace applied to terminal close candidates; refreshed from Agent
     /// settings by every observer scan.
     pub(crate) terminal_close_grace: std::time::Duration,
@@ -3972,6 +3977,7 @@ impl AppRuntime {
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
+                    pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
@@ -4281,6 +4287,7 @@ impl AppRuntime {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
             pending_workspace_resume_contexts: HashMap::new(),
@@ -4315,6 +4322,7 @@ impl AppRuntime {
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             update_drain_scan_in_flight: false,
+            update_drain_host_blockers: None,
             terminal_close_grace: std::time::Duration::from_secs(
                 gwt_config::agent_config::DEFAULT_TERMINAL_CLOSE_GRACE_SECS,
             ),
@@ -4377,6 +4385,7 @@ impl AppRuntime {
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
         app.seed_restored_window_details();
+        app.start_agent_auto_update();
         Ok(app)
     }
 
@@ -8610,7 +8619,9 @@ impl AppRuntime {
     /// for each enabled canonical project scope. GitHub and claim I/O stays
     /// off tao's event loop, while the in-flight set drops duplicate ticks.
     pub(crate) fn issue_monitor_scheduled_tick_events(&mut self) -> Vec<OutboundEvent> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // Keep the capture clock as precise as close/launch observations so
+        // same-second scans cannot precede a canvas they actually followed.
+        let now = chrono::Utc::now().to_rfc3339();
         self.issue_monitor_scheduled_tick_events_at(&now)
     }
 
@@ -8802,8 +8813,30 @@ impl AppRuntime {
         project_tab_id: &str,
         now: &str,
     ) -> Option<gwt::IssueMonitorWindowSnapshot> {
+        self.issue_monitor_window_snapshot_with_session_metadata(
+            project_tab_id,
+            now,
+            |session_id| {
+                (
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number),
+                    gwt::cli::execution_state::session_launch_route(Some(session_id))
+                        == Some(gwt_agent::LaunchRoute::Autonomous),
+                )
+            },
+        )
+    }
+
+    fn issue_monitor_window_snapshot_with_session_metadata(
+        &self,
+        project_tab_id: &str,
+        now: &str,
+        session_metadata: impl Fn(&str) -> (Option<u64>, bool),
+    ) -> Option<gwt::IssueMonitorWindowSnapshot> {
         self.tab(project_tab_id)?;
         let tab_ids = self.issue_monitor_project_tab_ids(project_tab_id);
+        let session_metadata = &session_metadata;
         let windows =
             self.tabs
                 .iter()
@@ -8822,27 +8855,19 @@ impl AppRuntime {
                                 &window_id,
                                 &tab.project_root,
                             );
+                            let (session_issue, monitor_owned) = window
+                                .session_id
+                                .as_deref()
+                                .map(session_metadata)
+                                .unwrap_or_default();
                             let issue_number = pending
                                 .and_then(|context| context.issue_monitor_issue_number)
                                 .or(window.linked_issue_number)
-                                .or_else(|| {
-                                    let session_id = window.session_id.as_deref()?;
-                                    self.launch_wizard_cache
-                                        .session_by_id(session_id)
-                                        .and_then(|session| session.linked_issue_number)
-                                });
+                                .or(session_issue);
                             gwt::IssueMonitorWindowObservation {
-                                // Use the canonical route resolver: it also recognizes
-                                // legacy Monitor launches stamped Manual (Issue #4510).
                                 monitor_owned: pending.is_some_and(|context| {
                                     context.issue_monitor_issue_number.is_some()
-                                }) || window.session_id.as_deref().is_some_and(
-                                    |session_id| {
-                                        gwt::cli::execution_state::session_launch_route(Some(
-                                            session_id,
-                                        )) == Some(gwt_agent::LaunchRoute::Autonomous)
-                                    },
-                                ),
+                                }) || monitor_owned,
                                 review_dispatch: pending
                                     .is_some_and(|context| context.issue_monitor_review_dispatch)
                                     || self
@@ -9018,7 +9043,7 @@ impl AppRuntime {
                 return reply(false, Some("monitor_state_unavailable"));
             }
         }
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = chrono::Utc::now().to_rfc3339();
         // Issue #4084: an on-demand scan classifies idle windows too, so the
         // PM's `scan_now` frees a slot the same way the periodic tick does.
         let window_snapshot =
@@ -9368,6 +9393,31 @@ impl AppRuntime {
         mut status: Box<gwt::IssueMonitorStatusView>,
     ) -> Vec<OutboundEvent> {
         self.retain_missing_issue_monitor_capacity(project_root, &mut status);
+        if let Some(drain) = status.update_drain.as_mut() {
+            drain.blocking.retain(|blocker| {
+                !matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })
+            });
+            if let Some(host_blockers) = &self.update_drain_host_blockers {
+                drain.blocking.retain(|blocker| {
+                    !matches!(
+                        blocker,
+                        gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
+                            | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
+                    )
+                });
+                drain.blocking.extend(host_blockers.iter().cloned());
+            }
+            let (panes, _) = self.capture_update_quiescence_inputs();
+            let snapshot = gwt::update_drain::UpdateQuiescenceSnapshot {
+                panes,
+                ..Default::default()
+            };
+            let mut blocking = gwt::update_drain::update_quiescence(&snapshot)
+                .err()
+                .unwrap_or_default();
+            blocking.append(&mut drain.blocking);
+            drain.blocking = blocking;
+        }
         self.replace_knowledge_terminal_queue(project_root, &status.terminal_queue);
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
@@ -9608,7 +9658,7 @@ impl AppRuntime {
     ) -> (Vec<gwt::update_drain::PaneObservation>, Vec<PathBuf>) {
         let mut window_ids: Vec<&String> = self.window_lookup.keys().collect();
         window_ids.sort();
-        let panes = window_ids
+        let mut panes: Vec<gwt::update_drain::PaneObservation> = window_ids
             .into_iter()
             .filter_map(|window_id| {
                 let address = self.window_lookup.get(window_id)?;
@@ -9624,15 +9674,24 @@ impl AppRuntime {
                         });
                 Some(gwt::update_drain::PaneObservation {
                     window_id: window_id.clone(),
-                    label: window
-                        .purpose_title
-                        .clone()
-                        .unwrap_or_else(|| window.title.clone()),
+                    label: format!(
+                        "{}: {}",
+                        tab.title,
+                        window.purpose_title.as_deref().unwrap_or(&window.title)
+                    ),
                     state: self.window_status(window_id).unwrap_or(window.status),
                     resident_pm,
                 })
             })
             .collect();
+        if self.agent_maintenance.busy {
+            panes.push(gwt::update_drain::PaneObservation {
+                window_id: "agent-maintenance".into(),
+                label: "Agent maintenance process".into(),
+                state: WindowProcessStatus::Running,
+                resident_pm: false,
+            });
+        }
         let worktrees = self
             .active_agent_sessions
             .values()
@@ -9746,6 +9805,12 @@ impl AppRuntime {
         version: &str,
         refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
     ) -> Vec<OutboundEvent> {
+        if gwt_core::update::load_pending_update_manifest()
+            .is_some_and(|manifest| manifest.version == version && manifest.auto_apply_deferred)
+        {
+            return self
+                .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Cancelled);
+        }
         let mut events = Vec::new();
         let contexts = self.project_contexts();
         if contexts.is_empty() {
@@ -10010,6 +10075,41 @@ impl AppRuntime {
         observations: Vec<UpdateDrainObservation>,
     ) -> Vec<OutboundEvent> {
         self.update_drain_scan_in_flight = false;
+        if let Some(manifest) = gwt_core::update::load_pending_update_manifest()
+            .filter(|manifest| manifest.auto_apply_deferred)
+        {
+            if !self.project_contexts().iter().any(|context| {
+                self.project_auto_update_drain(context)
+                    .is_some_and(|(_, drain)| drain.version == manifest.version)
+            }) {
+                return Vec::new();
+            }
+            return self.release_update_auto_apply_events(
+                &manifest.version,
+                UpdateAutoApplyRelease::Cancelled,
+            );
+        }
+        if let Some(observation) = observations
+            .iter()
+            .find(|observation| self.project_context_is_current(&observation.context))
+        {
+            // Reuse the same worker observation as automatic apply. Status
+            // callbacks only refresh GUI panes and never scan leases or ECRs.
+            self.update_drain_host_blockers = Some(
+                gwt::update_drain::update_quiescence(&observation.snapshot)
+                    .err()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|blocker| {
+                        matches!(
+                            blocker,
+                            gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
+                                | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
+                        )
+                    })
+                    .collect(),
+            );
+        }
         // A launch can arrive while the durable scan is running. Recheck GUI-owned
         // activity before planning an apply; never trust its older pane snapshot.
         let (panes, _) = self.capture_update_quiescence_inputs();
@@ -10507,6 +10607,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -10680,6 +10781,12 @@ impl AppRuntime {
                 self.spawn_supported_agent_list(client_id);
                 Vec::new()
             }
+            FrontendEvent::MaintainSupportedAgent { agent_id, action } => {
+                self.maintain_supported_agent_events(client_id, agent_id, action)
+            }
+            FrontendEvent::SetAgentAutoUpdate { enabled } => {
+                self.set_agent_auto_update_events(client_id, enabled)
+            }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -10843,6 +10950,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -10953,7 +11061,12 @@ impl AppRuntime {
             }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady { bounds } => {
-                self.startup_auto_resume_ready_events(bounds)
+                if self.agent_maintenance.busy {
+                    self.agent_maintenance.deferred_startup_bounds = Some(bounds);
+                    Vec::new()
+                } else {
+                    self.startup_auto_resume_ready_events(bounds)
+                }
             }
             FrontendEvent::StartupFirstFrame { navigation_ms } => {
                 gwt::perf::startup::first_frame(navigation_ms);
@@ -10979,6 +11092,7 @@ impl AppRuntime {
             FrontendEvent::SetPmAutoStart { enabled } => {
                 self.set_pm_auto_start_events(context, enabled)
             }
+            FrontendEvent::SetPmPaused { paused } => self.set_pm_paused_events(context, paused),
             FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
                 self.set_pm_loop_interval_events(context, loop_interval_secs)
             }
@@ -11104,6 +11218,9 @@ impl AppRuntime {
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
+            }
+            FrontendEvent::LoadPmReports { id } => {
+                self.load_pm_reports_events(context, client_id, &id)
             }
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
@@ -11808,6 +11925,12 @@ impl AppRuntime {
             FrontendEvent::ListSupportedAgents => {
                 self.spawn_supported_agent_list(client_id);
                 Vec::new()
+            }
+            FrontendEvent::MaintainSupportedAgent { agent_id, action } => {
+                self.maintain_supported_agent_events(client_id, agent_id, action)
+            }
+            FrontendEvent::SetAgentAutoUpdate { enabled } => {
+                self.set_agent_auto_update_events(client_id, enabled)
             }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
@@ -13443,10 +13566,12 @@ impl AppRuntime {
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
         }
+        self.observe_pm_agent_idle_transition(window_id, composed);
         Some(composed)
     }
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
+        self.forget_pm_agent_idle_window(window_id);
         self.invalidate_launch_delivery_ack(window_id);
         self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);

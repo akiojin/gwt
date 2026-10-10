@@ -1,6 +1,7 @@
 pub mod agent_backend_dispatch;
 pub mod agent_capability;
 pub mod agent_capacity;
+pub mod agent_maintenance;
 pub(crate) mod agent_project_state;
 pub mod agent_resource_policy;
 pub mod pane_runtime;
@@ -11,6 +12,7 @@ pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod autonomous_handoff;
 pub mod backend_service;
 pub mod board_audience;
+pub mod board_discussion_sync;
 pub mod board_provider;
 pub mod board_remote;
 pub mod branch_cleanup;
@@ -76,6 +78,7 @@ pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
 pub mod work_notes;
+pub(crate) mod workspace_update_receipt;
 pub mod worktree;
 pub mod worktree_form;
 pub mod worktree_inventory;
@@ -97,7 +100,8 @@ pub use agent_project_state::{
     apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
-    continue_authenticated_execution, describe_authenticated_host_contract, observe_agent_runtime,
+    apply_bound_authenticated_workspace_update_with_operation_id, continue_authenticated_execution,
+    describe_authenticated_host_contract, observe_agent_runtime,
     prepare_resume_producing_authority, probe_authenticated_execution_binding,
     probe_authenticated_prepared_execution_binding, probe_bound_authenticated_work_materialization,
     try_prepare_resume_producing_authority, AgentBuildAbortTerminalizationRequest,
@@ -209,6 +213,7 @@ pub use issue_monitor::{
     MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
     PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
+    UPDATE_DRAIN_RELEASE_OPERATION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

@@ -89,6 +89,15 @@ pub struct TeamsConfig {
 /// File name of the per-project Board config under `<repo>/.gwt/work/`.
 pub const PROJECT_BOARD_FILE: &str = "board.toml";
 
+/// Explicit opt-in to best-effort GitHub Discussion mirroring (SPEC-4833).
+/// Authentication remains machine-local through the existing GitHub client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubDiscussionConfig {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
 /// Per-project Board provider override (SPEC-2963 FR-025..FR-032).
 ///
 /// Persisted as a git-tracked `<repo>/.gwt/work/board.toml`, so the channel
@@ -100,6 +109,8 @@ pub const PROJECT_BOARD_FILE: &str = "board.toml";
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct ProjectBoardConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_discussion: Option<GitHubDiscussionConfig>,
     /// Per-project provider. `None` inherits the global provider (FR-028/FR-031).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<BoardProviderKind>,
@@ -147,7 +158,10 @@ impl ProjectBoardConfig {
 
     /// Whether the project sets nothing (so the global config fully applies).
     pub fn is_empty(&self) -> bool {
-        self.provider.is_none() && self.channel.is_none() && self.tenant.is_none()
+        self.provider.is_none()
+            && self.channel.is_none()
+            && self.tenant.is_none()
+            && self.github_discussion.is_none()
     }
 }
 
@@ -308,6 +322,18 @@ tenant_id = "tenant-1"
     }
 
     #[test]
+    fn project_board_config_preserves_discussion_binding_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = "[github_discussion]\nowner = \"example\"\nrepo = \"project\"\nnumber = 42\n";
+        std::fs::write(dir.path().join(PROJECT_BOARD_FILE), raw).unwrap();
+        let cfg = ProjectBoardConfig::load_from_work_dir(dir.path());
+        cfg.save_to_work_dir(dir.path()).unwrap();
+        let saved = std::fs::read_to_string(dir.path().join(PROJECT_BOARD_FILE)).unwrap();
+        assert!(saved.contains("[github_discussion]"));
+        assert!(saved.contains("number = 42"));
+    }
+
+    #[test]
     fn project_board_config_roundtrips_through_work_dir() {
         // FR-025: provider + channel + tenant persist to <repo>/.gwt/work/board.toml.
         let dir = tempfile::tempdir().unwrap();
@@ -315,6 +341,7 @@ tenant_id = "tenant-1"
             provider: Some(BoardProviderKind::Slack),
             channel: Some("C-PROJ-A".to_string()),
             tenant: Some("T-ACME".to_string()),
+            ..Default::default()
         };
         cfg.save_to_work_dir(dir.path()).unwrap();
         assert!(dir.path().join(PROJECT_BOARD_FILE).exists());

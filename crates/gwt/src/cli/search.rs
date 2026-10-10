@@ -204,6 +204,9 @@ fn render_search_unavailable(
             "retryable": true,
             "reason": unavailable.reason,
             "retry_after_ms": unavailable.retry_after_ms,
+            "holder": unavailable.holder,
+            "start_decision": crate::index_search::SEARCH_UNAVAILABLE_START_DECISION,
+            "recovery": unavailable.recovery(),
         });
         out.push_str(&payload.to_string());
         out.push('\n');
@@ -589,6 +592,13 @@ mod tests {
         let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
             reason: "project index runner unavailable".to_string(),
             retry_after_ms: 5_000,
+            holder: Some(Box::new(crate::index_resources::IndexRunnerHolder {
+                repo_hash: "other-repo".into(),
+                owner_pid: Some(42),
+                project_root: Some(std::path::PathBuf::from("other-project")),
+                action: Some("index-issues".into()),
+                qos: Some("background".into()),
+            })),
         });
 
         render_search_unavailable(&mut out, true, &error);
@@ -598,10 +608,46 @@ mod tests {
         assert_eq!(payload["error_code"], "SEARCH_UNAVAILABLE");
         assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
         assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(payload["holder"]["repo_hash"], "other-repo");
+        assert_eq!(payload["holder"]["project_root"], "other-project");
+        assert_eq!(payload["holder"]["action"], "index-issues");
+        assert_eq!(payload["holder"]["qos"], "background");
+        assert_eq!(payload["start_decision"], "known_approved_owner_only");
+        let recovery = payload["recovery"]
+            .as_str()
+            .expect("start and retry guidance");
+        assert!(recovery.contains("index.status"), "{recovery}");
+        assert!(recovery.contains("approved implementation"), "{recovery}");
+        assert!(recovery.contains("creating an Issue/SPEC"), "{recovery}");
+        // Issue #4840 AC-c / AC-h: an index-independent preflight path and a
+        // runner-specific action, distinct from lease contention guidance.
+        assert!(recovery.contains("gh search issues"), "{recovery}");
+        assert!(recovery.contains("index.repair"), "{recovery}");
+        assert!(!recovery.contains("checkpoint"), "{recovery}");
         assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
         assert!(error.retryable());
         assert_eq!(error.retry_after_ms(), Some(5_000));
         assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn render_search_unavailable_lease_contention_gets_its_own_recovery() {
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchUnavailable};
+        let mut out = String::new();
+        let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+            reason: "search heavy lease unavailable".to_string(),
+            retry_after_ms: 5_000,
+            holder: None,
+        });
+
+        render_search_unavailable(&mut out, true, &error);
+
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        let recovery = payload["recovery"].as_str().expect("lease guidance");
+        assert!(recovery.contains("checkpoint"), "{recovery}");
+        assert!(recovery.contains("gh search issues"), "{recovery}");
+        assert!(!recovery.contains("index.repair"), "{recovery}");
+        assert!(error.to_string().contains(recovery), "{error}");
     }
 
     #[test]

@@ -1001,6 +1001,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 continue;
                             };
                             if let Some(control) = decode_issue_monitor_control_in_repo(payload, Some(&scope.project_root)) {
+                                let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
                                     completion.reject(IssueMonitorControlQueueError::Closed);
@@ -1035,7 +1036,11 @@ fn spawn_issue_monitor_worker_with_lease(
                                     );
                                     control_open = false;
                                 }
-                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                if review_deferred {
+                                    publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                                } else {
+                                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                }
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
                                 // Preserve committed scan intent while the
@@ -1080,6 +1085,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         break;
                     };
                     revision = next_revision;
+                    let review_deferred = matches!(&accepted.control, IssueMonitorControl::ReviewDispatchDeferred(_));
                     match try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
@@ -1153,7 +1159,11 @@ fn spawn_issue_monitor_worker_with_lease(
                             control_open = false;
                         }
                     }
-                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                    if review_deferred {
+                        publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                    } else {
+                        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                    }
                 }
                 _ = wait_for_issue_monitor_deadline(scan_watchdog_deadline) => {
                     if expire_issue_monitor_scan_at_watchdog(
@@ -1215,7 +1225,9 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // journal before the coalesced retry.
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
-                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                // Preserve deliveries until a fresh scan commits. In particular,
+                                // a host-drain deferral must not immediately emit itself again.
+                                publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
                                 scan_requested = true;
                                 tokio::task::yield_now().await;
                             }
@@ -1503,6 +1515,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                     ) || monitor.auto_close_merged_issues_enabled())
                             }
                             crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
+                            | crate::IssueMonitorEffectPayload::RemoveQueueLabel { .. }
                             | crate::IssueMonitorEffectPayload::DisarmAutoMerge { .. } => true,
                         };
                     let deadline = Instant::now() + operation_timeout;
@@ -1902,9 +1915,16 @@ async fn wait_for_issue_monitor_scan(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IssueMonitorControl {
     Enabled(bool),
+    IssueState {
+        issue_number: u64,
+        state: crate::IssueMonitorIssueState,
+        updated_at: String,
+    },
     /// SPEC #3200 T-046/FR-024: arm/disarm the unattended autonomous mode kill
     /// switch. Disarming stops new autonomous candidates on the next scan.
     AutonomousMode(bool),
+    /// A host-wide update drain postponed an unstarted review window.
+    ReviewDispatchDeferred(crate::AutonomousReviewDispatch),
     /// SPEC #3200 FR-015: a review agent reported its verdict for a reviewed SHA.
     ReviewVerdict {
         issue_number: u64,
@@ -2633,6 +2653,21 @@ fn apply_routine_issue_monitor_control(
         | IssueMonitorControl::WaitDeclared { .. } => false,
         // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
         IssueMonitorControl::ScanNow => true,
+        IssueMonitorControl::IssueState {
+            issue_number,
+            state,
+            updated_at,
+        } => {
+            match state {
+                crate::IssueMonitorIssueState::Closed => {
+                    monitor.record_closed(issue_number, Some(updated_at));
+                }
+                crate::IssueMonitorIssueState::Open => {
+                    monitor.record_reopened(issue_number, Some(updated_at));
+                }
+            }
+            false
+        }
         IssueMonitorControl::ClaimLaunchDelivery {
             issue_number,
             delivery_id,
@@ -2676,6 +2711,10 @@ fn apply_routine_issue_monitor_control(
                 &materializer_id,
                 &materializer_window_id,
             );
+            false
+        }
+        IssueMonitorControl::ReviewDispatchDeferred(dispatch) => {
+            monitor.requeue_review_dispatch_for_update_drain(&dispatch);
             false
         }
         IssueMonitorControl::ReviewVerdict {
@@ -3227,6 +3266,21 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
     decode_issue_monitor_control_in_repo(payload, None)
 }
 
+#[cfg(test)]
+#[test]
+fn issue_5062_host_drain_can_requeue_a_review_delivery_through_control() {
+    let payload = serde_json::json!({
+        "event": "control", "source_pid": u32::MAX,
+        "payload": { "review_dispatch_deferred": {
+            "issue_number": 5062, "pr_number": 42, "reviewed_sha": "abc123",
+            "required_criteria": [], "diff": "", "linked_issue_kind": "issue",
+        } },
+    });
+    assert!(
+        matches!(decode_issue_monitor_control(payload), Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch)) if dispatch.issue_number == 5062 && dispatch.pr_number == 42)
+    );
+}
+
 fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
@@ -3245,6 +3299,24 @@ fn decode_issue_monitor_control_in_repo(
                 return None;
             }
             let payload = event.get("payload")?;
+            if let Some(state) = payload.get("issue_state") {
+                let issue_number = state.get("number")?.as_u64()?;
+                if issue_number == 0 {
+                    return None;
+                }
+                let updated_at = state.get("updated_at")?.as_str()?;
+                chrono::DateTime::parse_from_rfc3339(updated_at).ok()?;
+                let state = match state.get("state")?.as_str()? {
+                    "closed" => crate::IssueMonitorIssueState::Closed,
+                    "open" => crate::IssueMonitorIssueState::Open,
+                    _ => return None,
+                };
+                return Some(IssueMonitorControl::IssueState {
+                    issue_number,
+                    state,
+                    updated_at: updated_at.to_string(),
+                });
+            }
             if let Some(config) = payload
                 .get("config_set")
                 .and_then(serde_json::Value::as_object)
@@ -3494,6 +3566,17 @@ fn decode_issue_monitor_control_in_repo(
                     resume_condition,
                     at,
                 });
+            }
+            if let Some(dispatch) = payload.get("review_dispatch_deferred") {
+                let dispatch: crate::AutonomousReviewDispatch =
+                    serde_json::from_value(dispatch.clone()).ok()?;
+                if dispatch.issue_number == 0
+                    || dispatch.pr_number == 0
+                    || dispatch.reviewed_sha.trim().is_empty()
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch));
             }
             if let Some(review_verdict) = payload.get("review_verdict") {
                 let issue_number = review_verdict.get("issue_number")?.as_u64()?;
@@ -4217,6 +4300,7 @@ enum IssueMonitorEffectOutcome {
     Release(
         gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimReleaseOutcome>,
     ),
+    QueueLabelCleanup(gwt_github::client::OwnerMutationResult<bool>),
     AutoMerge(gwt_git::pr_status::AutoMergeMutationOutcome),
     /// Issue #3917: comment + optional verified close of a delivered Issue.
     MergedIssueSettlement(
@@ -4304,6 +4388,7 @@ fn issue_monitor_effect_is_safety(effect: &crate::PendingIssueMonitorEffect) -> 
         effect.payload,
         crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
             | crate::IssueMonitorEffectPayload::DisarmAutoMerge { .. }
+            | crate::IssueMonitorEffectPayload::RemoveQueueLabel { .. }
     )
 }
 
@@ -4508,6 +4593,68 @@ fn execute_issue_monitor_effect(
                 gwt_github::ApiError::Network(error),
             )),
         }),
+        crate::IssueMonitorEffectPayload::RemoveQueueLabel { issue_number } => {
+            use gwt_github::client::{FetchResult, IssueClient};
+            IssueMonitorEffectOutcome::QueueLabelCleanup(match issue_monitor_http_client(scope) {
+                Ok(client) => (|| {
+                    let FetchResult::Updated(snapshot) = client
+                        .fetch(IssueNumber(*issue_number), None)
+                        .map_err(OwnerMutationError::PreSubmit)?
+                    else {
+                        return Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+                            "unconditional queue-label read returned NotModified".to_string(),
+                        )));
+                    };
+                    let removed = crate::issue_monitor_settlement::remove_closed_queue_label(
+                        &client, &snapshot,
+                    )?;
+                    let snapshot = if removed {
+                        let FetchResult::Updated(snapshot) = client
+                            .fetch(IssueNumber(*issue_number), None)
+                            .map_err(OwnerMutationError::RemoteOutcomeUnknown)?
+                        else {
+                            return Err(OwnerMutationError::RemoteOutcomeUnknown(
+                                ApiError::Unexpected(
+                                    "unconditional queue-label readback returned NotModified"
+                                        .to_string(),
+                                ),
+                            ));
+                        };
+                        snapshot
+                    } else {
+                        snapshot
+                    };
+                    if snapshot.state == gwt_github::IssueState::Closed
+                        && snapshot
+                            .labels
+                            .iter()
+                            .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+                    {
+                        return Err(OwnerMutationError::RemoteOutcomeUnknown(
+                            ApiError::Unexpected(
+                                "closed queue-label removal was not confirmed".to_string(),
+                            ),
+                        ));
+                    }
+                    gwt_github::Cache::new(
+                        crate::issue_cache::issue_cache_root_for_repo_path_or_detached(
+                            &scope.project_root,
+                        ),
+                    )
+                    .write_snapshot(&snapshot)
+                    .map_err(|error| {
+                        let error = ApiError::Unexpected(error.to_string());
+                        if removed {
+                            OwnerMutationError::RemoteOutcomeUnknown(error)
+                        } else {
+                            OwnerMutationError::PreSubmit(error)
+                        }
+                    })?;
+                    Ok(removed)
+                })(),
+                Err(error) => Err(OwnerMutationError::PreSubmit(ApiError::Network(error))),
+            })
+        }
         crate::IssueMonitorEffectPayload::ArmAutoMerge {
             pr_number,
             reviewed_sha,
@@ -4809,6 +4956,29 @@ fn try_commit_issue_monitor_effect_result(
                 ) => {
                     let _ = candidate.complete_pending_effect(&key);
                     settled = true;
+                }
+                (
+                    crate::IssueMonitorEffectPayload::RemoveQueueLabel { .. },
+                    IssueMonitorEffectOutcome::QueueLabelCleanup(Ok(_)),
+                ) => {
+                    let _ = candidate.complete_pending_effect(&key);
+                    settled = true;
+                }
+                (
+                    crate::IssueMonitorEffectPayload::RemoveQueueLabel { .. },
+                    IssueMonitorEffectOutcome::QueueLabelCleanup(Err(
+                        OwnerMutationError::PreSubmit(_),
+                    )),
+                ) => {
+                    let _ = candidate.retry_pending_effect(&key);
+                }
+                (
+                    crate::IssueMonitorEffectPayload::RemoveQueueLabel { .. },
+                    IssueMonitorEffectOutcome::QueueLabelCleanup(Err(
+                        OwnerMutationError::RemoteOutcomeUnknown(_),
+                    )),
+                ) => {
+                    // Keep Attempting; fresh Closed and label readback precedes any retry.
                 }
                 (
                     crate::IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. },
@@ -6090,6 +6260,97 @@ mod agent_failure_source_contract_tests {
         assert!(identity.active);
         assert_eq!(identity.claim_id.as_deref(), Some(claim_id));
         monitor
+    }
+
+    #[test]
+    fn issue_closed_control_retires_live_and_durable_membership_without_resurrection() {
+        let temp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let prefs_path = temp.path().join("monitor.json");
+        let mut monitor = monitor_with_launch("claim", "tab::agent");
+        monitor.terminal_queue_push(&[42], "operator", "2026-09-01T00:00:00Z");
+        let mut stale = monitor.clone();
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let control =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"issue_state": {
+                    "number": 42, "state": "closed", "updated_at": "2026-09-01T00:01:00Z"
+                }}),
+                u32::MAX,
+            ))
+            .expect("close notification must decode");
+        assert!(matches!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                AcceptedIssueMonitorControl::new(control),
+            ),
+            IssueMonitorControlCommit::Committed { .. }
+        ));
+        let closed = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        stale.rebase_daemon_driver_prefs(&closed);
+        for state in [&monitor, &stale] {
+            assert!(state.active_issue_numbers().is_empty());
+            assert!(state.local_terminal_queue_numbers().is_empty());
+            assert!(state.inbox_item(42).is_none());
+        }
+        let reopened =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"issue_state": {
+                    "number": 42, "state": "open", "updated_at": "2026-09-01T00:02:00Z"
+                }}),
+                u32::MAX,
+            ))
+            .unwrap();
+        super::try_apply_issue_monitor_control(&mut monitor, reopened, "2026-09-01T00:02:00Z");
+        monitor.terminal_queue_push(&[42], "operator", "2026-09-01T00:02:00Z");
+        let delayed_close =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"issue_state": {
+                    "number": 42, "state": "closed", "updated_at": "2026-09-01T00:01:00Z"
+                }}),
+                u32::MAX,
+            ))
+            .unwrap();
+        super::try_apply_issue_monitor_control(&mut monitor, delayed_close, "2026-09-01T00:03:00Z");
+        assert_eq!(
+            monitor.local_terminal_queue_numbers(),
+            vec![42],
+            "a delayed close cannot revoke reopened admission"
+        );
+    }
+
+    #[test]
+    fn newer_open_control_fences_a_delayed_first_close() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        super::try_apply_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::IssueState {
+                issue_number: 42,
+                state: crate::IssueMonitorIssueState::Open,
+                updated_at: "2026-09-01T00:02:00Z".to_string(),
+            },
+            "2026-09-01T00:02:00Z",
+        );
+        monitor.terminal_queue_push(&[42], "operator", "2026-09-01T00:02:00Z");
+        super::try_apply_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::IssueState {
+                issue_number: 42,
+                state: crate::IssueMonitorIssueState::Closed,
+                updated_at: "2026-09-01T00:01:00Z".to_string(),
+            },
+            "2026-09-01T00:03:00Z",
+        );
+        assert_eq!(
+            monitor.local_terminal_queue_numbers(),
+            vec![42],
+            "a newer authoritative Open must fence even the first delayed Closed record"
+        );
+        assert!(monitor.pending_effects().is_empty());
     }
 
     #[test]

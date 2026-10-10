@@ -5,6 +5,50 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Render-only HTML is derived from durable report Markdown on the host.
+#[derive(Debug, Clone, Serialize)]
+pub struct PmReportView {
+    #[serde(flatten)]
+    pub report: gwt_core::pm_report::PmReport,
+    pub body_html: String,
+}
+
+impl From<gwt_core::pm_report::PmReport> for PmReportView {
+    fn from(report: gwt_core::pm_report::PmReport) -> Self {
+        let body_html = crate::board_remote::markdown::markdown_to_html(&report.body);
+        Self { report, body_html }
+    }
+}
+
+fn serialize_release_notes_entries<S: serde::Serializer>(
+    entries: &[gwt_core::release_notes::ReleaseEntry],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::board_remote::markdown::{render_markdown_html, MarkdownHtmlProfile};
+    let mut rendered = serde_json::to_value(entries).map_err(serde::ser::Error::custom)?;
+    for (entry, value) in entries
+        .iter()
+        .zip(rendered.as_array_mut().into_iter().flatten())
+    {
+        for (section, value) in entry
+            .sections
+            .iter()
+            .zip(value["sections"].as_array_mut().into_iter().flatten())
+        {
+            let markdown = section
+                .items
+                .iter()
+                .map(|item| format!("- {item}\n"))
+                .collect::<String>();
+            value["body_html"] = serde_json::Value::String(render_markdown_html(
+                &markdown,
+                MarkdownHtmlProfile::ReleaseNotes,
+            ));
+        }
+    }
+    rendered.serialize(serializer)
+}
+
 use crate::{
     branch_cleanup::{BranchCleanupProgressPhase, BranchCleanupResultEntry},
     branch_list::BranchListEntry,
@@ -385,6 +429,10 @@ pub enum FrontendEvent {
     SetPmAutoStart {
         enabled: bool,
     },
+    /// Issue #3812: preserve residency while pausing autonomous PM work.
+    SetPmPaused {
+        paused: bool,
+    },
     /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
     SetPmLoopInterval {
         #[serde(deserialize_with = "deserialize_u64_or_decimal_string")]
@@ -533,6 +581,10 @@ pub enum FrontendEvent {
     /// Read the registered PM's conversation. Native paths and identities are
     /// resolved on the host from this authenticated window, never from the client.
     LoadPmConversation {
+        id: String,
+    },
+    /// Read explicitly posted reports for the registered PM window.
+    LoadPmReports {
         id: String,
     },
     /// Inject one line of input into the pane bound to the given agent
@@ -1017,6 +1069,13 @@ pub enum FrontendEvent {
     ListCustomAgents,
     /// SPEC #1921 L3: list supported built-ins and their cached detection state.
     ListSupportedAgents,
+    MaintainSupportedAgent {
+        agent_id: String,
+        action: crate::agent_maintenance::MaintenanceAction,
+    },
+    SetAgentAutoUpdate {
+        enabled: bool,
+    },
     /// Settings > Custom Agents > Add from preset: enumerate built-in preset
     /// definitions for the picker. Response is
     /// [`BackendEvent::CustomAgentPresetList`].
@@ -1884,6 +1943,11 @@ pub struct SupportedAgentView {
     /// None distinguishes an unavailable version from a known one; `installed`
     /// distinguishes a failed version probe from an agent that was not detected.
     pub installed_version: Option<String>,
+    pub available_version: Option<String>,
+    pub update_check_error: Option<String>,
+    pub update_available: bool,
+    pub up_to_date: bool,
+    pub install_supported: bool,
 }
 
 /// Issue #3906 AC-7 / AC-12: phases of the automatic apply announced through
@@ -2009,6 +2073,12 @@ pub enum BackendEvent {
         session_id: Option<String>,
         snapshot: crate::pm_conversation::PmConversationSnapshot,
     },
+    PmReports {
+        id: String,
+        session_id: Option<String>,
+        reports: Vec<PmReportView>,
+        error: Option<String>,
+    },
     /// Origin-client completion receipt for one authenticated pane snapshot
     /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
     /// sets explain every authorized pane that produced no frame.
@@ -2082,6 +2152,7 @@ pub enum BackendEvent {
         /// non-project surface or closing the final project tab.
         available: bool,
         auto_start: bool,
+        paused: bool,
         /// SPEC-3431 FR-132: effective resident-loop interval after applying
         /// the backend minimum to legacy or manually edited preferences.
         loop_interval_secs: u64,
@@ -2560,6 +2631,16 @@ pub enum BackendEvent {
     /// Response to [`FrontendEvent::ListSupportedAgents`].
     SupportedAgentList {
         agents: Vec<SupportedAgentView>,
+        auto_update: bool,
+        maintenance_pending: bool,
+    },
+    SupportedAgentMaintenance {
+        agent_id: String,
+        pending: bool,
+        success: Option<bool>,
+        message: String,
+        before_version: Option<String>,
+        after_version: Option<String>,
     },
     /// Response to [`FrontendEvent::ListCustomAgentPresets`].
     CustomAgentPresetList {
@@ -2778,6 +2859,7 @@ pub enum BackendEvent {
     /// round-trip. The value is the running binary's `CARGO_PKG_VERSION`.
     ReleaseNotesPayload {
         id: String,
+        #[serde(serialize_with = "serialize_release_notes_entries")]
         entries: Vec<gwt_core::release_notes::ReleaseEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         focus_version: Option<String>,
@@ -2837,6 +2919,11 @@ impl BackendEventPolicy {
 }
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
+    BackendEventPolicy::new(
+        "pm_reports",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
     BackendEventPolicy::new(
         "pm_conversation",
         BackendEventDeliveryClass::Snapshot,
@@ -3307,6 +3394,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "supported_agent_maintenance",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "agent_backend_saved",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -3427,6 +3519,7 @@ impl BackendEvent {
             BackendEvent::TerminalPreview { .. } => "terminal_preview",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
+            BackendEvent::PmReports { .. } => "pm_reports",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
@@ -3511,6 +3604,7 @@ impl BackendEvent {
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
             BackendEvent::CustomAgentList { .. } => "custom_agent_list",
             BackendEvent::SupportedAgentList { .. } => "supported_agent_list",
+            BackendEvent::SupportedAgentMaintenance { .. } => "supported_agent_maintenance",
             BackendEvent::CustomAgentPresetList { .. } => "custom_agent_preset_list",
             BackendEvent::CustomAgentSaved { .. } => "custom_agent_saved",
             BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",
@@ -3607,6 +3701,71 @@ mod tests {
         ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
         RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn pm_reports_wire_uses_safe_shared_markdown_and_client_scoped_snapshot() {
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_reports", "id": "pm"
+        }))
+        .unwrap();
+        assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
+        let event = BackendEvent::PmReports {
+            id: "pm".into(), session_id: Some("session".into()), error: None,
+            reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress,
+                body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
+                created_at: chrono::Utc::now(),
+            })],
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        let html = value["reports"][0]["body_html"].as_str().unwrap();
+        for expected in [
+            "<h1>Report</h1>",
+            "<strong>Ready</strong>",
+            "<code>code</code>",
+            "<li>Item</li>",
+            "<pre><code",
+        ] {
+            assert!(html.contains(expected), "missing {expected}: {html}");
+        }
+        assert!(!html.contains("<script>"));
+        assert_eq!(value["reports"][0]["kind"], "progress");
+        assert_eq!(
+            event.delivery_policy().delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            event.delivery_policy().backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn release_notes_wire_uses_shared_markdown_preserving_literal_html() {
+        let event = BackendEvent::ReleaseNotesPayload {
+            id: "notes".into(),
+            focus_version: None,
+            current_version: "1.0.0".into(),
+            entries: vec![gwt_core::release_notes::ReleaseEntry {
+                version: "1.0.0".into(),
+                date: "2026-10-11".into(),
+                sections: vec![gwt_core::release_notes::Section {
+                    heading: "Fixed".into(),
+                    items: vec!["**Ready** and `code` <script>literal</script>".into()],
+                }],
+            }],
+        };
+        let value = serde_json::to_value(event).unwrap();
+        let section = &value["entries"][0]["sections"][0];
+        assert_eq!(section["heading"], "Fixed");
+        let html = section["body_html"]
+            .as_str()
+            .expect("derived Markdown HTML");
+        assert!(html.contains("<strong>Ready</strong>"));
+        assert!(html.contains("<code>code</code>"));
+        assert!(html.contains("&lt;script&gt;literal&lt;/script&gt;"));
+        assert!(!html.contains("<script>"));
+    }
 
     #[test]
     fn close_project_protocol_rejects_legacy_tab_operations_and_preserves_delivery() {
@@ -3788,6 +3947,7 @@ mod tests {
         let event = BackendEvent::PmStatus {
             available: true,
             auto_start: true,
+            paused: false,
             loop_interval_secs: u64::MAX,
             loop_interval_secs_decimal: u64::MAX.to_string(),
             configured_agent_id: "claude".to_string(),
