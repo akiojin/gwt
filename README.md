@@ -294,6 +294,12 @@ gwtd <<'JSON'
 JSON
 ```
 
+If `workspace.update` loses its response, use the reported `operation_id` with
+`workspace.receipt` (`params: {"operation_id":"<UUID>"}`) in the same Session.
+This read-only query does not contact the Host or resend the update. `applied`
+confirms durable publication; `unconfirmed` means proof is not yet available,
+including with an older Host, and does not prove the update failed.
+
 `board.show` returns the latest 20 entries visible to the selected workspace or
 session, in chronological order. Set `params.limit` to a nonnegative integer
 (for example, `15`; `0` returns no entries). `params.all: true` selects all

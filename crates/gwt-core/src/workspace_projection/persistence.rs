@@ -4935,6 +4935,23 @@ pub fn workspace_state_external_commit_resolution_at(
     operation_id: &str,
 ) -> Result<ExternalWorkspaceCommitResolution> {
     validate_external_workspace_operation_id(operation_id)?;
+    if workspace_state_transaction_is_pending_at(current_path, work_items_path)? {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    }
+    Ok(
+        load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
+            .map_or(ExternalWorkspaceCommitResolution::Missing, |receipt| {
+                receipt.resolution
+            }),
+    )
+}
+
+/// Inspect publication markers, including split-root coordinators, without
+/// acquiring recovery locks or publishing any state (Issue #3838).
+pub fn workspace_state_transaction_is_pending_at(
+    current_path: &Path,
+    work_items_path: &Path,
+) -> Result<bool> {
     let base_lock_targets = vec![
         current_path.with_file_name("works.json"),
         work_items_path.to_path_buf(),
@@ -4948,15 +4965,7 @@ pub fn workspace_state_external_commit_resolution_at(
     )?);
     marker_paths.sort();
     marker_paths.dedup();
-    if find_pending_workspace_state_transaction(&marker_paths)?.is_some() {
-        return Ok(ExternalWorkspaceCommitResolution::Busy);
-    }
-    Ok(
-        load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
-            .map_or(ExternalWorkspaceCommitResolution::Missing, |receipt| {
-                receipt.resolution
-            }),
-    )
+    Ok(find_pending_workspace_state_transaction(&marker_paths)?.is_some())
 }
 
 pub fn resolve_workspace_state_external_commit_at(
@@ -7837,6 +7846,51 @@ fn canonical_workspace_work_event_bytes(event: &WorkEvent) -> Result<Vec<u8>> {
         .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
     canonical.push(b'\n');
     Ok(canonical)
+}
+
+/// Read-only proof of an exact immutable source event. Refuse redirected
+/// managed directories just as the canonical shard writer does.
+pub fn workspace_work_event_shard_matches(repo_path: &Path, event: &WorkEvent) -> Result<bool> {
+    let events_dir = gwt_repo_local_work_events_dir(repo_path);
+    if !validate_workspace_work_event_store_path(&events_dir)? {
+        return Ok(false);
+    }
+    let shard = gwt_work_event_shard_path(&events_dir, &event.id);
+    let bucket = shard
+        .parent()
+        .ok_or_else(|| GwtError::Other("Work event shard has no bucket directory".to_string()))?;
+    if !validate_workspace_work_event_bucket_path(&events_dir, bucket)? {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(&shard) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            Ok(fs::read(shard)? == canonical_workspace_work_event_bytes(event)?)
+        }
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn receipt_source_proof_refuses_redirected_bucket() {
+    let repo = tempfile::tempdir().unwrap();
+    let events = gwt_repo_local_work_events_dir(repo.path());
+    let event = WorkEvent::new(WorkEventKind::Update, "receipt-work", Utc::now());
+    write_workspace_work_event_shards_to_dir(&events, std::slice::from_ref(&event)).unwrap();
+    assert!(workspace_work_event_shard_matches(repo.path(), &event).unwrap());
+    let shard = gwt_work_event_shard_path(&events, &event.id);
+    let bucket = shard.parent().unwrap();
+    let redirected = repo.path().join("redirected-source");
+    fs::rename(bucket, &redirected).unwrap();
+    std::os::unix::fs::symlink(&redirected, bucket).unwrap();
+    let before = fs::read(redirected.join(shard.file_name().unwrap())).unwrap();
+    assert!(workspace_work_event_shard_matches(repo.path(), &event).is_err());
+    assert_eq!(
+        fs::read(redirected.join(shard.file_name().unwrap())).unwrap(),
+        before
+    );
 }
 
 fn divergent_workspace_work_event_shard_error(event_id: &str, shard_path: &Path) -> GwtError {

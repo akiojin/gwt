@@ -664,6 +664,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["workspace.projection-prune"],
     },
     Operation {
+        name: "workspace.receipt",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.store_consolidate",
         aliases: &["workspace.store-consolidate"],
     },
