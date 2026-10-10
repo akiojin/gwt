@@ -2024,7 +2024,9 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
             .build(),
     ));
 
-    runtime.save_issue_monitor_profile_from_launch_request(
+    // Saved content must not depend on completing fsync inside the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    let events = runtime.save_issue_monitor_profile_from_launch_request(
         session,
         IssueMonitorProfileSaveContext {
             client_id: "client-1".to_string(),
@@ -2033,6 +2035,15 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
             sets: None,
         },
         request,
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, level, .. }
+                if message == "Issue Monitor settings saved" && level == "info"
+        )),
+        "profile save must commit successfully: {events:?}"
     );
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
