@@ -5146,6 +5146,42 @@ impl AppRuntime {
         delivery_id: &str,
         materializer_window_id: &str,
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        self.claim_issue_monitor_launch_delivery_with_publishers(
+            project_root,
+            issue_number,
+            delivery_id,
+            materializer_window_id,
+            |snapshot, tabs| {
+                gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
+                    project_root,
+                    snapshot,
+                    tabs,
+                )
+            },
+            |payload| self.publish_issue_monitor_control(project_root, payload),
+        )
+    }
+
+    fn claim_issue_monitor_launch_delivery_with_publishers(
+        &self,
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_window_id: &str,
+        publish_snapshot: impl FnOnce(
+            &gwt::IssueMonitorWindowSnapshot,
+            &std::collections::BTreeSet<String>,
+        ) -> Result<
+            (),
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+        >,
+        publish_claim: impl FnOnce(
+            serde_json::Value,
+        ) -> Result<
+            (),
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+        >,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
         let materializer_id = self.issue_monitor_materializer_id.clone();
         let materializer_pid = std::process::id();
         let tab_id = self.issue_monitor_tab_id_for_project_root(project_root);
@@ -5199,28 +5235,21 @@ impl AppRuntime {
         // Waiting for its periodic scan can strand an existing-pane adoption
         // at capacity even though this GUI's preflight accepted it.
         if let Some(snapshot) = snapshot.as_ref() {
-            match gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
-                project_root,
-                snapshot,
-                &snapshot_tabs,
-            ) {
+            match publish_snapshot(snapshot, &snapshot_tabs) {
                 Ok(()) => {}
                 Err(error) if error.allows_local_fallback() => {}
                 Err(error) => return Err(error),
             }
         }
-        let publication = self.publish_issue_monitor_control(
-            project_root,
-            serde_json::json!({
-                "claim_launch_delivery": {
-                    "issue_number": issue_number,
-                    "delivery_id": delivery_id,
-                    "materializer_id": materializer_id.clone(),
-                    "materializer_pid": materializer_pid,
-                    "materializer_window_id": materializer_window_id,
-                }
-            }),
-        );
+        let publication = publish_claim(serde_json::json!({
+            "claim_launch_delivery": {
+                "issue_number": issue_number,
+                "delivery_id": delivery_id,
+                "materializer_id": materializer_id.clone(),
+                "materializer_pid": materializer_pid,
+                "materializer_window_id": materializer_window_id,
+            }
+        }));
         match publication {
             Ok(()) => {
                 let prefs = gwt::load_issue_monitor_prefs(
