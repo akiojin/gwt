@@ -1398,6 +1398,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.report.post" => {
+            let kind = required_string(params, "kind")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
+                project_root: optional_string(params, "project_root")?,
+                kind: serde_json::from_value(Value::String(kind)).map_err(|_| {
+                    CliParseError::InvalidValue {
+                        flag: "kind",
+                        reason: "expected one of: progress, decision, blocker",
+                    }
+                })?,
+                body: required_string(params, "body")?,
+            })
+        }
+        "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
+            project_root: optional_string(params, "project_root")?,
+        }),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
@@ -5399,6 +5415,105 @@ mod tests {
     }
 
     // SPEC-3431: PM agent diagnostics parse variants.
+    #[test]
+    fn pm_report_operations_parse_and_expose_read_only_listing() {
+        let command = ok(
+            "pm.report.post",
+            json!({"kind": "decision", "body": "# Decision", "project_root": "/tmp/project"}),
+        );
+        assert!(matches!(command, CliCommand::Pm(_)));
+        assert!(matches!(ok("pm.report.list", json!({})), CliCommand::Pm(_)));
+        assert!(matches!(
+            ok("pm.report.list", json!({"project_root": "/tmp/project"})),
+            CliCommand::Pm(_)
+        ));
+        assert!(matches!(
+            err("pm.report.post", json!({"kind":"other", "body":"text"})),
+            CliParseError::InvalidValue { flag: "kind", .. }
+        ));
+        assert!(matches!(
+            err("pm.report.post", json!({"kind":"progress"})),
+            CliParseError::MissingFlag("body")
+        ));
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pm.report.list"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pm.report.post"
+            )
+        );
+        for operation in ["pm.report.post", "pm.report.list"] {
+            assert!(crate::cli::pm::capabilities_report()
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_report_post_requires_pm_authority_except_for_direct_cli() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let post = || match ok(
+            "pm.report.post",
+            json!({"kind":"progress", "body":"Persisted progress"}),
+        ) {
+            CliCommand::Pm(command) => command,
+            other => panic!("unexpected report command: {other:?}"),
+        };
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let mut output = String::new();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            0
+        );
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["ok"], true);
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
+        output.clear();
+        let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
+        assert!(error.to_string().contains("registered PM"), "{error}");
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "registered-pm".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..crate::pm_registry::PmPrefs::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            0
+        );
+        let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
+            panic!("expected PM list")
+        };
+        output.clear();
+        crate::cli::pm::run(&mut env, list, &mut output).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["reports"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn pm_status_variants() {
         assert!(matches!(

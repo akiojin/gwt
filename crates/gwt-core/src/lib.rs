@@ -26,6 +26,7 @@ pub mod migration;
 pub mod named_pipe;
 pub mod operation_deadline;
 pub mod paths;
+pub mod pm_report;
 pub mod process;
 pub mod process_console;
 pub mod process_executor;

@@ -10526,6 +10526,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -10862,6 +10863,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -11124,6 +11126,9 @@ impl AppRuntime {
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
+            }
+            FrontendEvent::LoadPmReports { id } => {
+                self.load_pm_reports_events(context, client_id, &id)
             }
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)

@@ -1331,7 +1331,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
-        requestVisiblePmConversations();
+        requestVisiblePmReports();
       }
 
       function handleSocketMessage(event) {
@@ -5426,7 +5426,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           if (view.sessionId !== windowData.session_id) {
             view.sessionId = windowData.session_id;
             bindPmWindowState(windowData.id, windowData.session_id);
-            requestVisiblePmConversations();
+            requestVisiblePmReports();
           }
           return;
         }
@@ -5441,17 +5441,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (overlay) logHost.append(overlay);
         body.classList.add("pm-conversation-body");
         body.append(root, logHost);
-        view = { root, body, logHost, sessionId: windowData.session_id, pendingSessions: [] };
+        view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          send: (message) => {
-            const result = send(message);
-            if (result === "sent") view.pendingSessions.push(view.sessionId);
-            return result;
-          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmConversations();
+            if (!visible) requestVisiblePmReports();
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -5464,19 +5459,19 @@ import { createUiStateStore } from "/ui-state-store.js";
           view.controller.update(state);
           if (state) view.logHost.dataset.stateVersion = String(state.revision);
         });
-        requestVisiblePmConversations();
+        requestVisiblePmReports();
       }
 
-      function requestVisiblePmConversations() {
+      function requestVisiblePmReports() {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            send({ kind: "load_pm_conversation", id: windowData.id });
+            send({ kind: "load_pm_reports", id: windowData.id });
           }
         }
       }
-      window.setInterval(requestVisiblePmConversations, 5000);
+      window.setInterval(requestVisiblePmReports, 5000);
 
       function mountWindowBody(windowData, element) {
         disposePmChat(windowData.id);
@@ -6453,24 +6448,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
-          case "pm_conversation": {
+          case "pm_reports": {
             applyPmWindowReceiveEvent(event);
-            break;
-          }
-          case "pane_send_result": {
-            let view = pmChatViews.get(event.window_id);
-            // A pane removed before submit has no window ID in its rejection.
-            // Only an unambiguous failure may unlock a pending PM draft.
-            if (!event.window_id && event.ok === false) {
-              const pending = (activeWorkspace()?.windows || [])
-                .map(windowData => pmChatViews.get(windowData.id))
-                .filter(candidate => candidate?.pendingSessions.length);
-              if (pending.length === 1) view = pending[0];
-            }
-            if (view && view.pendingSessions.length) {
-              const sentSession = view.pendingSessions.shift();
-              if (sentSession === view.sessionId) view.controller.handleSendResult(event);
-            }
             break;
           }
           case "pm_status":

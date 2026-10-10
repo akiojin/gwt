@@ -5,10 +5,10 @@ use std::{
 
 use gwt_core::paths::gwt_cache_dir;
 use gwt_github::{Cache, CacheEntry, IssueState, SectionName};
-use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    board_remote::markdown::{render_markdown_html, MarkdownHtmlProfile},
     has_gwt_spec_label,
     issue_cache::{
         issue_cache_root_for_repo_path, issue_cache_root_for_repo_path_or_detached,
@@ -1043,30 +1043,9 @@ fn knowledge_detail_section(
     let body = body.into();
     KnowledgeDetailSection {
         title: title.into(),
-        body_html: Some(render_markdown_body_html(&body)),
+        body_html: Some(render_markdown_html(&body, MarkdownHtmlProfile::Knowledge)),
         body,
     }
-}
-
-fn render_markdown_body_html(markdown: &str) -> String {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TASKLISTS);
-
-    let parser = Parser::new_ext(markdown, options);
-    let mut raw_html = String::new();
-    html::push_html(&mut raw_html, parser);
-
-    sanitize_markdown_html(&raw_html)
-}
-
-fn sanitize_markdown_html(raw_html: &str) -> String {
-    ammonia::Builder::default()
-        .add_tags(&["input", "table", "thead", "tbody", "tr", "th", "td"])
-        .add_tag_attributes("input", &["checked", "disabled", "type"])
-        .clean(raw_html)
-        .to_string()
 }
 
 fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
@@ -1997,6 +1976,8 @@ Extra context.
         assert!(html.contains("<h1>Markdown title</h1>"), "{html}");
         assert!(html.contains("<table>"), "{html}");
         assert!(html.contains("type=\"checkbox\""), "{html}");
+        assert!(html.contains("disabled"), "{html}");
+        assert!(html.contains("checked"), "{html}");
         assert!(!html.contains("<script"), "{html}");
         assert!(!html.contains("onclick"), "{html}");
         assert!(!html.contains("javascript:"), "{html}");
