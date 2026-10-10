@@ -1827,19 +1827,24 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         .expect("confirm wizard view");
     assert_eq!(confirm_view.primary_action_label, "Save settings");
 
+    // Recovery content must not depend on completing fsync inside the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let saved_events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::Submit,
         None,
     );
 
-    assert!(saved_events.iter().any(|event| {
-        matches!(
-            &event.event,
-            BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
-        )
-    }));
+    assert!(
+        saved_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                    if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
+            )
+        }),
+        "profile recovery save must commit successfully: {saved_events:?}"
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
