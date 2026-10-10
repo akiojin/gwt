@@ -784,11 +784,15 @@ gwt respects any explicit value (`true` or `false`) and does not change it. A
 config that cannot be parsed or written never blocks startup; the path and
 cause are recorded in the error ledger (`errors.list`).
 
-`errors.list` returns project-scoped errors by default. Set `project_root` to
-filter by project. Use `scope: "host"` for machine-wide errors such as startup
+`errors.list` returns only the current project's errors by default, including
+its other worktrees. Set `project_root` to filter by an explicit recorded root.
+Use `scope: "host"` for machine-wide errors such as startup
 configuration failures, `scope: "unknown"` for unattributed records, or
 `scope: "all"` to inspect every scope. A `project_root` filter always excludes
 host and unknown records; gwt never guesses their project.
+Damaged ledger rows appear as `ledger_corruption` host diagnostics with the
+ledger filename and line number. Their timestamp is when corruption is observed;
+the original rows remain intact.
 
 Codex CLIs before 0.153.0 cannot load a table under `[features]`: a single
 `[features.context_management]` table makes the whole config unreadable
