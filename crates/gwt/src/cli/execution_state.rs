@@ -18284,6 +18284,13 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #5098: the same live PID/start_ticks survives WSL btime steps.
+        // Exercise the real launch/settlement paths, not only the identity parser.
+        let clock = crate::process::test_clock::ProcessClock::new(
+            std::process::id(),
+            10_546_425,
+            1_791_187_159,
+        );
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -18309,20 +18316,42 @@ mod tests {
         let handshake = begin_active_session_launch_handshake(&sessions_dir, &identity)
             .unwrap()
             .expect("Active launch should acquire the durable handshake first");
+        let handshake_path = gwt_agent::active_launch_handshake_path(&sessions_dir, session_id);
+        let before_handshake = fs::read(&handshake_path).unwrap();
         let before_settlement = generation_authority_bytes(dir.path(), owner);
+        clock.set_btime(1_791_187_160);
+        assert_eq!(
+            crate::process::host_process_start_epoch_secs(std::process::id()),
+            Some(1_791_292_624),
+            "the injected wall-clock observation must actually move"
+        );
+        assert!(
+            begin_active_session_launch_handshake(&sessions_dir, &identity)
+                .unwrap()
+                .is_none(),
+            "a clock step must not abandon a live Host's Active launch fence"
+        );
+        assert_eq!(fs::read(&handshake_path).unwrap(), before_handshake);
         let settle_error = settle(dir.path(), session_id, ExecutionSettlement::Completed)
             .expect_err("ordinary terminal settlement must also honor the Active launch fence");
         assert_eq!(settle_error.kind(), ErrorKind::PermissionDenied);
+        assert!(settle_error
+            .to_string()
+            .contains("in-flight Session authority handoff"));
+        assert_eq!(fs::read(&handshake_path).unwrap(), before_handshake);
         assert_eq!(
             generation_authority_bytes(dir.path(), owner),
             before_settlement
         );
         terminal_session.update_status(gwt_agent::AgentStatus::Stopped);
         terminal_session.save(&sessions_dir).unwrap();
-        gwt_agent::SessionRuntimeState::for_execution(
+        gwt_agent::SessionRuntimeState::for_execution_process(
             gwt_agent::AgentStatus::Stopped,
             &identity,
             41,
+            crate::process::host_process_start_time(std::process::id()).unwrap(),
+            i32::MAX as u32,
+            1,
         )
         .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
         .unwrap();
@@ -18332,6 +18361,11 @@ mod tests {
             FRESH_LINKED_OWNER_LAUNCH_SOURCE,
         );
         let before = generation_authority_bytes(dir.path(), owner);
+        clock.set_btime(1_791_187_161);
+        assert_eq!(
+            crate::process::host_process_start_epoch_secs(std::process::id()),
+            Some(1_791_292_625)
+        );
 
         let refused = prepare_exact_terminal_active_successor(
             dir.path(),
@@ -18347,6 +18381,10 @@ mod tests {
         )
         .expect_err("an in-flight Active launch handshake must fence terminal settlement");
         assert_eq!(refused.kind(), ErrorKind::PermissionDenied);
+        assert!(refused
+            .to_string()
+            .contains("in-flight Active launch handshake"));
+        assert_eq!(fs::read(&handshake_path).unwrap(), before_handshake);
         assert_eq!(generation_authority_bytes(dir.path(), owner), before);
 
         assert!(finish_active_session_launch_handshake(&sessions_dir, &handshake).unwrap());
