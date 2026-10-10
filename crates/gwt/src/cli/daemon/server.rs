@@ -21508,8 +21508,8 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed worker max prefs");
-        let before = fs::read(&prefs_path).expect("read worker prefs bytes");
         let hub = BroadcastHub::new();
+        let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let shutdown = Arc::new(DaemonShutdown::new());
         let worker = spawn_issue_monitor_worker_with_config(
             scope,
@@ -21520,6 +21520,26 @@ exit 1
                 ..crate::IssueMonitorConfig::default()
             },
         );
+        recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status.last_scan_at.is_some()
+                && status.last_error.as_deref().is_some_and(|error| {
+                    error.contains("remote-resolution") && error.contains("launch_suppressed")
+                })
+        })
+        .await
+        .expect("the initial non-Git scan settles before the control transaction");
+        // Startup can normalize legacy bindings and persist the first scan.
+        // Compare the control against that settled state, with its exact MAX
+        // source still present, rather than racing those independent writes.
+        let settled =
+            crate::load_issue_monitor_prefs(&prefs_path).expect("load settled worker prefs");
+        assert_eq!(
+            settled.effect_authority_epoch,
+            initial.effect_authority_epoch
+        );
+        assert_eq!(settled.launched_issues, initial.launched_issues);
+        assert!(settled.last_control_receipt.is_none());
+        let before = fs::read(&prefs_path).expect("read settled worker prefs bytes");
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
