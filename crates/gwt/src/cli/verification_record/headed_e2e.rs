@@ -10,6 +10,9 @@ pub struct HeadedE2eEvidence {
     pub chromium_light_passed: u64,
     pub failed: u64,
     pub status: String,
+    /// Absolute paths to files attached by the measured Playwright run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
 }
 
 impl HeadedE2eEvidence {
@@ -100,6 +103,7 @@ mod tests {
             chromium_light_passed: 1,
             failed: 0,
             status: "passed".to_string(),
+            artifacts: Vec::new(),
         };
         assert!(pass.passed());
         assert!(HeadedE2eEvidence {
@@ -128,6 +132,21 @@ mod tests {
             ..pass
         }
         .passed());
+    }
+
+    #[test]
+    fn artifact_paths_roundtrip_without_changing_legacy_serialization() {
+        let legacy =
+            r#"{"chromium_dark_passed":1,"chromium_light_passed":1,"failed":0,"status":"passed"}"#;
+        let evidence: HeadedE2eEvidence = serde_json::from_str(legacy).unwrap();
+        assert!(evidence.artifacts.is_empty());
+        assert_eq!(serde_json::to_string(&evidence).unwrap(), legacy);
+
+        let mut with_artifacts: serde_json::Value = serde_json::from_str(legacy).unwrap();
+        with_artifacts["artifacts"] =
+            serde_json::json!(["/output/screenshot.png", "/output/trace.zip"]);
+        let evidence: HeadedE2eEvidence = serde_json::from_value(with_artifacts.clone()).unwrap();
+        assert_eq!(serde_json::to_value(evidence).unwrap(), with_artifacts);
     }
 
     #[test]

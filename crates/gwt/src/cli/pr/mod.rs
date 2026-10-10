@@ -3015,15 +3015,15 @@ mod tests {
             Some(&fixture.repo),
         )
         .unwrap();
-        let mut start = gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Start,
+        let mut done = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
             &work_id,
             chrono::Utc::now(),
         );
-        start.owner = Some(s("Issue #42"));
-        start.title = Some(s("PR shard delivery"));
-        start.agent_session_id = Some(s(session_id));
-        start.execution_container = Some(
+        done.owner = Some(s("Issue #42"));
+        done.title = Some(s("PR shard delivery"));
+        done.agent_session_id = Some(s(session_id));
+        done.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some(s("main")),
                 worktree_path: Some(fixture.repo.clone()),
@@ -3037,7 +3037,7 @@ mod tests {
         projection.id = work_id.clone();
         gwt_core::workspace_projection::save_workspace_projection(&fixture.repo, &projection)
             .unwrap();
-        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start).unwrap();
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, done).unwrap();
         git(&["add", "--", ".gwt/work/events"]);
         fixture.commit("chore(work): seed canonical Work");
         fixture.push();
@@ -3127,6 +3127,27 @@ mod tests {
             crate::cli::verification_record::EvidenceStatus::Fresh
         );
 
+        // #5216: a review Session may resume this same Work after final Done.
+        // Its immutable shard must survive delivery without another commit/PR.
+        let mut resume = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Resume,
+            &work_id,
+            chrono::Utc::now(),
+        );
+        resume.agent_session_id = Some(s("independent-review-session"));
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, resume.clone())
+            .unwrap();
+        let resume_path =
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &resume.id);
+        let resume_bytes = std::fs::read(&resume_path).unwrap();
+        let pending = crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            session_id,
+            true,
+        )
+        .unwrap();
+        assert!(pending.obligation_open && !pending.status.is_settled());
+
         // A real source change must still refuse completion with this same run.
         std::fs::write(fixture.repo.join("src.txt"), "changed source\n").unwrap();
         assert_eq!(
@@ -3149,9 +3170,17 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("stale"), "{out}");
+        assert!(
+            crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap()
+                .obligation_open,
+            "refused delivery must not close the bookkeeping obligation"
+        );
         // Restore the fixture's delivery commit, without rerunning verification.
         git(&["reset", "--hard", "HEAD^"]);
         git(&["push", "--force", "origin", "main"]);
+        env.completion_prs.get_mut(&7).unwrap().state = gwt_git::pr_status::PrState::Merged;
         out.clear();
         assert_eq!(
             crate::cli::execution_state::run(
@@ -3166,6 +3195,17 @@ mod tests {
         let completed = crate::cli::execution_state::load(&fixture.repo)
             .unwrap()
             .unwrap();
+        let bookkeeping =
+            crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap();
+        assert!(
+            !bookkeeping.obligation_open,
+            "verified merged delivery must close its own bookkeeping obligation"
+        );
+        assert_eq!(bookkeeping.status, pending.status, "keep the audit warning");
+        assert_eq!(std::fs::read(&resume_path).unwrap(), resume_bytes);
+        assert_eq!(bookkeeping.execution_binding, pending.execution_binding);
         assert_eq!(
             crate::cli::hook::work_event_settlement_stop_check::handle_with_input(
                 &fixture.repo,
@@ -3204,11 +3244,10 @@ mod tests {
             )
             .unwrap();
             assert!(
-                receipt.status.is_settled(),
+                !receipt.obligation_open,
                 "post-delivery PR editing must close in one cycle: {:?}",
                 receipt.status
             );
-            assert!(!receipt.obligation_open);
             sync_edited_workspace_pr_metadata(&mut env, &merged_pr).unwrap();
         }
         assert_eq!(
@@ -3988,8 +4027,8 @@ mod tests {
                 has_non_gwt_changes: Some(true),
             },
             gwt_git::UnlandedBranch {
-                branch: "work/issue-3552".to_string(),
-                owner_issue: Some(3552),
+                branch: "pm/resident".to_string(),
+                owner_issue: None,
                 ahead: 2,
                 last_commit_at: Some("2026-08-28T04:00:00Z".parse().expect("commit date")),
                 has_open_pr: false,
@@ -4029,7 +4068,7 @@ mod tests {
             "\"has_open_pr\": false",
             "\"has_non_gwt_changes\": true",
             "\"bookkeeping_only_branch_count\": 1",
-            "\"branch\": \"work/issue-3552\"",
+            "\"branch\": \"pm/resident\"",
         ] {
             assert!(out.contains(field), "missing {field}: {out}");
         }
@@ -4043,8 +4082,15 @@ mod tests {
         );
         assert_eq!(payload["bookkeeping_only_branch_count"], 1);
         assert_eq!(
-            payload["bookkeeping_only_branches"][0]["branch"],
-            "work/issue-3552"
+            payload["bookkeeping_only_branches"][0],
+            serde_json::json!({
+                "branch": "pm/resident",
+                "owner_issue": null,
+                "ahead": 2,
+                "last_commit_at": "2026-08-28T04:00:00Z",
+                "has_open_pr": false,
+                "has_non_gwt_changes": false,
+            })
         );
     }
 
@@ -4762,6 +4808,7 @@ mod tests {
                 chromium_light_passed: light,
                 failed,
                 status: "passed".to_string(),
+                artifacts: Vec::new(),
             });
             verification::save(repo.path(), &record).unwrap();
             let mut out = String::new();

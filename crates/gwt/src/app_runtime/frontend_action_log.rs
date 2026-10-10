@@ -767,6 +767,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_pm_loop_interval", "pm")
                 .target(loop_interval_secs.to_string())
         }
+        FrontendEvent::SetPmPaused { paused } => FrontendUserActionLog::new("set_pm_paused", "pm")
+            .mode(if *paused { "paused" } else { "active" }),
         FrontendEvent::SetPmLaunchProfile {
             agent_id, model, ..
         } => FrontendUserActionLog::new("set_pm_launch_profile", "pm")

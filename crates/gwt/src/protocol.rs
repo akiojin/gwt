@@ -385,6 +385,10 @@ pub enum FrontendEvent {
     SetPmAutoStart {
         enabled: bool,
     },
+    /// Issue #3812: preserve residency while pausing autonomous PM work.
+    SetPmPaused {
+        paused: bool,
+    },
     /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
     SetPmLoopInterval {
         #[serde(deserialize_with = "deserialize_u64_or_decimal_string")]
@@ -2082,6 +2086,7 @@ pub enum BackendEvent {
         /// non-project surface or closing the final project tab.
         available: bool,
         auto_start: bool,
+        paused: bool,
         /// SPEC-3431 FR-132: effective resident-loop interval after applying
         /// the backend minimum to legacy or manually edited preferences.
         loop_interval_secs: u64,
@@ -3788,6 +3793,7 @@ mod tests {
         let event = BackendEvent::PmStatus {
             available: true,
             auto_start: true,
+            paused: false,
             loop_interval_secs: u64::MAX,
             loop_interval_secs_decimal: u64::MAX.to_string(),
             configured_agent_id: "claude".to_string(),

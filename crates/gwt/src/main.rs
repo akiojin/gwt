@@ -1899,8 +1899,11 @@ enum UserEvent {
     RuntimeApprovalResolutionCancelled {
         id: String,
     },
-    /// Issue #3702: the fast-path just submitted or cleared a composer that
-    /// had unsent keystrokes. Deliver one coalesced PM wake if one was held.
+    /// Issue #3932: deliver or retry retained Agent idle edges without a tick.
+    PmAgentIdleWake {
+        context: app_runtime::ProjectContext,
+    },
+    /// Issue #3702: the fast-path submitted or cleared a composing PM pane.
     FlushPendingPmWake {
         id: String,
     },
@@ -11040,6 +11043,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionCancelled { id }) => {
                 app.cancel_runtime_approval_resolution(&id);
+            }
+            Event::UserEvent(UserEvent::PmAgentIdleWake { context }) => {
+                app.pm_agent_idle_wake_events(&context);
             }
             Event::UserEvent(UserEvent::FlushPendingPmWake { id }) => {
                 app.flush_pending_pm_wake(&id);
