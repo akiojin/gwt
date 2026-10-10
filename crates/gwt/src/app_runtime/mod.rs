@@ -1364,6 +1364,8 @@ pub(crate) struct ProjectRuntimeState {
     /// blocking worker. Duplicate ticks are coalesced by dropping them while
     /// the same canonical project scope is in flight.
     pub(crate) issue_monitor_scheduled_scans_in_flight: HashSet<PathBuf>,
+    /// Renewals have their own lane so slow scans cannot delay live claims.
+    pub(crate) issue_monitor_claim_renewals_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Latest published read model; capacity refreshes preserve scan/queue authority.
     pub(crate) issue_monitor_status_cache: std::cell::RefCell<Option<gwt::IssueMonitorStatusView>>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
@@ -1462,6 +1464,7 @@ pub(crate) fn initial_project_states(
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
+                    issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -2420,6 +2423,7 @@ enum LocalIssueMonitorEffectOutcome {
     Claim(
         gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimAcquireOutcome>,
     ),
+    Renew(gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimRenewOutcome>),
     Revoked(
         gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimReleaseOutcome>,
     ),
@@ -2431,33 +2435,40 @@ enum LocalIssueMonitorEffectOutcome {
 fn begin_local_issue_monitor_effect_attempt(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
+    renewals_only: bool,
 ) -> std::io::Result<Option<gwt::PendingIssueMonitorEffect>> {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let eligible = |effect: &gwt::PendingIssueMonitorEffect| match effect.payload {
+        gwt::IssueMonitorEffectPayload::RenewClaim { .. } => true,
+        gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
+        | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => !renewals_only,
+        _ => false,
+    };
     try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
         prefs_path,
         monitor,
         |latest| {
-            if let Some(effect) = latest.pending_effects().iter().find(|effect| {
-                effect.state == gwt::IssueMonitorEffectState::Attempting
-                    && matches!(
-                        effect.payload,
-                        gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
-                            | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
-                    )
-            }) {
-                return Some(effect.clone());
-            }
             let effect = latest
                 .pending_effects()
                 .iter()
-                .find(|effect| {
-                    effect.state == gwt::IssueMonitorEffectState::Prepared
-                        && matches!(
-                            effect.payload,
-                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
-                                | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
-                        )
+                .filter(|effect| {
+                    eligible(effect) && latest.claim_renewal_attempt_is_ready(effect, &now)
+                })
+                .min_by_key(|effect| {
+                    let priority = match effect.payload {
+                        gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => 0,
+                        gwt::IssueMonitorEffectPayload::RenewClaim { .. } => 1,
+                        _ => 2,
+                    };
+                    (
+                        priority,
+                        effect.state != gwt::IssueMonitorEffectState::Attempting,
+                    )
                 })
                 .cloned()?;
+            if effect.state == gwt::IssueMonitorEffectState::Attempting {
+                return Some(effect);
+            }
             let key = effect.attempt_key();
             if !latest.mark_pending_effect_attempting(&key) {
                 return None;
@@ -2486,6 +2497,7 @@ fn commit_local_issue_monitor_effect_result(
 
     let remote_error = match &outcome {
         LocalIssueMonitorEffectOutcome::Claim(Err(error))
+        | LocalIssueMonitorEffectOutcome::Renew(Err(error))
         | LocalIssueMonitorEffectOutcome::Revoked(Err(error))
         | LocalIssueMonitorEffectOutcome::Release(Err(error)) => Some(error.to_string()),
         _ => None,
@@ -2505,9 +2517,36 @@ fn commit_local_issue_monitor_effect_result(
             }) {
                 return 0_u8;
             }
-            let current =
-                latest.effect_authority_epoch() == key.authority_epoch && latest.config.enabled;
+            let authority_current = latest.effect_authority_epoch() == key.authority_epoch;
+            let current = authority_current && latest.config.enabled;
+            match &outcome {
+                LocalIssueMonitorEffectOutcome::Claim(result) if current => {
+                    latest.record_claim_acquisition_result(&effect.payload, result, now_text)
+                }
+                LocalIssueMonitorEffectOutcome::Renew(result) if current => {
+                    latest.record_claim_renewal_result(&effect.payload, result, now_text)
+                }
+                LocalIssueMonitorEffectOutcome::Release(result) if authority_current => {
+                    latest.record_claim_release_result(&effect.payload, result, now_text)
+                }
+                _ => {}
+            }
             match (&effect.payload, outcome) {
+                (
+                    gwt::IssueMonitorEffectPayload::RenewClaim { .. },
+                    LocalIssueMonitorEffectOutcome::Renew(result),
+                ) => {
+                    if !current || result.is_ok() {
+                        latest.complete_pending_effect(&key);
+                        1
+                    } else if matches!(result, Err(OwnerMutationError::PreSubmit(_))) {
+                        latest.retry_pending_effect(&key);
+                        2
+                    } else {
+                        // Retain Attempting until fresh readback reconciles it.
+                        0
+                    }
+                }
                 (
                     gwt::IssueMonitorEffectPayload::AcquireClaim {
                         issue_number,
@@ -2629,9 +2668,313 @@ fn commit_local_issue_monitor_effect_result(
     )
 }
 
+#[cfg(test)]
+mod claim_renewal_tests {
+    use super::*;
+
+    #[test]
+    fn local_renewal_result_never_creates_launch_delivery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let effect = gwt::PendingIssueMonitorEffect {
+            effect_id: "renew:42:claim-42".to_string(),
+            authority_epoch: 7,
+            attempt: 1,
+            state: gwt::IssueMonitorEffectState::Attempting,
+            payload: gwt::IssueMonitorEffectPayload::RenewClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                generation_id: "generation-42".to_string(),
+                ttl_secs: 1800,
+            },
+        };
+        let prefs = gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![effect.clone()],
+            claim_identities: vec![gwt::IssueMonitorClaimIdentity {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+            }],
+            ..Default::default()
+        };
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        let result = Ok(
+            gwt_github::issue_auto_claim::ClaimRenewOutcome::NotRenewed {
+                reason: "the current execution holder ended".to_string(),
+                conflicting_claims: Vec::new(),
+            },
+        );
+        assert_eq!(
+            commit_local_issue_monitor_effect_result(
+                &prefs_path,
+                &mut monitor,
+                effect.clone(),
+                LocalIssueMonitorEffectOutcome::Renew(result),
+                "2026-10-08T00:05:00Z"
+            )
+            .unwrap(),
+            1
+        );
+        let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert!(persisted.pending_effects.is_empty());
+        assert!(persisted.launching_issues.is_empty());
+        assert!(persisted.pending_launch_deliveries.is_empty());
+        assert_eq!(
+            persisted.claim_diagnostics[&42].last_failure.as_deref(),
+            Some("the current execution holder ended")
+        );
+
+        let mut prefs = persisted;
+        prefs.pending_effects = vec![effect];
+        prefs.claim_diagnostics.clear();
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        let start = gwt_core::operation_deadline::now();
+        let deadline = start + std::time::Duration::from_secs(60);
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let mut expired_clock = None;
+        let error = drive_local_issue_monitor_claim_effects_with(
+            &prefs_path,
+            &mut monitor,
+            |_, _, _, _| {
+                expired_clock = Some(gwt_core::operation_deadline::ScopedOperationClock::set(
+                    deadline,
+                ));
+                Ok(LocalIssueMonitorEffectOutcome::Renew(Err(
+                    gwt_github::client::OwnerMutationError::RemoteOutcomeUnknown(
+                        gwt_github::ApiError::Network("heartbeat timed out".to_string()),
+                    ),
+                )))
+            },
+        )
+        .expect_err("the expired remote deadline remains visible");
+        assert!(error.contains("deadline"), "{error}");
+        drop(expired_clock);
+        let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            persisted.pending_effects[0].state,
+            gwt::IssueMonitorEffectState::Attempting,
+            "unknown PATCH outcomes remain fenced for fresh readback"
+        );
+        assert!(persisted.claim_diagnostics[&42]
+            .last_failure
+            .as_deref()
+            .unwrap()
+            .contains("heartbeat timed out"));
+        assert!(persisted.launching_issues.is_empty());
+        assert!(persisted.pending_launch_deliveries.is_empty());
+
+        drop(_deadline);
+        drop(_clock);
+        let release_effect = gwt::PendingIssueMonitorEffect {
+            effect_id: "release:42:claim-42".to_string(),
+            authority_epoch: 7,
+            attempt: 1,
+            state: gwt::IssueMonitorEffectState::Attempting,
+            payload: gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+            },
+        };
+        let mut prefs = persisted;
+        prefs.enabled = false;
+        prefs.pending_effects = vec![release_effect.clone()];
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        assert_eq!(
+            commit_local_issue_monitor_effect_result(
+                &prefs_path,
+                &mut monitor,
+                release_effect.clone(),
+                LocalIssueMonitorEffectOutcome::Release(Ok(
+                    gwt_github::issue_auto_claim::ClaimReleaseOutcome::AlreadyReleased(None),
+                )),
+                "2026-10-08T00:06:00Z",
+            )
+            .unwrap(),
+            1,
+        );
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            prefs.claim_diagnostics[&42].state,
+            gwt::issue_monitor::IssueMonitorClaimHealth::Released,
+            "disabled cleanup records same-epoch exact claim success"
+        );
+        prefs.pending_effects = vec![release_effect.clone()];
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        assert_eq!(
+            commit_local_issue_monitor_effect_result(
+                &prefs_path,
+                &mut monitor,
+                release_effect,
+                LocalIssueMonitorEffectOutcome::Release(Err(
+                    gwt_github::client::OwnerMutationError::PreSubmit(
+                        gwt_github::ApiError::Network("release denied".to_string()),
+                    ),
+                )),
+                "2026-10-08T00:07:00Z",
+            )
+            .unwrap(),
+            2,
+        );
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            prefs.claim_diagnostics[&42].state,
+            gwt::issue_monitor::IssueMonitorClaimHealth::UpdateFailed,
+        );
+        assert!(prefs.claim_diagnostics[&42]
+            .last_failure
+            .as_deref()
+            .unwrap()
+            .contains("release denied"));
+        assert!(prefs.launching_issues.is_empty());
+        assert!(prefs.pending_launch_deliveries.is_empty());
+
+        for outcome_unknown in [false, true] {
+            let failed = gwt::PendingIssueMonitorEffect::prepared(
+                "renew-fair:42",
+                7,
+                gwt::IssueMonitorEffectPayload::RenewClaim {
+                    issue_number: 42,
+                    claim_id: "claim-42".to_string(),
+                    owner: "host/session".to_string(),
+                    generation_id: "generation-42".to_string(),
+                    ttl_secs: 1800,
+                },
+            );
+            let mut healthy = failed.clone();
+            healthy.effect_id = "renew-fair:43".to_string();
+            if let gwt::IssueMonitorEffectPayload::RenewClaim {
+                issue_number,
+                claim_id,
+                generation_id,
+                ..
+            } = &mut healthy.payload
+            {
+                *issue_number = 43;
+                *claim_id = "claim-43".to_string();
+                *generation_id = "generation-43".to_string();
+            }
+            let mut scenario = prefs.clone();
+            scenario.enabled = true;
+            scenario.pending_effects = vec![failed.clone(), healthy.clone()];
+            scenario
+                .claim_identities
+                .push(gwt::IssueMonitorClaimIdentity {
+                    issue_number: 43,
+                    claim_id: "claim-43".to_string(),
+                    owner: "host/session".to_string(),
+                });
+            gwt::save_issue_monitor_prefs(&prefs_path, &scenario).unwrap();
+            let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), scenario);
+            let mut attempted = Vec::new();
+            drive_local_issue_monitor_claim_effects_with(
+                &prefs_path,
+                &mut monitor,
+                |effect, _, now, now_text| {
+                    let gwt::IssueMonitorEffectPayload::RenewClaim {
+                        issue_number,
+                        claim_id,
+                        owner,
+                        ..
+                    } = &effect.payload
+                    else {
+                        panic!("expected a renewal");
+                    };
+                    attempted.push(*issue_number);
+                    let result = if *issue_number == 42 {
+                        let source = gwt_github::ApiError::Network("renewal failed".to_string());
+                        Err(if outcome_unknown {
+                            gwt_github::client::OwnerMutationError::RemoteOutcomeUnknown(source)
+                        } else {
+                            gwt_github::client::OwnerMutationError::PreSubmit(source)
+                        })
+                    } else {
+                        Ok(gwt_github::issue_auto_claim::ClaimRenewOutcome::Renewed {
+                            claim: gwt_github::issue_auto_claim::ClaimComment {
+                                comment_id: Some(gwt_github::CommentId(43)),
+                                claim_id: claim_id.clone(),
+                                owner: owner.clone(),
+                                issue_number: *issue_number,
+                                status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                                heartbeat_at: now_text.to_string(),
+                                expires_at: (*now + chrono::Duration::minutes(30))
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                launched_work_id: Some("work/issue-43".to_string()),
+                            },
+                            conflicting_claims: Vec::new(),
+                        })
+                    };
+                    Ok(LocalIssueMonitorEffectOutcome::Renew(result))
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                attempted,
+                vec![42, 43],
+                "a failed claim cannot starve the next claim"
+            );
+            let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+            assert_eq!(persisted.pending_effects.len(), 1);
+            let pending = &persisted.pending_effects[0];
+            assert_eq!(
+                pending.state,
+                if outcome_unknown {
+                    gwt::IssueMonitorEffectState::Attempting
+                } else {
+                    gwt::IssueMonitorEffectState::Prepared
+                },
+            );
+            if outcome_unknown {
+                assert_eq!(pending.attempt_key(), failed.attempt_key());
+            }
+            let failure_at = chrono::DateTime::parse_from_rfc3339(
+                persisted.claim_diagnostics[&42]
+                    .last_failure_at
+                    .as_deref()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(!monitor.claim_renewal_attempt_is_ready(pending, &failure_at.to_rfc3339()));
+            let next = failure_at
+                + chrono::Duration::seconds(monitor.claim_heartbeat_interval_secs() as i64);
+            assert!(monitor.claim_renewal_attempt_is_ready(pending, &next.to_rfc3339()));
+            assert!(persisted.claim_diagnostics[&43].last_success_at.is_some());
+            assert!(persisted.launching_issues.is_empty());
+            assert!(persisted.pending_launch_deliveries.is_empty());
+        }
+    }
+}
+
 fn drive_local_issue_monitor_claim_effects_with(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
+    mut execute: impl FnMut(
+        &gwt::PendingIssueMonitorEffect,
+        bool,
+        &chrono::DateTime<chrono::Utc>,
+        &str,
+    ) -> Result<LocalIssueMonitorEffectOutcome, String>,
+) -> Result<(), String> {
+    drive_local_issue_monitor_claim_effects_matching_with(prefs_path, monitor, false, &mut execute)
+}
+
+fn drive_local_issue_monitor_claim_effects_matching_with(
+    prefs_path: &Path,
+    monitor: &mut gwt::IssueMonitorState,
+    renewals_only: bool,
     mut execute: impl FnMut(
         &gwt::PendingIssueMonitorEffect,
         bool,
@@ -2653,13 +2996,22 @@ fn drive_local_issue_monitor_claim_effects_with(
     let _local_deadline = local_deadline;
     let initial_count = monitor.pending_effects().len();
     for _ in 0..initial_count.max(1) {
-        let Some(effect) = begin_local_issue_monitor_effect_attempt(prefs_path, monitor)
-            .map_err(|error| error.to_string())?
+        let Some(effect) =
+            begin_local_issue_monitor_effect_attempt(prefs_path, monitor, renewals_only)
+                .map_err(|error| error.to_string())?
         else {
             break;
         };
-        let authority_current =
-            effect.authority_epoch == monitor.effect_authority_epoch() && monitor.config.enabled;
+        let renewal = matches!(
+            effect.payload,
+            gwt::IssueMonitorEffectPayload::RenewClaim { .. }
+        );
+        let authority_current = effect.authority_epoch == monitor.effect_authority_epoch()
+            && monitor.config.enabled
+            && (!matches!(
+                effect.payload,
+                gwt::IssueMonitorEffectPayload::RenewClaim { .. }
+            ) || monitor.claim_renewal_is_current(&effect.payload));
         gwt_core::operation_deadline::ensure_remaining(
             "local Issue Monitor remote effect submission",
         )
@@ -2667,15 +3019,51 @@ fn drive_local_issue_monitor_claim_effects_with(
         let now = chrono::Utc::now();
         let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let outcome = execute(&effect, authority_current, &now, &now_text)?;
-        gwt_core::operation_deadline::ensure_remaining(
+        let renewed = matches!(
+            &outcome,
+            LocalIssueMonitorEffectOutcome::Renew(Ok(
+                gwt_github::issue_auto_claim::ClaimRenewOutcome::Renewed { .. }
+            )),
+        );
+        let now_text = if renewal && !renewed {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        } else {
+            now_text
+        };
+        if let Err(error) = gwt_core::operation_deadline::ensure_remaining(
             "local Issue Monitor remote effect result commit",
-        )
-        .map_err(|error| error.to_string())?;
+        ) {
+            if matches!(
+                effect.payload,
+                gwt::IssueMonitorEffectPayload::RenewClaim { .. }
+            ) {
+                // An expired ambient deadline cannot be extended. Give only
+                // this result's fenced prefs commit a fresh, bounded thread;
+                // unknown PATCH outcomes still remain Attempting.
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let _deadline =
+                                gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                                    gwt_core::operation_deadline::now()
+                                        + local_issue_monitor_prefs_timeout(),
+                                );
+                            commit_local_issue_monitor_effect_result(
+                                prefs_path, monitor, effect, outcome, &now_text,
+                            )
+                        })
+                        .join()
+                })
+                .map_err(|_| "claim heartbeat timeout result commit panicked".to_string())?
+                .map_err(|error| error.to_string())?;
+            }
+            return Err(error.to_string());
+        }
         let transition = commit_local_issue_monitor_effect_result(
             prefs_path, monitor, effect, outcome, &now_text,
         )
         .map_err(|error| error.to_string())?;
-        if transition != 1 {
+        if transition != 1 && !renewal {
             break;
         }
     }
@@ -2684,76 +3072,196 @@ fn drive_local_issue_monitor_claim_effects_with(
 
 fn execute_local_issue_monitor_claim_effects(
     prefs_path: &Path,
+    project_root: &Path,
     owner: &str,
     repo: &str,
     monitor: &mut gwt::IssueMonitorState,
     issue_client_factory: &RuntimeIssueClientFactory,
+    renewals_only: bool,
 ) -> Result<(), String> {
     use gwt_github::issue_auto_claim::{
         acquire_claim_mutation, release_claim_mutation, ClaimComment, ClaimStatus,
     };
 
-    drive_local_issue_monitor_claim_effects_with(
-        prefs_path,
-        monitor,
-        |effect, authority_current, now, now_text| {
-            let client = issue_client_factory(owner, repo).map_err(|error| error.to_string())?;
-            Ok(match &effect.payload {
-                gwt::IssueMonitorEffectPayload::AcquireClaim {
-                    issue_number,
-                    claim_id,
-                    owner,
-                    heartbeat_at,
-                    expires_at,
-                    launched_work_id,
-                } if authority_current => {
-                    let ttl = chrono::DateTime::parse_from_rfc3339(heartbeat_at)
-                        .ok()
-                        .zip(chrono::DateTime::parse_from_rfc3339(expires_at).ok())
-                        .and_then(|(start, end)| (end - start).num_seconds().try_into().ok())
-                        .filter(|ttl: &u64| *ttl > 0)
-                        .unwrap_or(gwt::IssueMonitorConfig::default().claim_ttl_secs);
-                    LocalIssueMonitorEffectOutcome::Claim(acquire_claim_mutation(
+    let mut execute = |effect: &gwt::PendingIssueMonitorEffect,
+                       authority_current: bool,
+                       now: &chrono::DateTime<chrono::Utc>,
+                       now_text: &str| {
+        let client = match issue_client_factory(owner, repo) {
+            Ok(client) => client,
+            Err(error) => {
+                let error = gwt_github::client::OwnerMutationError::PreSubmit(error);
+                return Ok(match &effect.payload {
+                    gwt::IssueMonitorEffectPayload::RenewClaim { .. } => {
+                        LocalIssueMonitorEffectOutcome::Renew(Err(error))
+                    }
+                    gwt::IssueMonitorEffectPayload::AcquireClaim { .. } if authority_current => {
+                        LocalIssueMonitorEffectOutcome::Claim(Err(error))
+                    }
+                    gwt::IssueMonitorEffectPayload::AcquireClaim { .. } => {
+                        LocalIssueMonitorEffectOutcome::Revoked(Err(error))
+                    }
+                    gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => {
+                        LocalIssueMonitorEffectOutcome::Release(Err(error))
+                    }
+                    _ => return Err("unsupported local Issue Monitor effect".to_string()),
+                });
+            }
+        };
+        Ok(match &effect.payload {
+            gwt::IssueMonitorEffectPayload::RenewClaim { .. } => {
+                LocalIssueMonitorEffectOutcome::Renew(if authority_current {
+                    gwt::issue_monitor_worker::execute_claim_renewal(
+                        project_root,
+                        &effect.payload,
                         client.as_ref(),
-                        gwt_github::IssueNumber(*issue_number),
-                        ClaimComment {
-                            comment_id: None,
-                            claim_id: claim_id.clone(),
-                            owner: owner.clone(),
-                            issue_number: *issue_number,
-                            status: ClaimStatus::Active,
-                            heartbeat_at: now_text.to_string(),
-                            expires_at: (*now + chrono::Duration::seconds(ttl as i64))
-                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                            launched_work_id: launched_work_id.clone(),
-                        },
                         now_text,
-                    ))
-                }
-                gwt::IssueMonitorEffectPayload::AcquireClaim {
-                    issue_number,
-                    claim_id,
-                    owner,
-                    ..
-                } => LocalIssueMonitorEffectOutcome::Revoked(release_claim_mutation(
+                    )
+                } else {
+                    Ok(
+                        gwt_github::issue_auto_claim::ClaimRenewOutcome::NotRenewed {
+                            reason: "claim renewal authority was revoked".to_string(),
+                            conflicting_claims: Vec::new(),
+                        },
+                    )
+                })
+            }
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number,
+                claim_id,
+                owner,
+                heartbeat_at,
+                expires_at,
+                launched_work_id,
+            } if authority_current => {
+                let ttl = chrono::DateTime::parse_from_rfc3339(heartbeat_at)
+                    .ok()
+                    .zip(chrono::DateTime::parse_from_rfc3339(expires_at).ok())
+                    .and_then(|(start, end)| (end - start).num_seconds().try_into().ok())
+                    .filter(|ttl: &u64| *ttl > 0)
+                    .unwrap_or(gwt::IssueMonitorConfig::default().claim_ttl_secs);
+                LocalIssueMonitorEffectOutcome::Claim(acquire_claim_mutation(
                     client.as_ref(),
                     gwt_github::IssueNumber(*issue_number),
-                    claim_id,
-                    owner,
-                )),
-                gwt::IssueMonitorEffectPayload::ReleaseClaim {
-                    issue_number,
-                    claim_id,
-                    owner,
-                } => LocalIssueMonitorEffectOutcome::Release(release_claim_mutation(
-                    client.as_ref(),
-                    gwt_github::IssueNumber(*issue_number),
-                    claim_id,
-                    owner,
-                )),
-                _ => return Err("unsupported local Issue Monitor effect".to_string()),
-            })
-        },
+                    ClaimComment {
+                        comment_id: None,
+                        claim_id: claim_id.clone(),
+                        owner: owner.clone(),
+                        issue_number: *issue_number,
+                        status: ClaimStatus::Active,
+                        heartbeat_at: now_text.to_string(),
+                        expires_at: (*now + chrono::Duration::seconds(ttl as i64))
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        launched_work_id: launched_work_id.clone(),
+                    },
+                    now_text,
+                ))
+            }
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number,
+                claim_id,
+                owner,
+                ..
+            } => LocalIssueMonitorEffectOutcome::Revoked(release_claim_mutation(
+                client.as_ref(),
+                gwt_github::IssueNumber(*issue_number),
+                claim_id,
+                owner,
+            )),
+            gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number,
+                claim_id,
+                owner,
+            } => LocalIssueMonitorEffectOutcome::Release(release_claim_mutation(
+                client.as_ref(),
+                gwt_github::IssueNumber(*issue_number),
+                claim_id,
+                owner,
+            )),
+            _ => return Err("unsupported local Issue Monitor effect".to_string()),
+        })
+    };
+    if renewals_only {
+        drive_local_issue_monitor_claim_effects_matching_with(
+            prefs_path,
+            monitor,
+            true,
+            &mut execute,
+        )
+    } else {
+        drive_local_issue_monitor_claim_effects_with(prefs_path, monitor, &mut execute)
+    }
+}
+
+fn run_local_issue_monitor_claim_renewals(
+    project_root: &Path,
+    prefs_path: &Path,
+    issue_client_factory: &RuntimeIssueClientFactory,
+) -> Result<(), String> {
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
+    );
+    let _lease = match gwt::try_acquire_issue_monitor_local_fallback_lease(prefs_path) {
+        Ok(lease) => lease,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let prefs = gwt::load_issue_monitor_prefs(prefs_path).map_err(|error| error.to_string())?;
+    if !prefs.enabled {
+        return Ok(());
+    }
+    let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let active_generations =
+        gwt::issue_monitor_worker::live_claim_renewal_generations(project_root, &monitor, &now);
+    if !active_generations.is_empty() {
+        try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
+            prefs_path,
+            &mut monitor,
+            |latest| {
+                latest.prepare_claim_renewal_effects(&now, &active_generations);
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    if !monitor.pending_effects().iter().any(|effect| {
+        matches!(
+            effect.payload,
+            gwt::IssueMonitorEffectPayload::RenewClaim { .. },
+        )
+    }) {
+        return Ok(());
+    }
+    let (owner, repo) = match gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root)
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            let error = error.to_string();
+            let result = Err(gwt_github::client::OwnerMutationError::PreSubmit(
+                gwt_github::ApiError::Network(error.clone()),
+            ));
+            try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
+                prefs_path,
+                &mut monitor,
+                |latest| {
+                    let pending = latest.pending_effects().to_vec();
+                    for effect in pending {
+                        latest.record_claim_renewal_result(&effect.payload, &result, &now);
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            return Err(error);
+        }
+    };
+    execute_local_issue_monitor_claim_effects(
+        prefs_path,
+        project_root,
+        &owner,
+        &repo,
+        &mut monitor,
+        issue_client_factory,
+        true,
     )
 }
 
@@ -3331,10 +3839,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     if let Some((owner, repo)) = local_repo_identity {
         if let Err(error) = execute_local_issue_monitor_claim_effects(
             &prefs_path,
+            project_root,
             &owner,
             &repo,
             &mut monitor,
             issue_client_factory,
+            false,
         ) {
             let error_for_commit = error.clone();
             try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
@@ -3458,6 +3968,7 @@ impl AppRuntime {
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
+                    issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -7979,10 +8490,12 @@ impl AppRuntime {
         };
         let execution = execute_local_issue_monitor_claim_effects(
             prefs_path,
+            project_root,
             owner,
             repo,
             monitor,
             &self.issue_client_factory,
+            false,
         );
         if let Err(error) = execution {
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -8005,6 +8518,54 @@ impl AppRuntime {
             ));
         }
         events
+    }
+
+    pub(crate) fn issue_monitor_claim_renewal_tick_events(&mut self) -> Vec<OutboundEvent> {
+        let mut seen = HashSet::new();
+        let projects = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .filter_map(|tab| {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root);
+                seen.insert(prefs_path.clone())
+                    .then(|| (tab.project_root.clone(), prefs_path, tab.id.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (project_root, prefs_path, tab_id) in projects {
+            let Some(in_flight) = self
+                .project_context(&tab_id)
+                .and_then(|context| self.project_states.get(&context.project_key))
+                .map(|state| Arc::clone(&state.issue_monitor_claim_renewals_in_flight))
+            else {
+                continue;
+            };
+            if in_flight.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                continue;
+            }
+            let worker_in_flight = Arc::clone(&in_flight);
+            let issue_client_factory = Arc::clone(&self.issue_client_factory);
+            let spawn = self.blocking_tasks.try_spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_local_issue_monitor_claim_renewals(
+                        &project_root,
+                        &prefs_path,
+                        &issue_client_factory,
+                    )
+                }));
+                worker_in_flight.store(false, std::sync::atomic::Ordering::Release);
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(%error, "local claim heartbeat worker failed"),
+                    Err(_) => tracing::error!("local claim heartbeat worker panicked"),
+                }
+            });
+            if let Err(error) = spawn {
+                in_flight.store(false, std::sync::atomic::Ordering::Release);
+                tracing::warn!(%error, "local claim heartbeat worker could not start");
+            }
+        }
+        Vec::new()
     }
 
     /// Issue #3505: enqueue one non-blocking, authority-fenced scheduled scan

@@ -15,7 +15,11 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use gwt_github::{
-    issue_auto_claim::{acquire_claim, ClaimAcquireOutcome, ClaimComment, ClaimStatus},
+    client::OwnerMutationResult,
+    issue_auto_claim::{
+        acquire_claim, ClaimAcquireOutcome, ClaimComment, ClaimReleaseOutcome, ClaimRenewOutcome,
+        ClaimStatus,
+    },
     IssueClient, IssueNumber,
 };
 
@@ -291,6 +295,14 @@ pub enum IssueMonitorEffectPayload {
         expires_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         launched_work_id: Option<String>,
+    },
+    /// Retain an existing claim; success must never create a launch delivery.
+    RenewClaim {
+        issue_number: u64,
+        claim_id: String,
+        owner: String,
+        generation_id: String,
+        ttl_secs: u64,
     },
     ReleaseClaim {
         issue_number: u64,
@@ -599,6 +611,9 @@ fn revoke_uncommitted_effects_for_closed_issue(
             IssueMonitorEffectPayload::AcquireClaim {
                 issue_number: pending_issue,
                 ..
+            } | IssueMonitorEffectPayload::RenewClaim {
+                issue_number: pending_issue,
+                ..
             } | IssueMonitorEffectPayload::ArmAutoMerge {
                 issue_number: pending_issue,
                 ..
@@ -630,6 +645,7 @@ fn revoke_uncommitted_effects_for_closed_issue(
                 );
             }
             IssueMonitorEffectPayload::ReleaseClaim { .. }
+            | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
             | IssueMonitorEffectPayload::SettleMergedIssue { .. } => {}
         }
@@ -679,6 +695,9 @@ fn revoke_uncommitted_claims_for_issue(
             || !matches!(
                 effect.payload,
                 IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: pending_issue,
+                    ..
+                } | IssueMonitorEffectPayload::RenewClaim {
                     issue_number: pending_issue,
                     ..
                 } if pending_issue == issue_number
@@ -738,6 +757,7 @@ fn advance_effect_authority(
             || !matches!(
                 effect.payload,
                 IssueMonitorEffectPayload::AcquireClaim { .. }
+                    | IssueMonitorEffectPayload::RenewClaim { .. }
                     | IssueMonitorEffectPayload::ArmAutoMerge { .. }
                     | IssueMonitorEffectPayload::SettleMergedIssue { .. }
             )
@@ -798,6 +818,7 @@ fn advance_effect_authority(
                 )
             }
             IssueMonitorEffectPayload::ReleaseClaim { .. }
+            | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
             | IssueMonitorEffectPayload::SettleMergedIssue { .. } => continue,
         };
@@ -1049,6 +1070,8 @@ pub struct IssueMonitorPrefs {
     /// kept past the end of the launch so a stop / requeue can release it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claim_identities: Vec<IssueMonitorClaimIdentity>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claim_diagnostics: BTreeMap<u64, IssueMonitorClaimDiagnostics>,
     /// Issue #3222: claims whose agent window is not bound yet (`Launching`).
     /// Persisted so an in-flight claim survives the per-handler prefs
     /// roundtrip — otherwise a rescan re-claims the same issue (same-owner
@@ -1248,6 +1271,7 @@ impl Default for IssueMonitorPrefs {
             launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             claim_identities: Vec::new(),
+            claim_diagnostics: BTreeMap::new(),
             launch_confirmations: BTreeMap::new(),
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
@@ -1479,6 +1503,43 @@ pub struct IssueMonitorClaimIdentity {
     pub issue_number: u64,
     pub claim_id: String,
     pub owner: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorClaimHealth {
+    #[default]
+    Unclaimed,
+    Unknown,
+    Active,
+    Expired,
+    UpdateFailed,
+    Conflict,
+    Released,
+}
+
+/// Last attempt, last successful readback, and last failure remain inspectable
+/// after a restart. Foreign claims are evidence, never an arbitration decision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorClaimDiagnostics {
+    pub state: IssueMonitorClaimHealth,
+    pub claim_id: Option<String>,
+    pub owner: Option<String>,
+    pub expires_at: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_failure_at: Option<String>,
+    pub last_failure: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub concurrent_claims: Vec<IssueMonitorConcurrentClaim>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorConcurrentClaim {
+    pub claim_id: String,
+    pub owner: String,
+    pub expires_at: String,
+    pub launched_work_id: Option<String>,
 }
 
 /// Issue #3883 AC-2: a malformed-prefs recovery that had no committed
@@ -2220,6 +2281,14 @@ fn issue_monitor_runtime_label(target: gwt_agent::LaunchRuntimeTarget) -> &'stat
     }
 }
 
+impl IssueMonitorConfig {
+    pub fn claim_heartbeat_interval_secs(&self) -> u64 {
+        self.claim_heartbeat_secs
+            .max(1)
+            .min((self.claim_ttl_secs / 3).max(1))
+    }
+}
+
 impl Default for IssueMonitorConfig {
     fn default() -> Self {
         Self {
@@ -2634,6 +2703,10 @@ pub enum IssueMonitorExecutionSettlement {
     /// restart is the usual cause. The work was interrupted, not decided, so
     /// it must not be treated as a settled outcome.
     Interrupted,
+    /// The identity gate has no executable recovery. This is a diagnostic,
+    /// not settlement: retain the unfinished owner for PM steering and never
+    /// requeue the same dead window into the recovery loop (Issue #5078).
+    RecoveryExhausted,
     Unknown,
 }
 
@@ -4313,6 +4386,8 @@ pub struct IssueMonitorInboxSummary {
     /// claim comments one by one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_expires_at: Option<String>,
+    #[serde(default)]
+    pub claim_diagnostics: IssueMonitorClaimDiagnostics,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_by_claim_id: Option<String>,
     /// Issue #4077 AC-2: why this row is held out of the queue, including a
@@ -4594,6 +4669,8 @@ pub struct IssueMonitorState {
     /// Outlives the launch on purpose — see [`IssueMonitorClaimIdentity`].
     #[serde(default)]
     claim_identities: BTreeMap<u64, IssueMonitorClaimIdentity>,
+    #[serde(default)]
+    claim_diagnostics: BTreeMap<u64, IssueMonitorClaimDiagnostics>,
     /// issue → work branch for currently launched Issues, used to look up the
     /// PR when checking whether the work has merged.
     launched_branches: BTreeMap<u64, String>,
@@ -6889,6 +6966,7 @@ impl IssueMonitorState {
             launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             claim_identities: BTreeMap::new(),
+            claim_diagnostics: BTreeMap::new(),
             launch_confirmations: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
@@ -6978,6 +7056,7 @@ impl IssueMonitorState {
             .into_iter()
             .map(|identity| (identity.issue_number, identity))
             .collect();
+        state.claim_diagnostics = prefs.claim_diagnostics;
         // Issue #3883: the ledger keeps running windows attributable even
         // when another process loses its active launch projection.
         state.launch_bindings = prefs.launch_bindings;
@@ -7154,6 +7233,7 @@ impl IssueMonitorState {
                 .map(|(issue, confirmation)| (*issue, confirmation.clone()))
                 .collect(),
             claim_identities: self.claim_identities.values().cloned().collect(),
+            claim_diagnostics: self.claim_diagnostics.clone(),
             launching_issues: self
                 .active_launches
                 .iter()
@@ -7615,6 +7695,7 @@ impl IssueMonitorState {
                     .iter()
                     .filter_map(|effect| match &effect.payload {
                         IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                        | IssueMonitorEffectPayload::RenewClaim { issue_number, .. }
                         | IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. }
                         | IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
                             Some(*issue_number)
@@ -9967,6 +10048,15 @@ impl IssueMonitorState {
         self.auto_apply_updates = disk.auto_apply_updates;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
+        // Claim mutations commit after rebase. An observer must retain the
+        // exact durable identity rather than erase it with its older snapshot.
+        self.claim_identities = disk
+            .claim_identities
+            .iter()
+            .cloned()
+            .map(|identity| (identity.issue_number, identity))
+            .collect();
+        self.claim_diagnostics = disk.claim_diagnostics.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
         self.queued_launch_session_strategies = disk.queued_launch_session_strategies.clone();
         self.last_control_receipt = disk.last_control_receipt.clone();
@@ -12314,7 +12404,22 @@ impl IssueMonitorState {
                         blocked_by_owner: item.blocked_by_owner.clone(),
                         // Issue #4077 AC-2: the deadline and the reason travel
                         // with the row, so a silent queue explains itself.
-                        claim_expires_at: item.claim_expires_at.clone(),
+                        claim_expires_at: item.claim_expires_at.clone().or_else(|| {
+                            self.claim_identities
+                                .get(&item.issue.number)
+                                .and_then(|identity| {
+                                    self.claim_diagnostics
+                                        .get(&item.issue.number)
+                                        .filter(|claim| {
+                                            claim.claim_id.as_deref()
+                                                == Some(identity.claim_id.as_str())
+                                                && claim.owner.as_deref()
+                                                    == Some(identity.owner.as_str())
+                                        })
+                                        .and_then(|claim| claim.expires_at.clone())
+                                })
+                        }),
+                        claim_diagnostics: self.claim_diagnostics_at(item.issue.number, now),
                         blocked_by_claim_id: item.blocked_by_claim_id.clone(),
                         exclusion_reason: item.exclusion_reason.clone(),
                         launched_window_id: self.launched_window_id(item.issue.number),
@@ -12930,6 +13035,371 @@ impl IssueMonitorState {
         &self.pending_effects
     }
 
+    pub fn claim_heartbeat_interval_secs(&self) -> u64 {
+        self.config.claim_heartbeat_interval_secs()
+    }
+
+    /// Renewals retain existing ownership and bypass new-launch admission.
+    /// Runtime authority is checked separately immediately before the PATCH.
+    pub fn claim_renewal_candidates(&self, now: &str) -> Vec<IssueMonitorClaimIdentity> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        let Some(now_at) = parse_rfc3339_utc(now) else {
+            return Vec::new();
+        };
+        self.claim_identities
+            .values()
+            .filter(|identity| {
+                !self.issue_is_closed(identity.issue_number)
+                    && !self.pending_effects.iter().any(|effect| {
+                        matches!(
+                            &effect.payload,
+                            IssueMonitorEffectPayload::RenewClaim { issue_number, .. }
+                                | IssueMonitorEffectPayload::ReleaseClaim { issue_number, .. }
+                                if *issue_number == identity.issue_number
+                        )
+                    })
+                    && self
+                        .claim_diagnostics
+                        .get(&identity.issue_number)
+                        .and_then(|diagnostic| {
+                            diagnostic
+                                .last_attempt_at
+                                .as_deref()
+                                .or(diagnostic.last_success_at.as_deref())
+                        })
+                        .and_then(parse_rfc3339_utc)
+                        .is_none_or(|last| {
+                            now_at.signed_duration_since(last).num_seconds()
+                                >= self.claim_heartbeat_interval_secs() as i64
+                        })
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn prepare_claim_renewal_effects(
+        &mut self,
+        now: &str,
+        active_generations: &BTreeMap<u64, String>,
+    ) -> usize {
+        let mut prepared = 0;
+        for identity in self.claim_renewal_candidates(now) {
+            let Some(generation_id) = active_generations.get(&identity.issue_number) else {
+                continue;
+            };
+            let payload = IssueMonitorEffectPayload::RenewClaim {
+                issue_number: identity.issue_number,
+                claim_id: identity.claim_id.clone(),
+                owner: identity.owner.clone(),
+                generation_id: generation_id.clone(),
+                ttl_secs: self.config.claim_ttl_secs,
+            };
+            if self
+                .prepare_pending_effect(
+                    format!(
+                        "renew:{}:{}:{now}",
+                        identity.issue_number, identity.claim_id
+                    ),
+                    payload,
+                )
+                .is_some()
+            {
+                let diagnostic = self
+                    .claim_diagnostics
+                    .entry(identity.issue_number)
+                    .or_default();
+                diagnostic.claim_id = Some(identity.claim_id);
+                diagnostic.owner = Some(identity.owner);
+                diagnostic.last_attempt_at = Some(now.to_string());
+                prepared += 1;
+            }
+        }
+        prepared
+    }
+
+    pub fn claim_renewal_is_current(&self, payload: &IssueMonitorEffectPayload) -> bool {
+        let IssueMonitorEffectPayload::RenewClaim {
+            issue_number,
+            claim_id,
+            owner,
+            ..
+        } = payload
+        else {
+            return false;
+        };
+        self.config.enabled && !self.issue_is_closed(*issue_number)
+            && self.claim_identities.get(issue_number).is_some_and(|identity|
+                identity.claim_id == *claim_id && identity.owner == *owner)
+            && !self.pending_effects.iter().any(|effect| matches!(
+                &effect.payload, IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number: pending_issue, claim_id: pending_claim, owner: pending_owner,
+                } if pending_issue == issue_number && pending_claim == claim_id && pending_owner == owner
+            ))
+    }
+
+    pub fn claim_renewal_attempt_is_ready(
+        &self,
+        effect: &PendingIssueMonitorEffect,
+        now: &str,
+    ) -> bool {
+        let IssueMonitorEffectPayload::RenewClaim {
+            issue_number,
+            claim_id,
+            owner,
+            ..
+        } = &effect.payload
+        else {
+            return true;
+        };
+        if effect.authority_epoch != self.effect_authority_epoch
+            || !self.claim_renewal_is_current(&effect.payload)
+            || (effect.state == IssueMonitorEffectState::Prepared && effect.attempt == 0)
+        {
+            return true;
+        }
+        self.claim_diagnostics
+            .get(issue_number)
+            .filter(|diagnostic| {
+                diagnostic.claim_id.as_deref() == Some(claim_id.as_str())
+                    && diagnostic.owner.as_deref() == Some(owner.as_str())
+            })
+            .and_then(|diagnostic| diagnostic.last_failure_at.as_deref())
+            .and_then(|failed_at| rfc3339_elapsed_secs(failed_at, now))
+            .is_none_or(|elapsed| elapsed >= self.claim_heartbeat_interval_secs() as i64)
+    }
+
+    fn claim_diagnostics_at(&self, issue_number: u64, now: &str) -> IssueMonitorClaimDiagnostics {
+        let mut diagnostic = self
+            .claim_diagnostics
+            .get(&issue_number)
+            .cloned()
+            .unwrap_or_else(|| {
+                self.claim_identities
+                    .get(&issue_number)
+                    .map(|identity| IssueMonitorClaimDiagnostics {
+                        state: IssueMonitorClaimHealth::Unknown,
+                        claim_id: Some(identity.claim_id.clone()),
+                        owner: Some(identity.owner.clone()),
+                        ..Default::default()
+                    })
+                    .or_else(|| {
+                        self.inbox_item(issue_number)
+                            .filter(|item| item.blocked_by_owner.is_some())
+                            .map(|item| IssueMonitorClaimDiagnostics {
+                                state: IssueMonitorClaimHealth::Active,
+                                claim_id: item.blocked_by_claim_id.clone(),
+                                owner: item.blocked_by_owner.clone(),
+                                expires_at: item.claim_expires_at.clone(),
+                                ..Default::default()
+                            })
+                    })
+                    .unwrap_or_default()
+            });
+        if diagnostic.state == IssueMonitorClaimHealth::Active
+            && diagnostic
+                .expires_at
+                .as_deref()
+                .and_then(parse_rfc3339_utc)
+                .zip(parse_rfc3339_utc(now))
+                .is_some_and(|(expires, now)| expires <= now)
+        {
+            diagnostic.state = IssueMonitorClaimHealth::Expired;
+        }
+        diagnostic
+    }
+
+    fn record_claim_update_success(&mut self, claim: &ClaimComment, now: &str) {
+        let diagnostic = self
+            .claim_diagnostics
+            .entry(claim.issue_number)
+            .or_default();
+        diagnostic.state = IssueMonitorClaimHealth::Active;
+        diagnostic.claim_id = Some(claim.claim_id.clone());
+        diagnostic.owner = Some(claim.owner.clone());
+        diagnostic.expires_at = Some(claim.expires_at.clone());
+        diagnostic.last_attempt_at = Some(now.to_string());
+        diagnostic.last_success_at = Some(now.to_string());
+        diagnostic.concurrent_claims.clear();
+    }
+
+    fn record_claim_update_failure(
+        &mut self,
+        issue_number: u64,
+        claim_id: &str,
+        owner: &str,
+        reason: String,
+        now: &str,
+    ) {
+        let diagnostic = self.claim_diagnostics.entry(issue_number).or_default();
+        diagnostic.state = IssueMonitorClaimHealth::UpdateFailed;
+        diagnostic.claim_id = Some(claim_id.to_string());
+        diagnostic.owner = Some(owner.to_string());
+        diagnostic.last_attempt_at = Some(now.to_string());
+        diagnostic.last_failure_at = Some(now.to_string());
+        diagnostic.last_failure = Some(reason);
+    }
+
+    pub fn record_claim_acquisition_result(
+        &mut self,
+        payload: &IssueMonitorEffectPayload,
+        result: &OwnerMutationResult<ClaimAcquireOutcome>,
+        now: &str,
+    ) {
+        let IssueMonitorEffectPayload::AcquireClaim {
+            issue_number,
+            claim_id,
+            owner,
+            ..
+        } = payload
+        else {
+            return;
+        };
+        match result {
+            Ok(ClaimAcquireOutcome::Acquired(claim)) => {
+                self.record_claim_update_success(claim, now)
+            }
+            Ok(ClaimAcquireOutcome::Blocked(claim))
+            | Ok(ClaimAcquireOutcome::Lost {
+                winning_claim: claim,
+                ..
+            }) => {
+                let diagnostic = self.claim_diagnostics.entry(*issue_number).or_default();
+                diagnostic.state = IssueMonitorClaimHealth::Active;
+                diagnostic.claim_id = Some(claim.claim_id.clone());
+                diagnostic.owner = Some(claim.owner.clone());
+                diagnostic.expires_at = Some(claim.expires_at.clone());
+                diagnostic.last_attempt_at = Some(now.to_string());
+            }
+            Err(error) => self.record_claim_update_failure(
+                *issue_number,
+                claim_id,
+                owner,
+                format!("claim acquisition failed: {error}"),
+                now,
+            ),
+        }
+    }
+
+    pub fn record_claim_renewal_result(
+        &mut self,
+        payload: &IssueMonitorEffectPayload,
+        result: &OwnerMutationResult<ClaimRenewOutcome>,
+        now: &str,
+    ) {
+        let IssueMonitorEffectPayload::RenewClaim {
+            issue_number,
+            claim_id,
+            owner,
+            ..
+        } = payload
+        else {
+            return;
+        };
+        if !self
+            .claim_identities
+            .get(issue_number)
+            .is_some_and(|identity| identity.claim_id == *claim_id && identity.owner == *owner)
+        {
+            return;
+        }
+        let conflicts = match result {
+            Ok(ClaimRenewOutcome::Renewed {
+                claim,
+                conflicting_claims,
+            }) => {
+                self.record_claim_update_success(claim, now);
+                conflicting_claims
+            }
+            Ok(ClaimRenewOutcome::NotRenewed {
+                reason,
+                conflicting_claims,
+            }) => {
+                self.record_claim_update_failure(
+                    *issue_number,
+                    claim_id,
+                    owner,
+                    reason.clone(),
+                    now,
+                );
+                conflicting_claims
+            }
+            Err(error) => {
+                self.record_claim_update_failure(
+                    *issue_number,
+                    claim_id,
+                    owner,
+                    format!("claim heartbeat failed: {error}"),
+                    now,
+                );
+                return;
+            }
+        };
+        let diagnostic = self
+            .claim_diagnostics
+            .get_mut(issue_number)
+            .expect("recorded claim result");
+        diagnostic.concurrent_claims = conflicts
+            .iter()
+            .map(|claim| IssueMonitorConcurrentClaim {
+                claim_id: claim.claim_id.clone(),
+                owner: claim.owner.clone(),
+                expires_at: claim.expires_at.clone(),
+                launched_work_id: claim.launched_work_id.clone(),
+            })
+            .collect();
+        if !conflicts.is_empty() {
+            diagnostic.state = IssueMonitorClaimHealth::Conflict;
+            self.push_unconditional_notice("error", *issue_number,
+                format!("Issue #{issue_number}: concurrent claims detected for {owner}; ownership arbitration is required"));
+        }
+    }
+
+    pub fn record_claim_release_result(
+        &mut self,
+        payload: &IssueMonitorEffectPayload,
+        result: &OwnerMutationResult<ClaimReleaseOutcome>,
+        now: &str,
+    ) {
+        let IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number,
+            claim_id,
+            owner,
+        } = payload
+        else {
+            return;
+        };
+        if !self
+            .claim_diagnostics
+            .get(issue_number)
+            .is_some_and(|diagnostic| {
+                diagnostic.claim_id.as_deref() == Some(claim_id.as_str())
+                    && diagnostic.owner.as_deref() == Some(owner.as_str())
+            })
+        {
+            return;
+        }
+        match result {
+            Ok(_) => {
+                let diagnostic = self
+                    .claim_diagnostics
+                    .get_mut(issue_number)
+                    .expect("known claim");
+                diagnostic.state = IssueMonitorClaimHealth::Released;
+                diagnostic.last_attempt_at = Some(now.to_string());
+                diagnostic.last_success_at = Some(now.to_string());
+            }
+            Err(error) => self.record_claim_update_failure(
+                *issue_number,
+                claim_id,
+                owner,
+                format!("claim release failed: {error}"),
+                now,
+            ),
+        }
+    }
+
     fn claim_effect_is_blocked_by_provider_hold(
         &self,
         payload: &IssueMonitorEffectPayload,
@@ -12948,6 +13418,10 @@ impl IssueMonitorState {
             || effect.state != IssueMonitorEffectState::Prepared
             || effect.authority_epoch != self.effect_authority_epoch
             || self.claim_effect_is_blocked_by_provider_hold(&effect.payload)
+            || (matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::RenewClaim { .. }
+            ) && !self.claim_renewal_is_current(&effect.payload))
             || matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
             || self
                 .pending_effects
@@ -12970,6 +13444,8 @@ impl IssueMonitorState {
         let effect_id = effect_id.into();
         if effect_id.is_empty()
             || self.claim_effect_is_blocked_by_provider_hold(&payload)
+            || (matches!(&payload, IssueMonitorEffectPayload::RenewClaim { .. })
+                && !self.claim_renewal_is_current(&payload))
             || matches!(&payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
             || self
                 .pending_effects
@@ -14320,6 +14796,11 @@ impl IssueMonitorState {
             return false;
         }
         let expires_at = expires_at.into();
+        let diagnostic = self.claim_diagnostics.entry(issue.number).or_default();
+        diagnostic.state = IssueMonitorClaimHealth::Active;
+        diagnostic.claim_id = blocking_claim_id.map(str::to_string);
+        diagnostic.owner = Some(owner.clone());
+        diagnostic.expires_at = Some(expires_at.clone());
         let claim_block_issue_updated_at = issue.updated_at.clone();
         // Issue #4077 AC-2: the reason a row left the queue belongs in the same
         // projection as every other exclusion, or the PM has to read GitHub
@@ -15103,9 +15584,10 @@ impl IssueMonitorState {
                 launched_work_id: Some(branch_name),
             };
 
+            let attempted_claim_id = claim.claim_id.clone();
             match acquire_claim(client, IssueNumber(issue.number), claim, now) {
                 Ok(ClaimAcquireOutcome::Acquired(claim)) => {
-                    let claim_id = claim.claim_id;
+                    let claim_id = claim.claim_id.clone();
                     let synchronous_effect_id = format!("synchronous-claim:{claim_id}");
                     let delivery_id = format!("launch:{synchronous_effect_id}");
                     if self.apply_confirmed_claim(
@@ -15115,6 +15597,7 @@ impl IssueMonitorState {
                         &synchronous_effect_id,
                         now,
                     ) {
+                        self.record_claim_update_success(&claim, now);
                         if let Some(request) = self
                             .pending_launch_deliveries
                             .iter()
@@ -15151,6 +15634,13 @@ impl IssueMonitorState {
                     );
                 }
                 Err(error) => {
+                    self.record_claim_update_failure(
+                        issue.number,
+                        &attempted_claim_id,
+                        owner,
+                        format!("claim acquisition failed: {error}"),
+                        now,
+                    );
                     self.last_error = Some(format!("issue #{}: {error}", issue.number));
                     break;
                 }
@@ -20981,7 +21471,7 @@ mod tests {
         monitor.record_blocked_by_claim(candidate, "other-agent", "2026-08-03T00:05:00Z", None);
 
         assert_eq!(
-            monitor.agent_status(),
+            monitor.agent_status_without_scan_at("2026-08-03T00:00:00Z"),
             IssueMonitorAgentStatus {
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,
@@ -20996,7 +21486,7 @@ mod tests {
                 max_active_agents_override: Some(3),
                 agent_capacity: AgentCapacity::default(),
                 enabled: true,
-                gui_status: Some(monitor.status_view()),
+                gui_status: Some(monitor.status_view_at("2026-08-03T00:00:00Z")),
                 autonomous_mode: false,
                 auto_apply_updates: None,
                 auto_apply_updates_effective: Some(false),
@@ -21021,6 +21511,17 @@ mod tests {
                     completion_reason: None,
                     blocked_by_owner: Some("other-agent".to_string()),
                     claim_expires_at: Some("2026-08-03T00:05:00Z".to_string()),
+                    claim_diagnostics: IssueMonitorClaimDiagnostics {
+                        state: IssueMonitorClaimHealth::Active,
+                        claim_id: None,
+                        owner: Some("other-agent".to_string()),
+                        expires_at: Some("2026-08-03T00:05:00Z".to_string()),
+                        last_attempt_at: None,
+                        last_success_at: None,
+                        last_failure_at: None,
+                        last_failure: None,
+                        concurrent_claims: Vec::new(),
+                    },
                     blocked_by_claim_id: None,
                     exclusion_reason: Some(
                         "blocked by claim owned by other-agent until 2026-08-03T00:05:00Z"

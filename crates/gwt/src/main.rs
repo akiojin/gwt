@@ -2076,6 +2076,8 @@ enum UserEvent {
     /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
     /// tick — drives local scans and the PM periodic wake.
     IssueMonitorScheduledTick,
+    /// Existing claims have deadlines independent of candidate scans.
+    IssueMonitorClaimRenewalTick,
     /// Issue #3633: keep a runtime daemon alive for every enabled project.
     ///
     /// Separate from the scan tick because the two cadences answer different
@@ -10249,6 +10251,26 @@ fn main() -> std::io::Result<()> {
             tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
         }
     }
+    {
+        let tick_proxy = proxy.clone();
+        let interval = std::time::Duration::from_secs(
+            gwt::IssueMonitorConfig::default().claim_heartbeat_interval_secs(),
+        );
+        if let Err(error) = std::thread::Builder::new()
+            .name("issue-monitor-claim-renewal-tick".to_string())
+            .spawn(move || loop {
+                if tick_proxy
+                    .send_event(UserEvent::IssueMonitorClaimRenewalTick)
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(interval);
+            })
+        {
+            tracing::error!(%error, "failed to start Issue Monitor claim renewal tick thread");
+        }
+    }
     // Issue #3633: the GUI is the subject that keeps a runtime daemon alive.
     // Nothing in production used to start one, so the daemon-only control
     // lane (`scan_now`, `daemon.subscribe`) was permanently unavailable.
@@ -11267,6 +11289,10 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledTick) => {
                 let events = app.issue_monitor_scheduled_tick_events();
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorClaimRenewalTick) => {
+                let events = app.issue_monitor_claim_renewal_tick_events();
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {

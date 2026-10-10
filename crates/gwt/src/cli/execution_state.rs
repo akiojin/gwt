@@ -934,6 +934,79 @@ pub fn owner_generation_hold_for_project(
     ))
 }
 
+/// Issue #5056: heartbeat only an integrity-valid Active generation whose
+/// current holder has exact live runtime evidence. The effective projection
+/// names that holder after a same-generation takeover, unlike the immutable
+/// header's initial Session. This read never repairs or reaps authority.
+pub(crate) fn live_active_owner_generation(
+    project_root: &Path,
+    issue_number: u64,
+) -> Option<String> {
+    // Owner directories are keyed by number. Read their authoritative kind
+    // instead of guessing whether the Monitor's Issue has a gwt-spec label.
+    let context = GenerationTransactionContext::resolve(
+        project_root,
+        ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: issue_number,
+        },
+    )
+    .ok()?;
+    let contents = read_owner_ledger_from_dir(&context.owner_dir).ok()??;
+    let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).ok()?;
+    if ledger.owner.number != issue_number {
+        return None;
+    }
+    validate_generation_ledger(&ledger, ledger.owner).ok()?;
+    let current = ledger.current_generation()?;
+    if ledger.effective_status_for(current) != ExecutionControlStatus::Active {
+        return None;
+    }
+    let record =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+            .map(hydrate_recovery_envelopes)
+            .ok()?;
+    if !integrity_ok(&record)
+        || record.owner_kind != ledger.owner.kind
+        || record.owner_number != issue_number
+        || record.status != ExecutionControlStatus::Active
+        || record.settled_at.is_some()
+    {
+        return None;
+    }
+    gwt_agent::validate_session_id_path_component(&record.primary_session_id).ok()?;
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let holder_path = sessions_dir.join(format!("{}.toml", record.primary_session_id));
+    let gwt_agent::SessionPathState::Present(holder) =
+        gwt_agent::inspect_session_path(&holder_path)
+    else {
+        return None;
+    };
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&holder).ok()??;
+    if identity.session_id != record.primary_session_id
+        || !execution_binding_authorizes_lifecycle_descendant(
+            &ledger,
+            current,
+            &record.primary_session_id,
+            &identity.execution_binding.identity,
+        )
+        || identity.execution_binding.owner_kind != ledger.owner.kind.as_str()
+        || identity.execution_binding.owner_number != issue_number
+        || identity.repo_hash
+            != crate::index_worker::detect_repo_hash(&context.worktree)
+                .map(|value| value.to_string())
+        || !identity.worktree_path.exists()
+        || worktree_binding_hash(&identity.worktree_path) != current.identity.worktree_binding_hash
+    {
+        return None;
+    }
+    matches!(
+        classify_exact_session_runtime(&sessions_dir, &identity).ok()?,
+        ExactSessionRuntimeDisposition::Live
+    )
+    .then(|| current.identity.generation_id.clone())
+}
+
 /// Issue #4161: read the Prepared transactions fencing `owner_number`'s
 /// current generation from the repository's owner ledger tree.
 ///
@@ -4900,12 +4973,22 @@ enum CurrentExecutionBindingAuthority {
     ActiveMutation,
     BlockedBuildAbort,
     PrMutation,
+    /// Issue #5078 (AC-1): the Workspace identity (purpose / current focus)
+    /// of the Session that holds the exact current binding. A Blocked
+    /// generation recovered by `execution.continue` must be able to lift the
+    /// identity gate, or the verification its recovery requires is
+    /// unreachable.
+    ProjectionUpdate,
 }
 
 impl CurrentExecutionBindingAuthority {
     fn allows(self, status: ExecutionControlStatus) -> bool {
         match self {
             Self::ActiveMutation => status == ExecutionControlStatus::Active,
+            Self::ProjectionUpdate => matches!(
+                status,
+                ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
+            ),
             Self::BlockedBuildAbort => status == ExecutionControlStatus::Blocked,
             Self::PrMutation => matches!(
                 status,
@@ -4951,6 +5034,29 @@ fn current_active_execution_binding_matches_context(
         expected_session_id,
         expected_identity,
         CurrentExecutionBindingAuthority::ActiveMutation,
+    )
+}
+
+/// Issue #5078 (AC-1): the status of the current generation when the caller
+/// holds its exact binding with Workspace identity authority, else `None`.
+/// Active and Blocked generations qualify; a Blocked caller is still refused
+/// any settlement-opening update by the Host bridge.
+pub(crate) fn current_projection_execution_binding_status(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    expected_session_id: &str,
+    expected_identity: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<Option<ExecutionControlStatus>> {
+    let context = match GenerationTransactionContext::resolve(worktree, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    current_execution_binding_status_context(
+        &context,
+        expected_session_id,
+        expected_identity,
+        CurrentExecutionBindingAuthority::ProjectionUpdate,
     )
 }
 
@@ -5000,16 +5106,32 @@ fn current_execution_binding_matches_context(
     expected_identity: &gwt_agent::ExecutionBindingIdentity,
     authority: CurrentExecutionBindingAuthority,
 ) -> io::Result<bool> {
+    current_execution_binding_status_context(
+        context,
+        expected_session_id,
+        expected_identity,
+        authority,
+    )
+    .map(|status| status.is_some())
+}
+
+fn current_execution_binding_status_context(
+    context: &GenerationTransactionContext,
+    expected_session_id: &str,
+    expected_identity: &gwt_agent::ExecutionBindingIdentity,
+    authority: CurrentExecutionBindingAuthority,
+) -> io::Result<Option<ExecutionControlStatus>> {
     let Some(ledger) = load_generation_ledger_from_context(context)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let current = ledger.current_generation().ok_or_else(|| {
         invalid_generation_data("execution generation ledger current id is missing")
     })?;
-    if !authority.allows(ledger.effective_status_for(current))
+    let status = ledger.effective_status_for(current);
+    if !authority.allows(status)
         || current.identity.worktree_binding_hash != context.worktree_binding_hash
     {
-        return Ok(false);
+        return Ok(None);
     }
     let projection =
         serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
@@ -5019,13 +5141,14 @@ fn current_execution_binding_matches_context(
                     "execution generation projection is malformed: {error}"
                 ))
             })?;
-    Ok(projection.primary_session_id == expected_session_id
+    Ok((projection.primary_session_id == expected_session_id
         && execution_binding_authorizes_lifecycle_descendant(
             &ledger,
             current,
             expected_session_id,
             expected_identity,
         ))
+    .then_some(status))
 }
 
 /// Execute one producing operation while its owner generation and durable
@@ -5167,6 +5290,34 @@ pub fn with_current_active_session_execution_identity_lease<T>(
     expected: &gwt_agent::SessionExecutionIdentity,
     operation: impl FnOnce() -> T,
 ) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+/// Identity recovery shares the continuation binding, including Blocked.
+pub(crate) fn with_current_projection_session_execution_identity_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::ProjectionUpdate,
+        operation,
+    )
+}
+
+fn with_current_session_execution_identity_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    authority: CurrentExecutionBindingAuthority,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
     if gwt_agent::current_thread_holds_session_lease() {
         return Err(io::Error::new(
             ErrorKind::WouldBlock,
@@ -5222,10 +5373,11 @@ pub fn with_current_active_session_execution_identity_lease<T>(
                 .as_ref()
                 != Some(expected)
                 || canonical_worktree != context.worktree
-                || !current_active_execution_binding_matches_context(
+                || !current_execution_binding_matches_context(
                     context,
                     &expected.session_id,
                     &binding.identity,
+                    authority,
                 )?
             {
                 return Ok(None);
@@ -5876,7 +6028,8 @@ fn with_current_session_execution_identity_held_global_lease<T>(
                         &binding.identity,
                     )?
                 }
-                CurrentExecutionBindingAuthority::PrMutation => false,
+                CurrentExecutionBindingAuthority::PrMutation
+                | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
             };
             if gwt_agent::SessionExecutionIdentity::from_session(session)
                 .ok()
@@ -5967,7 +6120,8 @@ fn with_current_session_execution_identity_global_lease<T>(
                                 &binding.identity,
                             )?
                         }
-                        CurrentExecutionBindingAuthority::PrMutation => false,
+                        CurrentExecutionBindingAuthority::PrMutation
+                        | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
                     };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)
                         .ok()
@@ -12257,6 +12411,38 @@ const EXECUTION_RECORD_RECOVERY_OPERATIONS: [&str; 6] = [
 /// can proceed (Issue #4029 AC-2).
 pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
 
+/// `recovery_hint` value (Issue #5078 AC-2): the Session's Workspace identity
+/// gate is closed and none of the recoveries it admits can lift it. The
+/// remaining exits are `execution.blocked` and the PM escalation path, which
+/// the gate never refuses.
+pub const RECOVERY_HINT_RECOVERY_EXHAUSTED: &str = "recovery_exhausted";
+
+/// Drop the recoveries a closed identity gate would refuse and return them.
+fn gate_closed_refused_recoveries(
+    gate_closed: bool,
+    snapshot: &mut ExecutionDiagnosisSnapshot,
+) -> Vec<String> {
+    if !gate_closed {
+        return Vec::new();
+    }
+    let (admitted, refused) = std::mem::take(&mut snapshot.available_recoveries)
+        .into_iter()
+        .partition(|operation| {
+            crate::cli::hook::workflow_policy::identity_gate_admits_operation(operation)
+        });
+    snapshot.available_recoveries = admitted;
+    for probe in &mut snapshot.recovery_probes {
+        if probe.executable()
+            && !crate::cli::hook::workflow_policy::identity_gate_admits_operation(&probe.operation)
+        {
+            probe.state = crate::cli::governance::RecoveryProbeState::Unavailable;
+            probe.governance.cause = Some(crate::cli::governance::GovernanceCause::ManagedIdentity);
+            probe.reason = Some("workspace_identity_gate_closed".to_string());
+        }
+    }
+    refused
+}
+
 /// Issue #4443 AC-2: the gwtd operations a Host refusal may name to an agent.
 ///
 /// A refusal that reaches an agent over the capability bridge carries operation
@@ -13224,8 +13410,25 @@ fn finalize_recovery_probes(
         }
     }
     snapshot.recovery_probes = probes;
+    // Issue #5078 (AC-2): while this Session's identity gate is closed, a
+    // recovery the gate would refuse is not a route out. Advertise only what
+    // the gate admits; when nothing remains, say so as a diagnosis instead of
+    // handing the agent a list it cannot run.
+    let gate_closed = session_id.is_some_and(|session_id| {
+        crate::cli::hook::workflow_policy::identity_gate_closed_for_session(worktree, session_id)
+    });
+    let gate_refused = gate_closed_refused_recoveries(gate_closed, &mut snapshot);
     snapshot.recovery_hint = if prepared_launch {
         Some("prepared_launch_readiness_required".to_string())
+    } else if gate_closed && snapshot.available_recoveries.is_empty() {
+        snapshot.warnings.push(format!(
+            "{RECOVERY_HINT_RECOVERY_EXHAUSTED}: the Workspace identity gate is closed and no recovery it admits can lift it (gate-refused: [{}]); record execution.blocked with params.reason and escalate with board.post kind:\"blocked\" or issue.comment",
+            gate_refused.join(", ")
+        ));
+        Some(RECOVERY_HINT_RECOVERY_EXHAUSTED.to_string())
+    } else if gate_closed {
+        // Identity recovery is an executable next step, not a fresh launch.
+        None
     } else {
         execution_recovery_hint(&snapshot)
     };
@@ -13243,10 +13446,9 @@ fn finalize_recovery_probes(
     snapshot
 }
 
-/// The Host refuses `workspace.update` unless the caller's Session holds the
-/// *current Active* execution binding: `active_execution_binding()` is `None`
-/// for a `Prepared` or `Inspection` authority, and
-/// `validate_current_execution_binding_authority` rejects a superseded one.
+/// The Host permits identity updates only for the exact current Active or
+/// Blocked binding. Prepared, Inspection and superseded authorities remain
+/// refused by `validate_projection_execution_binding_authority`.
 /// Both answer `ExecutionBindingMismatch`, which the bridge reports as
 /// `authority_mismatch` at HTTP 409 with no local fallback.
 ///
@@ -13300,9 +13502,16 @@ fn workspace_update_recovery_probe(
             reason,
         )
     };
-    match current_active_execution_binding_matches(worktree, owner, session_id, &binding.identity) {
-        Ok(true) => probe,
-        Ok(false) => unavailable(
+    // Issue #5078 (AC-1): mirror the Host's Workspace identity authority,
+    // which also admits the exact binding of a recovered Blocked generation.
+    match current_projection_execution_binding_status(
+        worktree,
+        owner,
+        session_id,
+        &binding.identity,
+    ) {
+        Ok(Some(_)) => probe,
+        Ok(None) => unavailable(
             GovernanceCause::Authority,
             "workspace_update_execution_binding_not_current",
         ),
@@ -20661,6 +20870,194 @@ mod tests {
         assert_eq!(diagnosis.recommended_recovery, "execution.continue");
     }
 
+    #[test]
+    fn live_active_owner_generation_resolves_issue_and_spec_and_rejects_terminal_status() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        for (index, kind) in [ExecutionOwnerKind::Issue, ExecutionOwnerKind::Spec]
+            .into_iter()
+            .enumerate()
+        {
+            let worktree = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+            let owner = ExecutionOwnerKey {
+                kind,
+                number: 5056 + index as u64,
+            };
+            let (candidate, identity) = startup_reaper_active_fixture_with_status(
+                worktree.path(),
+                owner,
+                "heartbeat-holder",
+                gwt_agent::AgentStatus::Running,
+            );
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let process_started_at =
+                crate::process::host_process_start_time(std::process::id()).unwrap();
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Running,
+                &identity,
+                41,
+                process_started_at,
+                std::process::id(),
+                process_started_at,
+            )
+            .save(&gwt_agent::runtime_state_path(
+                &sessions_dir,
+                &identity.session_id,
+            ))
+            .unwrap();
+            let authority_before = generation_authority_bytes(worktree.path(), owner);
+
+            assert_eq!(
+                live_active_owner_generation(worktree.path(), owner.number),
+                Some(candidate.generation_id.clone())
+            );
+            assert_eq!(
+                generation_authority_bytes(worktree.path(), owner),
+                authority_before
+            );
+
+            let settlement = if kind == ExecutionOwnerKind::Issue {
+                ExecutionSettlement::Completed
+            } else {
+                ExecutionSettlement::Blocked {
+                    reason: "heartbeat must stop at settlement".to_string(),
+                    missing_verification: None,
+                }
+            };
+            assert!(matches!(
+                settle(worktree.path(), &identity.session_id, settlement).unwrap(),
+                SettleResult::Settled(_)
+            ));
+            assert_eq!(
+                live_active_owner_generation(worktree.path(), owner.number),
+                None
+            );
+            if kind == ExecutionOwnerKind::Spec {
+                let mut reopened = load(worktree.path()).unwrap().unwrap();
+                reopened
+                    .recoveries
+                    .push(test_recovery(&identity.session_id, 1));
+                reopened.blocked_reason = None;
+                reopened.missing_verification = None;
+                reopened.status = ExecutionControlStatus::Active;
+                reopened.settled_at = None;
+                assert!(persist_generation_lifecycle_transition_if_owned(
+                    worktree.path(),
+                    &reopened,
+                    ExecutionControlStatus::Blocked,
+                    "verified same-session recovery",
+                )
+                .unwrap());
+                assert_eq!(
+                    live_active_owner_generation(worktree.path(), owner.number),
+                    Some(candidate.generation_id),
+                    "same-session lifecycle events preserve the holder's runtime authority",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_active_owner_generation_uses_takeover_holder_and_requires_exact_live_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: 5056,
+        };
+        let (candidate, original_identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            "heartbeat-original",
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let process_started_at =
+            crate::process::host_process_start_time(std::process::id()).unwrap();
+        let write_live_runtime = |identity: &gwt_agent::SessionExecutionIdentity| {
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Running,
+                identity,
+                41,
+                process_started_at,
+                std::process::id(),
+                process_started_at,
+            )
+            .save(&gwt_agent::runtime_state_path(
+                &sessions_dir,
+                &identity.session_id,
+            ))
+            .unwrap();
+        };
+        write_live_runtime(&original_identity);
+        let mut record = load(worktree.path()).unwrap().unwrap();
+        let transfer = OwnershipTransfer {
+            from_session_id: original_identity.session_id.clone(),
+            to_session_id: "heartbeat-current".to_string(),
+            reason: "same-generation recovery".to_string(),
+            transferred_at: Utc::now(),
+        };
+        record.primary_session_id = transfer.to_session_id.clone();
+        record.transfers.push(transfer.clone());
+        assert!(persist_generation_takeover_if_owned(worktree.path(), &record, &transfer).unwrap());
+        let binding = current_execution_binding(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(
+            worktree.path(),
+            owner,
+            &record.primary_session_id,
+            binding,
+        );
+        let holder_path = sessions_dir.join(format!("{}.toml", record.primary_session_id));
+        let mut holder = gwt_agent::Session::load(&holder_path).unwrap();
+        let current_identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+            .unwrap()
+            .unwrap();
+        write_live_runtime(&current_identity);
+
+        assert_eq!(
+            live_active_owner_generation(worktree.path(), owner.number),
+            Some(candidate.generation_id)
+        );
+        fs::remove_file(gwt_agent::runtime_state_path(
+            &sessions_dir,
+            &current_identity.session_id,
+        ))
+        .unwrap();
+        assert_eq!(
+            live_active_owner_generation(worktree.path(), owner.number),
+            None,
+            "a live initial Session cannot keep a dead current holder's heartbeat alive"
+        );
+
+        holder.execution_binding.as_mut().unwrap().identity =
+            original_identity.execution_binding.identity;
+        holder.save(&sessions_dir).unwrap();
+        let stale_identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+            .unwrap()
+            .unwrap();
+        write_live_runtime(&stale_identity);
+        assert_eq!(
+            live_active_owner_generation(worktree.path(), owner.number),
+            None,
+            "a live process with the predecessor binding is not the current holder"
+        );
+    }
+
     /// One corrupt owner entry is reported without hiding another valid Active
     /// candidate in the same repository owner tree.
     #[test]
@@ -25337,8 +25734,8 @@ mod tests {
                     display_name: session.agent_id.display_name().to_string(),
                     status_category:
                         gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
-                    current_focus: None,
-                    title_summary: None,
+                    current_focus: Some("abort the matching blocked build".to_string()),
+                    title_summary: Some("blocked build abort authority".to_string()),
                     worktree_path: Some(worktree.clone()),
                     branch: Some(session.branch.clone()),
                     last_board_entry_id: None,
