@@ -2077,6 +2077,10 @@ enum UserEvent {
         grace: std::time::Duration,
         observations: Vec<app_runtime::terminal_convergence::TerminalWindowObservation>,
     },
+    UpdateDrainObserved {
+        now: chrono::DateTime<chrono::Utc>,
+        observations: Vec<app_runtime::UpdateDrainObservation>,
+    },
     IssueMonitorScheduledScanComplete {
         project_root: PathBuf,
         prefs_path: PathBuf,
@@ -4549,6 +4553,7 @@ mod tests {
             active_agent_sessions: HashMap::new(),
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
+            update_drain_scan_in_flight: false,
             terminal_close_grace: std::time::Duration::from_secs(60),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
@@ -11279,6 +11284,9 @@ fn main() -> std::io::Result<()> {
             }) => {
                 let events = app.terminal_convergence_observed_events(grace, observations);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::UpdateDrainObserved { now, observations }) => {
+                clients.dispatch(app.update_drain_observed_events(now, observations));
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
                 project_root,

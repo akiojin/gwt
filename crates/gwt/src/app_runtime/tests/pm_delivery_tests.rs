@@ -15,22 +15,10 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    let pm_pane = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("PM runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    runtime.register_pty_writer(&pm_window_id, None);
     let target_window = "tab-1::other-window".to_string();
     insert_test_pane_runtime(&mut runtime, &target_window);
-    let target_pane = runtime
-        .runtimes
-        .get(&target_window)
-        .expect("target runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&target_window, &target_pane);
+    runtime.register_pty_writer(&target_window, None);
 
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:43123/internal/hook-live",
@@ -158,22 +146,10 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    let pm_pane = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("PM runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    runtime.register_pty_writer(&pm_window_id, None);
     let target_window = "tab-1::other-window".to_string();
     insert_test_pane_runtime(&mut runtime, &target_window);
-    let target_pane = runtime
-        .runtimes
-        .get(&target_window)
-        .expect("target runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&target_window, &target_pane);
+    runtime.register_pty_writer(&target_window, None);
 
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:43123/internal/hook-live",
@@ -282,22 +258,10 @@ fn authenticated_pm_send_reports_unverified_without_target_hook_ack() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    let pm_pane = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("PM runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    runtime.register_pty_writer(&pm_window_id, None);
     let target_window = "tab-1::other-window".to_string();
     insert_test_pane_runtime(&mut runtime, &target_window);
-    let target_pane = runtime
-        .runtimes
-        .get(&target_window)
-        .expect("target runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&target_window, &target_pane);
+    runtime.register_pty_writer(&target_window, None);
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:43123/internal/hook-live",
         "ws://127.0.0.1:43124/ws",
@@ -360,13 +324,7 @@ fn authenticated_pm_send_replays_verified_receipt_without_a_live_target() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    let pm_pane = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("PM runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    runtime.register_pty_writer(&pm_window_id, None);
     let target_window = "tab-1::other-window";
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b2";
     let body = "already verified body";
@@ -449,13 +407,7 @@ fn concurrent_same_operation_waiters_share_one_prepared_delivery() {
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     for window_id in [pm_window_id.as_str(), "tab-1::other-window"] {
         insert_test_pane_runtime(&mut runtime, window_id);
-        let pane = runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
-            .pane
-            .clone();
-        runtime.register_pty_writer(window_id, &pane);
+        runtime.register_pty_writer(window_id, None);
     }
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:43123/internal/hook-live",
@@ -572,13 +524,7 @@ fn authenticated_pm_send_refuses_foreign_project_without_a_durable_receipt() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    let pm_pane = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("PM runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    runtime.register_pty_writer(&pm_window_id, None);
 
     let foreign = temp.path().join("foreign-repo");
     fs::create_dir_all(&foreign).expect("create foreign repo");
@@ -601,13 +547,7 @@ fn authenticated_pm_send_refuses_foreign_project_without_a_durable_receipt() {
         .active_agent_sessions
         .insert(foreign_window_id.to_string(), foreign_session);
     insert_test_pane_runtime(&mut runtime, foreign_window_id);
-    let foreign_pane = runtime
-        .runtimes
-        .get(foreign_window_id)
-        .expect("foreign runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(foreign_window_id, &foreign_pane);
+    runtime.register_pty_writer(foreign_window_id, None);
 
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:43123/internal/hook-live",

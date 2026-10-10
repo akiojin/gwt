@@ -2703,7 +2703,10 @@ fn issue_monitor_error_notification_keeps_project_in_ledger() {
     let outbound = runtime
         .issue_monitor_project_notification(Some(&root), event)
         .unwrap();
-    prepare_outbound_event(&outbound);
+    gwt::error_report::record_backend_event_with_origin(
+        &outbound.event,
+        outbound.error_origin.as_ref(),
+    );
     let rows = gwt_core::error_ledger::list_since(None).unwrap();
     let row = rows
         .iter()

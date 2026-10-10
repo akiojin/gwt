@@ -608,7 +608,11 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+    pub(crate) fn register_pty_writer(
+        &self,
+        id: &str,
+        session_snapshot: Option<&gwt_agent::Session>,
+    ) {
         let Some(project_key) = self
             .window_lookup
             .get(id)
@@ -618,40 +622,35 @@ impl AppRuntime {
             tracing::warn!(window_id = %id, "refusing PTY writer without project ownership");
             return;
         };
-        let Ok(pane_guard) = pane.lock() else {
-            tracing::warn!(
-                target: "gwt_input_trace",
-                stage = "registry_lock_poisoned",
-                window_id = %id,
-                "failed to register PTY writer: pane mutex poisoned"
-            );
+        let Some(runtime) = self.runtimes.get(id) else {
+            tracing::warn!(window_id = %id, "refusing PTY writer without an installed runtime");
             return;
         };
-        let pty = pane_guard.shared_pty();
-        drop(pane_guard);
-        let monitor_runtime = self.active_agent_sessions.get(id).and_then(|active| {
-            if gwt::cli::execution_state::session_launch_route(Some(&active.session_id))
-                != Some(gwt_agent::LaunchRoute::Autonomous)
-            {
-                return None;
-            }
-            let session = gwt_agent::Session::load(
-                &self
-                    .sessions_dir
-                    .join(format!("{}.toml", active.session_id)),
-            )
-            .ok()?;
-            Some(gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration {
-                window_id: id.to_string(),
-                session_id: active.session_id.clone(),
-                issue_number: session.linked_issue_number?,
-                worktree_path: active.worktree_path.clone(),
-                project_root: self.tab(&active.tab_id)?.project_root.clone(),
-                sessions_dir: self.sessions_dir.clone(),
-                incarnation: self.runtimes.get(id)?.incarnation,
-                review_dispatch: self.issue_monitor_review_dispatch_windows.contains(id),
-            })
-        });
+        let pty = Arc::clone(&runtime.pty);
+        let monitor_runtime = self
+            .active_agent_sessions
+            .get(id)
+            .zip(session_snapshot)
+            .and_then(|(active, session)| {
+                if session.id != active.session_id
+                    || !(session.launch_route == gwt_agent::LaunchRoute::Autonomous
+                        || session.launch_args.iter().any(|arg| {
+                            arg.contains(gwt::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE)
+                        }))
+                {
+                    return None;
+                }
+                Some(gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                    window_id: id.to_string(),
+                    session_id: active.session_id.clone(),
+                    issue_number: session.linked_issue_number?,
+                    worktree_path: active.worktree_path.clone(),
+                    project_root: self.tab(&active.tab_id)?.project_root.clone(),
+                    sessions_dir: self.sessions_dir.clone(),
+                    incarnation: runtime.incarnation,
+                    review_dispatch: self.issue_monitor_review_dispatch_windows.contains(id),
+                })
+            });
         match self.pty_writers.write() {
             Ok(mut guard) => {
                 let previous = guard.insert(
