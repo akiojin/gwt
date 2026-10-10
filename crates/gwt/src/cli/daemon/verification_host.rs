@@ -347,49 +347,60 @@ async fn run_async_cancellable<G>(
             return Err(DelegatedRunError::Cancelled);
         }
     }
-    let execution = async {
-        let mut client = DaemonClient::connect(endpoint).await?;
-        client
-            .send_frame(&ClientFrame::SpawnVerification(request.clone()))
-            .await?;
-
-        let accepted = match client.read_frame::<DaemonFrame>().await? {
-            DaemonFrame::VerificationAccepted(accepted) => accepted,
-            DaemonFrame::Error { message } => {
-                return Err(format!("daemon refused the verification spawn: {message}"))
-            }
-            other => return Err(format!("expected VerificationAccepted, got: {other:?}")),
-        };
-        // Keep the caller's command scope alive until completion or error.
-        // The PID is already part of the existing protocol response.
-        let _command_scope = on_started(accepted.pid);
-
-        loop {
-            match client.read_frame::<DaemonFrame>().await? {
-                DaemonFrame::VerificationFinished(finished) => {
-                    return Ok(DelegatedRun {
-                        exit_code: finished.exit_code,
-                        signal: finished.signal,
-                        accepted,
-                        reclaimed_survivors: finished.reclaimed_survivors,
-                    })
-                }
-                DaemonFrame::Error { message } => {
-                    return Err(format!("daemon reported a spawn failure: {message}"))
-                }
-                // The daemon may fan unrelated control frames down any
-                // connection; none of them ends this run.
-                _ => continue,
-            }
-        }
-    };
     let completion = async {
+        let mut start_acknowledged = false;
+        let execution = async {
+            let mut client = DaemonClient::connect(endpoint).await?;
+            client
+                .send_frame(&ClientFrame::SpawnVerification(request.clone()))
+                .await?;
+
+            let accepted = match client.read_frame::<DaemonFrame>().await? {
+                DaemonFrame::VerificationAccepted(accepted) => accepted,
+                DaemonFrame::Error { message } => {
+                    return Err(format!("daemon refused the verification spawn: {message}"))
+                }
+                other => return Err(format!("expected VerificationAccepted, got: {other:?}")),
+            };
+            start_acknowledged = true;
+            // Keep the caller's command scope alive until completion or error.
+            // The PID is already part of the existing protocol response.
+            let _command_scope = on_started(accepted.pid);
+
+            loop {
+                match client.read_frame::<DaemonFrame>().await? {
+                    DaemonFrame::VerificationFinished(finished) => {
+                        return Ok(DelegatedRun {
+                            exit_code: finished.exit_code,
+                            signal: finished.signal,
+                            accepted,
+                            reclaimed_survivors: finished.reclaimed_survivors,
+                        })
+                    }
+                    DaemonFrame::Error { message } => {
+                        return Err(format!("daemon reported a spawn failure: {message}"))
+                    }
+                    // The daemon may fan unrelated control frames down any
+                    // connection; none of them ends this run.
+                    _ => continue,
+                }
+            }
+        };
         match timeout {
             // The whole exchange is bounded, including connect and Accepted.
             // Expiry drops the client and reclaims only its owned workload.
             Some(timeout) => tokio::time::timeout(timeout, execution)
                 .await
-                .map_err(|_| DelegatedRunError::TimedOut(timeout))?
+                .map_err(|_| {
+                    if start_acknowledged {
+                        DelegatedRunError::TimedOut(timeout)
+                    } else {
+                        DelegatedRunError::Failed(format!(
+                            "daemon verification exchange timed out after {timeout:?} before \
+                             command start was acknowledged; inspect the daemon connection and health"
+                        ))
+                    }
+                })?
                 .map_err(DelegatedRunError::Failed),
             None => execution.await.map_err(DelegatedRunError::Failed),
         }
@@ -483,6 +494,75 @@ mod tests {
         .await;
         assert!(matches!(result, Err(DelegatedRunError::Failed(message))
             if message == "cancellation state unreadable"));
+    }
+
+    #[tokio::test]
+    async fn timeout_before_start_acknowledgement_is_transport_failure() {
+        use gwt_core::daemon::IpcHandshakeResponse;
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        // Both handshake and spawn acceptance are transport work, not a
+        // running command. Observe the blocked exchange before expiring it.
+        for complete_handshake in [false, true] {
+            let directory = scratch();
+            let endpoint = fixture_endpoint(directory.path());
+            let mut listener =
+                super::super::transport::IpcListener::bind(Path::new(&endpoint.bind)).unwrap();
+            let response = IpcHandshakeResponse {
+                protocol_version: endpoint.protocol_version,
+                daemon_version: "fixture".into(),
+                accepted: true,
+                rejection_reason: None,
+            };
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let mut stream = BufReader::new(listener.accept().await.unwrap());
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                if complete_handshake {
+                    let payload = format!("{}\n", serde_json::to_string(&response).unwrap());
+                    stream
+                        .get_mut()
+                        .write_all(payload.as_bytes())
+                        .await
+                        .unwrap();
+                    line.clear();
+                    stream.read_line(&mut line).await.unwrap();
+                    assert!(matches!(
+                        serde_json::from_str::<ClientFrame>(&line).unwrap(),
+                        ClientFrame::SpawnVerification(_)
+                    ));
+                }
+                ready_tx.send(()).unwrap();
+                assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
+            });
+            let request = held_command(directory.path(), "never-started");
+            let runner = tokio::spawn(async move {
+                run_async(
+                    &endpoint,
+                    &request,
+                    |_| panic!("the daemon never acknowledged command start"),
+                    Some(Duration::from_secs(60)),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(30), ready_rx)
+                .await
+                .expect("fixture received the exchange")
+                .unwrap();
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(60)).await;
+            let result = runner.await.unwrap();
+            tokio::time::resume();
+            server.await.unwrap();
+            assert!(
+                matches!(result, Err(DelegatedRunError::Failed(message))
+                if message.contains("timed out") && message.contains("acknowledged")
+                    && message.contains("60")),
+                "start acknowledgement timeout must be a transport failure"
+            );
+        }
     }
 
     #[cfg(unix)]
