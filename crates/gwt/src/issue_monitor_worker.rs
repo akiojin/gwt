@@ -324,7 +324,7 @@ pub fn issue_monitor_readback_budget() -> std::time::Duration {
 /// Whether the scan still has budget to start another per-candidate readback
 /// and leave the launch stage something to run on. An absent ambient deadline
 /// (direct callers, tests) imposes no limit of its own.
-fn readback_fan_out_has_budget() -> bool {
+pub(crate) fn readback_fan_out_has_budget() -> bool {
     gwt_core::operation_deadline::current().is_none_or(|deadline| {
         deadline.saturating_duration_since(std::time::Instant::now()) > ISSUE_MONITOR_LAUNCH_RESERVE
     })
@@ -4336,6 +4336,10 @@ mod tests {
             std::fs::write(
                 &fake_gh,
                 "@echo off\r\n\
+                 if /I \"%~1 %~2\"==\"issue view\" (\r\n\
+                   type \"%~dp0gh-view-%~3.json\"\r\n\
+                   exit /b 0\r\n\
+                 )\r\n\
                  set \"page=1\"\r\n\
                  set \"suffix=json\"\r\n\
                  echo %* | findstr /C:\"page=2\" >nul\r\n\
@@ -4355,6 +4359,10 @@ mod tests {
             std::fs::write(
                 &fake_gh,
                 "#!/bin/sh\n\
+                 if [ \"$1 $2\" = \"issue view\" ]; then\n\
+                   cat \"$(dirname \"$0\")/gh-view-$3.json\"\n\
+                   exit $?\n\
+                 fi\n\
                  page=1\n\
                  suffix=json\n\
                  case \"$*\" in *page=2*) page=2 ;; esac\n\
@@ -4395,6 +4403,128 @@ mod tests {
             }),
             "missing population diagnostic: {rows:?}"
         );
+    }
+
+    #[test]
+    fn inbox_population_shrink_from_explicit_closed_issue_is_not_a_fault() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(7));
+        monitor.record_candidate(issue(8));
+        let mut closed = issue(8);
+        closed.state = IssueMonitorIssueState::Closed;
+        let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(7), closed],
+            IssueMonitorCandidateSource::Live,
+            temp.path(),
+            "2026-09-10T00:00:00Z",
+        );
+        assert!(monitor.inbox_item(8).is_none());
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+    }
+
+    fn shrink_probe_repo(dir: &Path, states: &[(u64, &str)]) -> PathBuf {
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+        }
+        for (number, state) in states {
+            std::fs::write(
+                dir.join(format!("gh-view-{number}.json")),
+                serde_json::json!({
+                    "number": number, "title": format!("Issue {number}"),
+                    "body": "Body", "labels": [{"name": "auto-improve"}],
+                    "state": state, "updatedAt": "2026-09-10T00:00:00Z", "comments": []
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        repo
+    }
+
+    #[test]
+    fn inbox_population_shrink_from_confirmed_closed_issue_is_not_a_fault() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[(8, "CLOSED")]);
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(7));
+        monitor.record_candidate(issue(8));
+        let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(7)],
+            IssueMonitorCandidateSource::Live,
+            &repo,
+            "2026-09-10T00:00:00Z",
+        );
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn inbox_population_shrink_with_open_issue_is_a_single_fault_across_replays() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8, 9]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[(8, "CLOSED"), (9, "OPEN")]);
+        let mut before = IssueMonitorState::new(IssueMonitorConfig::default());
+        for number in [7, 8, 9] {
+            before.record_candidate(issue(number));
+        }
+        let mut newcomer = issue(10);
+        newcomer.labels.push("gwt-queued".into());
+        for now in ["2026-09-10T00:00:00Z", "2026-09-10T00:00:10Z"] {
+            let mut monitor = before.clone();
+            let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                &[issue(7), newcomer.clone()],
+                IssueMonitorCandidateSource::Live,
+                &repo,
+                now,
+            );
+            assert_eq!(monitor.inbox.len(), 2);
+            assert_eq!(summary.errors.len(), 1);
+        }
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 1, "same reduction was recorded twice: {rows:?}");
+        assert_eq!(rows[0].kind, gwt_core::error_ledger::ErrorKind::DaemonFault);
+        assert!(rows[0].message.contains("removed issues: [9]"), "{rows:?}");
     }
 
     /// Issue #4087 AC-4: an Issue created on GitHub (never seen by gwtd) reaches
