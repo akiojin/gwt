@@ -4801,6 +4801,7 @@ mod tests {
                 chromium_light_passed: light,
                 failed,
                 status: "passed".to_string(),
+                artifacts: Vec::new(),
             });
             verification::save(repo.path(), &record).unwrap();
             let mut out = String::new();
