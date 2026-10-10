@@ -5428,6 +5428,9 @@ mod tests {
     fn pm_pause_resume_preserve_registration_and_rearm_only_on_transition() {
         use crate::pm_registry;
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path().join("state"));
         let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
