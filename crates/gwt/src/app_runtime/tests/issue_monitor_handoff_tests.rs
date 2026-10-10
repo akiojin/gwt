@@ -131,7 +131,7 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         )
         .expect("publish predecessor Work");
         let predecessor_id =
-            gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+            gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
                 &fixture.project_root,
                 &fixture.worktree,
                 |projection, _, _| {
@@ -144,6 +144,15 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                 },
             )
             .expect("terminalize predecessor Work");
+        // Launch starts shared-event intake. Exercise that rebuild before the
+        // readiness handshake so the predecessor's local close must survive it.
+        let project_key = gwt_core::paths::resolve_project_scope(&fixture.project_root).hash;
+        let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+            &fixture.project_root,
+            &gwt_core::paths::gwt_workspace_work_items_path(&project_key),
+            &gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key),
+        );
+        assert!(intake.load_error.is_none(), "{case}: {intake:?}");
         let predecessor =
             gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
                 .unwrap()
@@ -183,11 +192,38 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         ready.project_root = Some(fixture.project_root.display().to_string());
         ready.branch = Some("work/issue-3165".to_string());
         fixture.runtime.handle_runtime_hook_event(ready);
-        commit_pending_fresh_execution(&mut fixture.runtime);
+        let events = commit_pending_fresh_execution(&mut fixture.runtime);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event.event,
+                BackendEvent::TerminalStatus {
+                    status: WindowProcessStatus::Error,
+                    ..
+                }
+            )),
+            "{case}: fresh readiness must commit, not roll back: {events:?}",
+        );
         assert!(!fixture
             .runtime
             .pending_fresh_execution_launches
             .contains_key(&window_id));
+        let candidate =
+            gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+                .expect("committed successor Session");
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(
+                &fixture.worktree,
+                fixture.execution_owner,
+            )
+            .expect("committed successor execution"),
+            Some(
+                candidate
+                    .execution_binding
+                    .expect("committed successor Session binding")
+                    .identity,
+            ),
+            "{case}: readiness must activate the candidate before Work readback",
+        );
 
         let works =
             gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
