@@ -6361,10 +6361,14 @@ impl RunResponse {
         let infrastructure_failure = record.commands.iter().find(|result| {
             result.exit_code == -1
                 && result.terminated_by_signal.is_none()
-                && result
+                && (result
                     .output_streams
                     .iter()
                     .any(|stream| stream.stream == "spawn error")
+                    || (result.nextest.is_none()
+                        && result
+                            .output_tail
+                            .contains("nextest JUnit evidence missing or invalid:")))
         });
         let status = if accepted {
             "passed"
@@ -6900,6 +6904,35 @@ pub(crate) mod tests {
             .data
             .to_string()
             .contains("unexpected server response"));
+    }
+
+    #[test]
+    fn nextest_evidence_collection_failure_is_an_execution_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut record, _) = run_verification(
+            directory.path(),
+            "session-5085-nextest",
+            &["git --version".into()],
+        )
+        .unwrap();
+        let diagnostic = "nextest JUnit evidence missing or invalid: report is absent";
+        record.commands[0].command = "cargo nextest run --profile gwt-verify".into();
+        record.commands[0].output_tail = diagnostic.into();
+        record.all_passed = false;
+        // Evidence collection replaces a successful exit with -1; it must
+        // not reclassify a raw nextest test failure that also lacks a report.
+        for (exit_code, expected_status) in [(-1, "error"), (100, "failed")] {
+            record.commands[0].exit_code = exit_code;
+            let response = RunResponse::for_record(&record, false);
+            assert_eq!(response.status, expected_status);
+            if expected_status == "error" {
+                assert_eq!(response.data["cause"], diagnostic);
+                assert!(response.data["recovery"]
+                    .as_str()
+                    .unwrap()
+                    .contains("verify.run"));
+            }
+        }
     }
 
     // A deadlock must fail this regression rather than hang the test runner.
