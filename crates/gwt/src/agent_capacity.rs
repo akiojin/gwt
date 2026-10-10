@@ -1443,9 +1443,14 @@ mod tests {
         let missing = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
         assert!(missing.reason.contains("build"), "{}", missing.reason);
         assert!(missing.reason.contains("Manual"), "{}", missing.reason);
-        assert!(missing
-            .reason
-            .contains(&temp.path().join("target").display().to_string()));
+        // Windows temp paths may use an 8.3 alias; recovery text uses the normalized root.
+        assert!(
+            missing
+                .reason
+                .contains(&normalized(temp.path()).join("target").display().to_string()),
+            "{}",
+            missing.reason
+        );
     }
 
     #[test]
