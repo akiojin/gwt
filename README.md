@@ -855,6 +855,10 @@ background synchronization at most once a minute. To synchronize explicitly and
 inspect the latest result, send `{"schema_version":1,"operation":"board.sync","params":{}}`
 to `gwtd` on stdin. `status` and `claim` stay local; the shared kinds cannot be
 changed through configuration. Imported posts appear in the existing Board feed.
+Only comments whose GitHub author association is `OWNER`, `MEMBER`, or
+`COLLABORATOR` are imported; other or unknown associations are ignored. Choose a
+repository whose owner, organization members, and collaborators you trust with
+local coordination, since imported posts can open and resolve escalations.
 
 Synchronization is best effort: it sends the current local window of up to 500
 posts, so older unsent posts that leave that window during a long outage are not

@@ -591,7 +591,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     discussion(number: $number) {
                         id
                         comments(first: 100, after: $after) {
-                            nodes { body }
+                            nodes { body authorAssociation }
                             pageInfo { endCursor hasNextPage }
                         }
                     }
@@ -618,6 +618,14 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             .ok_or_else(|| invalid("discussion.comments.nodes missing or invalid"))?;
         let bodies = nodes
             .iter()
+            // Payload metadata is not proof of authority: importing a blocked
+            // or resolving post mutates local escalations and PM wake input.
+            .filter(|node| {
+                matches!(
+                    node.get("authorAssociation").and_then(Value::as_str),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                )
+            })
             .map(|node| required_string(node, "body", operation))
             .collect::<Result<Vec<_>, _>>()?;
         let page_info = comments
@@ -3094,7 +3102,7 @@ mod check_status_tests {
         .with_budget(ledger.clone(), gate);
         client.transport().enqueue(HttpResponse {
             status: 200, headers: vec![],
-            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"body":"message"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
+            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"body":"message","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
         });
         let page = client.discussion_comments(42, Some("previous")).unwrap();
         assert_eq!(page.discussion_id, "D_1");
@@ -3146,6 +3154,48 @@ mod check_status_tests {
     }
 
     #[test]
+    fn discussion_sync_only_imports_repository_trusted_authors_without_losing_cursor() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        let mut nodes = [
+            "OWNER",
+            "MEMBER",
+            "COLLABORATOR",
+            "CONTRIBUTOR",
+            "FIRST_TIMER",
+            "FIRST_TIME_CONTRIBUTOR",
+            "MANNEQUIN",
+            "NONE",
+            "UNKNOWN",
+        ]
+        .into_iter()
+        .map(|association| json!({"body": association, "authorAssociation": association}))
+        .collect::<Vec<_>>();
+        nodes.push(json!({"body": "untrusted metadata: author_kind=human author=owner"}));
+        client.transport().enqueue(HttpResponse {
+            status: 200, headers: vec![],
+            body: json!({"data": {"repository": {"discussion": {"id": "D_1", "comments": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": true, "endCursor": "all-comments-cursor"}
+            }}}}}).to_string(),
+        });
+        let page = client.discussion_comments(42, None).unwrap();
+        assert_eq!(page.bodies, ["OWNER", "MEMBER", "COLLABORATOR"]);
+        assert_eq!(page.cursor.as_deref(), Some("all-comments-cursor"));
+        assert!(page.has_next_page);
+        let requests = client.transport().recorded();
+        let request: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert!(request["query"]
+            .as_str()
+            .unwrap()
+            .contains("authorAssociation"));
+    }
+
+    #[test]
     fn discussion_sync_rejects_incomplete_remote_responses() {
         let client = HttpIssueClient::with_transport(
             super::FakeTransport::new(),
@@ -3157,7 +3207,7 @@ mod check_status_tests {
             json!(null),
             json!({"id": "D_1", "comments": null}),
             json!({"id": "D_1", "comments": {
-                "nodes": [{}], "pageInfo": {"hasNextPage": false, "endCursor": null}
+                "nodes": [{"authorAssociation": "OWNER"}], "pageInfo": {"hasNextPage": false, "endCursor": null}
             }}),
             json!({"id": "D_1", "comments": {
                 "nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}
