@@ -229,7 +229,7 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 3. **If the work fails the Ready PR Gate** → create/update only as Draft PR, or return NO ACTION if the user explicitly rejects Draft.
 4. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode. A Ready/non-draft PR still requires the Ready PR Gate.
 5. **If no open PR** → create new PR with `params.draft:true` unless the Ready PR Gate is satisfied.
-6. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+6. **Branch sync:** Being behind `origin/$base` alone never requires a merge before PR creation. Probe with `git merge-tree --write-tree HEAD "origin/$base"`; merge `origin/$base` (never rebase) and re-run `verify.plan` / `verify.run` only when it reports a conflict. Otherwise create the PR at the verified HEAD and sync afterwards with `pr.update_branch` when the base is strict (see `references/create-flow.md` Step 4).
 
 ### PR Title Rules
 
@@ -413,7 +413,7 @@ Post a PR summary comment via JSON operation `pr.comment`.
 ### Verify Fix (mandatory)
 
 Re-run inspection with `--mode all`. Loop until exit code 0.
-- CI pending --> poll 30s intervals until complete.
+- CI pending --> use the bounded checks and wait handling in `references/fix-flow.md`.
 - After fix push, re-poll for new CI run.
 
 ### Loop Safety Guard
@@ -500,11 +500,28 @@ push. An explicit owner-requested hold uses `pr.draft`; resume through
 
 ### Loop Safety Guard
 
-The same blocker (same CI check name, same unresolved thread, same conflict)
-surviving 3 consecutive drive iterations → stop, report what was tried each
-iteration, and ask the user **continue** / **abort** / **change approach**. Do
-not loop indefinitely; the merged-state poll is bounded and hands off via
-`board.post` (`params.kind:"blocked"`) when CI stays pending.
+CI pending/queued is a temporary wait; pending alone never counts toward the
+3 consecutive failed drive iterations. Read `execution.status` / `launch_route`:
+an autonomous / Issue Monitor launch must not ask a human to continue merely
+because the same checks are still running.
+
+At the bounded polling limit, post `board.post` with `params.kind:"status"`
+or `params.kind:"handoff"`, the PR number, pending check names, and a resume
+instruction. Declare `issue.monitor.wait` with the explicit owner Issue number
+in `params.number`, a `reason`, and a `resume_condition` naming the pending CI.
+This ends the polling batch, not the execution: keep it Active, preserve
+auto-merge, and resume the bounded check path when CI progresses. Clear the
+declaration with `issue.monitor.wait` and `params.clear:true` when resuming.
+Without a Monitor owner, use the status/handoff without inventing an Issue.
+Do not emit `params.kind:"blocked"` or NeedsHuman, call `execution.blocked`,
+or claim Delivered for a pending-only wait. Ready PR, required CI, and
+auto-merge gates remain unchanged; delivery still requires `merged_at`.
+
+A real blocker (the same failed CI check, unresolved thread, or conflict)
+surviving 3 consecutive repair iterations still stops the repair loop: report
+what was tried and obtain the required **continue** / **abort** / **change
+approach** decision. A human decision, unsafe operation, or actual tool refusal
+still follows the existing blocked escalation contract in `gwt-coordination`.
 
 ### Optional: arm a completion goal (SPEC-3050)
 

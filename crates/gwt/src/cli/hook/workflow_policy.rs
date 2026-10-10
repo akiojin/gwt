@@ -174,6 +174,13 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(session) = load_session_from_env() else {
         return Ok(false);
     };
+    agent_workspace_identity_missing(worktree_root, &session)
+}
+
+fn agent_workspace_identity_missing(
+    worktree_root: &Path,
+    session: &Session,
+) -> Result<bool, HookError> {
     // The title requirement is meaningful only for the same Session/container
     // that workspace.update itself can mutate. A stale ambient Session must
     // not brick an unrelated cwd, repository, or branch before the user can
@@ -188,6 +195,13 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     } else {
         worktree_root
     };
+    // Issue #5078 (AC-4): a restored window of a Completed execution has no
+    // work left to label, and the Host refuses its `workspace.update`. Holding
+    // the gate there only loops; the window must reach settlement and close.
+    // An explicit relaunch opens an Active successor, which the gate covers.
+    if crate::cli::execution_state::is_completed(projection_root) {
+        return Ok(false);
+    }
     let Some(projection) = load_workspace_projection(projection_root)? else {
         return Ok(false);
     };
@@ -224,7 +238,7 @@ fn evaluate_title_summary_guard(
         return Ok(HookOutput::Silent);
     }
 
-    if is_identity_gate_exempt_event(event) {
+    if is_identity_gate_exempt_event(event) || is_escalation_event(event) {
         return Ok(HookOutput::Silent);
     }
 
@@ -240,7 +254,7 @@ Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
 Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
 workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as a single-segment gwtd command.\n\n\
-While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, execution.release_prepared, and memory.add. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
+While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -626,11 +640,10 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 ///   It does not claim delivery. `execution.complete` and `build.abort`
 ///   remain gated: completion and discarding Work are not blocker reporting.
 ///
-/// `available_recoveries` can also name `verify.plan` / `verify.run`, and
-/// those stay gated on purpose: they take the host-wide verification lease and
-/// mint a session-bound evidence record, which is exactly the anonymous
+/// `verify.plan` / `verify.run` stay gated on purpose: they take the verification
+/// lease and mint a session-bound evidence record, which is exactly the anonymous
 /// side effect the gate exists to prevent. They are reachable the moment the
-/// gate lifts, which the escape above always does.
+/// gate lifts. Closed-gate diagnosis omits them from `available_recoveries`.
 ///
 /// AC-2 — a bookkeeping-only `git commit` is deliberately **not** exempted.
 /// The `chore(work):` convention bounds the subject line, never the index: a
@@ -663,6 +676,36 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
     )
 }
 
+/// Issue #5078 (AC-3): the PM escalation path never waits for the identity.
+///
+/// A session trapped by the gate must be able to say so: `board.post` with
+/// `kind:"blocked"` reaches the PM, and `issue.comment` leaves the durable
+/// record on the owner Issue. Neither touches version control, Work, or a
+/// lease. Other Board kinds stay gated so the exemption cannot carry ordinary
+/// progress reporting past an unlabeled window.
+fn is_escalation_event(event: &HookEvent) -> bool {
+    if event.tool_name.as_deref() != Some("Bash") {
+        return false;
+    }
+    let Some(envelope) = event.command().and_then(json_envelope) else {
+        return false;
+    };
+    match envelope
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("issue.comment") => true,
+        Some("board.post") => {
+            envelope
+                .get("params")
+                .and_then(|params| params.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some("blocked")
+        }
+        _ => false,
+    }
+}
+
 /// Issue #4533 (AC-1): whether the identity gate would currently deny this
 /// session's writes in `worktree_root`. Mirrors the context [`evaluate`]
 /// builds, including the review-dispatch and PM exemptions, so a refusal
@@ -674,6 +717,32 @@ pub(crate) fn identity_gate_closed(worktree_root: &Path) -> bool {
         return false;
     }
     current_agent_workspace_identity_missing(worktree_root).unwrap_or(false)
+}
+
+/// Issue #5078 (AC-2): [`identity_gate_closed`] for an explicit Session, so
+/// `execution.status` can judge the caller it diagnoses rather than the
+/// ambient environment.
+pub(crate) fn identity_gate_closed_for_session(worktree_root: &Path, session_id: &str) -> bool {
+    if crate::issue_monitor_review::review_dispatch_session_active()
+        || pm_identity_exempt_session_for_worktree(worktree_root)
+    {
+        return false;
+    }
+    let session_path = gwt_sessions_dir().join(format!("{session_id}.toml"));
+    Session::load_and_migrate(&session_path)
+        .ok()
+        .is_some_and(|session| {
+            agent_workspace_identity_missing(worktree_root, &session).unwrap_or(false)
+        })
+}
+
+/// Issue #5078 (AC-2): whether the identity gate lets this canonical operation
+/// run while it is closed. `execution.status` advertises only these while the
+/// gate is closed, so a listed recovery is never refused by the gate.
+pub(crate) fn identity_gate_admits_operation(operation: &str) -> bool {
+    matches!(operation, "workspace.ensure" | "workspace.update")
+        || is_identity_gate_exempt_operation(operation)
+        || is_read_only_json_envelope_operation(operation)
 }
 
 fn is_workspace_identity_update_command(command: &str) -> bool {
@@ -769,6 +838,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
+            | "workspace.receipt"
             | "workspace.projection_list"
             | "workspace.projection-list"
             | "board.show"
@@ -1834,6 +1904,21 @@ mod tests {
     }
 
     #[test]
+    fn workspace_receipt_is_read_only_before_title_identity_is_set() {
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        let command = envelope_command(
+            "workspace.receipt",
+            r#"{"operation_id":"aafc5f24-e5a5-4270-956d-86ac31dafb88"}"#,
+        );
+        assert_eq!(
+            evaluate_with_context(&bash_event(&command), repo.path(), &context).expect("policy"),
+            HookOutput::Silent,
+            "receipt recovery must stay available before Work identity is set"
+        );
+    }
+
+    #[test]
     fn issue_monitor_json_operations_have_the_expected_policy_classification() {
         assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
         assert!(is_read_only_json_envelope_operation("issue.monitor.tiers"));
@@ -2168,6 +2253,27 @@ mod tests {
             HookOutput::Silent,
             "{command}"
         );
+    }
+
+    /// Issue #5078 (AC-3): the PM escalation path is never closed by the gate,
+    /// while ordinary Board reporting still waits for the identity.
+    #[test]
+    fn title_summary_guard_allows_pm_escalation_before_identity_is_set() {
+        for command in [
+            envelope_command("board.post", r#"{"kind":"blocked","body":"stuck"}"#),
+            envelope_command("issue.comment", r#"{"number":5078,"body":"stuck"}"#),
+        ] {
+            assert_eq!(
+                evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+        let status = envelope_command("board.post", r#"{"kind":"status","body":"progress"}"#);
+        assert!(matches!(
+            evaluate_title_summary_guard(&bash_event(&status), true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     /// Issue #4533 (AC-2): the recorded decision is that a bookkeeping-only

@@ -500,6 +500,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.pause",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.resume",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.stop",
         aliases: &["pm.deregister"],
     },
@@ -662,6 +670,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "workspace.projection_prune",
         aliases: &["workspace.projection-prune"],
+    },
+    Operation {
+        name: "workspace.receipt",
+        aliases: &[],
     },
     Operation {
         name: "workspace.store_consolidate",

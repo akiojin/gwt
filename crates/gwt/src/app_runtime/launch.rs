@@ -126,7 +126,12 @@ fn resolve_agent_resource_launch(
     };
     let max_active =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo_path))
-            .map_or(1, |prefs| prefs.max_active_agents);
+            .map_or(1, |prefs| {
+                let mut monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                monitor.refresh_agent_capacity(repo_path);
+                monitor.effective_max_active_agents()
+            });
     let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let resolved = gwt::agent_resource_policy::resolve_agent_resource_policy(
         &settings.agent.resource,
@@ -2131,6 +2136,11 @@ fn rollback_worker_genesis(
 }
 
 fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch {
+    // Keep the existing Work lock budget, including PM/Execution lock waits.
+    // Expired authority operations retain their exact reconciliation evidence.
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+    );
     let fresh_execution_had_pending = input.pending_fresh_execution.is_some();
     let token = input.result.as_ref().ok().and_then(|launch| {
         launch
@@ -2529,13 +2539,18 @@ fn prepare_agent_launch_inner(
         }
         return Err("launch window closed before PTY spawn".into());
     }
-    if let Err(error) = gwt_agent::update_session(&input.sessions_dir, &session_id, |session| {
-        session.restore_window_on_startup = true;
-        session.updated_at = chrono::Utc::now();
-        session.launch_origin = input.origin;
-        session.restore_source_session_id = input.auto_resume_source_session_id.clone();
-        Ok(())
-    }) {
+    if let Err(error) = gwt_agent::update_session_with_wait(
+        &input.sessions_dir,
+        &session_id,
+        std::time::Duration::from_secs(2),
+        |session| {
+            session.restore_window_on_startup = true;
+            session.updated_at = chrono::Utc::now();
+            session.launch_origin = input.origin;
+            session.restore_source_session_id = input.auto_resume_source_session_id.clone();
+            Ok(())
+        },
+    ) {
         tracing::warn!(%session_id, %error, "failed to persist launched Session window metadata");
     }
     if !input.is_continue_work && !is_fresh && genesis.is_none() {
@@ -3074,7 +3089,9 @@ pub(super) fn launch_config_from_persisted_session(
     // unconditionally, because a persisted `launch_args` that still records the
     // prompt is not consulted by the builder and would otherwise lose it too.
     let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
-    if pm_scratch.is_some() {
+    if pm_scratch.is_some()
+        && gwt::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
+    {
         builder = builder.extra_arg(super::pm::PM_BOOTSTRAP_PROMPT);
     }
 
@@ -5045,6 +5062,7 @@ impl AppRuntime {
             success.pane,
             Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
             success.initial_prompt_file,
+            success.session_snapshot.as_ref(),
         );
         if let Some(operation_id) = self
             .pending_continue_work
@@ -5057,7 +5075,17 @@ impl AppRuntime {
             self.sync_pm_session_cache(&root, registration.as_ref());
             status
         });
-        self.spawn_work_events_ingest(project_root.clone(), false);
+        self.spawn_work_events_ingest_for_project_key(
+            project_root.clone(),
+            pending
+                .context
+                .as_ref()
+                .expect("current project")
+                .project_key
+                .clone(),
+            false,
+            None,
+        );
         let _ = self.persist();
         self.launch_error_terminal_details.remove(&window_id);
         let mut events = self
@@ -5488,6 +5516,7 @@ impl AppRuntime {
             pane,
             console_kind,
             launch.initial_prompt_file,
+            None,
         );
         Ok(())
     }
@@ -5499,6 +5528,7 @@ impl AppRuntime {
         pane: Pane,
         console_kind: Option<gwt_core::process_console::ProcessKind>,
         initial_prompt_file: Option<Arc<tempfile::TempPath>>,
+        session_snapshot: Option<&gwt_agent::Session>,
     ) {
         self.invalidate_launch_delivery_ack(id);
         let pane = Arc::new(Mutex::new(pane));
@@ -5525,7 +5555,7 @@ impl AppRuntime {
         // status event exposes the pane. The registry owns only a cloned Arc;
         // the process owner remains WindowRuntime.
         self.runtimes.insert(id.to_string(), runtime);
-        self.register_pty_writer(id, &pane);
+        self.register_pty_writer(id, session_snapshot);
         // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
         // the pre-PTY failure guard.
         self.restore_launch_windows.remove(id);
@@ -5908,6 +5938,7 @@ impl AppRuntime {
             .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
             let mut monitor =
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            monitor.refresh_agent_capacity(&project_root_path);
             let now = chrono::Utc::now().to_rfc3339();
             if let Some(snapshot) = self.issue_monitor_window_snapshot_for_tab(tab_id, &now) {
                 let tabs = self.issue_monitor_project_tab_ids(tab_id);

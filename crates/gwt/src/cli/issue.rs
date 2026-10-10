@@ -398,6 +398,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            max_active_auto,
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent,
@@ -409,6 +410,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            max_active_auto,
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent.as_deref(),
@@ -792,7 +794,7 @@ fn launch_capacity(
         .occupied_slot_count
         .unwrap_or_else(|| status.active_launches.len() + status.review_windows.len());
     let reserved = occupied + status.pending_claim_issues.as_ref().map_or(0, Vec::len);
-    let admission_saturated = reserved >= status.max_active;
+    let admission_saturated = reserved >= configured_max_active;
     if !admission_saturated && active_session_count < configured_max_active {
         return None;
     }
@@ -809,7 +811,7 @@ fn launch_capacity(
         "pending_claim_issues": status.pending_claim_issues,
         "reservation_snapshot": "before_control_and_closed_issue_reconciliation",
         "session_details_field": "active_sessions",
-        "guidance": "Reservations and reported_max_active come from one Monitor snapshot before control identity and closed-Issue action reconciliation. Reservations are occupied_slot_count plus pending_claim_issues (older publishers use active_launches plus review_windows). Top-level active_launches and inbox remain the control authority; configured_max_active is the current durable setting. Reported owners may include stale or closed rows. Physical active_sessions are separate observations, not an admission counter. Inspect active_sessions and session_row_mismatch; do not requeue running work to free capacity.",
+        "guidance": "Reservations and reported_max_active come from one Monitor snapshot before control identity and closed-Issue action reconciliation. Reservations are occupied_slot_count plus pending_claim_issues (older publishers use active_launches plus review_windows). Top-level active_launches and inbox remain the control authority; configured_max_active is the current effective limit from durable mode and current machine capacity. Reported owners may include stale or closed rows. Physical active_sessions are separate observations, not an admission counter. Inspect active_sessions and session_row_mismatch; do not requeue running work to free capacity.",
     }))
 }
 
@@ -876,9 +878,10 @@ fn load_monitor_agent_status(
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let authority =
+    let mut authority =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
-    let configured_max_active = prefs.max_active_agents.max(1);
+    authority.refresh_agent_capacity(project_root);
+    let configured_max_active = authority.effective_max_active_agents();
     if let Some(published) = published {
         let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(published)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
@@ -886,9 +889,18 @@ fn load_monitor_agent_status(
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
         status.source = crate::IssueMonitorStatusSource::Daemon;
-        // Keep reported counts and owners together before durable identity
-        // replacement and closed-Issue filtering change the action projection.
+        // Keep reported counts and owners together before current capacity,
+        // durable identity, and closed-Issue action reconciliation.
         let capacity = launch_capacity(&status, active_session_count, configured_max_active);
+        let capacity_status = authority.agent_status();
+        status.agent_capacity = capacity_status.agent_capacity.clone();
+        status.max_active_agents_override = capacity_status.max_active_agents_override;
+        status.max_active = capacity_status.max_active;
+        if let Some(gui) = status.gui_status.as_mut() {
+            gui.agent_capacity = capacity_status.agent_capacity;
+            gui.max_active_agents_override = capacity_status.max_active_agents_override;
+            gui.max_active_agents = capacity_status.max_active;
+        }
         attach_monitor_control_identity(&authority, &mut status);
         return Ok((status, capacity));
     }
@@ -3123,6 +3135,7 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3134,6 +3147,7 @@ fn apply_monitor_config_set(
         enabled,
         autonomous_mode,
         max_active,
+        max_active_auto,
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
@@ -3157,6 +3171,9 @@ fn apply_monitor_config_set(
     }
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
+    }
+    if max_active_auto {
+        candidate.set_max_active_agents_override(None);
     }
     if let Some(auto_close_merged_issues) = auto_close_merged_issues {
         candidate
@@ -3205,6 +3222,7 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3221,6 +3239,7 @@ fn validate_monitor_config_set(
         && enabled.is_none()
         && autonomous_mode.is_none()
         && max_active.is_none()
+        && !max_active_auto
         && auto_close_merged_issues.is_none()
         && auto_apply_updates.is_none()
         && launch_agent.is_none()
@@ -3245,7 +3264,7 @@ fn validate_monitor_config_set(
              resident PM for this repository",
         ));
     }
-    if max_active == Some(0) {
+    if max_active == Some(0) || (max_active_auto && max_active.is_some()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "max_active must be greater than zero",
@@ -3265,6 +3284,7 @@ fn run_monitor_config_set<E: CliEnv>(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3280,6 +3300,7 @@ fn run_monitor_config_set<E: CliEnv>(
         enabled,
         autonomous_mode,
         max_active,
+        max_active_auto,
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
@@ -3311,6 +3332,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "max_active_mode": max_active_auto.then_some("auto"),
                 "auto_close_merged_issues": auto_close_merged_issues,
                 "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
@@ -3337,6 +3359,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 enabled,
                 autonomous_mode,
                 max_active,
+                max_active_auto,
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
@@ -3350,12 +3373,18 @@ fn run_monitor_config_set<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.refresh_agent_capacity(&project_root);
     out.push_str(
         &serde_json::json!({
             "allowed_labels": prefs.allowed_labels,
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
-            "max_active": prefs.max_active_agents.max(1),
+            "max_active": monitor.effective_max_active_agents(),
+            "max_active_agents_override": monitor.max_active_agents_override(),
+            "max_active_mode": prefs.max_active_agents_mode,
+            "agent_capacity": monitor.status_view().agent_capacity,
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
@@ -4592,9 +4621,9 @@ fn run_issue_edit<E: CliEnv>(
 /// guards `issue.edit` on `gwt-spec` Issues nor the `auto-merge` acceptance
 /// block guard applies — both exist to protect a body rewrite.
 ///
-/// An Issue already in the target state is reported with `changed: false` and
-/// nothing reaches the API, not even `comment`: replaying the same envelope
-/// after a lost response must not duplicate the rationale on the Issue.
+/// An Issue already in the target state is reported with `changed: false`.
+/// Replays reconcile Monitor/queue-label cleanup without resubmitting the
+/// state change or duplicating the rationale after a lost response.
 fn run_issue_set_state<E: CliEnv>(
     env: &mut E,
     number: u64,
@@ -4610,7 +4639,7 @@ fn run_issue_set_state<E: CliEnv>(
     if current.state == target {
         // A replay after a lost response still reaches the Monitor, so a
         // notification that failed the first time is repaired here.
-        notify_monitor_of_reopen(env, &current)?;
+        reconcile_issue_state(env, &current)?;
         // `reason` describes what was written, and nothing was: echoing the
         // requested one here would claim a rationale GitHub never recorded.
         write_issue_state_result(out, number, target, false, None, None);
@@ -4640,22 +4669,54 @@ fn run_issue_set_state<E: CliEnv>(
     // One-way flow: the cache is refreshed from the post-write server state so
     // the UI and the Monitor never read a state this operation already changed.
     let written = refresh_issue_cache(env, issue)?.snapshot;
-    notify_monitor_of_reopen(env, &written)?;
+    reconcile_issue_state(env, &written)?;
     write_issue_state_result(out, number, target, true, reason, comment_id);
     Ok(0)
 }
 
-/// Issue #4770: lift the Monitor's durable `Closed` record for an Issue that is
-/// now Open, so `issue.monitor.requeue` right after `issue.reopen` is not
-/// refused. Only this Issue's record moves — no candidate scan runs — and the
-/// prefs file is written only when a `Closed` record was actually lifted.
-fn notify_monitor_of_reopen<E: CliEnv>(
+/// Retire admission before label cleanup so a failed GitHub DELETE cannot
+/// leave a confirmed Closed Issue launchable. Replays repair either step.
+fn reconcile_issue_state<E: CliEnv>(
+    env: &mut E,
+    snapshot: &IssueSnapshot,
+) -> Result<(), SpecOpsError> {
+    notify_monitor_of_issue_state(env, snapshot)?;
+    let cleanup =
+        crate::issue_monitor_settlement::remove_closed_queue_label(env.client(), snapshot);
+    match cleanup {
+        Ok(false) => Ok(()),
+        outcome => {
+            // Also resolve a lost DELETE response from authoritative readback;
+            // never submit the mutation twice in the same operation.
+            let written = refresh_issue_cache(env, snapshot.number)?.snapshot;
+            notify_monitor_of_issue_state(env, &written)?;
+            if written.state == IssueState::Closed
+                && !written
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+            {
+                Ok(())
+            } else {
+                let message = match outcome {
+                    Err(
+                        OwnerMutationError::PreSubmit(error)
+                        | OwnerMutationError::RemoteOutcomeUnknown(error),
+                    ) => error.to_string(),
+                    _ => "closed queue-label cleanup was not confirmed".to_string(),
+                };
+                Err(ApiError::Network(message).into())
+            }
+        }
+    }
+}
+
+/// Deliver the revision to the live daemon before its ACK. Only a definitely
+/// unsent control may fall back to the fenced, locked prefs writer.
+fn notify_monitor_of_issue_state<E: CliEnv>(
     env: &E,
     snapshot: &IssueSnapshot,
 ) -> Result<(), SpecOpsError> {
-    if snapshot.state != IssueState::Open {
-        return Ok(());
-    }
     // No resolvable project root means no Monitor store to hold the Issue.
     let Ok(project_root) = issue_monitor_project_root(env, None) else {
         return Ok(());
@@ -4664,14 +4725,43 @@ fn notify_monitor_of_reopen<E: CliEnv>(
     if !prefs_path.exists() {
         return Ok(());
     }
-    crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "issue_state": {
+            "number": snapshot.number.0,
+            "state": match snapshot.state {
+                IssueState::Closed => "closed",
+                IssueState::Open => "open",
+            },
+            "updated_at": snapshot.updated_at.0,
+        }}),
+        std::process::id(),
+    );
+    // GitHub has already committed this revision. Allow scope resolution and
+    // durable acknowledgment beyond the GUI's 200ms hot-path budget.
+    match crate::daemon_publisher::publish_issue_monitor_control_with_timeout(
+        &project_root,
+        payload,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.allows_local_fallback() => {}
+        Err(error) => return Err(io_as_api_error(io::Error::other(error.to_string()))),
+    }
+    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        if monitor.record_reopened(snapshot.number.0, Some(snapshot.updated_at.0.clone())) {
-            *prefs = monitor.prefs();
+        match snapshot.state {
+            IssueState::Closed => {
+                monitor.record_closed(snapshot.number.0, Some(snapshot.updated_at.0.clone()))
+            }
+            IssueState::Open => {
+                monitor.record_reopened(snapshot.number.0, Some(snapshot.updated_at.0.clone()));
+            }
         }
+        *prefs = monitor.prefs();
         Ok(())
     })
     .map_err(io_as_api_error)?;
@@ -5560,6 +5650,7 @@ mod tests {
             completion_reason: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            claim_diagnostics: Default::default(),
             blocked_by_claim_id: None,
             exclusion_reason: None,
             launched_window_id: launched_window_id.map(str::to_string),
@@ -6866,6 +6957,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_close_immediately_retires_monitor_membership_and_queue_label() {
+        for reason in [
+            gwt_github::client::IssueCloseReason::Completed,
+            gwt_github::client::IssueCloseReason::NotPlanned,
+        ] {
+            let (tmp, mut env) = seeded_edit_env(&["bug", "gwt-queued"]);
+            env.client.use_rfc3339_timestamps();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(tmp.path());
+            let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+            monitor.terminal_queue_push(&[7, 8], "operator", "2026-09-01T00:00:00Z");
+            monitor.complete_active_launch_at(7, "tab::agent", "2026-09-01T00:00:00Z");
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+
+            run(
+                &mut env,
+                IssueCommand::Close {
+                    number: 7,
+                    reason: Some(reason),
+                    comment: None,
+                },
+                &mut String::new(),
+            )
+            .expect("close");
+
+            let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let mut restarted = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                persisted.clone(),
+            );
+            assert_eq!(restarted.local_terminal_queue_numbers(), vec![8]);
+            assert!(restarted.active_issue_numbers().is_empty());
+            assert!(restarted.inbox_item(7).is_none());
+            monitor.rebase_daemon_driver_prefs(&persisted);
+            assert!(monitor.active_issue_numbers().is_empty());
+            assert_eq!(monitor.local_terminal_queue_numbers(), vec![8]);
+            let closed = fetched(&env, 7);
+            assert_eq!(closed.state, IssueState::Closed);
+            assert_eq!(closed.labels, vec!["bug"]);
+            assert_eq!(
+                Cache::new(env.cache_root())
+                    .load_entry(IssueNumber(7))
+                    .unwrap()
+                    .snapshot,
+                closed
+            );
+            assert!(restarted
+                .claim_next_launch_requests_with_probe(
+                    &env.client,
+                    "host",
+                    "2026-09-01T00:01:00Z",
+                    1,
+                    |_| false,
+                )
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn reopened_issue_can_be_explicitly_pushed_after_closed_scan() {
+        let home = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (_tmp, repo, mut env) = close_scan_reopen(crate::IssueMonitorPrefs::default());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorQueuePush {
+                    project_root: Some(repo.clone()),
+                    issue_numbers: vec![7],
+                    position: None,
+                    force: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "{out}"
+        );
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![8, 7]);
+        let open = fetched(&env, 7);
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[crate::IssueMonitorIssue {
+                number: 7,
+                title: open.title,
+                labels: open.labels,
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+                readiness: crate::IssueMonitorReadiness::default(),
+                updated_at: Some(open.updated_at.0),
+            }],
+            "2026-09-01T00:01:00Z",
+        );
+        assert!(monitor.queued_issue_numbers().contains(&7));
+    }
+
     /// SPEC #4249 FR-001: the close reason reaches the client, and an explaining
     /// comment is posted *before* the close so a reader who finds the Issue
     /// closed already sees why.
@@ -7033,11 +7228,8 @@ mod tests {
         );
     }
 
-    /// SPEC #4249 AC-2: closing and reopening an Issue leaves the Monitor's
-    /// local queue accounting alone, so a `issue.monitor.requeue` right after a
-    /// reopen still returns the Issue to the queue. The operations write GitHub
-    /// and the Issue cache only; if either ever started writing a durable
-    /// closure hold, this test is the one that catches it.
+    /// SPEC #4249 AC-2: an authoritative reopen lifts the close hold so an
+    /// explicit `issue.monitor.requeue` can return the Issue to the queue.
     #[test]
     fn reopened_issue_still_requeues_into_the_monitor_queue() {
         let _env_lock = crate::env_test_lock()
@@ -7063,6 +7255,7 @@ mod tests {
         .expect("save prefs");
 
         let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),
@@ -7122,6 +7315,7 @@ mod tests {
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
 
         let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),
@@ -7977,6 +8171,7 @@ mod tests {
             crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
                 .expect("persisted queue");
         prefs.enabled = true;
+        prefs.max_active_agents_mode = crate::issue_monitor::IssueMonitorMaxActiveMode::Manual;
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
@@ -8295,6 +8490,54 @@ mod tests {
             .is_some_and(|text| text.contains("does not override") && text.contains("requeue")));
     }
 
+    /// Issue #3620 / #4248 integration: the current configuration is an
+    /// effective limit, so an unmeasured Auto mode must remain zero in the
+    /// launch-capacity diagnosis as well as the status projection.
+    #[test]
+    fn agent_capacity_auto_zero_is_the_configured_launch_capacity_limit() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Auto,
+                max_active_agents: 9,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save Auto prefs");
+        let saved = std::fs::read(&prefs_path).expect("saved prefs");
+
+        let (status, diagnosis) = load_monitor_agent_status(&repo, 0).expect("status");
+
+        assert_eq!(status.max_active, 0, "unknown Auto capacity fails closed");
+        assert_eq!(status.max_active_agents_override, None);
+        assert!(!status.agent_capacity.measurement_complete);
+        assert!(status
+            .agent_capacity
+            .reason
+            .contains("snapshot_unavailable"));
+        let diagnosis = diagnosis.expect("zero capacity must be explained");
+        assert_eq!(diagnosis["configured_max_active"], 0);
+        assert_eq!(diagnosis["reported_max_active"], 0);
+        assert_eq!(diagnosis["admission_saturated"], true);
+        assert_eq!(diagnosis["reserved_slot_count"], 0);
+        assert_eq!(diagnosis["active_session_count"], 0);
+        assert_eq!(diagnosis["source"], "degraded_cache");
+        let gui = status.gui_status.expect("GUI projection");
+        assert_eq!(gui.max_active_agents, 0);
+        assert_eq!(gui.max_active_agents_override, None);
+        assert_eq!(gui.agent_capacity, status.agent_capacity);
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs after status"),
+            saved,
+            "status must not persist an effective Auto limit"
+        );
+    }
+
     /// AC-5: physical saturation must be visible even when the admission
     /// projection has fewer reservations, without changing slot accounting.
     #[test]
@@ -8317,6 +8560,14 @@ mod tests {
             launch_capacity(&status, 1, status.max_active).is_none(),
             "free capacity stays free"
         );
+        let mut stale = status.clone();
+        stale.max_active = 8;
+        stale.occupied_slot_count = Some(3);
+        let capacity = launch_capacity(&stale, 1, 2).expect("refreshed capacity is saturated");
+        assert_eq!(capacity["admission_saturated"], true);
+        assert_eq!(capacity["reported_max_active"], 8);
+        assert_eq!(capacity["configured_max_active"], 2);
+        assert_eq!(capacity["reserved_slot_count"], 3);
     }
 
     #[test]
@@ -8670,6 +8921,8 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8727,6 +8980,8 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8765,6 +9020,7 @@ mod tests {
                 completion_reason: None,
                 blocked_by_owner: None,
                 claim_expires_at: None,
+                claim_diagnostics: Default::default(),
                 blocked_by_claim_id: None,
                 exclusion_reason: None,
                 launched_window_id: None,
@@ -8869,6 +9125,8 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                agent_capacity: Default::default(),
+                max_active_agents_override: Some(1),
                 source: crate::IssueMonitorStatusSource::Daemon,
                 active_launches_incomplete: false,
                 queue: vec![2338],
@@ -8907,6 +9165,7 @@ mod tests {
                     completion_reason: None,
                     blocked_by_owner: None,
                     claim_expires_at: None,
+                    claim_diagnostics: Default::default(),
                     blocked_by_claim_id: None,
                     exclusion_reason: None,
                     launched_window_id: None,
@@ -8985,6 +9244,8 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -9099,6 +9360,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 max_active_agents: 3,
                 priority_order: vec![2, 1],
@@ -9195,6 +9457,40 @@ mod tests {
             status["active_launches"].as_array().unwrap().len()
         );
         assert_eq!(gui_status["max_active_agents"], status["max_active"]);
+        let expected_unclaimed_claim = serde_json::json!({
+            "state": "unclaimed",
+            "claim_id": null,
+            "owner": null,
+            "expires_at": null,
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "last_failure_at": null,
+            "last_failure": null,
+        });
+        // Issue #5140 AC-3: the legacy launching row reports its stalled
+        // deadline too. Check the live-time diagnostic before comparing the
+        // remaining stable projection.
+        let diagnostic = status["inbox"][2]
+            .as_object_mut()
+            .expect("launching row")
+            .remove("error_message")
+            .expect("stalled launch diagnostic");
+        let diagnostic = diagnostic.as_str().expect("diagnostic text");
+        assert!(diagnostic.starts_with("Launch stalled: no window for "));
+        assert!(diagnostic.ends_with("s (deadline 120s; issue #9)"));
+        assert_eq!(gui_status["agent_capacity"], status["agent_capacity"]);
+        assert_eq!(gui_status["max_active_agents_override"], 3);
+        assert_eq!(status["max_active_agents_override"], 3);
+        assert_eq!(status["agent_capacity"]["measurement_complete"], false);
+        assert!(status["agent_capacity"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("snapshot_unavailable"));
+        status.as_object_mut().unwrap().remove("agent_capacity");
+        status
+            .as_object_mut()
+            .unwrap()
+            .remove("max_active_agents_override");
         assert_eq!(
             status,
             serde_json::json!({
@@ -9265,6 +9561,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 1,
@@ -9275,6 +9572,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 9,
@@ -9284,6 +9582,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                 ],
                 "inbox_coverage": {
@@ -9537,6 +9836,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 max_active_agents: 3,
                 launched_issues: vec![
                     crate::IssueMonitorLaunchedIssue {
@@ -9721,6 +10021,15 @@ mod tests {
         assert_eq!(status["inbox"][0]["state"], "launched");
         assert_eq!(status["active_launches"], serde_json::json!([43, 44]));
         assert_eq!(status["max_active"], 3);
+        // The legacy publisher omitted capacity fields. Current durable mode
+        // and the shared measurement still govern the actionable projection.
+        assert_eq!(status["source"], "daemon");
+        assert_eq!(status["max_active_agents_override"], 3);
+        assert_eq!(status["agent_capacity"]["measurement_complete"], false);
+        assert!(status["agent_capacity"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("snapshot_unavailable")));
+        assert_eq!(status["launch_capacity"]["admission_saturated"], true);
         assert_eq!(status["launch_capacity"]["reserved_slot_count"], 4);
         assert_eq!(
             status["launch_capacity"]["reservation_snapshot"],
@@ -9911,6 +10220,7 @@ mod tests {
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
                 crate::IssueMonitorPrefs {
+                    max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                     enabled: true,
                     ..Default::default()
                 },
@@ -10139,6 +10449,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -10171,6 +10482,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
@@ -10214,6 +10526,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -10240,6 +10553,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -10249,6 +10563,62 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+    }
+
+    #[test]
+    fn agent_capacity_config_set_persists_auto_reset_without_daemon() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create project");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                max_active_agents: 7,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                ..Default::default()
+            },
+        )
+        .expect("manual preferences");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: None,
+                allowed_labels: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                max_active_auto: true,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
+            },
+            &mut out,
+        )
+        .expect("Auto reset");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("saved Auto preferences");
+        assert_eq!(
+            prefs.max_active_agents_mode,
+            crate::issue_monitor::IssueMonitorMaxActiveMode::Auto
+        );
+        assert_eq!(
+            prefs.max_active_agents, 1,
+            "resource observations are not project preferences"
+        );
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply");
+        assert_eq!(reply["max_active_mode"], "auto");
+        assert!(reply["max_active_agents_override"].is_null());
+        assert_eq!(
+            reply["max_active"], 0,
+            "unknown Auto measurement is visibly closed"
+        );
+        assert!(reply["agent_capacity"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()));
     }
 
     fn pool_profile(agent_id: &str, prefer_for: &[&str]) -> crate::IssueMonitorLaunchProfile {
@@ -10587,6 +10957,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: false,
                 autonomous_mode: false,
                 max_active_agents: 3,
@@ -10622,6 +10993,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    max_active_auto: false,
                     auto_close_merged_issues: None,
                     auto_apply_updates: None,
                     launch_agent: None,
@@ -10670,6 +11042,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: false,
                 autonomous_mode: false,
                 max_active_agents: 3,
@@ -10707,6 +11080,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    max_active_auto: false,
                     auto_close_merged_issues: None,
                     auto_apply_updates: None,
                     launch_agent: None,
@@ -11546,6 +11920,8 @@ mod tests {
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: Vec::new(),
@@ -11584,6 +11960,7 @@ mod tests {
                 completion_reason: None,
                 blocked_by_owner: Some("akiojin:77083".to_string()),
                 claim_expires_at: Some("2026-09-07T02:37:00Z".to_string()),
+                claim_diagnostics: Default::default(),
                 blocked_by_claim_id: Some("gwt-auto-improve:df524fc5".to_string()),
                 exclusion_reason: Some("blocked by claim".to_string()),
                 launched_window_id: None,
@@ -12899,6 +13276,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -12941,6 +13319,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),

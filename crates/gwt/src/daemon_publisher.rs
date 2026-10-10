@@ -71,7 +71,8 @@ pub fn publish_issue_monitor_control(
     publish_issue_monitor_control_with_timeout(project_root, payload, DEFAULT_TIMEOUT)
 }
 
-fn publish_issue_monitor_control_with_timeout(
+/// Use a bounded custom budget for controls outside the GUI hot path.
+pub(crate) fn publish_issue_monitor_control_with_timeout(
     project_root: &Path,
     payload: Value,
     timeout: Duration,

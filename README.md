@@ -222,9 +222,12 @@ port, updates the saved value, and emits a warning. An explicit `--port <n>`
 applies only to that launch—including `--port 0` for an ephemeral port—and
 never changes the saved implicit port. Pass `--bind 0.0.0.0` to make the embedded UI reachable
 from other hosts on the same LAN or VPN-extended LAN; pair it with an explicit
-`--port` when you need an operator-selected, well-known port. `--no-tray` and
-`--no-open` are accepted today but currently no-op while the rest of SPEC #2920
-Phase 4 lands.
+`--port` when you need an operator-selected, well-known port. `--no-tray`
+starts a temporary server without registering a tray icon. It exits when its
+launching parent ends, or five seconds after its last browser session closes
+(reloads can reconnect during that grace). Before any browser connects, the
+server follows its parent's lifetime. `--no-open` explicitly suppresses browser
+auto-open; startup already suppresses it by default.
 
 `gwt open` is the Linux fallback for desktops that do not run a
 StatusNotifierItem host (e.g. GNOME 3.26+ without the AppIndicator
@@ -290,6 +293,12 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+If `workspace.update` loses its response, use the reported `operation_id` with
+`workspace.receipt` (`params: {"operation_id":"<UUID>"}`) in the same Session.
+This read-only query does not contact the Host or resend the update. `applied`
+confirms durable publication; `unconfirmed` means proof is not yet available,
+including with an older Host, and does not prove the update failed.
 
 `board.show` returns the latest 20 entries visible to the selected workspace or
 session, in chronological order. Set `params.limit` to a nonnegative integer
@@ -420,6 +429,22 @@ between its body and acceptance criteria and its agent's read-only output.
 **Windowize** moves the agent to Canvas. **Hide preview / Show preview** gives
 the board the full width or restores the detail pane; columns scroll horizontally
 instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
+
+**Max active** uses **Auto** for new settings. Its recommendation reflects CPU,
+free memory and disk space, the GUI's CPU use, and live agents in other projects.
+Registered projects without live agents consume no share. **Machine budget**
+shows the limiting resource and distinguishes the Monitor's implementation/review
+limit from the total including PM agents. Auto pauses new admissions while required
+measurements are unavailable; running agents continue.
+Initial measurements of large `target` directories can take several minutes;
+the same pause applies when a previous measurement expires during refresh.
+Enter a positive number to keep a **Manual** override, or select **Use Auto** to
+follow the recommendation again. Existing saved limits remain Manual. Values above
+the recommendation are allowed, with a warning that verification may not finish and
+timing-dependent test failures may block unrelated PRs. Automation uses
+`issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
+`{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
+`max_active_agents_override`, and the shared `agent_capacity` measurement.
 
 **Allowed labels** controls which Issues this terminal's Monitor admits. Add or
 remove one label at a time; an Issue needs any label in the saved list. Matching
@@ -655,6 +680,11 @@ unchanged.
 
 - It starts automatically when you open a project, and there is a per-project
   opt-out.
+- PM settings offers **Pause / Resume** for its autonomous loop. Pause persists
+  across restarts while the PM remains available for conversation; Issue Monitor
+  and running agents keep working. Resume reconciles the latest status. JSON
+  operations `pm.pause` / `pm.resume` provide the same control, and `pm.status`
+  reports `paused` separately from registration.
 - Closing the PM pane stops it; it will not restart itself. A crash does
   auto-resume, with a backoff so a crash loop cannot spin.
 - Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on

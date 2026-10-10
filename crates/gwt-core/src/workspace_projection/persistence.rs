@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -4346,9 +4346,28 @@ fn with_workspace_work_items_locks_profiled<T>(
         .collect::<Vec<_>>();
     lock_paths.sort();
     lock_paths.dedup();
+    // Issue #5208: these are per-handle OS locks, so a thread that already
+    // holds one of them would wait on itself forever. Refuse instead.
+    if let Some(held) = lock_paths
+        .iter()
+        .find(|path| workspace_work_items_lock_held_by_current_thread(path))
+    {
+        return Err(GwtError::Other(format!(
+            "{WORKSPACE_WORK_ITEMS_LOCK_OPERATION} lock {} is already held by this thread; re-acquiring it would self-deadlock",
+            held.display()
+        )));
+    }
+    // Issue #5208: without an ambient deadline the OS wait used to be
+    // unbounded, so one long holder silently stalled every Work writer. Bound
+    // only the acquisition; the operation keeps the caller's own deadline.
+    let acquisition_deadline = crate::operation_deadline::current().is_none().then(|| {
+        crate::operation_deadline::ScopedOperationDeadline::enter(
+            crate::operation_deadline::now() + workspace_work_items_lock_default_wait(),
+        )
+    });
     let mut locks = Vec::with_capacity(lock_paths.len());
     let mut lock_wait_micros = 0u64;
-    for lock_path in lock_paths {
+    for lock_path in &lock_paths {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -4358,16 +4377,70 @@ fn with_workspace_work_items_locks_profiled<T>(
         // operation / since) instead of only that the deadline expired.
         // Ordinary contention is routine here and is not logged.
         let lock = crate::operation_deadline::NamedFileLock::acquire_quiet(
-            &lock_path,
+            lock_path,
             WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
         )?;
         lock_wait_micros =
             lock_wait_micros.saturating_add(lock_started.elapsed().as_micros() as u64);
         locks.push(lock);
     }
+    drop(acquisition_deadline);
+    let held = HeldWorkspaceWorkItemsLocks::register(lock_paths);
     let result = operation(lock_wait_micros);
+    drop(held);
     drop(locks);
     result
+}
+
+/// Issue #5208: the longest a Work items lock acquisition waits when the
+/// caller set no operation deadline. The error names the observed holder.
+const WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+thread_local! {
+    static WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn workspace_work_items_lock_default_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE.with(std::cell::Cell::get) {
+        return wait;
+    }
+    WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT
+}
+
+thread_local! {
+    /// Work items lock files the current thread holds, innermost last.
+    static HELD_WORKSPACE_WORK_ITEMS_LOCKS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn workspace_work_items_lock_held_by_current_thread(lock_path: &Path) -> bool {
+    HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow().iter().any(|path| path == lock_path))
+}
+
+/// Records the locks for the duration of the operation, including unwinding.
+struct HeldWorkspaceWorkItemsLocks {
+    count: usize,
+}
+
+impl HeldWorkspaceWorkItemsLocks {
+    fn register(lock_paths: Vec<PathBuf>) -> Self {
+        let count = lock_paths.len();
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow_mut().extend(lock_paths));
+        Self { count }
+    }
+}
+
+impl Drop for HeldWorkspaceWorkItemsLocks {
+    fn drop(&mut self) {
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| {
+            let mut held = held.borrow_mut();
+            let keep = held.len().saturating_sub(self.count);
+            held.truncate(keep);
+        });
+    }
 }
 
 pub(crate) fn with_workspace_current_and_work_items_lock<T>(
@@ -4862,6 +4935,23 @@ pub fn workspace_state_external_commit_resolution_at(
     operation_id: &str,
 ) -> Result<ExternalWorkspaceCommitResolution> {
     validate_external_workspace_operation_id(operation_id)?;
+    if workspace_state_transaction_is_pending_at(current_path, work_items_path)? {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    }
+    Ok(
+        load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
+            .map_or(ExternalWorkspaceCommitResolution::Missing, |receipt| {
+                receipt.resolution
+            }),
+    )
+}
+
+/// Inspect publication markers, including split-root coordinators, without
+/// acquiring recovery locks or publishing any state (Issue #3838).
+pub fn workspace_state_transaction_is_pending_at(
+    current_path: &Path,
+    work_items_path: &Path,
+) -> Result<bool> {
     let base_lock_targets = vec![
         current_path.with_file_name("works.json"),
         work_items_path.to_path_buf(),
@@ -4875,15 +4965,7 @@ pub fn workspace_state_external_commit_resolution_at(
     )?);
     marker_paths.sort();
     marker_paths.dedup();
-    if find_pending_workspace_state_transaction(&marker_paths)?.is_some() {
-        return Ok(ExternalWorkspaceCommitResolution::Busy);
-    }
-    Ok(
-        load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
-            .map_or(ExternalWorkspaceCommitResolution::Missing, |receipt| {
-                receipt.resolution
-            }),
-    )
+    Ok(find_pending_workspace_state_transaction(&marker_paths)?.is_some())
 }
 
 pub fn resolve_workspace_state_external_commit_at(
@@ -7764,6 +7846,51 @@ fn canonical_workspace_work_event_bytes(event: &WorkEvent) -> Result<Vec<u8>> {
         .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
     canonical.push(b'\n');
     Ok(canonical)
+}
+
+/// Read-only proof of an exact immutable source event. Refuse redirected
+/// managed directories just as the canonical shard writer does.
+pub fn workspace_work_event_shard_matches(repo_path: &Path, event: &WorkEvent) -> Result<bool> {
+    let events_dir = gwt_repo_local_work_events_dir(repo_path);
+    if !validate_workspace_work_event_store_path(&events_dir)? {
+        return Ok(false);
+    }
+    let shard = gwt_work_event_shard_path(&events_dir, &event.id);
+    let bucket = shard
+        .parent()
+        .ok_or_else(|| GwtError::Other("Work event shard has no bucket directory".to_string()))?;
+    if !validate_workspace_work_event_bucket_path(&events_dir, bucket)? {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(&shard) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            Ok(fs::read(shard)? == canonical_workspace_work_event_bytes(event)?)
+        }
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn receipt_source_proof_refuses_redirected_bucket() {
+    let repo = tempfile::tempdir().unwrap();
+    let events = gwt_repo_local_work_events_dir(repo.path());
+    let event = WorkEvent::new(WorkEventKind::Update, "receipt-work", Utc::now());
+    write_workspace_work_event_shards_to_dir(&events, std::slice::from_ref(&event)).unwrap();
+    assert!(workspace_work_event_shard_matches(repo.path(), &event).unwrap());
+    let shard = gwt_work_event_shard_path(&events, &event.id);
+    let bucket = shard.parent().unwrap();
+    let redirected = repo.path().join("redirected-source");
+    fs::rename(bucket, &redirected).unwrap();
+    std::os::unix::fs::symlink(&redirected, bucket).unwrap();
+    let before = fs::read(redirected.join(shard.file_name().unwrap())).unwrap();
+    assert!(workspace_work_event_shard_matches(repo.path(), &event).is_err());
+    assert_eq!(
+        fs::read(redirected.join(shard.file_name().unwrap())).unwrap(),
+        before
+    );
 }
 
 fn divergent_workspace_work_event_shard_error(event_id: &str, shard_path: &Path) -> GwtError {

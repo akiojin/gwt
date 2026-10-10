@@ -215,8 +215,11 @@ gwt open ~/src/my-repo              # そのプロジェクトを (必要なら�
 ephemeral port を選ぶ `--port 0` を含め、保存済みの暗黙ポートを変更しません。
 同一 LAN や VPN-extended LAN の別端末からブラウザ UI に接続したい場合は
 `--bind 0.0.0.0` を指定してください。運用者が選んだ既知のポートを使う場合は
-`--port` を併用できます。`--no-tray` / `--no-open` は SPEC #2920 Phase 4 の
-他作業が完了するまで受け取るだけで no-op の状態です。
+`--port` を併用できます。`--no-tray` はトレイを登録しない一時サーバーを起動します。
+起動元の親プロセスが終了するか、最後のブラウザセッションが閉じて5秒経つと終了します
+（この猶予中は再読み込み・再接続できます）。ブラウザが一度も接続していない場合は
+親プロセスの寿命に従います。`--no-open` はブラウザの自動起動を明示的に抑止します。
+フラグなしの起動も、既定でブラウザを自動では開きません。
 
 `gwt open` は Linux の GNOME 3.26+ など system tray を持たない環境向けの
 fallback です。tray アイコンが見えない場合でも `gwt browser URL: ...` が
@@ -278,6 +281,11 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+`workspace.update` の応答を失った場合は、表示された `operation_id` を同じ Session の
+`workspace.receipt`（`params: {"operation_id":"<UUID>"}`）に渡して確認できます。
+この読み取り専用照会は Host へ接続せず、更新も再送しません。`applied` は永続化の完了、
+`unconfirmed` は旧 Host を含め証拠がまだ確認できない状態であり、更新の失敗を意味しません。
 
 `board.show` は、選択された workspace / session から見える最新20件を時系列順で
 返します。`params.limit` に非負整数（例: `15`、`0` は空）を指定して件数を変更できます。
@@ -395,6 +403,20 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+
+**Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
+GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
+ない登録済みプロジェクトは配分を消費しません。**Machine budget** には制約になった資源を
+表示し、Monitor の実装・レビュー上限と PM を含む総数を区別します。必要な実測値が
+得られない間、Auto は新規起動を待機させます。実行中のエージェントは継続します。
+大きな `target` ディレクトリの初回実測には数分かかる場合があります。
+更新中に前回の実測値が期限切れになった場合も、新規起動は待機します。
+正の数値を入力すると **Manual** の上書きを保存し、**Use Auto** で推奨値への追従に戻せます。
+既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
+検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
+自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+`{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
+`max_active_agents_override`、共有実測値の `agent_capacity` を返します。
 
 **Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
 ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
@@ -599,6 +621,10 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 担うため、多重起動の防止機構はそのまま維持されます。
 
 - プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
+- PM 設定の **Pause / Resume** で自律ループを一時停止・再開できます。停止状態は
+  再起動後も維持され、PM との会話、Issue Monitor、稼働中の agent は継続します。
+  Resume は最新の状態を再確認します。JSON operations `pm.pause` / `pm.resume`
+  でも操作でき、`pm.status` は登録状態と別に `paused` を返します。
 - PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
   クラッシュループを防ぐバックオフが働きます。
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは

@@ -735,11 +735,16 @@ pub(super) fn codex_home_for_startup(env_codex_home: Option<std::ffi::OsString>)
 }
 
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
-    let _ = gwt_agent::update_session(sessions_dir, session_id, |session| {
-        session.update_status(gwt_agent::AgentStatus::Stopped);
-        session.restore_window_on_startup = false;
-        Ok(())
-    });
+    let _ = gwt_agent::update_session_with_wait(
+        sessions_dir,
+        session_id,
+        std::time::Duration::from_secs(2),
+        |session| {
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+            session.restore_window_on_startup = false;
+            Ok(())
+        },
+    );
 }
 
 impl AppRuntime {

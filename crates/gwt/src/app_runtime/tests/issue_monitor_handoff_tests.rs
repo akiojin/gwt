@@ -1827,19 +1827,24 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         .expect("confirm wizard view");
     assert_eq!(confirm_view.primary_action_label, "Save settings");
 
+    // Recovery content must not depend on completing fsync inside the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let saved_events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::Submit,
         None,
     );
 
-    assert!(saved_events.iter().any(|event| {
-        matches!(
-            &event.event,
-            BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
-        )
-    }));
+    assert!(
+        saved_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                    if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
+            )
+        }),
+        "profile recovery save must commit successfully: {saved_events:?}"
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -1879,6 +1884,7 @@ fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() 
     codex.model = Some("saved-codex-model".into());
     codex.fast_mode = true;
     let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         max_active_agents: 7,
         launch_usage_threshold_percent: 83,
         ..Default::default()
@@ -2023,7 +2029,9 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
             .build(),
     ));
 
-    runtime.save_issue_monitor_profile_from_launch_request(
+    // Saved content must not depend on completing fsync inside the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    let events = runtime.save_issue_monitor_profile_from_launch_request(
         session,
         IssueMonitorProfileSaveContext {
             client_id: "client-1".to_string(),
@@ -2032,6 +2040,15 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
             sets: None,
         },
         request,
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, level, .. }
+                if message == "Issue Monitor settings saved" && level == "info"
+        )),
+        "profile save must commit successfully: {events:?}"
     );
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");

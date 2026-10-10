@@ -41,6 +41,19 @@ where
     }
 }
 
+fn deserialize_positive_capacity_override<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<usize>::deserialize(deserializer)?;
+    if value == Some(0) {
+        return Err(serde::de::Error::custom("manual capacity must be positive"));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileContentMode {
@@ -371,6 +384,10 @@ pub enum FrontendEvent {
     /// Governs the next project open only — it never stops a live PM.
     SetPmAutoStart {
         enabled: bool,
+    },
+    /// Issue #3812: preserve residency while pausing autonomous PM work.
+    SetPmPaused {
+        paused: bool,
     },
     /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
     SetPmLoopInterval {
@@ -897,7 +914,8 @@ pub enum FrontendEvent {
         usage_threshold_percent: Option<u8>,
     },
     SetIssueMonitorMaxActiveAgents {
-        max_active_agents: usize,
+        #[serde(deserialize_with = "deserialize_positive_capacity_override")]
+        max_active_agents: Option<usize>,
     },
     SetIssueMonitorAllowedLabels {
         allowed_labels: Vec<String>,
@@ -2068,6 +2086,7 @@ pub enum BackendEvent {
         /// non-project surface or closing the final project tab.
         available: bool,
         auto_start: bool,
+        paused: bool,
         /// SPEC-3431 FR-132: effective resident-loop interval after applying
         /// the backend minimum to legacy or manually edited preferences.
         loop_interval_secs: u64,
@@ -3774,6 +3793,7 @@ mod tests {
         let event = BackendEvent::PmStatus {
             available: true,
             auto_start: true,
+            paused: false,
             loop_interval_secs: u64::MAX,
             loop_interval_secs_decimal: u64::MAX.to_string(),
             configured_agent_id: "claude".to_string(),

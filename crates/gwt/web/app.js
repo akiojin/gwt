@@ -1,5 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { markdownContent, renderUiContent } from "/ui-content.js";
+import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -174,7 +175,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
-      import { createPmChat } from "/pm-chat.js";
+      import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -1406,7 +1407,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         for (const [windowId, view] of pmChatViews) {
           view.pendingSessions.length = 0;
           view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
-          view.controller.update({ availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." });
+          applyPmWindowReceiveEvent({ kind: "pm_conversation", id: windowId, session_id: view.sessionId,
+            snapshot: { availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." } });
         }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
@@ -3466,8 +3468,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
       // the backend marked `is_pm`; null while no PM pane exists.
       let pmWindowId = null;
+      const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
 
       function updatePmLauncher(workspace) {
+        pmLauncherModel.update(state => ({ ...state, workspace }));
+      }
+
+      pmLauncherModel.subscribe(state => state, ({ workspace, paused }) => {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
         pmWindowId = pmWindow?.id ?? null;
@@ -3482,6 +3489,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               ? "stopped"
               : "running";
           railEntry.dataset.pmState = state;
+          railEntry.dataset.pmPaused = String(paused);
           // Issue #4777: the hover text says what the PM is, not only its name.
           const role = "your point of contact, not one of the agents";
           railEntry.title =
@@ -3490,6 +3498,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               : state === "stopped"
                 ? `Project Manager (stopped): ${role}. Click to resume`
                 : `Project Manager: ${role}. Click to start`;
+          if (paused) railEntry.title += ". Autonomous loop paused";
         }
 
         const floating = document.getElementById("canvas-pm-launcher");
@@ -3498,7 +3507,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           // reachable on screen, so a visible PM never gets a duplicate CTA.
           floating.hidden = Boolean(pmWindow) && isWindowWithinViewport(pmWindow);
         }
-      }
+      });
 
       // True when the window's rectangle intersects the visible canvas area.
       function isWindowWithinViewport(windowData) {
@@ -5379,10 +5388,24 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       const pmChatViews = new Map();
+      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const renderedTerminalPackets = new Map();
+      subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
+        if (!state) return;
+        const packet = state.terminal;
+        if (packet && renderedTerminalPackets.get(state.windowId) !== packet) {
+          if (packet.kind === "terminal_snapshot") frontendUnits.terminalHost.replaceTerminalSnapshot(state.windowId, packet.dataBase64);
+          else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
+          renderedTerminalPackets.set(state.windowId, packet);
+        }
+        const view = pmChatViews.get(state.windowId);
+        if (view) view.logHost.dataset.stateVersion = String(state.revision);
+      });
 
       function disposePmChat(windowId) {
         const view = pmChatViews.get(windowId);
         if (!view) return;
+        view.unsubscribe();
         view.controller.dispose();
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
@@ -5402,7 +5425,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (view) {
           if (view.sessionId !== windowData.session_id) {
             view.sessionId = windowData.session_id;
-            view.controller.setSession(windowData.session_id);
+            bindPmWindowState(windowData.id, windowData.session_id);
             requestVisiblePmConversations();
           }
           return;
@@ -5436,6 +5459,11 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           },
         });
         pmChatViews.set(windowData.id, view);
+        bindPmWindowState(windowData.id, windowData.session_id);
+        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
+          view.controller.update(state);
+          if (state) view.logHost.dataset.stateVersion = String(state.revision);
+        });
         requestVisiblePmConversations();
       }
 
@@ -6065,6 +6093,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
                   const element = windowMap.get(windowId);
                   if (!element) return;
                   disposePmChat(windowId);
+                  removePmWindowState(windowId);
+                  renderedTerminalPackets.delete(windowId);
                   const runtime = terminalMap.get(windowId);
                   if (runtime && runtime.activationFrame !== null) {
                     cancelAnimationFrame(runtime.activationFrame);
@@ -6424,8 +6454,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
           case "pm_conversation": {
-            const view = pmChatViews.get(event.id);
-            if (view && event.session_id === view.sessionId) view.controller.update(event.snapshot);
+            applyPmWindowReceiveEvent(event);
             break;
           }
           case "pane_send_result": {
@@ -6447,6 +6476,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);
+            pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
@@ -6484,10 +6514,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           }
           case "terminal_output":
-            frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_snapshot":
-            frontendUnits.terminalHost.replaceTerminalSnapshot(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
             frontendUnits.terminalHost.applyStatus(

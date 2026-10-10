@@ -298,6 +298,104 @@ test("Issue Monitor renders the JSON gui_status contract and follows updated lim
   assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "5");
 });
 
+function capacityStatus(overrides = {}) {
+  return {
+    enabled: true, state: "idle", active_count: 0, max_active_agents: 3,
+    max_active_agents_override: null,
+    agent_capacity: {
+      measurement_complete: true, machine_budget: 6, recommended_worker_limit: 3,
+      recommended_implementation_count: 4, recommended_total_count: 5,
+      machine_live_agents: 5, own_live_agents: 3, own_pm_agents: 1, other_live_agents: 2,
+      gui_cpu_millicores: 375, limiting_constraint: "cpu",
+      reason: "CPU limits capacity after GUI, other projects and PM reservations.",
+      constraints: [{ resource: "cpu", capacity: 6, binding: true, reason: "GUI CPU reserved" }],
+    },
+    ...overrides,
+  };
+}
+
+test("Issue #3620: Auto shows zero worker capacity and distinguishes machine recommendations and usage", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const status = capacityStatus({ max_active_agents: 0 });
+  status.agent_capacity.recommended_worker_limit = 0;
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/0");
+  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "0");
+  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Auto");
+  const capacity = body.querySelector(".knowledge-monitor-capacity");
+  assert.equal(capacity.tagName, "DETAILS");
+  assert.equal(capacity.hidden, false);
+  assert.match(capacity.textContent, /0 monitor workers.*4 implementation agents.*5 total including PM/);
+  assert.match(capacity.textContent, /Machine budget: 6.*Machine live: 5.*This project: 3.*PM: 1.*Other projects: 2/);
+  assert.match(capacity.textContent, /GUI CPU reserved: 0\.375 cores/);
+  assert.match(capacity.textContent, /CPU: 6.*limiting.*GUI CPU reserved/);
+  assert.match(capacity.textContent, /CPU limits capacity/);
+});
+
+test("Issue #3620: manual excess is allowed and Use Auto waits for the backend echo", async (t) => {
+  const { body, surface, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus(capacityStatus());
+  const input = body.querySelector(".knowledge-monitor-max-active input");
+  input.value = "7";
+  input.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_max_active_agents", max_active_agents: 7 });
+  assert.equal(input.hasAttribute("max"), false, "recommendation never blocks an explicit limit");
+  assert.ok(body.querySelector('[data-role="monitor-capacity-mode"]'), "Auto/manual provenance is present");
+  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Auto");
+  surface.applyIssueMonitorStatus(capacityStatus({ max_active_agents: 7, max_active_agents_override: 7 }));
+  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
+  const warning = body.querySelector(".knowledge-monitor-capacity-warning");
+  assert.equal(warning.hidden, false);
+  assert.match(warning.textContent, /4 agents above recommendation.*CPU/i);
+  assert.match(warning.textContent, /Verification may not finish\. Timing-dependent test failures may block unrelated PRs\./);
+  body.querySelector('[data-action="monitor-capacity-auto"]').click();
+  assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_max_active_agents", max_active_agents: null });
+  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
+  surface.applyIssueMonitorStatus(capacityStatus());
+  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Auto");
+  assert.equal(warning.hidden, true);
+  surface.applyIssueMonitorStatus({ max_active_agents: 3, max_active_agents_override: null });
+  assert.equal(body.querySelector(".knowledge-monitor-capacity").hidden, true, "omitted capacity cannot retain stale measurements");
+});
+
+test("Issue #5227: grouped incomplete diagnostics stay compact and preserve Manual 9", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const diskReason = "Disk measurement unavailable; check that the worktree volume is mounted and free at least 4 GiB.";
+  const reason = `inventory_uncertain: child_identity_missing ×37; ${diskReason}`;
+  const status = capacityStatus({ max_active_agents: 9, max_active_agents_override: 9 });
+  status.agent_capacity = { ...status.agent_capacity, measurement_complete: false, machine_budget: null,
+    recommended_worker_limit: 0, reason, constraints: [
+      { resource: "disk", capacity: null, binding: true, reason: diskReason },
+    ] };
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "9");
+  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
+  const warning = body.querySelector(".knowledge-monitor-capacity-warning");
+  assert.ok(warning, "incomplete measurements have an inline warning");
+  assert.equal(warning.hidden, false);
+  assert.match(warning.textContent, /measurement is incomplete.*Manual limit 9 is unchanged/);
+  assert.ok(warning.textContent.includes(diskReason), "the disk diagnostic explains how to recover");
+  assert.equal(warning.textContent.split("child_identity_missing").length - 1, 1);
+  assert.equal(warning.textContent.split("×37").length - 1, 1);
+  assert.ok([...warning.textContent].length <= 700, "the complete warning stays within 700 Unicode characters");
+  assert.equal(body.querySelector('[data-role="capacity-reason"]').textContent, reason);
+  assert.match(body.querySelector(".knowledge-monitor-capacity").textContent, /Machine budget: unknown[\s\S]*Disk: unknown/);
+});
+
+test("Issue #3620: the Operator strip preserves a zero effective worker cap", async () => {
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { applyIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const { document } = parseHTML('<div id="op-strip-issue-monitor"><span id="op-strip-issue-monitor-value"></span></div>');
+  applyIssueMonitorStatus(document, { enabled: true, state: "idle", queue_len: 2, active_count: 0, max_active_agents: 0 });
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle Q2 A0/0");
+});
+
 test("Issue #4158: allowed labels show any-of admission, all-label default and excluded issues", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

@@ -525,6 +525,7 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let initial = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 1,
         ..queued_issue_monitor_prefs(&[43])
@@ -538,6 +539,7 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
         "2026-08-10T01:00:00Z",
     );
     let latest = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 4,
         priority_order: vec![43],
@@ -1399,6 +1401,8 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo");
     init_repo_with_initial_commit(&repo);
+    // Issue #3812: pausing the PM must not pause Monitor scan/claim/launch.
+    gwt::pm_registry::set_pm_paused(&repo, true).expect("pause PM only");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(
         &prefs_path,
@@ -1462,4 +1466,231 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
         launch_advanced,
         "a scheduled tick in the daemon-absent topology must do more than refresh the queue"
     );
+}
+
+/// A stopped Monitor has no daemon or scheduled scan to publish measurement
+/// changes. The host sampler must own this notification independently.
+#[test]
+fn issue_monitor_capacity_sampler_notifies_stopped_projects_without_scanning() {
+    let main = include_str!("../../main.rs");
+    let sampler = main
+        .split("let capacity_projects =")
+        .nth(1)
+        .expect("host sampler")
+        .split("let monitor_writers =")
+        .next()
+        .unwrap();
+    assert!(
+        sampler.contains("IssueMonitorCapacityChanged"),
+        "capacity observations must notify stopped GUI monitors"
+    );
+    assert!(
+        main.contains("app.issue_monitor_capacity_changed_events(&project_root)"),
+        "the event loop must publish the capacity-only overlay"
+    );
+    assert!(
+        !sampler.contains("IssueMonitorScheduledTick"),
+        "measurement changes must not trigger scans or PM wakes"
+    );
+}
+
+#[test]
+fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_authority() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let active = temp.path().join("active");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&active).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    let tabs = vec![
+        sample_project_tab("active", "Active", active, ProjectKind::Git, &[]),
+        sample_project_tab("other", "Other", other.clone(), ProjectKind::Git, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("active"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let other_key = runtime.project_context("other").unwrap().project_key;
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&other);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+
+    for manual in [None, Some(9)] {
+        let mut durable = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::IssueMonitorPrefs::default(),
+        );
+        durable.set_max_active_agents_override(manual);
+        gwt::save_issue_monitor_prefs(&prefs_path, &durable.prefs()).unwrap();
+        let prefs_before = fs::read(&prefs_path).unwrap();
+        let mut monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::IssueMonitorPrefs::default(),
+        );
+        monitor.set_max_active_agents_override(manual);
+        let mut expected = monitor.status_view();
+        assert!(!expected.enabled);
+        expected.queue_len = 17;
+        expected.total_candidates = 41;
+        expected.last_scan_at = Some("2026-10-01T00:00:00Z".into());
+        expected.last_error = Some("daemon-owned diagnostic".into());
+        expected.launch_profile_summary = "saved daemon profile".into();
+        runtime.issue_monitor_daemon_status_events(&other, Box::new(expected.clone()));
+
+        let fresh = gwt::agent_capacity::AgentCapacity {
+            measurement_complete: true,
+            machine_budget: Some(5),
+            recommended_worker_limit: 4,
+            recommended_total_count: 5,
+            reason: "real observation".into(),
+            ..Default::default()
+        };
+        let expired = gwt::agent_capacity::AgentCapacity {
+            observed_at: Some(1),
+            expires_at: Some(2),
+            ..fresh.clone()
+        };
+        for (observation, auto_limit) in [(fresh, 4), (expired, 0)] {
+            let events = runtime.issue_monitor_capacity_changed_events_with(&other, |root| {
+                assert_eq!(root, other);
+                observation.clone()
+            });
+            assert_eq!(
+                events.len(),
+                1,
+                "no Inbox or PM event on measurement refresh"
+            );
+            assert_eq!(events[0].target, DispatchTarget::Project(other_key.clone()));
+            expected.agent_capacity = observation;
+            expected.max_active_agents = manual.unwrap_or(auto_limit);
+            let BackendEvent::IssueMonitorStatus { status } = &events[0].event else {
+                panic!("capacity update must publish the existing status protocol");
+            };
+            assert_eq!(
+                **status, expected,
+                "preserve every noncapacity daemon field"
+            );
+            assert_eq!(status.max_active_agents_override, manual);
+        }
+        assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    }
+    assert!(tasks.lock().unwrap().is_empty(), "no scan, RPC or PM work");
+    assert_eq!(runtime.daemon_supervisor.ensure_attempts(), 0);
+}
+
+#[test]
+fn issue_monitor_capacity_waits_for_the_initial_full_projection() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab",
+            "Repo",
+            root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab"),
+    );
+    assert!(runtime
+        .issue_monitor_capacity_changed_events_with(&root, |_| {
+            panic!("no observation read before the authoritative initial status")
+        })
+        .is_empty());
+    assert!(runtime
+        .issue_monitor_capacity_changed_events_with(&temp.path().join("closed"), |_| {
+            panic!("closed project must not publish capacity")
+        })
+        .is_empty());
+}
+
+#[test]
+fn issue_monitor_capacity_uses_saved_manual_authority_when_old_daemon_omits_it() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab",
+            "Repo",
+            root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab"),
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    fs::create_dir_all(prefs_path.parent().unwrap()).unwrap();
+    let legacy = br#"{"enabled":false,"max_active_agents":9,"priority_order":[]}"#;
+    fs::write(&prefs_path, legacy).unwrap();
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .max_active_agents_mode,
+        gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+        "fixture must be valid legacy Manual prefs"
+    );
+    // A live daemon from before this feature has no override field even when
+    // its persisted positive value is an explicit Manual limit.
+    let mut wire = serde_json::to_value(
+        gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view(),
+    )
+    .unwrap();
+    wire.as_object_mut()
+        .unwrap()
+        .remove("max_active_agents_override");
+    wire.as_object_mut().unwrap().remove("agent_capacity");
+    let mut expected: gwt::IssueMonitorStatusView = serde_json::from_value(wire).unwrap();
+    expected.queue_len = 13;
+    let mut old_daemon_status = expected.clone();
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(expected.clone()));
+    let capacity = gwt::agent_capacity::AgentCapacity {
+        measurement_complete: true,
+        recommended_worker_limit: 4,
+        ..Default::default()
+    };
+    let events = runtime.issue_monitor_capacity_changed_events_with(&root, |_| capacity.clone());
+    expected.agent_capacity = capacity;
+    expected.max_active_agents = 9;
+    expected.max_active_agents_override = Some(9);
+    let BackendEvent::IssueMonitorStatus { status } = &events[0].event else {
+        panic!("status")
+    };
+    assert_eq!(
+        **status, expected,
+        "durable Manual authority must survive an old daemon"
+    );
+    assert_eq!(fs::read(&prefs_path).unwrap(), legacy);
+    // A failed preference read must not erase the last valid Manual choice.
+    fs::write(&prefs_path, b"corrupt").unwrap();
+    // A repeated old wire frame must not erase the last valid Manual authority
+    // before the failed prefs read falls back to that same cached projection.
+    old_daemon_status.queue_len = 19;
+    old_daemon_status.last_error = Some("latest daemon diagnostic".into());
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(old_daemon_status));
+    expected.queue_len = 19;
+    expected.last_error = Some("latest daemon diagnostic".into());
+    let expired = gwt::agent_capacity::AgentCapacity {
+        observed_at: Some(1),
+        expires_at: Some(2),
+        ..expected.agent_capacity.clone()
+    };
+    let events = runtime.issue_monitor_capacity_changed_events_with(&root, |_| expired.clone());
+    expected.agent_capacity = expired;
+    let BackendEvent::IssueMonitorStatus { status } = &events[0].event else {
+        panic!("status")
+    };
+    assert_eq!(**status, expected);
+    assert_eq!(fs::read(&prefs_path).unwrap(), b"corrupt");
 }

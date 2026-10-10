@@ -403,6 +403,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?))
         }
         "workspace.update" => workspace_update(params)?,
+        "workspace.receipt" => CliCommand::Workspace(WorkspaceCommand::Receipt {
+            operation_id: required_string(params, "operation_id")?,
+        }),
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
@@ -759,6 +762,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
+            let max_active_auto = match optional_string(params, "max_active_mode")?.as_deref() {
+                None => false,
+                Some("manual") if max_active.is_some() => false,
+                Some("auto") if max_active.is_none() => true,
+                Some(_) => return Err(CliParseError::InvalidJson(
+                    "max_active_mode must be auto (without max_active) or manual (with max_active)"
+                        .to_string(),
+                )),
+            };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
             let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
@@ -769,6 +781,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
+                && !max_active_auto
                 && auto_close_merged_issues.is_none()
                 && auto_apply_updates.is_none()
                 && launch_agent.is_none()
@@ -792,6 +805,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                max_active_auto,
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
@@ -1386,6 +1400,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
+        }),
+        "pm.pause" | "pm.resume" => CliCommand::Pm(crate::cli::pm::PmCommand::SetPaused {
+            project_root: optional_string(params, "project_root")?,
+            paused: envelope.operation == "pm.pause",
         }),
         "pm.stop" | "pm.deregister" => CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
             project_root: optional_string(params, "project_root")?,
@@ -4202,6 +4220,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: Some(7),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4216,6 +4235,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4233,6 +4253,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: Some(false),
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4251,6 +4272,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: Some(true),
                 launch_agent: None,
@@ -4258,6 +4280,28 @@ mod tests {
             }),
             "Issue #3906 AC-1: the auto-apply override is settable on its own"
         );
+    }
+
+    #[test]
+    fn agent_capacity_config_envelope_accepts_explicit_auto() {
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "auto"}),
+        );
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "manual", "max_active": 4, "enabled": false}),
+        );
+        for params in [
+            json!({"max_active_mode": "invalid", "max_active": 4}),
+            json!({"max_active_mode": "auto", "max_active": 4}),
+            json!({"max_active_mode": "manual", "enabled": false}),
+        ] {
+            assert!(matches!(
+                err("issue.monitor.config.set", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
     }
 
     /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
@@ -4272,6 +4316,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -4286,6 +4331,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
@@ -4311,6 +4357,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -4795,6 +4842,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -5363,6 +5411,93 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn pm_pause_and_resume_are_mutating_json_operations() {
+        for operation in ["pm.pause", "pm.resume"] {
+            assert!(matches!(ok(operation, json!({})), CliCommand::Pm(_)));
+            assert!(matches!(
+                ok(operation, json!({"project_root": "/tmp/project"})),
+                CliCommand::Pm(_)
+            ));
+            assert!(
+                !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(operation)
+            );
+        }
+    }
+
+    #[test]
+    fn pm_pause_resume_preserve_registration_and_rearm_only_on_transition() {
+        use crate::pm_registry;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let original: pm_registry::PmPrefs = serde_json::from_value(json!({
+            "settings": {"auto_start": true},
+            "registration": {"session_id":"resident", "agent_id":"codex", "worktree_path":repo}
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&path, &original).unwrap();
+        let loop_path = pm_registry::pm_loop_state_path_for_repo_path(&repo);
+        let clock = pm_registry::PmLoopState {
+            last_wake_at: Some("2026-10-10T00:00:00Z".into()),
+            last_user_prompt_at: Some("2026-10-10T00:01:00Z".into()),
+            ..Default::default()
+        };
+        pm_registry::save_pm_loop_state(&loop_path, &clock).unwrap();
+        for operation in ["pm.pause", "pm.pause", "pm.resume", "pm.resume", "pm.pause"] {
+            let (_, out) = crate::cli::run_collect(&mut env, ok(operation, json!({}))).unwrap();
+            let report: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(report["paused"], operation == "pm.pause");
+            assert_eq!(report["registered"], true);
+            assert_eq!(report["auto_start"], true);
+            assert_eq!(
+                pm_registry::load_pm_prefs(&path).unwrap().registration,
+                original.registration
+            );
+            if operation == "pm.resume" {
+                assert!(pm_registry::load_pm_loop_state(&loop_path)
+                    .unwrap()
+                    .last_wake_at
+                    .is_none());
+                assert_eq!(
+                    pm_registry::load_pm_loop_state(&loop_path)
+                        .unwrap()
+                        .last_user_prompt_at,
+                    clock.last_user_prompt_at,
+                    "Resume must preserve the active user conversation gate"
+                );
+            }
+        }
+        crate::cli::run_collect(&mut env, ok("pm.resume", json!({}))).unwrap();
+        pm_registry::save_pm_loop_state(&loop_path, &clock).unwrap();
+        crate::cli::run_collect(&mut env, ok("pm.resume", json!({}))).unwrap();
+        assert_eq!(
+            pm_registry::load_pm_loop_state(&loop_path).unwrap(),
+            clock,
+            "repeated Resume must not re-arm an already active loop"
+        );
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "unrelated-agent");
+        assert!(
+            crate::cli::run_collect(&mut env, ok("pm.pause", json!({}))).is_err(),
+            "an unrelated Agent must not control the PM"
+        );
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        let (_, out) = crate::cli::run_collect(&mut env, ok("pm.pause", json!({}))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["paused"],
+            true,
+            "the registered PM remains authorized"
+        );
     }
 
     // Issue #4249 FR-003: the PM self-description is a read-only diagnostic.

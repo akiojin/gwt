@@ -1,6 +1,129 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.114.0] - 2026-10-10
+
+### Bug Fixes
+
+- **execution:** Execution.status に構造化された obligation/settlement 診断を返す
+- **test:** Disable background Git maintenance in publication fixtures
+- **skills:** 無人PRのCI待機をblockedに分類しない（#5128）
+- **execution:** Unblock terminal session recovery
+- **issue-monitor:** Retain claims for active executions
+- **gui:** Move launch completion I/O off the event loop
+- **verify:** Stop admitting later commands after a blocking raw FAIL
+- **gui:** Keep Work projection updates off the event loop
+- **verify:** Reclaim daemon process groups before reaping
+- **test:** Make workspace notification coalescing deterministic
+- **test:** Prevent docker probe tracing capture order dependence
+- **work:** Close delivered generation bookkeeping obligations
+- **verify:** Derive workspace fallback for unknown surfaces
+- **issue-monitor:** 再起動後の容量計測と警告集約を修正
+- **capacity:** Preserve grouped warnings with long paths
+- **inventory:** Preserve conservative session recovery
+
+### Documentation
+
+- **agents:** Align coverage guidance with CI scopes
+
+### Features
+
+- **pm:** Wake the resident pm on agent idle transitions
+
+### Miscellaneous Tasks
+
+- **work:** Record terminal recovery delivery
+- **work:** Record final claim retention delivery
+- **work:** Preserve claim retention restart checkpoint
+- **work:** Record PR 5207 delivery metadata
+- **work:** Record pull request handoff for issue 5160
+- **work:** Preserve independent review session record for issue 5160
+- **work:** Record issue 5165 review session
+- **work:** Deliver issue 5165 final evidence receipt
+- **work:** Record Issue #5197 PR attachment
+- **work:** Record Issue #5197 review launch
+- **work:** カバレッジ基準整合の最終検証を記録
+- **work:** Preserve issue 5227 delivery state
+
+### Testing
+
+- **recovery:** Preserve blocked authority and gate admission contracts
+- **issue-monitor:** Align status fixtures with claim diagnostics
+- **daemon:** Isolate MAX-epoch fixture home
+- **daemon:** Settle startup before MAX control snapshot
+- **gui:** Align launch completion regression checks
+- **gui:** Isolate origin probe from prefs write latency
+- **gui:** Pin prefs budget for observer rebase assertions
+- **verify:** Repair Unix fail-fast regression fixtures
+- **runtime:** Remove deadline dependence from monitor fixtures
+- **runtime:** Isolate recovery save fixture from deadline
+- **capacity:** Establish saved manual warning fixture
+
+## [9.113.1] - 2026-10-09
+
+### Bug Fixes
+
+- **skills:** Create PR at verified HEAD when branch is only behind base
+- **issue:** Issue.spec.create でマーカー無し本文を spec section として保存する
+- **execution:** Works.lock の再入デッドロックを解消し取得に期限を付ける（#5208）
+
+## [9.113.0] - 2026-10-09
+
+### Bug Fixes
+
+- **issue-monitor:** Reconcile physical panes before dispatch
+- **issue-monitor:** Reject duplicate panes below the active cap
+- **issue-monitor:** Keep stale snapshots from blocking unbound launch expiry
+- **verify:** Match recovery fixture platform gates
+- **verify:** Register cancellation operations in catalog
+- **verify:** Retain FIFO on transient enrollment reads
+- **terminal:** Drain unread macos pty output before reaping
+- **execution:** Recover terminal Work through fresh launches
+- **execution:** Guard terminal Work without Session references
+- **execution:** Preserve terminal recovery diagnostics
+- **issue-monitor:** Preserve capacity and observer safety
+- **tray:** Stop transient instances with their launch owner
+- **frontend:** Render PM chat and raw logs from shared window state
+- **issue-monitor:** Expire windowless launch deliveries
+- **issue-monitor:** Retain expired launch diagnostics
+- **pr:** Keep reads from terminalizing active work
+
+### Features
+
+- **issue-monitor:** 実測マシン予算から推奨エージェント数を算出
+- **pr:** PR の base 変更と close による自己復旧を追加
+- **gwtd:** Add run cancellation and queued diagnostics
+- **delivery:** Require owner PR readiness before completion
+- **verify:** Cancel caller-owned verification attempts
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3693 の起動履歴を保全
+- **work:** PR #5212 の配送履歴を記録
+- **work:** Issue #3693 の受入レビュー起動履歴を保全
+- **work:** Record issue 5165 pull request linkage
+- **work:** Record canonical PR 5215 link
+- **work:** Resume machine capacity delivery
+- **work:** Preserve issue 5016 relaunch history
+- **work:** Preserve issue 5016 successor history
+- **work:** Record issue 5016 delivery preparation
+- **work:** Record issue 5140 PR handoff
+
+### Testing
+
+- **daemon:** 起動検証fixtureを環境競合から隔離
+- **issue-monitor:** Provide exact root for failed launch feedback
+- **issue-monitor:** Synchronize daemon claim fixture readiness
+- **issue-monitor:** Set actual queue launch fixture geometry
+- **delivery:** Prepare owner PR in completion fixtures
+- **issue-monitor:** 起動設定 fixture の正値容量を明示
+- ロック競合fixtureのtracing通知を並列実行でも保持
+- **frontend:** Enforce shared PM window delivery contracts
+- **frontend:** Bind raw delivery checks to model subscription
+- **runtime:** Retry busy continuation reconciliation
+- **issue-monitor:** Assert legacy launch stall diagnostics
+- **issue-monitor:** Pin recovery fixture io budget
+
 ## [9.112.1] - 2026-10-08
 
 ### Bug Fixes
