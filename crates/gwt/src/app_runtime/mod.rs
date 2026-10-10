@@ -1420,6 +1420,7 @@ pub(crate) struct ProjectRuntimeState {
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
     pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    pub(crate) pm_agent_idle_wakes: pm::AgentIdleWakes,
     /// Issue #3702: one coalesced wake waiting for the PM composer to submit
     /// or clear. Keyed by the live PM window id.
     pub(crate) pending_pm_wakes: HashMap<String, pm::PmWakeDecision>,
@@ -1467,6 +1468,7 @@ pub(crate) fn initial_project_states(
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
+                    pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
@@ -3972,6 +3974,7 @@ impl AppRuntime {
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
                     pm_wake_seen: Default::default(),
+                    pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
                     pending_pm_worktree_preparations: Default::default(),
                     pending_launch_wizard_materializations: HashMap::new(),
@@ -13444,10 +13447,12 @@ impl AppRuntime {
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
         }
+        self.observe_pm_agent_idle_transition(window_id, composed);
         Some(composed)
     }
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
+        self.forget_pm_agent_idle_window(window_id);
         self.invalidate_launch_delivery_ack(window_id);
         self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);

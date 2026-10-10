@@ -20,6 +20,15 @@ const SCRIPT = path.join(scriptsDir, "coverage-summary.mjs");
 const THRESHOLD = path.join(scriptsDir, "check-coverage-threshold.mjs");
 const MAGIC = Buffer.from([0x81, 0x72, 0x66, 0x6f, 0x72, 0x70, 0x6c, 0xff]);
 
+test("threshold usage distinguishes unscoped coverage from the CI gate", () => {
+  const result = spawnSync(process.execPath, [THRESHOLD], { encoding: "utf8" });
+  assert.equal(result.status, 2);
+  assert.match(
+    result.stderr,
+    /Without --scope or --scope-exclude,.*not a CI gate/,
+  );
+});
+
 // Windows cannot execute a shebang fixture. Keep the same Node fake behind
 // a native launcher, rather than changing the command under test to a shell.
 let launcher;
