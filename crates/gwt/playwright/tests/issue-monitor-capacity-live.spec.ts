@@ -147,8 +147,9 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await expect(mode).toHaveText("Manual");
         await expect(input).toHaveValue(String(manual));
         await test.step("Issue #5227: grouped diagnostics preserve saved Manual 9", async () => {
-          await input.fill("9");
-          await input.press("Tab");
+          // The UI edit/save/reload path is covered above. Establish this
+          // diagnostic fixture through the real backend before projecting it.
+          await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 9 });
           await expectOverride(page, 9);
           await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
             .toMatchObject({ max_active_agents_mode: "manual", max_active_agents: 9 });
