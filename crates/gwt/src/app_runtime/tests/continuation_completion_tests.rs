@@ -257,6 +257,80 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
 }
 
 #[test]
+fn launch_complete_registers_monitor_runtime_from_worker_snapshot() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = gwt_agent::Session::load(&session_path).expect("launch Session");
+    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    session.linked_issue_number = Some(5187);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("autonomous Session");
+    runtime.handle_launch_complete(window_id.clone(), result);
+    drain_queued_blocking_tasks(&tasks);
+    let prepared = take_prepared_agent_launch(&recorded);
+    fs::write(&session_path, "invalid Session TOML")
+        .expect("make Session unavailable after prepare");
+
+    runtime.handle_agent_launch_prepared(prepared);
+
+    let writers = runtime.pty_writers.read().expect("PTY registry");
+    let registration = writers[&window_id]
+        .monitor_runtime
+        .as_ref()
+        .expect("GUI registration must use the prepared Session snapshot");
+    assert_eq!(registration.session_id, session_id);
+    assert_eq!(registration.issue_number, 5187);
+    assert_eq!(registration.project_root, temp.path());
+    assert_eq!(
+        registration.incarnation,
+        runtime.runtimes[&window_id].incarnation
+    );
+    assert!(Arc::ptr_eq(
+        &writers[&window_id].handle,
+        &runtime.runtimes[&window_id].pty
+    ));
+}
+
+#[test]
+fn launch_complete_worker_finishes_when_session_metadata_lock_is_busy() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    runtime.handle_launch_complete(window_id.clone(), result);
+    let session_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(runtime.sessions_dir.join(format!(".{session_id}.lock")))
+        .expect("Session sidecar lock");
+    FileExt::lock_exclusive(&session_lock).expect("hold Session metadata lock");
+    let (completed, completion) = std::sync::mpsc::channel();
+    let task_home = temp.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        let _gwt_home = ScopedGwtHome::set(task_home);
+        drain_queued_blocking_tasks(&tasks);
+        let _ = completed.send(());
+    });
+
+    let result = completion.recv_timeout(Duration::from_secs(10));
+    FileExt::unlock(&session_lock).expect("release Session metadata lock");
+    worker.join().expect("preparation worker");
+    // Release and join even on RED so the assertion cannot leave a stuck child.
+    assert!(
+        result.is_ok(),
+        "Session lock contention must not pin launch preparation"
+    );
+    runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    assert!(runtime.runtimes.contains_key(&window_id));
+}
+
+#[test]
 fn launch_complete_replays_session_start_received_before_pane_install() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -844,39 +918,67 @@ fn launch_complete_defers_all_session_and_pty_work() {
         "Repo",
         temp.path().into(),
         ProjectKind::Git,
-        &[WindowPreset::Agent],
+        &[
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+        ],
     );
-    let window_id = combined_window_id("tab-1", &tab.workspace.persisted().windows[0].id);
+    let window_ids: Vec<_> = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| combined_window_id("tab-1", &window.id))
+        .collect();
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    let events = runtime.handle_launch_complete(
-        window_id,
-        Ok((
-            ProcessLaunch {
-                initial_prompt_file: None,
-                command: "nonexistent-launch-complete-regression".into(),
-                args: Vec::new(),
-                env: HashMap::new(),
-                remove_env: Vec::new(),
-                cwd: None,
-                resource_policy: None,
-            },
-            "session-missing".into(),
-            "work/test".into(),
-            "Agent".into(),
-            temp.path().into(),
-            gwt_agent::AgentId::Codex,
-            None,
-            None,
-            gwt_agent::LaunchRuntimeTarget::Host,
-            gwt_agent::SessionMode::Normal,
-            false,
-            temp.path().display().to_string().into(),
-        )),
+    runtime.pending_launch_feedback_contexts.insert(
+        window_ids[1].clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".into(),
+            title: "Review dispatch".into(),
+            issue_monitor_issue_number: Some(5187),
+            issue_monitor_delivery_id: None,
+            issue_monitor_project_root: Some(temp.path().into()),
+            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: true,
+        },
     );
-    assert!(events.is_empty(), "dispatch must only enqueue preparation");
-    assert_eq!(tasks.lock().unwrap().len(), 1);
+    // Keep all three completions pending, including the interleaved review.
+    for (index, window_id) in window_ids.into_iter().enumerate() {
+        let events = runtime.handle_launch_complete(
+            window_id,
+            Ok((
+                ProcessLaunch {
+                    initial_prompt_file: None,
+                    command: "nonexistent-launch-complete-regression".into(),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                    remove_env: Vec::new(),
+                    cwd: None,
+                    resource_policy: None,
+                },
+                format!("session-missing-{index}"),
+                format!("work/test-{index}"),
+                "Agent".into(),
+                temp.path().into(),
+                gwt_agent::AgentId::Codex,
+                None,
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                gwt_agent::SessionMode::Normal,
+                false,
+                temp.path().display().to_string().into(),
+            )),
+        );
+        assert!(events.is_empty(), "dispatch must only enqueue preparation");
+    }
+    assert_eq!(tasks.lock().unwrap().len(), 3);
+    assert_eq!(runtime.pending_launch_completions.len(), 3);
     assert!(runtime.active_agent_sessions.is_empty());
     assert!(runtime.runtimes.is_empty());
 }

@@ -531,10 +531,6 @@ fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
 /// Serialize private Knowledge wire metadata without changing the public
 /// `BackendEvent` construction/destructuring shape.
 pub fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
-    crate::error_report::record_backend_event_with_origin(
-        &outbound.event,
-        outbound.error_origin.as_ref(),
-    );
     let mut prepared = prepare_outbound(&outbound.event);
     prepared.stream_seq = outbound.terminal_stream_seq;
     let Some(metadata) = outbound.knowledge_wire_metadata.as_ref() else {
@@ -594,10 +590,6 @@ fn prepare_owned_outbound(outbound: OutboundEvent) -> PreparedOutbound {
     {
         return prepare_outbound_event(&outbound);
     }
-    crate::error_report::record_backend_event_with_origin(
-        &outbound.event,
-        outbound.error_origin.as_ref(),
-    );
     let kind = outbound.event.event_kind();
     let stream_seq = outbound.terminal_stream_seq;
     let event = outbound.event;
@@ -1148,6 +1140,10 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
+            crate::error_report::queue_backend_event_with_origin(
+                &outbound.event,
+                outbound.error_origin.as_ref(),
+            );
             let target = outbound.target.clone();
             let prepared = prepare_owned_outbound(outbound);
             for (client_id, queue, receives_broadcasts, scope) in &snapshot {
@@ -3763,6 +3759,25 @@ mod tests {
     }
 
     #[test]
+    fn outbound_error_serialization_does_not_read_or_write_the_ledger() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let outbound = OutboundEvent::reply(
+            "client",
+            BackendEvent::IssueMonitorLaunchFailed {
+                issue_number: 5187,
+                message: "launch failed while the error ledger is unavailable".into(),
+            },
+        );
+        let prepared = prepare_outbound_event(&outbound);
+        assert!(prepared.payload.contains("launch failed"));
+        assert!(
+            gwt_core::error_ledger::list_since(None).unwrap().is_empty(),
+            "wire serialization must leave error ledger I/O to the background reporter"
+        );
+    }
+
+    #[test]
     fn outbound_error_origin_stays_in_ledger_not_wire() {
         use gwt_core::{
             error_ledger::{self, ErrorScope},
@@ -3783,17 +3798,20 @@ mod tests {
             prepared.payload.as_ref(),
             serde_json::to_string(&event).unwrap()
         );
-        prepare_outbound_event(&OutboundEvent::global_update_notice(
-            "error",
-            "host update error",
-        ));
-        prepare_outbound_event(&OutboundEvent::reply(
-            "client",
-            BackendEvent::IssueMonitorLaunchFailed {
-                issue_number: 4735,
-                message: "unknown launch error".into(),
-            },
-        ));
+        let hub = ClientHub::default();
+        hub.dispatch(vec![
+            outbound.clone(),
+            outbound,
+            OutboundEvent::global_update_notice("error", "host update error"),
+            OutboundEvent::reply(
+                "client",
+                BackendEvent::IssueMonitorLaunchFailed {
+                    issue_number: 4735,
+                    message: "unknown launch error".into(),
+                },
+            ),
+        ]);
+        crate::error_report::flush_backend_errors();
         let rows = error_ledger::list_since(None).unwrap();
         assert_eq!(rows.len(), 3);
         let project = rows

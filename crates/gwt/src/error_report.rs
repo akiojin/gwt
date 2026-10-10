@@ -5,8 +5,9 @@
 //! originating operation.
 
 use std::collections::BTreeMap;
+use std::sync::{mpsc, OnceLock};
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
 
 use crate::protocol::BackendEvent;
@@ -85,6 +86,12 @@ pub fn report_host_error(kind: ErrorKind, message: impl Into<String>) {
 
 /// Record an error event without inferring ownership from the current process.
 pub fn record_backend_event_with_origin(event: &BackendEvent, origin: Option<&ErrorOrigin>) {
+    if let Some(record) = backend_event_record(event, origin) {
+        append_record(record, true);
+    }
+}
+
+fn backend_event_record(event: &BackendEvent, origin: Option<&ErrorOrigin>) -> Option<ErrorRecord> {
     let (message, issue) = match event {
         BackendEvent::IssueMonitorToast {
             level,
@@ -96,7 +103,7 @@ pub fn record_backend_event_with_origin(event: &BackendEvent, origin: Option<&Er
             issue_number,
             message,
         } => (message, Some(*issue_number)),
-        _ => return,
+        _ => return None,
     };
     let record = match origin {
         Some(ErrorOrigin::Host) => ErrorRecord::new_host(ErrorKind::LaunchFailure, message),
@@ -113,11 +120,88 @@ pub fn record_backend_event_with_origin(event: &BackendEvent, origin: Option<&Er
             },
         ),
     };
-    append_record(record, true);
+    Some(record)
+}
+
+enum BackendErrorJob {
+    Record {
+        record: ErrorRecord,
+        #[cfg(test)]
+        home: Option<std::path::PathBuf>,
+    },
+    #[cfg(test)]
+    Flush(mpsc::SyncSender<()>),
+}
+
+fn backend_error_sender() -> Option<&'static mpsc::Sender<BackendErrorJob>> {
+    static SENDER: OnceLock<Option<mpsc::Sender<BackendErrorJob>>> = OnceLock::new();
+    SENDER
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::channel();
+            match std::thread::Builder::new()
+                .name("gwt-error-reporter".into())
+                .spawn(move || {
+                    while let Ok(job) = receiver.recv() {
+                        match job {
+                            BackendErrorJob::Record {
+                                record,
+                                #[cfg(test)]
+                                home,
+                            } => {
+                                #[cfg(test)]
+                                let _home = home
+                                    .as_ref()
+                                    .map(gwt_core::test_support::ScopedGwtHome::set);
+                                append_record(record, true);
+                            }
+                            #[cfg(test)]
+                            BackendErrorJob::Flush(done) => {
+                                let _ = done.send(());
+                            }
+                        }
+                    }
+                }) {
+                Ok(_) => Some(sender),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot start background error reporter");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+/// Keep ledger and daemon I/O outside GUI dispatch. A single worker preserves
+/// the existing duplicate suppression when several clients receive one error.
+pub fn queue_backend_event_with_origin(event: &BackendEvent, origin: Option<&ErrorOrigin>) {
+    let Some(record) = backend_event_record(event, origin) else {
+        return;
+    };
+    if let Some(sender) = backend_error_sender() {
+        let _ = sender.send(BackendErrorJob::Record {
+            record,
+            #[cfg(test)]
+            home: gwt_core::test_support::gwt_home_override(),
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn flush_backend_errors() {
+    let (done, completed) = mpsc::sync_channel(1);
+    backend_error_sender()
+        .expect("error reporter")
+        .send(BackendErrorJob::Flush(done))
+        .unwrap();
+    completed
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("error reporter completion");
 }
 
 fn recently_recorded(record: &ErrorRecord) -> bool {
-    let since = Utc::now() - Duration::seconds(5);
+    // GUI errors can wait in the reporter queue; compare their event times,
+    // so processing delay cannot turn one repeated error into several rows.
+    let since = record.recorded_at - Duration::seconds(5);
     gwt_core::error_ledger::list_since(Some(since))
         .ok()
         .is_some_and(|rows| {
@@ -147,6 +231,7 @@ fn publish_recorded(record: &ErrorRecord, project_root: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use gwt_core::test_support::ScopedGwtHome;
 
     fn isolated_home() -> (tempfile::TempDir, ScopedGwtHome) {
@@ -201,6 +286,16 @@ mod tests {
         assert!(gwt_core::error_ledger::list_since(None)
             .expect("list")
             .is_empty());
+    }
+
+    #[test]
+    fn queued_duplicate_errors_keep_their_event_time_deduplication_window() {
+        let (_dir, _home) = isolated_home();
+        let mut record = ErrorRecord::new_host(ErrorKind::LaunchFailure, "delayed backend error");
+        record.recorded_at = Utc::now() - Duration::seconds(60);
+        assert!(append_record(record.clone(), false).is_some());
+        assert!(append_record(record, false).is_none());
+        assert_eq!(gwt_core::error_ledger::list_since(None).unwrap().len(), 1);
     }
 
     #[test]
