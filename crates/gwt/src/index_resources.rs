@@ -6,6 +6,7 @@
 //! their existing read-only projections; nothing here redesigns scheduling.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use serde::Serialize;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -20,6 +21,59 @@ pub struct ProcessTreeUsage {
     /// Private commit. Only Windows exposes it (`PrivateUsage`); elsewhere it
     /// is `None` — unsupported, never reported as zero.
     pub private_bytes: Option<u64>,
+}
+
+/// The live model-lane holder. Optional runner fields stay unknown for
+/// legacy tickets; the querying project's root is never substituted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexRunnerHolder {
+    pub repo_hash: String,
+    pub owner_pid: Option<u32>,
+    pub project_root: Option<PathBuf>,
+    pub action: Option<String>,
+    pub qos: Option<String>,
+}
+
+impl std::fmt::Display for IndexRunnerHolder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "repo_hash={} project_root={} action={} qos={}",
+            self.repo_hash,
+            self.project_root
+                .as_ref()
+                .map_or_else(|| "unknown".to_string(), |root| root.display().to_string(),),
+            self.action.as_deref().unwrap_or("unknown"),
+            self.qos.as_deref().unwrap_or("unknown"),
+        )
+    }
+}
+
+/// Project the existing kernel-backed lease status for both index.status
+/// and a refused search. Stale tickets never become live runner holders.
+pub(crate) fn index_runner_holder(
+    status: &gwt_core::index_coordinator::HeavyLeaseStatus,
+) -> Option<IndexRunnerHolder> {
+    if !status.held {
+        return None;
+    }
+    let repo_hash = status.target.as_deref()?.split("--").next()?.to_string();
+    Some(IndexRunnerHolder {
+        repo_hash,
+        owner_pid: status.owner.as_ref().map(|owner| owner.pid),
+        project_root: status
+            .holder_context
+            .as_ref()
+            .map(|context| context.project_root.clone()),
+        action: status
+            .holder_context
+            .as_ref()
+            .map(|context| context.action.clone()),
+        qos: status
+            .holder_context
+            .as_ref()
+            .map(|context| context.qos.clone()),
+    })
 }
 
 /// Measure `root_pid` and its descendants over one CPU sampling interval.
@@ -73,6 +127,7 @@ pub struct IndexResourceDiagnostics {
     pub heavy_held: bool,
     pub heavy_owner_pid: Option<u32>,
     pub heavy_holder_kind: Option<String>,
+    pub heavy_holder: Option<IndexRunnerHolder>,
     pub heavy_pending: usize,
     pub broker_targets: usize,
     pub broker_queue_depth: usize,
@@ -94,6 +149,7 @@ pub fn collect_index_resources() -> IndexResourceDiagnostics {
         {
             diagnostics.heavy_held = status.held;
             diagnostics.heavy_pending = status.pending;
+            diagnostics.heavy_holder = index_runner_holder(&status);
             if status.held {
                 diagnostics.heavy_owner_pid = status.owner.as_ref().map(|owner| owner.pid);
                 diagnostics.heavy_holder_kind =
@@ -138,6 +194,9 @@ pub fn render_index_resources(out: &mut String, diagnostics: &IndexResourceDiagn
         diagnostics.broker_running,
         diagnostics.broker_follow_ups,
     ));
+    if let Some(holder) = &diagnostics.heavy_holder {
+        out.push_str(&format!("resources: runner_holder {holder}\n"));
+    }
     match &diagnostics.runner_tree {
         Some(tree) => out.push_str(&format!(
             "resources: runner_tree processes={} cpu_percent={:.1} rss_bytes={} private_bytes={}\n",
@@ -154,6 +213,64 @@ pub fn render_index_resources(out: &mut String, diagnostics: &IndexResourceDiagn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resources_report_the_actual_cross_project_holder_before_runner_spawn() {
+        use gwt_core::{
+            index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey},
+            test_support::{env_lock, ScopedEnvVar},
+        };
+        use std::time::Duration;
+
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let coordinator = IndexCoordinator::open_default().expect("coordinator");
+        let key = TargetKey::repo_shared("other-repo", "issues");
+        let JobAdmission::Owner(job) = coordinator
+            .request_job(&key, JobPriority::Background, Duration::from_secs(1))
+            .expect("target admission")
+        else {
+            panic!("new target must be owned")
+        };
+        let mut heavy = job
+            .acquire_heavy(Duration::from_secs(1))
+            .expect("model lease");
+        let legacy = serde_json::to_value(index_runner_holder(
+            &coordinator.heavy_lease_status().unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(legacy["repo_hash"], "other-repo");
+        assert!(legacy["project_root"].is_null());
+        assert!(legacy["action"].is_null());
+        assert!(legacy["qos"].is_null());
+        // No process is spawned: diagnostics must also cover model startup.
+        let project_root = temp.path().join("other-project");
+        let lease_id = heavy.id().to_string();
+        heavy.record_runner_context(&project_root, "index-issues", "background");
+        assert_eq!(
+            heavy.id(),
+            lease_id,
+            "diagnostics must preserve lease identity"
+        );
+
+        let diagnostics = collect_index_resources();
+        let payload = serde_json::to_value(&diagnostics).expect("diagnostics json");
+        assert_eq!(payload["heavy_holder"]["repo_hash"], "other-repo");
+        assert_eq!(
+            payload["heavy_holder"]["project_root"],
+            project_root.to_string_lossy().as_ref()
+        );
+        assert_eq!(payload["heavy_holder"]["action"], "index-issues");
+        assert_eq!(payload["heavy_holder"]["qos"], "background");
+        let mut out = String::new();
+        render_index_resources(&mut out, &diagnostics);
+        assert!(out.contains("repo_hash=other-repo"), "{out}");
+        assert!(out.contains("action=index-issues qos=background"), "{out}");
+    }
 
     #[test]
     fn renders_idle_and_unsupported_explicitly() {

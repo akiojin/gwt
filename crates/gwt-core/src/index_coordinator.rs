@@ -254,6 +254,14 @@ impl OwnerIdentity {
     }
 }
 
+/// Exact index runner arguments, published by the holder before model work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavyHolderContext {
+    pub project_root: PathBuf,
+    pub action: String,
+    pub qos: String,
+}
+
 /// Diagnostic ticket persisted next to each kernel lock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ticket {
@@ -287,6 +295,10 @@ pub struct Ticket {
     /// `refused` when it needed to and could not (Issue #4409 AC-4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder_spawn_host: Option<String>,
+    /// Exact runner context published by the lease owner before spawning
+    /// model work. Missing on older tickets; never inferred from the waiter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_context: Option<HeavyHolderContext>,
 }
 
 impl Ticket {
@@ -302,6 +314,7 @@ impl Ticket {
             ttl_renewed: None,
             holder_nice: None,
             holder_spawn_host: None,
+            holder_context: None,
         }
     }
 }
@@ -400,6 +413,7 @@ pub struct HeavyLeaseStatus {
     /// verification inside or outside the agent process tree.
     pub holder_nice: Option<i32>,
     pub holder_spawn_host: Option<String>,
+    pub holder_context: Option<HeavyHolderContext>,
     /// Units left according to the holder's published progress: batches for
     /// an index job, commands for a `verify.run` (Issue #4280 AC-2).
     pub remaining_batches: Option<u64>,
@@ -1128,6 +1142,7 @@ impl IndexCoordinator {
                 holder_kind: Some(holder_kind),
                 holder_nice: ticket.holder_nice,
                 holder_spawn_host: ticket.holder_spawn_host,
+                holder_context: ticket.holder_context,
                 remaining_batches: None,
                 estimated_remaining_ms: None,
                 holder_alive,
@@ -1178,6 +1193,7 @@ impl IndexCoordinator {
             holder_kind: Some(holder_kind),
             holder_nice: ticket.holder_nice,
             holder_spawn_host: ticket.holder_spawn_host,
+            holder_context: ticket.holder_context,
             remaining_batches,
             estimated_remaining_ms,
             holder_alive,
@@ -1669,6 +1685,7 @@ fn acquire_heavy_at(
                         // Filled in by the holder once it knows: the
                         // coordinator has no opinion about daemons.
                         holder_spawn_host: None,
+                        holder_context: None,
                     };
                     let _ = write_json_atomic(&locks.storage.join("heavy.ticket.json"), &ticket);
                     // Consume both the reservation (#4086) and remembered
@@ -2068,6 +2085,18 @@ impl HeavyLease {
     /// was legitimately granted.
     pub fn record_spawn_host(&mut self, spawn_host: impl Into<String>) {
         self.ticket.holder_spawn_host = Some(spawn_host.into());
+        let _ = write_json_atomic(&self.ticket_path, &self.ticket);
+    }
+
+    /// Publish exact runner arguments on this lease's existing diagnostic
+    /// ticket. Like `record_spawn_host`, a failed write does not cost the
+    /// legitimately acquired kernel lease, and its identity stays unchanged.
+    pub fn record_runner_context(&mut self, project_root: &Path, action: &str, qos: &str) {
+        self.ticket.holder_context = Some(HeavyHolderContext {
+            project_root: project_root.to_path_buf(),
+            action: action.to_string(),
+            qos: qos.to_string(),
+        });
         let _ = write_json_atomic(&self.ticket_path, &self.ticket);
     }
 

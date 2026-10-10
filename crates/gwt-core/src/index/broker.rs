@@ -43,8 +43,15 @@ pub const REFRESH_BROKER_SCHEMA_VERSION: u32 = 1;
 /// Quiet period for background dirty intents (FR-415).
 pub const DEFAULT_REFRESH_QUIET_PERIOD: Duration = Duration::from_secs(30);
 
+/// One background refresh execution quantum (Issue #4840 AC-9). Together
+/// with an equal elapsed-time rest this bounds host background occupation
+/// to 50% + 30s / observation window (at most 55% over ten minutes).
+pub const DEFAULT_REFRESH_CLAIM_TIMEOUT: Duration = Duration::from_secs(60);
+
 const BROKER_DIR_NAME: &str = "refresh-broker";
 const TARGETS_DIR_NAME: &str = "targets";
+const HOST_OWNER_LOCK_NAME: &str = "refresh.owner.lock";
+const BACKGROUND_REST_NAME: &str = "background-rest.json";
 
 /// Broker root under an explicit gwt home
 /// (`<gwt_home>/runtime/index-coordinator/refresh-broker`).
@@ -625,11 +632,24 @@ impl RefreshBroker {
         &self,
         mut accept: impl FnMut(&RefreshTarget) -> bool,
     ) -> BrokerResult<Option<RefreshClaim>> {
+        // A claim covers maintenance as well as model work. The coordinator's
+        // heavy lock alone cannot bound concurrent claims across repositories.
+        let host_lock = open_lock_file(&self.root.join(HOST_OWNER_LOCK_NAME))?;
+        match fs2::FileExt::try_lock_exclusive(&host_lock) {
+            Ok(()) => {}
+            Err(error) if is_contended(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
         let now = self.now_millis();
+        let background_not_before = read_background_rest(&self.root)?;
         let mut candidates: Vec<(String, TargetRecord)> = self
             .list_records()?
             .into_iter()
-            .filter(|(_, record)| is_claimable(record, now) && accept(&record.target))
+            .filter(|(_, record)| {
+                is_claimable(record, now)
+                    && (is_urgent(record.priority) || now >= background_not_before)
+                    && accept(&record.target)
+            })
             .collect();
         candidates.sort_by(|(left_stem, left), (right_stem, right)| {
             priority_rank(left.priority)
@@ -698,8 +718,10 @@ impl RefreshBroker {
                         stem,
                         intent,
                         owner_lock: Some(owner_lock),
+                        host_lock: Some(host_lock),
+                        claimed_at_millis: now,
                         settled: false,
-                    }))
+                    }));
                 }
                 None => {
                     let _ = fs2::FileExt::unlock(&owner_lock);
@@ -792,6 +814,19 @@ fn is_claimable(record: &TargetRecord, now: u64) -> bool {
     }
 }
 
+fn read_background_rest(root: &Path) -> BrokerResult<u64> {
+    let path = root.join(BACKGROUND_REST_NAME);
+    let raw = match fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    serde_json::from_slice(&raw).map_err(|error| RefreshBrokerError::Corrupt {
+        path,
+        detail: error.to_string(),
+    })
+}
+
 /// Owner handle for one claimed target. Dropping without
 /// [`RefreshClaim::complete`] or [`RefreshClaim::fail`] re-queues the target
 /// after a fresh quiet period so a crashed owner never wedges admission.
@@ -802,6 +837,8 @@ pub struct RefreshClaim {
     stem: String,
     intent: RefreshIntent,
     owner_lock: Option<File>,
+    host_lock: Option<File>,
+    claimed_at_millis: u64,
     settled: bool,
 }
 
@@ -856,6 +893,15 @@ impl RefreshClaim {
                     detail: err.to_string(),
                 })?;
             let now = self.clock.now_millis();
+            if self.intent.priority == JobPriority::Background {
+                // The same host lock serializes this durable rest across all
+                // repositories and OS processes. Urgent claims bypass the rest.
+                let elapsed = now.saturating_sub(self.claimed_at_millis);
+                write_json_atomic(
+                    &self.root.join(BACKGROUND_REST_NAME),
+                    &now.saturating_add(elapsed),
+                )?;
+            }
             let running_epoch = record
                 .running
                 .as_ref()
@@ -896,6 +942,9 @@ impl RefreshClaim {
         })();
         self.settled = true;
         if let Some(lock) = self.owner_lock.take() {
+            let _ = fs2::FileExt::unlock(&lock);
+        }
+        if let Some(lock) = self.host_lock.take() {
             let _ = fs2::FileExt::unlock(&lock);
         }
         result
@@ -970,6 +1019,13 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    impl RefreshBrokerClock for AtomicU64 {
+        fn now_millis(&self) -> u64 {
+            self.load(Ordering::SeqCst)
+        }
+    }
 
     fn intent(target: RefreshTarget, epoch: u64, priority: JobPriority) -> RefreshIntent {
         RefreshIntent {
@@ -1023,31 +1079,56 @@ mod tests {
     #[test]
     fn failed_run_returns_to_quiet_and_keeps_the_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let broker = RefreshBroker::open(tmp.path().join("broker"), Duration::ZERO).expect("open");
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().join("broker"),
+            Duration::ZERO,
+            clock.clone(),
+        )
+        .expect("open");
         let target = RefreshTarget::base("repo", [RefreshScope::Files, RefreshScope::FilesDocs]);
         broker
             .submit(intent(target.clone(), 1, JobPriority::Background))
             .expect("submit");
         let claim = broker.claim_next().expect("claim").expect("claimable");
+        clock.store(11_000, Ordering::SeqCst);
         claim.fail("runner exploded").expect("fail");
         let snapshot = broker.inspect().expect("inspect");
         let state = snapshot.target(&target).expect("target");
         assert_eq!(state.state(), RefreshTargetState::Quiet);
+        assert_eq!(state.desired_epoch(), 1);
+        assert_eq!(state.completed_epoch(), None);
         assert_eq!(state.last_error(), Some("runner exploded"));
+        assert!(broker.claim_next().expect("claim during rest").is_none());
+        clock.store(12_000, Ordering::SeqCst);
         assert!(broker.claim_next().expect("claim again").is_some());
     }
 
     #[test]
     fn dropped_claim_is_reclaimable_after_quiet() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let broker = RefreshBroker::open(tmp.path().join("broker"), Duration::ZERO).expect("open");
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().join("broker"),
+            Duration::ZERO,
+            clock.clone(),
+        )
+        .expect("open");
         let target = RefreshTarget::base("repo", [RefreshScope::Files]);
         broker
             .submit(intent(target.clone(), 1, JobPriority::Background))
             .expect("submit");
         let claim = broker.claim_next().expect("claim").expect("claimable");
+        clock.store(11_000, Ordering::SeqCst);
         drop(claim);
-        assert_eq!(broker.inspect().expect("inspect").running_count(), 0);
+        let snapshot = broker.inspect().expect("inspect");
+        assert_eq!(snapshot.running_count(), 0);
+        let state = snapshot.target(&target).expect("target");
+        assert_eq!(state.state(), RefreshTargetState::Quiet);
+        assert_eq!(state.desired_epoch(), 1);
+        assert_eq!(state.completed_epoch(), None);
+        assert!(broker.claim_next().expect("reclaim during rest").is_none());
+        clock.store(12_000, Ordering::SeqCst);
         assert!(broker.claim_next().expect("reclaim").is_some());
     }
 

@@ -56,6 +56,9 @@ pub enum IndexInFlightKey {
     Bootstrap {
         project_root: PathBuf,
     },
+    StatusProjection {
+        project_root: PathBuf,
+    },
     FullStatus {
         project_root: PathBuf,
     },
@@ -162,6 +165,64 @@ impl ProjectIndexBootstrapService {
         project_root: PathBuf,
     ) -> ProjectIndexBootstrapRequest {
         self.spawn_background(proxy, project_root, current_worktree_status_probe)
+    }
+
+    /// A completed broker claim changes health, not the desired source epoch.
+    /// Keep this observer separate from bootstrap and automatic repair, both
+    /// of which admit work and would turn each completion into another claim.
+    pub(crate) fn refresh_after_completion(
+        &self,
+        proxy: AppEventProxy,
+        project_root: PathBuf,
+    ) -> ProjectIndexBootstrapRequest {
+        self.refresh_after_completion_with(proxy, project_root, current_worktree_status_probe)
+    }
+
+    fn refresh_after_completion_with<S>(
+        &self,
+        proxy: AppEventProxy,
+        project_root: PathBuf,
+        status_probe: S,
+    ) -> ProjectIndexBootstrapRequest
+    where
+        S: FnOnce(&Path) -> gwt::ProjectIndexStatusView + Send + 'static,
+    {
+        let project_key = normalize_project_root(&project_root);
+        let key = IndexInFlightKey::StatusProjection {
+            project_root: project_key.clone(),
+        };
+        if !self.try_reserve(key.clone()) {
+            return ProjectIndexBootstrapRequest::AlreadyRunning;
+        }
+        if let Ok(mut last) = self.last_full_status.lock() {
+            last.remove(&project_key);
+        }
+        let service = self.clone();
+        let key_for_thread = key.clone();
+        let log_span = tracing::Span::current();
+        let spawned = thread::Builder::new()
+            .name("gwt-index-status-projection".into())
+            .spawn(move || {
+                let _log_scope = log_span.enter();
+                let _guard = InFlightGuard {
+                    in_flight: service.in_flight.clone(),
+                    key: key_for_thread,
+                };
+                let status = status_probe(&project_key);
+                service.record_bootstrap_status(&project_key, &status);
+                proxy.send(UserEvent::ProjectIndexStatus {
+                    project_root: project_key.display().to_string(),
+                    status: Box::new(status),
+                });
+            });
+        match spawned {
+            Ok(_) => ProjectIndexBootstrapRequest::Spawned,
+            Err(error) => {
+                self.release(&key);
+                tracing::warn!(target: "gwt::index", %error, "failed to spawn index status projection");
+                ProjectIndexBootstrapRequest::SpawnFailed
+            }
+        }
     }
 
     /// Issue #4398 AC-3: the startup probe reuses the worktree inventory the
@@ -1266,15 +1327,6 @@ fn refresh_broker_drain_loop(proxy: AppEventProxy) {
                 continue;
             }
         };
-        if let Err(error) = ensure_project_index_runtime_for_rebuild() {
-            tracing::warn!(
-                target: "gwt::index",
-                error = %error,
-                "project index runtime unavailable for claimed refresh"
-            );
-            let _ = claim.fail(error);
-            continue;
-        }
         match gwt::index_worker::execute_claimed_project_index_refresh(claim) {
             Ok(project_root) => {
                 gwt::global_aggregated_status_cache().invalidate(&project_root);
@@ -1689,6 +1741,52 @@ mod tests {
             })
             .count();
         assert_eq!(ready_count, 2, "cached status replayed to the new client");
+    }
+
+    #[test]
+    fn refresh_completion_updates_status_without_registering_another_bootstrap() {
+        let service = super::ProjectIndexBootstrapService::default();
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = dunce::canonicalize(temp.path()).expect("canonical root");
+        let (proxy, events) = AppEventProxy::stub();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let initial_calls = calls.clone();
+        service.spawn_with(
+            proxy.clone(),
+            root.clone(),
+            move |_| {
+                initial_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "before"),
+        );
+        wait_for_project_status_detail(&events, &root.display().to_string(), "before");
+
+        // A completed refresh changes health, but observing it must neither
+        // submit a new epoch nor start automatic repair for this status.
+        service.refresh_after_completion_with(proxy.clone(), root.clone(), |_| {
+            gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::RepairRequired, "after")
+        });
+        wait_for_project_status_detail(&events, &root.display().to_string(), "after");
+
+        let replay_calls = calls.clone();
+        assert_eq!(
+            service.spawn_with(
+                proxy,
+                root,
+                move |_| {
+                    replay_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_| unreachable!("completion status must be cached for reconnect"),
+            ),
+            super::ProjectIndexBootstrapRequest::SkippedFresh
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(events.lock().expect("events").iter().all(|event| {
+            matches!(event, UserEvent::ProjectIndexStatus { status, .. } if status.detail == "before" || status.detail == "after")
+        }));
     }
 
     #[test]
