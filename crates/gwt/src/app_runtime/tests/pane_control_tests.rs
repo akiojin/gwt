@@ -870,13 +870,7 @@ fn queued_close_finalizer_preserves_same_window_successor_writer_generation() {
         .expect("predecessor runtime")
         .pty
         .clone();
-    let predecessor_pane = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("predecessor runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&window_id, &predecessor_pane);
+    runtime.register_pty_writer(&window_id, None);
 
     assert!(runtime.close_window_outcome(&window_id).closed);
     assert_eq!(
@@ -892,8 +886,7 @@ fn queued_close_finalizer_preserves_same_window_successor_writer_generation() {
     let successor_runtime = runtime.runtimes.get(&window_id).expect("successor runtime");
     let successor_incarnation = successor_runtime.incarnation;
     let successor = successor_runtime.pty.clone();
-    let successor_pane = successor_runtime.pane.clone();
-    runtime.register_pty_writer(&window_id, &successor_pane);
+    runtime.register_pty_writer(&window_id, None);
 
     let finalizer = finalizers
         .lock()
@@ -2332,7 +2325,7 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
         .expect("caller child pid");
     let caller_child_started_at = gwt::process::host_process_start_time(caller_child_pid)
         .expect("caller child process start time");
-    app.register_pty_writer(&caller_window_id, &caller_pane);
+    app.register_pty_writer(&caller_window_id, None);
 
     let mut caller_session = sample_active_agent_session("tab-project", &caller_window_id);
     caller_session.session_id = caller_session_id.to_string();

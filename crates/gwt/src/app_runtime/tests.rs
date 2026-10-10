@@ -1448,6 +1448,7 @@ fn sample_runtime_with_events(
         issue_monitor_review_dispatch_windows: HashSet::new(),
         terminal_close_candidates: HashMap::new(),
         terminal_convergence_scan_in_flight: false,
+        update_drain_scan_in_flight: false,
         terminal_close_grace: Duration::from_secs(60),
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
@@ -5396,6 +5397,42 @@ impl AppRuntime {
         events
     }
 
+    pub(crate) fn update_drain_tick_events_and_drain_at(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        let previous = std::mem::replace(&mut self.blocking_tasks, spawner);
+        fn recording(proxy: &AppEventProxy) -> Arc<Mutex<Vec<UserEvent>>> {
+            match proxy {
+                AppEventProxy::Stub(events) => events.clone(),
+                AppEventProxy::Project { inner, .. } => recording(inner),
+                AppEventProxy::Real(_) => panic!("test drain must use a recording proxy"),
+            }
+        }
+        let recorded = recording(&self.proxy);
+        let mut outbound = self.update_drain_tick_events_at(now);
+        drain_queued_blocking_tasks(&tasks);
+        let completion = {
+            let mut events = recorded.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::UpdateDrainObserved { .. }
+                    )
+                })
+                .map(|index| into_recorded_project_payload(events.remove(index)))
+        };
+        if let Some(UserEvent::UpdateDrainObserved { now, observations }) = completion {
+            outbound.extend(self.update_drain_observed_events(now, observations));
+        }
+        drain_queued_blocking_tasks(&tasks);
+        self.blocking_tasks = previous;
+        outbound
+    }
+
     /// Drive the same queued preparation and GUI completion used in production.
     pub(crate) fn handle_launch_complete_and_drain(
         &mut self,
@@ -8816,8 +8853,7 @@ fn assert_pm_delivery_refused(
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let (repo, mut runtime, pm_window_id) = pm_wake_fixture(temp);
         insert_test_pane_runtime(&mut runtime, &pm_window_id);
-        let pm_pane = runtime.runtimes[&pm_window_id].pane.clone();
-        runtime.register_pty_writer(&pm_window_id, &pm_pane);
+        runtime.register_pty_writer(&pm_window_id, None);
         let target = if other_session {
             let target = "tab-1::other-window".to_string();
             let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
@@ -8828,8 +8864,7 @@ fn assert_pm_delivery_refused(
                 .unwrap()
                 .worktree_path = worktree;
             insert_test_pane_runtime(&mut runtime, &target);
-            let pane = runtime.runtimes[&target].pane.clone();
-            runtime.register_pty_writer(&target, &pane);
+            runtime.register_pty_writer(&target, None);
             target
         } else {
             pm_window_id

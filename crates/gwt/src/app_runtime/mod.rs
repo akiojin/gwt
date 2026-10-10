@@ -361,6 +361,13 @@ pub(crate) enum UpdateAutoApplyRelease {
     Superseded,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct UpdateDrainObservation {
+    context: ProjectContext,
+    drain: Option<(gwt::IssueMonitorPrefs, gwt::IssueMonitorUpdateDrain)>,
+    snapshot: gwt::update_drain::UpdateQuiescenceSnapshot,
+}
+
 /// A notification-center record about the self-update (AC-12), broadcast to
 /// every client through the Issue Monitor toast channel.
 fn update_notice(level: &str, message: String) -> OutboundEvent {
@@ -1781,6 +1788,7 @@ pub struct AppRuntime {
         HashMap<String, terminal_convergence::TerminalCloseCandidate>,
     /// One background terminal-convergence scan at a time.
     pub(crate) terminal_convergence_scan_in_flight: bool,
+    pub(crate) update_drain_scan_in_flight: bool,
     /// Grace applied to terminal close candidates; refreshed from Agent
     /// settings by every observer scan.
     pub(crate) terminal_close_grace: std::time::Duration,
@@ -3730,6 +3738,7 @@ impl AppRuntime {
             issue_monitor_review_dispatch_windows: HashSet::new(),
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
+            update_drain_scan_in_flight: false,
             terminal_close_grace: std::time::Duration::from_secs(
                 gwt_config::agent_config::DEFAULT_TERMINAL_CLOSE_GRACE_SECS,
             ),
@@ -8837,9 +8846,80 @@ impl AppRuntime {
         &mut self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<OutboundEvent> {
+        if self.update_drain_scan_in_flight {
+            return Vec::new();
+        }
+        let contexts = self.project_contexts();
+        if contexts.is_empty() {
+            return Vec::new();
+        }
+        let (panes, worktrees) = self.capture_update_quiescence_inputs();
+        let proxy = self.proxy.clone();
+        self.update_drain_scan_in_flight = true;
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now() + std::time::Duration::from_secs(2),
+            );
+            let observations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                contexts
+                    .into_iter()
+                    .filter_map(|context| {
+                        let drain = Self::read_project_auto_update_drain(&context);
+                        let monitor = gwt::IssueMonitorState::with_prefs(
+                            gwt::IssueMonitorConfig::default(),
+                            drain
+                                .as_ref()
+                                .map(|(prefs, _)| prefs.clone())
+                                .unwrap_or_default(),
+                        );
+                        let snapshot = Self::read_update_quiescence_snapshot(
+                            panes.clone(),
+                            worktrees.clone(),
+                            &monitor,
+                        );
+                        if let Err(error) =
+                            gwt_core::operation_deadline::ensure_remaining("update drain scan")
+                        {
+                            tracing::warn!(%error, "discarding expired update drain observation");
+                            return None;
+                        }
+                        Some(UpdateDrainObservation {
+                            context,
+                            drain,
+                            snapshot,
+                        })
+                    })
+                    .collect()
+            }))
+            .unwrap_or_else(|_| {
+                tracing::warn!("update drain observer panicked; automatic apply deferred");
+                Vec::new()
+            });
+            proxy.send(UserEvent::UpdateDrainObserved { now, observations });
+        });
+        if let Err(error) = spawn {
+            self.update_drain_scan_in_flight = false;
+            tracing::warn!(%error, "failed to spawn update drain observer");
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn update_drain_observed_events(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+        observations: Vec<UpdateDrainObservation>,
+    ) -> Vec<OutboundEvent> {
+        self.update_drain_scan_in_flight = false;
+        // A launch can arrive while the durable scan is running. Recheck GUI-owned
+        // activity before planning an apply; never trust its older pane snapshot.
+        let (panes, _) = self.capture_update_quiescence_inputs();
         let mut events = Vec::new();
-        for context in self.project_contexts() {
-            events.extend(self.update_drain_tick_events_for_project(&context, now));
+        for mut observation in observations {
+            if !self.project_context_is_current(&observation.context) {
+                continue;
+            }
+            observation.snapshot.panes = panes.clone();
+            events.extend(self.update_drain_tick_events_for_project(observation, now));
         }
         let events = Self::deduplicate_update_host_events(events);
         for event in &events {
@@ -8859,19 +8939,17 @@ impl AppRuntime {
 
     fn update_drain_tick_events_for_project(
         &mut self,
-        context: &ProjectContext,
+        observation: UpdateDrainObservation,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<OutboundEvent> {
-        let Some((prefs, drain)) = self.project_auto_update_drain(context) else {
+        let context = &observation.context;
+        let Some((prefs, drain)) = observation.drain else {
             if let Some(state) = self.project_state_mut(context) {
                 state.update_auto_apply.reset();
             }
             return Vec::new();
         };
-        let monitor =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
-        let snapshot = self.update_quiescence_snapshot(&monitor);
-        let outcome = gwt::update_drain::update_quiescence(&snapshot);
+        let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
         let wait_reason = match &outcome {
             Ok(()) => "waiting for consecutive quiet observations or apply grace".to_string(),
             Err(blockers) => serde_json::to_string(blockers)
@@ -8886,14 +8964,6 @@ impl AppRuntime {
             })
             .unwrap_or(0);
         let Some(state) = self.project_state_mut(context) else {
-            record_pending_update_observation(
-                &drain.version,
-                Some(&context.project_root),
-                "pending_failed",
-                "project state unavailable while evaluating drain",
-                now,
-                None,
-            );
             return Vec::new();
         };
         let cancelled = state.update_auto_apply.is_cancelled(&drain.version);
@@ -8934,29 +9004,39 @@ impl AppRuntime {
                 _ => ("pending_waiting", wait_reason, next),
             }
         };
-        record_pending_update_observation(
-            &version,
-            Some(&context.project_root),
-            stage,
-            &reason,
-            now,
-            next,
-        );
         // Record identities when the bounded warning fires or a scheduled
         // apply is postponed, rather than writing the same blockers each tick.
-        if let gwt::update_drain::UpdateAutoApplyStep::StillDraining(blockers)
+        let blockers = if let gwt::update_drain::UpdateAutoApplyStep::StillDraining(blockers)
         | gwt::update_drain::UpdateAutoApplyStep::Postponed(blockers) = &step
         {
-            if let Ok(blockers) = serde_json::to_string(blockers) {
+            serde_json::to_string(blockers).ok()
+        } else {
+            None
+        };
+        let log_version = version.clone();
+        let project_root = context.project_root.clone();
+        let logged = self.blocking_tasks.try_spawn(move || {
+            record_pending_update_observation(
+                &log_version,
+                Some(&project_root),
+                stage,
+                &reason,
+                now,
+                next,
+            );
+            if let Some(blockers) = blockers {
                 gwt_core::update::log_update_event(
                     "drain_blocked",
                     &[
-                        ("version", &version),
-                        ("project_root", &context.project_root.to_string_lossy()),
+                        ("version", &log_version),
+                        ("project_root", &project_root.to_string_lossy()),
                         ("blockers", &blockers),
                     ],
                 );
             }
+        });
+        if let Err(error) = logged {
+            tracing::warn!(%error, "cannot spawn update drain logging worker");
         }
         let blocker_list = |blockers: &[gwt::update_drain::UpdateBlocker]| {
             blockers
@@ -9044,6 +9124,12 @@ impl AppRuntime {
     /// A project's prefs and its `Auto` update drain, if raised.
     fn project_auto_update_drain(
         &self,
+        context: &ProjectContext,
+    ) -> Option<(gwt::IssueMonitorPrefs, gwt::IssueMonitorUpdateDrain)> {
+        Self::read_project_auto_update_drain(context)
+    }
+
+    fn read_project_auto_update_drain(
         context: &ProjectContext,
     ) -> Option<(gwt::IssueMonitorPrefs, gwt::IssueMonitorUpdateDrain)> {
         let project_root = &context.project_root;

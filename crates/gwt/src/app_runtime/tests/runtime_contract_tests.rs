@@ -689,14 +689,8 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
         .active_agent_sessions
         .insert(window_id.clone(), session);
     insert_test_pane_runtime(&mut runtime, &window_id);
-    let pane = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("resumed runtime")
-        .pane
-        .clone();
 
-    runtime.register_pty_writer(&window_id, &pane);
+    runtime.register_pty_writer(&window_id, None);
 
     assert!(
         runtime
@@ -791,7 +785,7 @@ fn pty_writer_registration_preserves_inactive_project_ownership() {
     insert_test_pane_runtime(&mut runtime, window_id);
     let pane = runtime.runtimes[window_id].pane.clone();
 
-    runtime.register_pty_writer(window_id, &pane);
+    runtime.register_pty_writer(window_id, None);
 
     let writers = runtime.pty_writers.read().expect("registry");
     assert_eq!(
@@ -815,9 +809,8 @@ fn pty_writer_registration_rejects_a_window_without_project_ownership() {
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let window_id = "unknown::agent";
     insert_test_pane_runtime(&mut runtime, window_id);
-    let pane = runtime.runtimes[window_id].pane.clone();
 
-    runtime.register_pty_writer(window_id, &pane);
+    runtime.register_pty_writer(window_id, None);
 
     assert!(!runtime
         .pty_writers
@@ -840,13 +833,7 @@ fn deregistering_pty_writer_invalidates_the_removed_generation() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
-    let pane = runtime
-        .runtimes
-        .get(window_id)
-        .expect("runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(window_id, &pane);
+    runtime.register_pty_writer(window_id, None);
     let old_generation = runtime
         .pty_writers
         .read()
@@ -877,13 +864,7 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
-    let pane = runtime
-        .runtimes
-        .get(window_id)
-        .expect("runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(window_id, &pane);
+    runtime.register_pty_writer(window_id, None);
     let old_generation = runtime
         .pty_writers
         .read()
@@ -936,13 +917,7 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     let window_runtime = runtime.runtimes.get_mut(&window_id).expect("runtime");
     let incarnation = window_runtime.incarnation;
     window_runtime._initial_prompt_file = Some(Arc::new(prompt_file));
-    let pane = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&window_id, &pane);
+    runtime.register_pty_writer(&window_id, None);
     let generation = runtime
         .pty_writers
         .read()
