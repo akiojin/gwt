@@ -1572,6 +1572,15 @@ fn issue_5062_deferred_update_releases_drain_on_the_next_observation() {
             ..
         }
     )));
+    assert!(
+        runtime
+            .update_drain_observed_events(
+                chrono::Utc::now() + chrono::Duration::seconds(15),
+                Vec::new(),
+            )
+            .is_empty(),
+        "a deferred manifest with no matching drain must not emit another cancellation"
+    );
 }
 
 #[test]
