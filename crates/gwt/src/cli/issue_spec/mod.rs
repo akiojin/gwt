@@ -972,11 +972,17 @@ fn create_spec_from_markdown<E: CliEnv>(
     );
     let parsed = gwt_github::extract_sections(raw)
         .map_err(|err| SpecOpsError::from(gwt_github::body::ParseError::Section(err)))?;
-    let sections: BTreeMap<SectionName, String> = parsed
+    let mut sections: BTreeMap<SectionName, String> = parsed
         .into_iter()
         .map(|section| (section.name, section.content))
         .collect();
+    // Issue #5176: a plain body without section markers is the `spec`
+    // section, never silently dropped.
+    if sections.is_empty() && !raw.trim().is_empty() {
+        sections.insert(SectionName(SPEC_SECTION_NAME.to_string()), raw.to_string());
+    }
     guard_autonomous_acceptance_block(&labels, raw)?;
+    let receipts = render_create_receipts(&sections);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -988,7 +994,29 @@ fn create_spec_from_markdown<E: CliEnv>(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels
     ));
+    out.push_str(&receipts);
     Ok(0)
+}
+
+/// One `wrote N bytes to section 'NAME'` line per created section, in the
+/// same shape as the `issue.spec.edit` receipt (Issue #5176 AC-2).
+fn render_create_receipts(sections: &BTreeMap<SectionName, String>) -> String {
+    use sha2::{Digest, Sha256};
+    if sections.is_empty() {
+        return "wrote no sections\n".to_string();
+    }
+    sections
+        .iter()
+        .map(|(name, content)| {
+            let canonical = content.trim_matches(['\r', '\n']);
+            format!(
+                "wrote {} bytes to section '{}' (sha256:{:x})\n",
+                canonical.len(),
+                name.0,
+                Sha256::digest(canonical.as_bytes())
+            )
+        })
+        .collect()
 }
 
 fn create_spec_from_structured_json<E: CliEnv>(
@@ -1009,6 +1037,7 @@ fn create_spec_from_structured_json<E: CliEnv>(
     let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
     guard_autonomous_acceptance_block(&labels, &spec)?;
     let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
+    let receipts = render_create_receipts(&sections);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -1020,6 +1049,7 @@ fn create_spec_from_structured_json<E: CliEnv>(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels
     ));
+    out.push_str(&receipts);
     Ok(0)
 }
 

@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -4346,9 +4346,28 @@ fn with_workspace_work_items_locks_profiled<T>(
         .collect::<Vec<_>>();
     lock_paths.sort();
     lock_paths.dedup();
+    // Issue #5208: these are per-handle OS locks, so a thread that already
+    // holds one of them would wait on itself forever. Refuse instead.
+    if let Some(held) = lock_paths
+        .iter()
+        .find(|path| workspace_work_items_lock_held_by_current_thread(path))
+    {
+        return Err(GwtError::Other(format!(
+            "{WORKSPACE_WORK_ITEMS_LOCK_OPERATION} lock {} is already held by this thread; re-acquiring it would self-deadlock",
+            held.display()
+        )));
+    }
+    // Issue #5208: without an ambient deadline the OS wait used to be
+    // unbounded, so one long holder silently stalled every Work writer. Bound
+    // only the acquisition; the operation keeps the caller's own deadline.
+    let acquisition_deadline = crate::operation_deadline::current().is_none().then(|| {
+        crate::operation_deadline::ScopedOperationDeadline::enter(
+            crate::operation_deadline::now() + workspace_work_items_lock_default_wait(),
+        )
+    });
     let mut locks = Vec::with_capacity(lock_paths.len());
     let mut lock_wait_micros = 0u64;
-    for lock_path in lock_paths {
+    for lock_path in &lock_paths {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -4358,16 +4377,70 @@ fn with_workspace_work_items_locks_profiled<T>(
         // operation / since) instead of only that the deadline expired.
         // Ordinary contention is routine here and is not logged.
         let lock = crate::operation_deadline::NamedFileLock::acquire_quiet(
-            &lock_path,
+            lock_path,
             WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
         )?;
         lock_wait_micros =
             lock_wait_micros.saturating_add(lock_started.elapsed().as_micros() as u64);
         locks.push(lock);
     }
+    drop(acquisition_deadline);
+    let held = HeldWorkspaceWorkItemsLocks::register(lock_paths);
     let result = operation(lock_wait_micros);
+    drop(held);
     drop(locks);
     result
+}
+
+/// Issue #5208: the longest a Work items lock acquisition waits when the
+/// caller set no operation deadline. The error names the observed holder.
+const WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+thread_local! {
+    static WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn workspace_work_items_lock_default_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE.with(std::cell::Cell::get) {
+        return wait;
+    }
+    WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT
+}
+
+thread_local! {
+    /// Work items lock files the current thread holds, innermost last.
+    static HELD_WORKSPACE_WORK_ITEMS_LOCKS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn workspace_work_items_lock_held_by_current_thread(lock_path: &Path) -> bool {
+    HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow().iter().any(|path| path == lock_path))
+}
+
+/// Records the locks for the duration of the operation, including unwinding.
+struct HeldWorkspaceWorkItemsLocks {
+    count: usize,
+}
+
+impl HeldWorkspaceWorkItemsLocks {
+    fn register(lock_paths: Vec<PathBuf>) -> Self {
+        let count = lock_paths.len();
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow_mut().extend(lock_paths));
+        Self { count }
+    }
+}
+
+impl Drop for HeldWorkspaceWorkItemsLocks {
+    fn drop(&mut self) {
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| {
+            let mut held = held.borrow_mut();
+            let keep = held.len().saturating_sub(self.count);
+            held.truncate(keep);
+        });
+    }
 }
 
 pub(crate) fn with_workspace_current_and_work_items_lock<T>(
