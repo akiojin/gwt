@@ -3089,7 +3089,9 @@ pub(super) fn launch_config_from_persisted_session(
     // unconditionally, because a persisted `launch_args` that still records the
     // prompt is not consulted by the builder and would otherwise lose it too.
     let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
-    if pm_scratch.is_some() {
+    if pm_scratch.is_some()
+        && gwt::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
+    {
         builder = builder.extra_arg(super::pm::PM_BOOTSTRAP_PROMPT);
     }
 
