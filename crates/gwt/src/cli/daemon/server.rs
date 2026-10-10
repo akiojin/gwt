@@ -1001,6 +1001,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 continue;
                             };
                             if let Some(control) = decode_issue_monitor_control_in_repo(payload, Some(&scope.project_root)) {
+                                let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
                                     completion.reject(IssueMonitorControlQueueError::Closed);
@@ -1035,7 +1036,11 @@ fn spawn_issue_monitor_worker_with_lease(
                                     );
                                     control_open = false;
                                 }
-                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                if review_deferred {
+                                    publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                                } else {
+                                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                }
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
                                 // Preserve committed scan intent while the
@@ -1080,6 +1085,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         break;
                     };
                     revision = next_revision;
+                    let review_deferred = matches!(&accepted.control, IssueMonitorControl::ReviewDispatchDeferred(_));
                     match try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
@@ -1153,7 +1159,11 @@ fn spawn_issue_monitor_worker_with_lease(
                             control_open = false;
                         }
                     }
-                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                    if review_deferred {
+                        publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                    } else {
+                        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                    }
                 }
                 _ = wait_for_issue_monitor_deadline(scan_watchdog_deadline) => {
                     if expire_issue_monitor_scan_at_watchdog(
@@ -1215,7 +1225,9 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // journal before the coalesced retry.
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
-                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                // Preserve deliveries until a fresh scan commits. In particular,
+                                // a host-drain deferral must not immediately emit itself again.
+                                publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
                                 scan_requested = true;
                                 tokio::task::yield_now().await;
                             }
@@ -1911,6 +1923,8 @@ enum IssueMonitorControl {
     /// SPEC #3200 T-046/FR-024: arm/disarm the unattended autonomous mode kill
     /// switch. Disarming stops new autonomous candidates on the next scan.
     AutonomousMode(bool),
+    /// A host-wide update drain postponed an unstarted review window.
+    ReviewDispatchDeferred(crate::AutonomousReviewDispatch),
     /// SPEC #3200 FR-015: a review agent reported its verdict for a reviewed SHA.
     ReviewVerdict {
         issue_number: u64,
@@ -2699,6 +2713,10 @@ fn apply_routine_issue_monitor_control(
             );
             false
         }
+        IssueMonitorControl::ReviewDispatchDeferred(dispatch) => {
+            monitor.requeue_review_dispatch_for_update_drain(&dispatch);
+            false
+        }
         IssueMonitorControl::ReviewVerdict {
             issue_number,
             reviewed_sha,
@@ -3248,6 +3266,21 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
     decode_issue_monitor_control_in_repo(payload, None)
 }
 
+#[cfg(test)]
+#[test]
+fn issue_5062_host_drain_can_requeue_a_review_delivery_through_control() {
+    let payload = serde_json::json!({
+        "event": "control", "source_pid": u32::MAX,
+        "payload": { "review_dispatch_deferred": {
+            "issue_number": 5062, "pr_number": 42, "reviewed_sha": "abc123",
+            "required_criteria": [], "diff": "", "linked_issue_kind": "issue",
+        } },
+    });
+    assert!(
+        matches!(decode_issue_monitor_control(payload), Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch)) if dispatch.issue_number == 5062 && dispatch.pr_number == 42)
+    );
+}
+
 fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
@@ -3533,6 +3566,17 @@ fn decode_issue_monitor_control_in_repo(
                     resume_condition,
                     at,
                 });
+            }
+            if let Some(dispatch) = payload.get("review_dispatch_deferred") {
+                let dispatch: crate::AutonomousReviewDispatch =
+                    serde_json::from_value(dispatch.clone()).ok()?;
+                if dispatch.issue_number == 0
+                    || dispatch.pr_number == 0
+                    || dispatch.reviewed_sha.trim().is_empty()
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch));
             }
             if let Some(review_verdict) = payload.get("review_verdict") {
                 let issue_number = review_verdict.get("issue_number")?.as_u64()?;

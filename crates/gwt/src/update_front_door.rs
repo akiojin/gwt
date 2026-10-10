@@ -424,6 +424,7 @@ pub fn prepare_and_persist_pending_update(
         asset_url: prepared.asset_url.clone(),
         payload: prepared.payload.clone(),
         downloaded_at: chrono::Utc::now().to_rfc3339(),
+        auto_apply_deferred: false,
     };
     gwt_core::update::persist_pending_update_manifest(&manifest)?;
     Ok(manifest)
@@ -501,6 +502,11 @@ fn commit_pending_manifest_with_ops(
     use_helper_copy: bool,
 ) -> Result<String, String> {
     let latest = manifest.version.clone();
+    let expected = gwt_core::update::load_pending_update_manifest()
+        .filter(|current| {
+            current.version == manifest.version && current.payload == manifest.payload
+        })
+        .unwrap_or_else(|| manifest.clone());
     apply_prepared_payload_with_ops(
         ops,
         &latest,
@@ -510,9 +516,12 @@ fn commit_pending_manifest_with_ops(
         old_pid,
         use_helper_copy,
     )?;
-    // Best-effort cleanup so the next launch starts from a clean state. The
-    // helper has already been spawned so failures here are not fatal.
-    let _ = gwt_core::update::clear_pending_update_manifest();
+    // Keep a newer stage or defer published while this helper starts. The
+    // helper has already been spawned so cleanup failures are not fatal.
+    let _ = gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
+        &gwt_core::update::pending_update_dir(),
+        &expected,
+    );
     Ok(latest)
 }
 
@@ -522,6 +531,8 @@ fn commit_pending_manifest_with_ops(
 /// manifest is cleared. A failed helper spawn rolls the marker back so the
 /// next launch is not mistaken for the tail of an apply. The caller then
 /// sends `UserEvent::QuitApp { reason: ApplyUpdate }`.
+// Keep the helper-copy and automatic-apply choices explicit at this test seam.
+#[allow(clippy::too_many_arguments)]
 fn stage_graceful_update_apply_with_ops(
     ops: &mut impl UpdateApplyOps,
     manifest: gwt_core::update::PendingUpdateManifest,
@@ -530,9 +541,36 @@ fn stage_graceful_update_apply_with_ops(
     restart_args: Vec<String>,
     old_pid: u32,
     use_helper_copy: bool,
+    automatic: bool,
 ) -> Result<String, String> {
-    gwt_core::update::persist_update_resume_marker(marker)
-        .map_err(|err| format!("Failed to write update resume marker: {err}"))?;
+    {
+        // Defer and apply-start publish under the same lock. Whichever wins
+        // makes the other observe either the deferred flag or resume marker.
+        let _lock = gwt_core::update::pending_update_manifest_lock(
+            &gwt_core::update::pending_update_dir(),
+        )?;
+        if automatic {
+            let current = gwt_core::update::load_pending_update_manifest().ok_or_else(|| {
+                "Pending update with a valid payload is no longer staged.".to_string()
+            })?;
+            if current.version != manifest.version || current.payload != manifest.payload {
+                return Err(format!(
+                    "Staged update changed before v{} could be applied.",
+                    manifest.version
+                ));
+            }
+            if current.auto_apply_deferred {
+                return Err(format!(
+                    "Automatic apply of v{} is deferred.",
+                    manifest.version
+                ));
+            }
+        }
+        gwt_core::update::persist_update_resume_marker(marker)
+            .map_err(|err| format!("Failed to write update resume marker: {err}"))?;
+    }
+    // Cleanup below acquires the manifest lock itself. The marker now rejects
+    // a defer request, so the lock can be released before the helper starts.
     match commit_pending_manifest_with_ops(
         ops,
         manifest,
@@ -556,6 +594,7 @@ fn stage_graceful_update_apply_with_ops(
 pub fn stage_graceful_update_apply(
     manifest: gwt_core::update::PendingUpdateManifest,
     marker: &gwt_core::update::UpdateResumeMarker,
+    automatic: bool,
 ) -> Result<String, String> {
     let current_exe = std::env::current_exe()
         .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
@@ -568,6 +607,7 @@ pub fn stage_graceful_update_apply(
         marker.restart_args.clone(),
         std::process::id(),
         cfg!(windows),
+        automatic,
     )
 }
 
@@ -583,17 +623,15 @@ pub fn current_restart_args() -> Vec<String> {
 fn apply_pending_manifest_and_exit(
     manifest: gwt_core::update::PendingUpdateManifest,
 ) -> Result<(), String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
-    let mut ops = RealUpdateApplyOps::default();
-    commit_pending_manifest_with_ops(
-        &mut ops,
-        manifest,
-        &current_exe,
-        current_restart_args(),
-        std::process::id(),
-        cfg!(windows),
-    )?;
+    let marker = gwt_core::update::UpdateResumeMarker {
+        from_version: env!("CARGO_PKG_VERSION").to_string(),
+        to_version: manifest.version.clone(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        restart_args: current_restart_args(),
+        projects: Vec::new(),
+        attempt: 1,
+    };
+    stage_graceful_update_apply(manifest, &marker, true)?;
     std::process::exit(0);
 }
 
@@ -611,17 +649,25 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
         Some(m) => m,
         None => return false,
     };
+    if manifest.auto_apply_deferred {
+        return false;
+    }
     let current_version = env!("CARGO_PKG_VERSION");
     if !should_apply_pending_at_bootstrap(&manifest.version, current_version) {
         // The pending payload is for our current (or older) version. Drop it
-        // so we don't loop forever.
-        let _ = gwt_core::update::clear_pending_update_manifest();
+        // unless a newer stage or defer replaced the snapshot we observed.
+        let _ = gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
+            &gwt_core::update::pending_update_dir(),
+            &manifest,
+        );
         return false;
     }
     match apply_pending_manifest_and_exit(manifest) {
         Ok(()) => true, // unreachable: apply_pending_manifest_and_exit calls exit(0)
         Err(err) => {
-            // Apply failed before exit. Clear the manifest so we don't loop.
+            // The commit boundary may have rejected a newly deferred or
+            // replaced manifest. Preserve the staged payload for a later
+            // explicit apply rather than clearing another operation's state.
             // Issue #1764: `main()` installs the tracing subscriber before this
             // runs, so the failure reaches the project log as well — stderr
             // alone is discarded on the console-less Windows tray route.
@@ -631,7 +677,6 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
                 "bootstrap pending-update apply failed"
             );
             eprintln!("gwt bootstrap pending-update apply failed: {err}");
-            let _ = gwt_core::update::clear_pending_update_manifest();
             false
         }
     }
@@ -735,6 +780,7 @@ mod poll_state_tests {
         spawned_portable: bool,
         spawned_installer: bool,
         portable_spawn_count: usize,
+        staged_replacement: Option<PendingUpdateManifest>,
     }
 
     impl FakeUpdateApplyOps {
@@ -749,6 +795,7 @@ mod poll_state_tests {
                 spawned_portable: false,
                 spawned_installer: false,
                 portable_spawn_count: 0,
+                staged_replacement: None,
             }
         }
     }
@@ -763,6 +810,7 @@ mod poll_state_tests {
                     path: self.payload.clone(),
                 },
                 downloaded_at: "2026-05-10T12:00:00Z".to_string(),
+                auto_apply_deferred: false,
             }
         }
     }
@@ -795,6 +843,10 @@ mod poll_state_tests {
         ) -> Result<(), String> {
             self.spawned_portable = true;
             self.portable_spawn_count += 1;
+            if let Some(replacement) = self.staged_replacement.take() {
+                gwt_core::update::persist_pending_update_manifest(&replacement)?;
+                gwt_core::update::defer_pending_update(&replacement.version)?;
+            }
             self.portable_spawn_result.clone()
         }
 
@@ -890,6 +942,35 @@ mod poll_state_tests {
     }
 
     #[test]
+    fn issue_5062_bootstrap_deferred_manifest_preserves_the_staged_payload() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let payload_path = home.path().join("prepared-binary");
+        std::fs::write(&payload_path, "prepared payload").unwrap();
+        // The installed version makes the pre-fix route take its safe cleanup
+        // branch rather than spawn a real helper or exit the test process.
+        let manifest = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "asset_url": "https://example.invalid/update",
+            "payload": {"PortableBinary": {"path": payload_path}},
+            "downloaded_at": "2026-10-01T00:00:00Z",
+            "auto_apply_deferred": true,
+        });
+        std::fs::create_dir_all(gwt_core::update::pending_update_dir()).unwrap();
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(gwt_core::update::pending_update_manifest_path(), &bytes).unwrap();
+        assert!(!super::try_apply_pending_update_at_bootstrap());
+        assert_eq!(
+            std::fs::read(gwt_core::update::pending_update_manifest_path()).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            std::fs::read_to_string(payload_path).unwrap(),
+            "prepared payload"
+        );
+    }
+
+    #[test]
     fn bootstrap_clears_stale_manifest_in_tempdir() {
         // Stage a stale manifest pointing at a real on-disk payload so
         // load_pending_update_manifest_in returns Some, then verify the
@@ -906,6 +987,7 @@ mod poll_state_tests {
             asset_url: "https://example.invalid/v9.20.0.tar.gz".to_string(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: "2026-05-10T12:00:00Z".to_string(),
+            auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest_in(tempdir.path(), &manifest)
             .expect("persist");
@@ -935,6 +1017,7 @@ mod poll_state_tests {
             asset_url: "https://example.invalid/v9.31.0.tar.gz".to_string(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: "2026-09-07T00:00:00Z".to_string(),
+            auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest(&manifest).expect("persist manifest");
         manifest
@@ -952,6 +1035,105 @@ mod poll_state_tests {
             }],
             attempt: 1,
         }
+    }
+
+    #[test]
+    fn issue_5062_automatic_commit_refuses_defer_or_a_concurrent_manifest_writer() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut manifest = staged_manifest_in(home.path());
+        let queued = manifest.clone();
+        let mut ops = FakeUpdateApplyOps::portable(home.path().join("prepared-binary"));
+        let commit = |ops: &mut FakeUpdateApplyOps| {
+            super::stage_graceful_update_apply_with_ops(
+                ops,
+                queued.clone(),
+                &sample_resume_marker(),
+                Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+                Vec::new(),
+                42,
+                false,
+                true,
+            )
+        };
+        let before = std::fs::read(gwt_core::update::pending_update_manifest_path()).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(gwt_core::update::pending_update_dir().join("manifest.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        commit(&mut ops).expect_err("apply must not race a manifest writer");
+        assert_eq!(ops.portable_spawn_count, 0);
+        assert!(gwt_core::update::load_update_resume_marker().is_none());
+        assert_eq!(
+            std::fs::read(gwt_core::update::pending_update_manifest_path()).unwrap(),
+            before
+        );
+        drop(lock);
+
+        manifest.auto_apply_deferred = true;
+        gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+        commit(&mut ops).expect_err("a defer committed after the event snapshot wins");
+        assert_eq!(ops.portable_spawn_count, 0);
+        assert!(gwt_core::update::load_update_resume_marker().is_none());
+        assert_eq!(
+            gwt_core::update::load_pending_update_manifest(),
+            Some(manifest)
+        );
+        super::stage_graceful_update_apply_with_ops(
+            &mut ops,
+            queued,
+            &sample_resume_marker(),
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+            false,
+        )
+        .expect("explicit manual apply still uses the deferred payload");
+        assert_eq!(ops.portable_spawn_count, 1);
+        assert!(gwt_core::update::load_pending_update_manifest().is_none());
+    }
+
+    #[test]
+    fn issue_5062_committed_update_cleanup_preserves_a_newly_deferred_version() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let manifest = staged_manifest_in(home.path());
+        let replacement_payload = home.path().join("replacement-binary");
+        std::fs::write(&replacement_payload, "replacement payload").unwrap();
+        let mut replacement = manifest.clone();
+        replacement.version = "9.32.0".into();
+        replacement.payload = PreparedPayload::PortableBinary {
+            path: replacement_payload.clone(),
+        };
+        let mut ops = FakeUpdateApplyOps::portable(home.path().join("prepared-binary"));
+        ops.staged_replacement = Some(replacement.clone());
+        let version = super::stage_graceful_update_apply_with_ops(
+            &mut ops,
+            manifest,
+            &sample_resume_marker(),
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+            true,
+        )
+        .expect("the original helper commits while the replacement is deferred");
+        assert_eq!(version, "9.31.0");
+        assert_eq!(ops.portable_spawn_count, 1);
+        replacement.auto_apply_deferred = true;
+        assert_eq!(
+            gwt_core::update::load_pending_update_manifest(),
+            Some(replacement)
+        );
+        assert_eq!(
+            std::fs::read_to_string(replacement_payload).unwrap(),
+            "replacement payload"
+        );
     }
 
     #[test]
@@ -975,6 +1157,7 @@ mod poll_state_tests {
             Vec::new(),
             42,
             false,
+            true,
         )
         .expect("graceful apply commits");
 
@@ -1007,6 +1190,7 @@ mod poll_state_tests {
             Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
             Vec::new(),
             42,
+            false,
             false,
         )
         .expect_err("spawn failure surfaces");

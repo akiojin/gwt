@@ -612,6 +612,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "release.update.defer",
+        aliases: &[],
+    },
+    Operation {
         name: "search",
         aliases: &[],
     },

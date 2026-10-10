@@ -31,6 +31,8 @@ pub enum ReleaseCommand {
         /// Open the missing Release PR when the release is stalled.
         ensure_release_pr: bool,
     },
+    /// Defer automatic apply of this exact staged version on the host.
+    UpdateDefer { version: String },
 }
 
 pub(super) fn run<E: CliEnv>(
@@ -38,12 +40,28 @@ pub(super) fn run<E: CliEnv>(
     command: ReleaseCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let ReleaseCommand::Status {
-        release_branch,
-        base_branch,
-        scan_commits,
-        ensure_release_pr,
-    } = command;
+    let (release_branch, base_branch, scan_commits, ensure_release_pr) = match command {
+        ReleaseCommand::Status {
+            release_branch,
+            base_branch,
+            scan_commits,
+            ensure_release_pr,
+        } => (release_branch, base_branch, scan_commits, ensure_release_pr),
+        ReleaseCommand::UpdateDefer { version } => {
+            let manifest =
+                update::defer_pending_update(&version).map_err(SpecOpsError::Validation)?;
+            let payload = serde_json::json!({
+                "pending_update_version": manifest.version,
+                "auto_apply_deferred": manifest.auto_apply_deferred,
+                "update_stage": "deferred",
+            });
+            out.push_str(
+                &serde_json::to_string_pretty(&payload).map_err(super::serde_as_api_error)?,
+            );
+            out.push('\n');
+            return Ok(0);
+        }
+    };
     let options = options_from(release_branch, base_branch, scan_commits);
     let repo_path = env.repo_path().to_path_buf();
     let outcome = if ensure_release_pr {
@@ -142,8 +160,10 @@ pub fn status_json(outcome: &ReleasePrEnsure, generation: &RuntimeGeneration) ->
         "version": check.version,
         "pending_version": check.pending_version,
         "pending_update_version": null,
+        "auto_apply_deferred": false,
         "update_stage": null,
         "update_wait": null,
+        "update_wait_overdue": false,
         "last_apply_result": null,
         "last_apply_failure": null,
         "version_source": "github_remote_tags",
@@ -179,9 +199,13 @@ fn status_json_with_local(
         .and_then(|bytes| serde_json::from_slice::<update::PendingUpdateManifest>(&bytes).ok());
     let can_apply = update::load_pending_update_manifest().is_some();
     let payload_missing = pending.is_some() && !can_apply;
+    let deferred = pending
+        .as_ref()
+        .is_some_and(|manifest| manifest.auto_apply_deferred);
     let wait = update::load_update_wait_observation(repo_path).filter(|wait| {
         pending.as_ref().is_some_and(|manifest| {
-            manifest.version == wait.version
+            !manifest.auto_apply_deferred
+                && manifest.version == wait.version
                 && match (
                     chrono::DateTime::parse_from_rfc3339(&manifest.downloaded_at),
                     chrono::DateTime::parse_from_rfc3339(&wait.observed_at),
@@ -196,14 +220,29 @@ fn status_json_with_local(
         .as_ref()
         .filter(|result| result.outcome == UpdateApplyOutcome::Failure);
     payload["pending_update_version"] = serde_json::json!(pending.as_ref().map(|m| &m.version));
+    payload["auto_apply_deferred"] = serde_json::json!(deferred);
     payload["update_stage"] = serde_json::json!(if payload_missing {
         Some("payload_missing")
+    } else if deferred {
+        Some("deferred")
     } else {
         wait.as_ref()
             .map(|wait| wait.stage.as_str())
             .or_else(|| pending.as_ref().map(|_| "staged"))
     });
     payload["update_wait"] = serde_json::json!(wait);
+    // Issue #5062 AC-2: report an overdue waiting observation without
+    // assuming why it has not been refreshed.
+    let overdue = wait.as_ref().is_some_and(|wait| {
+        wait.next_evaluation_at
+            .as_deref()
+            .and_then(|next| chrono::DateTime::parse_from_rfc3339(next).ok())
+            .is_some_and(|next| {
+                chrono::Utc::now() - next.with_timezone(&chrono::Utc)
+                    > chrono::Duration::seconds(UPDATE_WAIT_OVERDUE_AFTER_SECS)
+            })
+    });
+    payload["update_wait_overdue"] = serde_json::json!(overdue);
     payload["last_apply_result"] = serde_json::json!(result);
     payload["last_apply_failure"] = serde_json::json!(failure);
 
@@ -215,17 +254,40 @@ fn status_json_with_local(
                 .as_ref()
                 .is_none_or(|manifest| manifest.version == failure.to_version)
         });
-    if payload_missing || current_failure {
+    let defer_operation = pending.as_ref().map(|manifest| {
+        format!(
+            "release.update.defer {}",
+            serde_json::json!({"version":manifest.version}),
+        )
+    });
+    if deferred && can_apply {
+        payload["owner_action"] = serde_json::json!(format!(
+            "automatic apply of v{} is deferred; Issue Monitor launches resume; apply the staged update in the GUI when ready",
+            pending.as_ref().unwrap().version,
+        ));
+    } else if payload_missing || current_failure {
         payload["owner_action"] = serde_json::json!(
             "download the update again or reinstall GWT.app; inspect update_wait.reason and last_apply_failure before retrying"
         );
+    } else if can_apply && overdue {
+        payload["owner_action"] = serde_json::json!(format!(
+            "drain evaluation observation is overdue; inspect update_wait for the last recorded blocker and next evaluation; run {} while staged/waiting to defer it and resume Issue Monitor launches; an already committed helper cannot be cancelled",
+            defer_operation.as_deref().unwrap_or_default(),
+        ));
     } else if can_apply {
-        payload["owner_action"] = serde_json::json!(
-            "apply the pending update in the GUI after the active work has drained; inspect update_wait for the current blocker"
-        );
+        // Issue #5062 AC-3: a drain holds new launches until it applies, so
+        // name the control that defers the update and resumes launches.
+        payload["owner_action"] = serde_json::json!(format!(
+            "apply the pending update in the GUI after the active work has drained; inspect update_wait for the current blocker; to defer the update and resume Issue Monitor launches, run {} while staged/waiting; an already committed helper cannot be cancelled",
+            defer_operation.as_deref().unwrap_or_default(),
+        ));
     }
     payload
 }
+
+/// How far past `next_evaluation_at` a waiting observation may lag before
+/// `release.status` reports the drain evaluation as overdue.
+const UPDATE_WAIT_OVERDUE_AFTER_SECS: i64 = 120;
 
 /// The single next step for this state, so the PM classifies nothing itself.
 fn default_action(check: &ReleaseCheck, created: bool) -> &'static str {
@@ -294,6 +356,61 @@ mod tests {
     }
 
     #[test]
+    fn local_update_status_reports_deferred_pending_without_live_wait() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let payload_path = home.path().join("prepared-binary");
+        std::fs::write(&payload_path, "prepared payload").unwrap();
+        let manifest = serde_json::json!({
+            "version": "9.200.0",
+            "asset_url": "https://example.invalid/update",
+            "payload": {"PortableBinary": {"path": payload_path}},
+            "downloaded_at": "2026-10-01T00:00:00Z",
+            "auto_apply_deferred": true,
+        });
+        std::fs::create_dir_all(update::pending_update_dir()).unwrap();
+        std::fs::write(
+            update::pending_update_manifest_path(),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        update::log_update_event(
+            "pending_waiting",
+            &[
+                ("project_root", home.path().to_str().unwrap()),
+                ("version", "9.200.0"),
+                ("reason", "active_work"),
+                ("observed_at", "2026-10-01T00:10:00Z"),
+                ("next_evaluation_at", "2026-10-01T00:10:05Z"),
+            ],
+        );
+        let outcome = ensure(check(ReleaseCheckState::NoBump, None, None), false, None);
+        let payload = status_json_with_local(
+            &outcome,
+            &RuntimeGeneration::unknown("develop"),
+            home.path(),
+        );
+        assert_eq!(payload["pending_update_version"], "9.200.0");
+        assert_eq!(payload["auto_apply_deferred"], true);
+        assert_eq!(payload["update_stage"], "deferred");
+        assert!(payload["update_wait"].is_null());
+        assert_eq!(payload["update_wait_overdue"], false);
+        assert!(payload["owner_action"]
+            .as_str()
+            .unwrap()
+            .contains("deferred"));
+        assert!(payload["owner_action"]
+            .as_str()
+            .unwrap()
+            .contains("9.200.0"));
+        assert!(payload["owner_action"].as_str().unwrap().contains("GUI"));
+        assert!(payload["owner_action"]
+            .as_str()
+            .unwrap()
+            .contains("launches"));
+    }
+
+    #[test]
     fn local_update_status_reads_valid_payload_and_the_last_attempt_without_applying() {
         use gwt_core::update::{
             self, PendingUpdateManifest, PreparedPayload, UpdateApplyOutcome, UpdateApplyResult,
@@ -309,6 +426,7 @@ mod tests {
                 path: payload_path.clone(),
             },
             downloaded_at: "2026-10-01T00:00:00Z".into(),
+            auto_apply_deferred: false,
         };
         update::persist_pending_update_manifest(&manifest).unwrap();
         let outcome = ensure(
@@ -343,6 +461,22 @@ mod tests {
         assert_eq!(
             waiting["update_wait"]["next_evaluation_at"],
             "2026-10-01T00:10:05Z"
+        );
+        // Issue #5062 AC-2: mark an overdue observation without claiming
+        // that its age proves a stopped scheduler.
+        assert_eq!(waiting["update_wait_overdue"], true);
+        assert!(waiting["owner_action"]
+            .as_str()
+            .unwrap()
+            .contains("overdue"));
+        // Issue #5062 AC-3: the owner can resume launches without applying.
+        assert!(
+            waiting["owner_action"]
+                .as_str()
+                .unwrap()
+                .contains("release.update.defer {\"version\":\"9.200.0\"}"),
+            "{}",
+            waiting["owner_action"]
         );
         update::log_update_event(
             "pending_failed",
