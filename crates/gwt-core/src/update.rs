@@ -169,7 +169,8 @@ pub fn persist_pending_update_manifest(manifest: &PendingUpdateManifest) -> Resu
 /// Test-friendly variant: write the manifest into an explicit directory. The
 /// production path uses [`persist_pending_update_manifest`] which targets
 /// [`pending_update_dir`]. Staging workers wait for brief manifest mutations
-/// rather than reporting a completed download as failed.
+/// rather than reporting a completed download as failed. Restaging the same
+/// valid pending version preserves its explicit automatic-apply defer.
 pub fn persist_pending_update_manifest_in(
     dir: &Path,
     manifest: &PendingUpdateManifest,
@@ -177,7 +178,10 @@ pub fn persist_pending_update_manifest_in(
     let lock = open_pending_update_manifest_lock(dir)?;
     fs2::FileExt::lock_exclusive(&lock)
         .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
-    write_pending_update_manifest_in(dir, manifest)
+    let mut staged = manifest.clone();
+    staged.auto_apply_deferred |= load_pending_update_manifest_in(dir)
+        .is_some_and(|current| current.version == staged.version && current.auto_apply_deferred);
+    write_pending_update_manifest_in(dir, &staged)
 }
 
 /// Acquire without waiting for a concurrent manifest writer. Defer, cleanup,
@@ -4575,8 +4579,7 @@ mod tests {
             .open(dir.path().join("manifest.lock"))
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
-        let mut replacement = manifest;
-        replacement.version = "9.201.0".into();
+        let replacement = manifest.clone();
         assert!(defer_pending_update_in(dir.path(), "9.200.0").is_err());
         assert!(clear_pending_update_manifest_in(dir.path()).is_err());
         assert_eq!(fs::read(dir.path().join("manifest.json")).unwrap(), before);
@@ -4597,6 +4600,9 @@ mod tests {
             finished_rx.recv_timeout(std::time::Duration::from_secs(1)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ));
+        let mut deferred = manifest.clone();
+        deferred.auto_apply_deferred = true;
+        write_pending_update_manifest_in(dir.path(), &deferred).unwrap();
         drop(lock);
         finished_rx
             .recv()
@@ -4604,8 +4610,29 @@ mod tests {
             .expect("staging resumes after the writer releases its lock");
         staging.join().unwrap();
         assert_eq!(
-            load_pending_update_manifest_in(dir.path()).unwrap().version,
-            "9.201.0"
+            load_pending_update_manifest_in(dir.path()).unwrap(),
+            deferred,
+            "a waiting same-version stage must preserve the completed defer"
+        );
+        persist_pending_update_manifest_in(dir.path(), &manifest).unwrap();
+        assert_eq!(
+            load_pending_update_manifest_in(dir.path()).unwrap(),
+            deferred
+        );
+
+        let mut replacement = manifest;
+        replacement.version = "9.201.0".into();
+        persist_pending_update_manifest_in(dir.path(), &replacement).unwrap();
+        assert_eq!(
+            load_pending_update_manifest_in(dir.path()).unwrap(),
+            replacement
+        );
+        replacement.version = "9.202.0".into();
+        replacement.auto_apply_deferred = true;
+        persist_pending_update_manifest_in(dir.path(), &replacement).unwrap();
+        assert_eq!(
+            load_pending_update_manifest_in(dir.path()).unwrap(),
+            replacement
         );
     }
 

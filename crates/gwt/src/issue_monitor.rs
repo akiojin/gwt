@@ -6102,6 +6102,30 @@ pub(crate) fn acquire_issue_monitor_daemon_lease(
     .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))
 }
 
+/// Probe only the existing lifetime lock, releasing any transient ownership
+/// before the prefs lock permits a daemon startup to acquire it.
+pub(crate) fn issue_monitor_daemon_lease_is_held(prefs_path: &Path) -> io::Result<bool> {
+    with_issue_monitor_prefs_lock(prefs_path, || {
+        let lock = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(issue_monitor_authority_lock_path(prefs_path))
+        {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => {
+                FileExt::unlock(&lock)?;
+                Ok(false)
+            }
+            Err(error) if gwt_core::operation_deadline::is_lock_contended(&error) => Ok(true),
+            Err(error) => Err(error),
+        }
+    })
+}
+
 fn daemon_lease_lock_error(stage: &str, path: &Path, error: io::Error) -> io::Error {
     let parent = path
         .parent()
