@@ -7052,17 +7052,26 @@ mod tests {
         }))
         .unwrap();
         gwt_core::error_ledger::record(host).unwrap();
-        for (params, expected) in [
-            (json!({}), 2),
-            (json!({"scope":"project"}), 2),
-            (json!({"scope":"host"}), 1),
-            (json!({"scope":"unknown"}), 1),
-            (json!({"scope":"all"}), 4),
-            (json!({"project_root":"/project-a","scope":"all"}), 1),
-            (json!({"project_root":"/project-a","scope":"host"}), 1),
-            (json!({"project_root":"/missing"}), 0),
+        for (caller_root, params, expected) in [
+            ("/project-a", json!({}), 1),
+            ("/project-b", json!({}), 1),
+            ("/project-a", json!({"scope":"project"}), 1),
+            ("/project-a", json!({"scope":"host"}), 1),
+            ("/project-a", json!({"scope":"unknown"}), 1),
+            ("/project-a", json!({"scope":"all"}), 4),
+            (
+                "/project-b",
+                json!({"project_root":"/project-a","scope":"all"}),
+                1,
+            ),
+            (
+                "/project-b",
+                json!({"project_root":"/project-a","scope":"host"}),
+                1,
+            ),
+            ("/project-a", json!({"project_root":"/missing"}), 0),
         ] {
-            let mut env = TestEnv::new(dir.path().to_path_buf());
+            let mut env = TestEnv::new(caller_root.into());
             let (_, output) =
                 crate::cli::run_collect(&mut env, ok("errors.list", params.clone())).unwrap();
             let payload: Value = serde_json::from_str(&output).unwrap();
@@ -7080,8 +7089,14 @@ mod tests {
                     assert_eq!(row["scope"], expected_scope, "{params}");
                 }
             }
-            if params.get("project_root").is_some() && expected > 0 {
-                assert_eq!(payload["errors"][0]["target"]["project_root"], "/project-a");
+            if expected_scope == "project" && expected > 0 {
+                assert_eq!(
+                    payload["errors"][0]["target"]["project_root"],
+                    params
+                        .get("project_root")
+                        .and_then(Value::as_str)
+                        .unwrap_or(caller_root)
+                );
             }
         }
         assert!(matches!(

@@ -725,11 +725,14 @@ gwt は明示された値（`true` / `false` を問わず）を尊重し、変�
 config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
 error ledger（`errors.list`）に記録されます。
 
-`errors.list` は既定で project スコープのエラーを返し、`project_root` で
-プロジェクトを絞り込めます。起動時の共通設定などマシン全体のエラーは
+`errors.list` は既定で現在のプロジェクトのエラーだけを返し、同じプロジェクトの
+別 worktree の記録も含みます。`project_root` で記録済みの root を明示して
+絞り込めます。起動時の共通設定などマシン全体のエラーは
 `scope: "host"`、帰属不明の記録は `scope: "unknown"`、全スコープは
 `scope: "all"` を明示して取得します。`project_root` を指定した場合は
 host・unknown 行を含めず、所属プロジェクトを推測で補いません。
+破損した台帳行は、ファイル名と行番号を持つ `ledger_corruption` の host 診断として
+返します。timestamp は破損を検出した時刻で、元の行は変更しません。
 
 0.153.0 より前の Codex CLI は `[features]` 配下の table を読めません。
 `[features.context_management]` が 1 つあるだけで config 全体が読めなくなり
