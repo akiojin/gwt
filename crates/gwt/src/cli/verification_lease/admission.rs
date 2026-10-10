@@ -1804,7 +1804,7 @@ mod tests {
                 .map(|_| {
                     scope.spawn(|| {
                         while !stop.load(Ordering::Acquire) {
-                            let mut command = std::process::Command::new("/bin/true");
+                            let mut command = gwt_core::process::hidden_command("/bin/true");
                             command.env_clear();
                             // Model a stalled fork/exec window so the regression
                             // need not wait thousands of runs for a rare overlap.
