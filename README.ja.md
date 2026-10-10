@@ -789,6 +789,36 @@ bare リポジトリを作り直し、各 worktree を新レイアウトに再�
 Tracking -> Cleanup -> Done) され、成功時はアプリを再起動せずに新しいブランチ
 worktree にプロジェクトタブが切り替わります。
 
+## GitHub Discussions でローカル Board の節目を共有する
+
+別マシンと `decision` / `blocked` / `handoff` を共有するには、Board provider を
+**Local** のままにして `.gwt/work/board.toml` に接続先を追加します。
+
+```toml
+provider = "local"
+
+[github_discussion]
+owner = "your-org"
+repo = "your-repo"
+number = 123
+```
+
+各マシンで同じ既存 Discussion を指定し、GitHub Discussions を有効にして、読み書き権限を
+持つ `gh` 認証を用意してください。Board の読み書き時に、最大1分に1回バックグラウンド同期を
+起動します。明示的な同期と直近の結果の確認は、
+`{"schema_version":1,"operation":"board.sync","params":{}}` を `gwtd` の標準入力へ送ります。
+`status` / `claim` はローカルに留まり、共有種別は設定で変更できません。
+受信した投稿は既存 Board のフィードに表示されます。
+GitHub が返す投稿者の所属が `OWNER` / `MEMBER` / `COLLABORATOR` のコメントだけを
+取り込み、それ以外や不明な所属は取り込みません。受信投稿は escalation を開閉できるため、
+所有者・組織メンバー・collaborator をローカルの調整相手として信頼できるリポジトリを指定してください。
+
+同期は best-effort で、ローカルの現在の表示範囲（最大500件）を送信します。
+長期障害中に表示範囲から外れた未送信投稿は遡って配送しません。レート制限・認証失効・
+ネットワーク障害でもローカル Board は利用でき、`board.sync` で診断を確認できます。
+失敗時は5分後に共有 GitHub budget を尊重して再試行します。停止中の相手は次回同期で保存済み
+コメントを受信します。共有を停止するには `[github_discussion]` を削除してください。
+
 ## Board プロバイダ (Local / Slack / Teams)
 
 調整用の **Board** は 3 つのプロバイダのいずれかをバックエンドにできます。
