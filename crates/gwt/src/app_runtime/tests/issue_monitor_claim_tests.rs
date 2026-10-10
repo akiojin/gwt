@@ -1339,6 +1339,11 @@ fn app_runtime_issue_monitor_cache_only_control_bounds_origin_probe() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Issue #4045: this test bounds the origin probe, so pin the independent
+    // prefs commit budget instead of depending on CI fsync completing in 250 ms.
+    let _prefs_budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
