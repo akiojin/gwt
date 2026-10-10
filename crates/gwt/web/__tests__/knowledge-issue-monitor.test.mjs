@@ -360,20 +360,28 @@ test("Issue #3620: manual excess is allowed and Use Auto waits for the backend e
   assert.equal(body.querySelector(".knowledge-monitor-capacity").hidden, true, "omitted capacity cannot retain stale measurements");
 });
 
-test("Issue #3620: incomplete measurement preserves the manual setting and explains uncertainty", async (t) => {
+test("Issue #5227: grouped incomplete diagnostics stay compact and preserve Manual 9", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  const status = capacityStatus({ max_active_agents: 7, max_active_agents_override: 7 });
+  const diskReason = "Disk measurement unavailable; check that the worktree volume is mounted and free at least 4 GiB.";
+  const reason = `inventory_uncertain: child_identity_missing ×37; ${diskReason}`;
+  const status = capacityStatus({ max_active_agents: 9, max_active_agents_override: 9 });
   status.agent_capacity = { ...status.agent_capacity, measurement_complete: false, machine_budget: null,
-    recommended_worker_limit: 0, reason: "Disk measurement unavailable", constraints: [
-      { resource: "disk", capacity: null, binding: true, reason: "Disk measurement unavailable" },
+    recommended_worker_limit: 0, reason, constraints: [
+      { resource: "disk", capacity: null, binding: true, reason: diskReason },
     ] };
   surface.applyIssueMonitorStatus(status);
-  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "7");
+  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "9");
+  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
   const warning = body.querySelector(".knowledge-monitor-capacity-warning");
   assert.ok(warning, "incomplete measurements have an inline warning");
   assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /measurement is incomplete.*Manual limit 7 is unchanged.*Disk measurement unavailable/);
+  assert.match(warning.textContent, /measurement is incomplete.*Manual limit 9 is unchanged/);
+  assert.ok(warning.textContent.includes(diskReason), "the disk diagnostic explains how to recover");
+  assert.equal(warning.textContent.split("child_identity_missing").length - 1, 1);
+  assert.equal(warning.textContent.split("×37").length - 1, 1);
+  assert.ok([...warning.textContent].length <= 700, "the complete warning stays within 700 Unicode characters");
+  assert.equal(body.querySelector('[data-role="capacity-reason"]').textContent, reason);
   assert.match(body.querySelector(".knowledge-monitor-capacity").textContent, /Machine budget: unknown[\s\S]*Disk: unknown/);
 });
 

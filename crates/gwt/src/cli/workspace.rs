@@ -24,6 +24,11 @@ use crate::cli::{CliEnv, CliParseError, WorkspaceCommand};
 pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     match head.as_str() {
+        "receipt" if rest.len() == 2 && rest[0] == "--operation-id" => {
+            Ok(WorkspaceCommand::Receipt {
+                operation_id: rest[1].clone(),
+            })
+        }
         "update" => parse_update(rest),
         "candidates" => parse_candidates(rest),
         "join" => parse_join(rest),
@@ -807,6 +812,23 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match cmd {
+        WorkspaceCommand::Receipt { operation_id } => {
+            let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| {
+                string_error("workspace.receipt requires ambient GWT_SESSION_ID".to_string())
+            })?;
+            let status = crate::workspace_update_receipt::inspect(
+                env.repo_path(),
+                &session_id,
+                &operation_id,
+                None,
+            )
+            .map_err(|error| string_error(error.to_string()))?;
+            out.push_str(
+                &serde_json::to_string(&status).map_err(|error| string_error(error.to_string()))?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
         WorkspaceCommand::Update {
             title,
             status,
@@ -891,9 +913,10 @@ pub(super) fn run<E: CliEnv>(
                     observation,
                     intent,
                 };
+                let operation_id = uuid::Uuid::new_v4().to_string();
                 let receipt =
-                    match crate::daemon_runtime::send_workspace_update_via_agent_bridge_detailed(
-                        &target, &request,
+                    match crate::daemon_runtime::send_workspace_update_via_agent_bridge_with_operation_id(
+                        &target, &request, Some(&operation_id),
                     ) {
                         Ok(receipt) => {
                             if let Some(authority) = bridge_authority.as_ref() {
@@ -917,7 +940,19 @@ pub(super) fn run<E: CliEnv>(
                             )
                             .map_err(string_error)?
                         }
-                        Err(error) => return Err(string_error(error.to_string())),
+                        Err(error) if error.reason() == crate::daemon_runtime::AgentBridgeFailureReason::TransportFailure => {
+                            let recovered = bridge_authority.as_ref().filter(|authority| authority.local_continuation_eligible)
+                                .and_then(|authority| crate::workspace_update_receipt::inspect(
+                                    &legacy_repo_path, &session_id, &operation_id, Some((&request, &authority.identity)),
+                                ).ok()).and_then(|status| status.receipt);
+                            match recovered {
+                                Some(receipt) => receipt,
+                                None => return Err(string_error(format!(
+                                    "{error}; operation_id={operation_id}, outcome=unconfirmed; inspect JSON operation workspace.receipt with this operation_id; do not resend the update"
+                                ))),
+                            }
+                        }
+                        Err(error) => return Err(string_error(format!("{error}; operation_id={operation_id}"))),
                     };
                 out.push_str(&format!(
                     "workspace updated: {}\n",

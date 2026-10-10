@@ -52,6 +52,7 @@ function normalizedLoopInterval(value) {
 function emptyStatus() {
   return {
     available: false,
+    paused: false,
     autoStart: true,
     configuredAgentId: "",
     configuredModel: "",
@@ -69,6 +70,7 @@ function normalizeStatus(status) {
   const options = Array.isArray(status?.agent_options) ? status.agent_options : [];
   return {
     available: status?.available !== false,
+    paused: Boolean(status?.paused),
     autoStart: status?.auto_start !== false,
     configuredAgentId: String(status?.configured_agent_id ?? ""),
     configuredModel: String(status?.configured_model ?? ""),
@@ -146,6 +148,11 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
       : state.isRunning && runningName
         ? `Running as: ${runningProfile.join(" · ")}`
         : "Not running";
+    view.autonomyStatus.textContent = !state.available
+      ? "Autonomous loop unavailable"
+      : state.paused ? "Autonomous loop paused" : "Autonomous loop active";
+    view.pauseToggle.textContent = state.paused ? "Resume" : "Pause";
+    view.pauseToggle.setAttribute("aria-pressed", String(state.paused));
 
     view.pendingChip.hidden = !(
       state.isRunning
@@ -193,6 +200,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
       view.effortSelect,
       view.intervalInput,
       view.autoStartInput,
+      view.pauseToggle,
       view.restart,
     ]) {
       control.disabled = !state.available;
@@ -277,6 +285,18 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     runningLine.dataset.role = "pm-running-as";
     section.appendChild(runningLine);
 
+    const autonomyStatus = el("p", "settings-status");
+    autonomyStatus.dataset.role = "pm-autonomy-status";
+    autonomyStatus.setAttribute("role", "status");
+    autonomyStatus.setAttribute("aria-live", "polite");
+    section.appendChild(autonomyStatus);
+    const pauseToggle = el("button", "wizard-button");
+    pauseToggle.type = "button";
+    pauseToggle.dataset.role = "pm-pause-toggle";
+    section.appendChild(pauseToggle);
+    section.appendChild(el("p", "settings-help",
+      "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged."));
+
     const pendingChip = el(
       "p",
       "settings-status",
@@ -355,11 +375,13 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     const view = {
       agentSelect,
       autoStartInput,
+      autonomyStatus,
       effortSelect,
       intervalError,
       intervalInput,
       modelInput,
       pendingChip,
+      pauseToggle,
       restart,
       runningLine,
       startBlockLine,
@@ -375,6 +397,10 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
         kind: "set_pm_auto_start",
         enabled: Boolean(autoStartInput.checked),
       });
+    });
+    pauseToggle.addEventListener("click", () => {
+      if (!state.available) return;
+      dispatch({ kind: "set_pm_paused", paused: !state.paused });
     });
     restart.addEventListener("click", () => {
       if (!state.available) return;
