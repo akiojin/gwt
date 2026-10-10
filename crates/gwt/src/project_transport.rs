@@ -32,7 +32,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{atomic::AtomicU64, Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -414,7 +414,38 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
     }
 }
 
-/// One backend event serialized once and shared across every client queue.
+type DeferredOutboundPayload = LazyLock<Arc<str>, Box<dyn FnOnce() -> Arc<str> + Send>>;
+
+#[derive(Clone)]
+enum SharedOutboundPayload {
+    Serialized(Arc<str>),
+    Deferred(Arc<DeferredOutboundPayload>),
+}
+
+impl SharedOutboundPayload {
+    fn serialized(&self) -> &Arc<str> {
+        match self {
+            Self::Serialized(payload) => payload,
+            Self::Deferred(payload) => LazyLock::force(payload),
+        }
+    }
+}
+
+impl std::ops::Deref for SharedOutboundPayload {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.serialized().as_ref()
+    }
+}
+
+impl AsRef<str> for SharedOutboundPayload {
+    fn as_ref(&self) -> &str {
+        self.serialized().as_ref()
+    }
+}
+
+/// One backend event encoded once and shared across every client queue.
 ///
 /// `coalesce_key` and `repair_pane_id` are deliberately separate identities.
 /// `coalesce_key` collapses successive snapshots of the same logical target to
@@ -425,7 +456,7 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
 pub struct PreparedOutbound {
-    payload: Arc<str>,
+    payload: SharedOutboundPayload,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
@@ -440,6 +471,33 @@ pub struct PreparedOutbound {
 }
 
 const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
+
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_WORK_PATCH_SERIALIZATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER:
+        std::cell::RefCell<Option<Arc<dyn Fn() + Send + Sync>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_active_work_patch_serialization(event: &BackendEvent) {
+    if matches!(event, BackendEvent::ActiveWorkProjectionPatch { .. }) {
+        ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let observer =
+            ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER.with(|observer| observer.borrow().clone());
+        if let Some(observer) = observer {
+            observer();
+        }
+    }
+}
+
+fn serialize_backend_event(event: &BackendEvent) -> Arc<str> {
+    #[cfg(test)]
+    observe_active_work_patch_serialization(event);
+    Arc::from(serde_json::to_string(event).expect("backend event json"))
+}
 
 fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
     let kind = event.event_kind();
@@ -457,7 +515,7 @@ fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
         _ => (None, None, None),
     };
     PreparedOutbound {
-        payload: Arc::from(serde_json::to_string(event).expect("backend event json")),
+        payload: SharedOutboundPayload::Serialized(serialize_backend_event(event)),
         kind,
         coalesce_key,
         repair_pane_id,
@@ -519,12 +577,45 @@ pub fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
             );
         }
     }
-    prepared.payload = Arc::from(serde_json::to_string(&payload).expect("backend event json"));
+    prepared.payload = SharedOutboundPayload::Serialized(Arc::from(
+        serde_json::to_string(&payload).expect("backend event json"),
+    ));
     prepared
 }
 
+fn prepare_owned_outbound(outbound: OutboundEvent) -> PreparedOutbound {
+    if !matches!(
+        outbound.event,
+        BackendEvent::ActiveWorkProjectionPatch { .. }
+    ) || outbound.knowledge_wire_metadata.is_some()
+    {
+        return prepare_outbound_event(&outbound);
+    }
+    crate::error_report::record_backend_event_with_origin(
+        &outbound.event,
+        outbound.error_origin.as_ref(),
+    );
+    let kind = outbound.event.event_kind();
+    let stream_seq = outbound.terminal_stream_seq;
+    let event = outbound.event;
+    // Issue #4411: keep this exact patch at its existing FIFO position,
+    // but encode it once on the sender instead of the GUI producer. The
+    // consumed closure releases its structured snapshot after encoding.
+    PreparedOutbound {
+        payload: SharedOutboundPayload::Deferred(Arc::new(LazyLock::new(Box::new(move || {
+            serialize_backend_event(&event)
+        })))),
+        kind,
+        coalesce_key: None,
+        repair_pane_id: None,
+        class: queue_class_for_kind(kind),
+        terminal_pane: None,
+        stream_seq,
+    }
+}
+
 struct QueuedOutbound {
-    payload: Arc<str>,
+    payload: SharedOutboundPayload,
     kind: &'static str,
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
@@ -760,6 +851,9 @@ impl ClientQueue {
         } else {
             Vec::new()
         };
+        // Materialization can encode a large patch or wait for another
+        // client's shared encoding. Never hold the producer's queue mutex.
+        drop(state);
         Some(DrainStep::Message {
             payload: entry.payload.to_string(),
             repair_panes,
@@ -1035,9 +1129,10 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
-            let prepared = prepare_outbound_event(&outbound);
+            let target = outbound.target.clone();
+            let prepared = prepare_owned_outbound(outbound);
             for (client_id, queue, receives_broadcasts, scope) in &snapshot {
-                if target_selects(&outbound.target, client_id, *receives_broadcasts, scope)
+                if target_selects(&target, client_id, *receives_broadcasts, scope)
                     && queue.enqueue(&prepared)
                 {
                     dead_clients.push(client_id.clone());
@@ -1092,7 +1187,7 @@ impl ClientHub {
         };
         let kind = "active_work_projection";
         let prepared = PreparedOutbound {
-            payload,
+            payload: SharedOutboundPayload::Serialized(payload),
             kind,
             coalesce_key: None,
             repair_pane_id: None,
@@ -2595,7 +2690,7 @@ impl ClientQueue {
     }
     pub fn enqueue_workspace_for_test(&self, payload: Arc<str>) -> bool {
         self.enqueue(&PreparedOutbound {
-            payload,
+            payload: SharedOutboundPayload::Serialized(payload),
             kind: "workspace_state",
             coalesce_key: None,
             repair_pane_id: None,
@@ -3348,11 +3443,84 @@ mod tests {
     }
 
     #[test]
+    fn client_hub_defers_active_work_patch_encoding_and_preserves_batch_order() {
+        let hub = ClientHub::default();
+        let first = hub.register_scoped("first".into(), ClientScope::Project(project_a()));
+        let second = hub.register_scoped("second".into(), ClientScope::Project(project_a()));
+        let projection = serde_json::from_value(serde_json::json!({
+            "id": "captured-projection", "title": "Captured Work patch",
+            "status_category": "idle", "status_text": "Paused",
+            "active_agents": 0, "blocked_agents": 0,
+            "board_refs": [], "journal_entries": [], "works": [], "agents": []
+        }))
+        .expect("projection fixture");
+        let events = vec![
+            BackendEvent::ActiveWorkProjectionPatch {
+                projection: Box::new(projection),
+            },
+            BackendEvent::WindowState {
+                window_id: "pane".into(),
+                state: crate::WindowProcessStatus::Stopped,
+            },
+            BackendEvent::TerminalStatus {
+                id: "pane".into(),
+                status: crate::WindowProcessStatus::Stopped,
+                detail: None,
+            },
+        ];
+        let expected: Vec<_> = events
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("expected JSON"))
+            .collect();
+        ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(0));
+        hub.dispatch(
+            events
+                .into_iter()
+                .map(|event| OutboundEvent::project(project_a(), event))
+                .collect(),
+        );
+        assert_eq!(
+            ACTIVE_WORK_PATCH_SERIALIZATIONS.with(std::cell::Cell::get),
+            0,
+            "GUI producer must enqueue the patch without encoding it"
+        );
+
+        for (queue, encodings) in [(first, 1), (second, 0)] {
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(0));
+                let observed_queue = queue.clone();
+                ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER.with(|observer| {
+                    *observer.borrow_mut() = Some(Arc::new(move || {
+                        assert!(
+                            observed_queue.state.try_lock().is_ok(),
+                            "encoding must happen after releasing the client queue mutex"
+                        );
+                    }));
+                });
+                let (payloads, repairs) = drain_all(&queue);
+                assert_eq!(
+                    payloads, expected,
+                    "patch and status wire order is unchanged"
+                );
+                assert!(repairs.is_empty());
+                assert_eq!(
+                    ACTIVE_WORK_PATCH_SERIALIZATIONS.with(std::cell::Cell::get),
+                    encodings,
+                    "both clients must share one consumer encoding"
+                );
+            })
+            .join()
+            .expect("consumer assertions");
+        }
+    }
+
+    #[test]
     fn prepared_active_work_enqueue_reuses_the_background_payload_allocation() {
         let queue = ClientQueue::default();
         let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
         let prepared = PreparedOutbound {
-            payload: payload.clone(),
+            payload: SharedOutboundPayload::Serialized(payload.clone()),
             kind: "active_work_projection",
             coalesce_key: None,
             repair_pane_id: None,
@@ -3369,7 +3537,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let queued = state.entries.front().expect("queued Active Work payload");
         assert!(
-            Arc::ptr_eq(&queued.payload, &payload),
+            Arc::ptr_eq(queued.payload.serialized(), &payload),
             "tao-side enqueue must retain the background Arc instead of cloning 4 MB"
         );
     }

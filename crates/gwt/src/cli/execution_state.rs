@@ -12203,12 +12203,16 @@ pub fn session_launch_route(session_id: Option<&str>) -> Option<gwt_agent::Launc
         .filter(|value| !value.is_empty())?;
     let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
     let session = gwt_agent::Session::load(&path).ok()?;
+    Some(session_launch_route_from_session(&session))
+}
+
+fn session_launch_route_from_session(session: &gwt_agent::Session) -> gwt_agent::LaunchRoute {
     if session.launch_route != gwt_agent::LaunchRoute::Autonomous
-        && launched_by_issue_monitor(&session)
+        && launched_by_issue_monitor(session)
     {
-        return Some(gwt_agent::LaunchRoute::Autonomous);
+        return gwt_agent::LaunchRoute::Autonomous;
     }
-    Some(session.launch_route)
+    session.launch_route
 }
 
 /// Whether the Issue Monitor composed this session's launch prompt.
@@ -12284,7 +12288,12 @@ fn autonomous_verification_block_refusal(
 /// Collect the current operation-local diagnosis without mutating trusted state.
 #[must_use]
 pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosisSnapshot {
-    diagnose_with_mode(worktree, session_id, ExecutionDiagnosisMode::OperationLocal)
+    diagnose_with_mode(
+        worktree,
+        session_id,
+        ExecutionDiagnosisMode::OperationLocal,
+        None,
+    )
 }
 
 /// Read an exact Worktree's durable diagnosis for GUI projection without
@@ -12295,13 +12304,45 @@ pub fn diagnose_for_projection(
     worktree: &Path,
     session_id: Option<&str>,
 ) -> ExecutionDiagnosisSnapshot {
-    diagnose_with_mode(worktree, session_id, ExecutionDiagnosisMode::Projection)
+    let session = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|id| {
+            let path = gwt_core::paths::gwt_sessions_dir().join(format!("{id}.toml"));
+            gwt_agent::Session::load(&path).ok()
+        });
+    diagnose_with_mode(
+        worktree,
+        session_id,
+        ExecutionDiagnosisMode::Projection,
+        session.as_ref(),
+    )
+}
+
+/// Reuse the matching Session captured by a projection's shared ledger read.
+/// Missing prepared Sessions do not fall back to a per-row disk read.
+#[doc(hidden)]
+#[must_use]
+pub fn diagnose_for_projection_with_session(
+    worktree: &Path,
+    session_id: Option<&str>,
+    session: Option<&gwt_agent::Session>,
+) -> ExecutionDiagnosisSnapshot {
+    let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
+    let session = session.filter(|session| Some(session.id.as_str()) == session_id);
+    diagnose_with_mode(
+        worktree,
+        session_id,
+        ExecutionDiagnosisMode::Projection,
+        session,
+    )
 }
 
 fn diagnose_with_mode(
     invocation_scope: &Path,
     session_id: Option<&str>,
     mode: ExecutionDiagnosisMode,
+    projection_session: Option<&gwt_agent::Session>,
 ) -> ExecutionDiagnosisSnapshot {
     let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
     let recovery_context = (mode == ExecutionDiagnosisMode::OperationLocal)
@@ -12358,7 +12399,13 @@ fn diagnose_with_mode(
         // The route belongs to the session, not to the record, so it is
         // reported even when this worktree carries no Execution Control
         // Record at all.
-        launch_route: session_launch_route(session_id).map(|route| route.as_str().to_string()),
+        launch_route: match mode {
+            ExecutionDiagnosisMode::OperationLocal => session_launch_route(session_id),
+            ExecutionDiagnosisMode::Projection => {
+                projection_session.map(session_launch_route_from_session)
+            }
+        }
+        .map(|route| route.as_str().to_string()),
         permission_decision: None,
         // Issue #4544 AC-4: reported alongside the route and for the same
         // reason — a permission-readiness block is a fact about the launch,
@@ -12536,12 +12583,18 @@ fn diagnose_with_mode(
                 }
                 ExecutionControlStatus::Active => match session_id {
                     Some(session_id) => {
-                        match crate::cli::verification_record::
-                            snapshot_current_generation_caller_binding(
+                        let binding = match mode {
+                            ExecutionDiagnosisMode::OperationLocal => crate::cli::verification_record::snapshot_current_generation_caller_binding(
                                 worktree,
                                 Some(session_id),
-                            )
-                        {
+                            ),
+                            ExecutionDiagnosisMode::Projection => crate::cli::verification_record::snapshot_current_generation_caller_binding_for_projection(
+                                worktree,
+                                Some(session_id),
+                                projection_session,
+                            ),
+                        };
+                        match binding {
                             Ok(binding) => {
                                 snapshot.binding_state = ExecutionBindingState::Bound;
                                 snapshot.binding_cause = "current_generation".to_string();
@@ -25157,6 +25210,56 @@ exit 1
                 Some(gwt_agent::LaunchRoute::Manual)
             );
             assert_eq!(session_launch_route(Some("session-4510-absent")), None);
+        }
+
+        #[test]
+        fn projection_diagnosis_uses_only_the_matching_prepared_session_for_launch_route() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("isolated Session ledger");
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let repo = tempfile::tempdir().expect("worktree fixture");
+            let mut session = gwt_agent::Session::new(
+                repo.path(),
+                "work/session-snapshot",
+                gwt_agent::AgentId::Codex,
+            );
+            session.id = "session-projection-route".to_string();
+            session.launch_route = gwt_agent::LaunchRoute::Manual;
+            session
+                .save(&gwt_core::paths::gwt_sessions_dir())
+                .expect("save attended disk Session");
+            let session_id = Some(" session-projection-route ");
+            assert_eq!(
+                diagnose_for_projection(repo.path(), session_id)
+                    .launch_route
+                    .as_deref(),
+                Some("manual")
+            );
+            session.launch_args = vec![crate::issue_monitor::issue_monitor_launch_prompt(
+                crate::LinkedIssueKind::Issue,
+                4411,
+            )];
+            assert_eq!(
+                diagnose_for_projection_with_session(repo.path(), session_id, Some(&session))
+                    .launch_route
+                    .as_deref(),
+                Some("autonomous"),
+                "prepared Monitor provenance must outrank its Manual stamp"
+            );
+            assert_eq!(
+                diagnose_for_projection_with_session(repo.path(), session_id, None).launch_route,
+                None,
+                "prepared absence must not reread the attended disk Session"
+            );
+            session.id = "session-different-source".to_string();
+            assert_eq!(
+                diagnose_for_projection_with_session(repo.path(), session_id, Some(&session))
+                    .launch_route,
+                None,
+                "a different prepared Session cannot supply this caller's route"
+            );
         }
 
         /// Issue #4217 AC-2: the route reaches the caller from the durable

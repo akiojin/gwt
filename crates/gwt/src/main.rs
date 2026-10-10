@@ -80,9 +80,9 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
     AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, ContinueWorkReadinessWatch,
-    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
-    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
+    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, PreparedRuntimeHookAgentFailure,
+    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget,
+    ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 #[cfg(test)]
@@ -568,6 +568,7 @@ struct EventLoopDispatchTimer {
     label: DispatchLabel,
     started: std::time::Instant,
     startup_queued: bool,
+    runtime_hook_stages: Option<(u64, u64, usize)>,
 }
 
 impl EventLoopDispatchTimer {
@@ -576,6 +577,7 @@ impl EventLoopDispatchTimer {
             label: event_loop_dispatch_label(event),
             started: std::time::Instant::now(),
             startup_queued: false,
+            runtime_hook_stages: None,
         }
     }
 }
@@ -592,6 +594,22 @@ impl Drop for EventLoopDispatchTimer {
         // Issue #4520 AC-2: a startup dispatch past 100 ms reaches perf.startup.
         gwt::perf::startup::event_loop_stall(label, elapsed.as_secs_f64() * 1_000.0);
         let elapsed_ms = elapsed.as_millis() as u64;
+        if let Some((handler_return_ms, fanout_ms, outbound_count)) =
+            self.runtime_hook_stages.filter(|_| elapsed_ms >= 100)
+        {
+            // The outer timer also includes the watchdog guard's teardown.
+            // Profile after capturing elapsed, leaving the budget unchanged.
+            tracing::debug!(
+                target: "gwt.frontend.timing",
+                marker = "issue_4411_runtime_hook_envelope_profile",
+                dispatch_ms = elapsed_ms,
+                handler_return_ms,
+                fanout_ms,
+                outbound_count,
+                unattributed_ms = elapsed_ms.saturating_sub(handler_return_ms + fanout_ms),
+                "RuntimeHook handler and client fan-out profile"
+            );
+        }
         if let Some(message) = gui_event_loop_stall_warning(label, elapsed_ms) {
             tracing::warn!(
                 target: "gwt.frontend.timing",
@@ -1980,6 +1998,7 @@ enum UserEvent {
         project_root: PathBuf,
     },
     ActiveWorkProjectionPrepared(Box<ActiveWorkProjectionPrepared>),
+    RuntimeHookAgentFailurePrepared(Box<PreparedRuntimeHookAgentFailure>),
     ProjectDispatch {
         context: app_runtime::ProjectContext,
         events: Vec<OutboundEvent>,
@@ -4440,6 +4459,7 @@ mod tests {
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+            runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
             issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
@@ -10975,6 +10995,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkspaceStateLoadFailed { project_root, error }) => {
                 clients.dispatch(app.handle_workspace_state_load_failed(&project_root, error));
             }
+            Event::UserEvent(UserEvent::RuntimeHookAgentFailurePrepared(prepared)) => {
+                clients.dispatch(app.handle_runtime_hook_agent_failure_prepared(*prepared));
+            }
             Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
                 let commit = app.handle_active_work_projection_prepared(*prepared);
                 let mut dispatch_ms = 0;
@@ -11049,8 +11072,17 @@ fn main() -> std::io::Result<()> {
                 ));
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
+                let handler_started = std::time::Instant::now();
                 let events = app.handle_runtime_hook_event(event);
+                let handler_return_ms = handler_started.elapsed().as_millis() as u64;
+                let outbound_count = events.len();
+                let fanout_started = std::time::Instant::now();
                 clients.dispatch(events);
+                dispatch_timer.runtime_hook_stages = Some((
+                    handler_return_ms,
+                    fanout_started.elapsed().as_millis() as u64,
+                    outbound_count,
+                ));
             }
             Event::UserEvent(UserEvent::DaemonRuntimeHook(event)) => {
                 let events = app.handle_daemon_runtime_hook_event(event);

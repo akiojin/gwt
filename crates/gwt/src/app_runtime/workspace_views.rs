@@ -1534,6 +1534,7 @@ pub(crate) fn workspace_work_item_view_from_item(
                 workspace_execution_container_view_from_ref(
                     container,
                     item.agents.first().map(|agent| agent.session_id.as_str()),
+                    session_index,
                 )
             })
             .collect(),
@@ -1637,6 +1638,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
 fn workspace_execution_container_view_from_ref(
     container: &gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
     session_id: Option<&str>,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceExecutionContainerView {
     gwt::WorkspaceExecutionContainerView {
         branch: container.branch.clone(),
@@ -1648,9 +1650,12 @@ fn workspace_execution_container_view_from_ref(
         pr_url: container.pr_url.clone(),
         pr_state: container.pr_state.clone(),
         diagnosis: container.worktree_path.as_deref().map(|worktree| {
-            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose_for_projection(
-                worktree, session_id,
-            ))
+            let session = session_id.and_then(|id| session_index.get(id.trim()).copied());
+            workspace_execution_diagnosis_view(
+                gwt::cli::execution_state::diagnose_for_projection_with_session(
+                    worktree, session_id, session,
+                ),
+            )
         }),
     }
 }
@@ -2427,15 +2432,16 @@ pub(super) fn attach_registry_sessions_to_active_works(
 pub(super) fn assign_and_merge_workspace_groups(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     project_root: &Path,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) {
-    assign_and_merge_workspace_groups_impl(active_works, project_root, true);
+    assign_and_merge_workspace_groups_impl(active_works, project_root, Some(session_index));
 }
 
 fn assign_and_merge_workspace_groups_cache_only(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     project_root: &Path,
 ) {
-    assign_and_merge_workspace_groups_impl(active_works, project_root, false);
+    assign_and_merge_workspace_groups_impl(active_works, project_root, None);
 }
 
 /// Rows mix second-precision `...Z` and fractional `...+00:00` stamps, so
@@ -2451,11 +2457,11 @@ fn updated_at_is_newer(candidate: &str, current: &str) -> bool {
 fn assign_and_merge_workspace_groups_impl(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     project_root: &Path,
-    include_execution_diagnosis: bool,
+    session_index: Option<&std::collections::HashMap<&str, &gwt_agent::Session>>,
 ) {
     for work in active_works.iter_mut() {
         if work.works.is_empty() {
-            let child = active_workspace_child_work(work, include_execution_diagnosis);
+            let child = active_workspace_child_work(work, session_index);
             work.works.push(child);
         }
         let branch = work
@@ -2558,7 +2564,7 @@ fn assign_and_merge_workspace_groups_impl(
 
 fn active_workspace_child_work(
     work: &gwt::ActiveWorkItemView,
-    include_execution_diagnosis: bool,
+    session_index: Option<&std::collections::HashMap<&str, &gwt_agent::Session>>,
 ) -> gwt::ActiveWorkspaceWorkView {
     let lifecycle_state = work.lifecycle_state.clone();
     let manual_close_allowed = lifecycle_state == "paused" && work.active_agents == 0;
@@ -2577,18 +2583,19 @@ fn active_workspace_child_work(
         manual_close_allowed,
         close_blocked_reason,
         agents: work.agents.clone(),
-        execution_diagnosis: if include_execution_diagnosis {
+        execution_diagnosis: session_index.and_then(|session_index| {
             work.worktree_path.as_deref().map(|worktree| {
+                let session_id = work.agents.first().map(|agent| agent.session_id.as_str());
+                let session = session_id.and_then(|id| session_index.get(id.trim()).copied());
                 workspace_execution_diagnosis_view(
-                    gwt::cli::execution_state::diagnose_for_projection(
+                    gwt::cli::execution_state::diagnose_for_projection_with_session(
                         Path::new(worktree),
-                        work.agents.first().map(|agent| agent.session_id.as_str()),
+                        session_id,
+                        session,
                     ),
                 )
             })
-        } else {
-            None
-        },
+        }),
         updated_at: work.updated_at.clone(),
     }
 }
@@ -3041,7 +3048,11 @@ fn prepare_active_work_projection(
             &sessions,
             &hook_failures,
         );
-        assign_and_merge_workspace_groups(&mut view.active_works, &input.project_root);
+        assign_and_merge_workspace_groups(
+            &mut view.active_works,
+            &input.project_root,
+            &session_index,
+        );
         attach_registry_sessions_to_active_works(
             &mut view.active_works,
             &agent_sessions,
@@ -4853,7 +4864,11 @@ fn build_active_work_projection(
         // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
         // branch into one Workspace row before the ledger attach, so the
         // attach / identity-collapse / cap run once per Workspace.
-        assign_and_merge_workspace_groups(&mut view.active_works, &job.project_root);
+        assign_and_merge_workspace_groups(
+            &mut view.active_works,
+            &job.project_root,
+            &session_index,
+        );
         // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
         // ledger to each Workspace (branch) row so sessions surface even
         // when works.json never recorded an agent for the branch.
