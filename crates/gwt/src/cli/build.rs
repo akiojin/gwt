@@ -2502,6 +2502,17 @@ format_version: Some(1),
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
 
         let abort_fixture = BoundTerminalFixture::new();
+        let mut projection =
+            gwt_core::workspace_projection::load_workspace_projection(&abort_fixture.git.repo)
+                .expect("load abort fixture identity")
+                .expect("abort fixture identity exists");
+        projection.agents[0].title_summary = Some("blocked build abort authority".to_string());
+        projection.agents[0].current_focus = Some("abort the matching blocked build".to_string());
+        gwt_core::workspace_projection::save_workspace_projection(
+            &abort_fixture.git.repo,
+            &projection,
+        )
+        .expect("open abort fixture identity gate");
         let _session = ScopedEnvVar::set(
             gwt_agent::GWT_SESSION_ID_ENV,
             abort_fixture.session.id.clone(),

@@ -9351,7 +9351,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_binding_terminal_generation_cannot_authorize_probe_or_work_mutation() {
+    fn execution_binding_terminal_generation_cannot_authorize_probe_or_done() {
         for (terminal_label, completed) in [("completed", true), ("blocked", false)] {
             with_strict_target_fixture(|repo, session| {
                 let (mut session, mut terminal_binding) =
@@ -9417,14 +9417,27 @@ mod tests {
                 .expect_err("terminal generation must not authorize a Host probe");
                 assert_execution_binding_denial(&probe_error);
 
+                let mut update_request = bound_workspace_update_request(&session);
+                if !completed {
+                    update_request.intent.status_category =
+                        Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+                }
                 let update_error = apply_bound_authenticated_workspace_update(
                     repo,
                     &session.id,
                     &terminal_binding,
-                    bound_workspace_update_request(&session),
+                    update_request,
                 )
-                .expect_err("terminal generation must not authorize workspace mutation");
-                assert_execution_binding_denial(&update_error);
+                .expect_err("terminal generation must not authorize Done");
+                if completed {
+                    assert_execution_binding_denial(&update_error);
+                } else {
+                    assert_eq!(
+                        update_error.code,
+                        AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+                    );
+                    assert!(update_error.message.contains("execution.reopen"));
+                }
 
                 let mut terminalization_request = bound_work_terminalization_request(&session);
                 if !completed {

@@ -25420,8 +25420,8 @@ mod tests {
                     display_name: session.agent_id.display_name().to_string(),
                     status_category:
                         gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
-                    current_focus: None,
-                    title_summary: None,
+                    current_focus: Some("abort the matching blocked build".to_string()),
+                    title_summary: Some("blocked build abort authority".to_string()),
                     worktree_path: Some(worktree.clone()),
                     branch: Some(session.branch.clone()),
                     last_board_entry_id: None,
