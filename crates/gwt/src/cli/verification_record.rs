@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::delivery_paths::{classify_path, DeliveryPath, BOOKKEEPING_GIT_EXCLUDE};
+use super::verification_lease::admission::VerificationError;
 use super::CliEnv;
 use crate::cli::execution_state;
 
@@ -4280,6 +4281,7 @@ pub fn run_verification(
         RunOptions::default(),
         || {},
     )
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Default)]
@@ -4304,7 +4306,8 @@ struct RunOptions<'a> {
 type AdmitCommand<'a> = dyn FnMut(
         &str,
         &VerificationHost,
-    ) -> Result<Option<crate::cli::verification_lease::admission::Admission>, String>
+    )
+        -> Result<Option<crate::cli::verification_lease::admission::Admission>, VerificationError>
     + 'a;
 
 fn run_verification_for_caller(
@@ -4314,14 +4317,14 @@ fn run_verification_for_caller(
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
     options: RunOptions<'_>,
-) -> Result<(VerificationRunRecord, String), String> {
+) -> Result<(VerificationRunRecord, String), VerificationError> {
     // Issue #4544 AC-3: canonical verification is the evidence every later
     // gate settles on. A session that stopped at a provider permission prompt
     // did not run unattended, so a passing record from it would assert
     // something nobody observed. Refused before the commands run rather than
     // after, because the run itself costs the host lease.
     if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(worktree) {
-        return Err(format!("verification refused: {reason}"));
+        return Err(format!("verification refused: {reason}").into());
     }
     run_verification_inner(
         worktree,
@@ -4378,7 +4381,7 @@ fn run_verification_inner<F>(
     prepared_quarantines: &[PreparedQuarantineRequest],
     mut options: RunOptions<'_>,
     after_commands: F,
-) -> Result<(VerificationRunRecord, String), String>
+) -> Result<(VerificationRunRecord, String), VerificationError>
 where
     F: FnOnce(),
 {
@@ -4387,7 +4390,9 @@ where
         .iter()
         .any(|command| !commands.contains(command))
     {
-        return Err("headed_e2e_commands must name exact entries in commands".to_string());
+        return Err("headed_e2e_commands must name exact entries in commands"
+            .to_string()
+            .into());
     }
     // Keep the operational artifact restore as the final matrix occurrence.
     let mut effective_commands = commands.to_vec();
@@ -4520,7 +4525,9 @@ where
             .is_some_and(is_canonical_trivial_plan)
     {
         return Err(
-            "verify.run with no commands requires a canonical trivial derived plan".to_string(),
+            "verify.run with no commands requires a canonical trivial derived plan"
+                .to_string()
+                .into(),
         );
     }
     let mut continuation = request;
@@ -4720,8 +4727,8 @@ where
         } else if let Some(admit) = options.admit_command.as_mut() {
             match admit(command, &options.host) {
                 Ok(admission) => admission,
-                Err(error) => {
-                    if error.contains("verify: deferred") {
+                Err(mut error) => {
+                    if let VerificationError::Deferred(deferral) = &mut error {
                         running.planned_missing = running
                             .continuation
                             .as_ref()
@@ -4729,7 +4736,7 @@ where
                             .unwrap_or_else(|| commands[index..].to_vec());
                         let lifecycle = running.lifecycle.as_mut().expect("unfinished run");
                         lifecycle.status = interruption::RunStatus::Deferred;
-                        lifecycle.reason = Some(error.clone());
+                        lifecycle.reason = Some(deferral.to_string());
                         lifecycle.current_command = Some(command.clone());
                         interruption::checkpoint(worktree, &running).map_err(|err| {
                             format!("failed to save deferred verification: {err}")
@@ -4750,7 +4757,8 @@ where
                                     .push_str(&format!("{}: {}\n", stream.stream, stream.path));
                             }
                         }
-                        return Err(format!("{error}{references}"));
+                        deferral.output_suffix.push_str(&references);
+                        return Err(error);
                     }
                     return Err(error);
                 }
@@ -6341,10 +6349,56 @@ pub(super) fn autonomous_confirmation_refusal(
     ))
 }
 
+pub(super) struct RunResponse {
+    pub status: &'static str,
+    pub data: serde_json::Value,
+}
+
+impl RunResponse {
+    fn for_record(record: &VerificationRunRecord, accepted: bool) -> Self {
+        let infrastructure_failure = record.commands.iter().find(|result| {
+            result.exit_code == -1
+                && result.terminated_by_signal.is_none()
+                && (result
+                    .output_streams
+                    .iter()
+                    .any(|stream| stream.stream == "spawn error")
+                    || (result.nextest.is_none()
+                        && result
+                            .output_tail
+                            .contains("nextest JUnit evidence missing or invalid:")))
+        });
+        let status = if accepted {
+            "passed"
+        } else if infrastructure_failure.is_some() {
+            "error"
+        } else {
+            "failed"
+        };
+        let mut data = serde_json::json!({"record_id": record.record_id});
+        if let Some(failure) = infrastructure_failure.filter(|_| !accepted) {
+            data["cause"] = failure.output_tail.clone().into();
+            data["recovery"] = serde_json::json!(
+                "Inspect verify.status and the reported execution/transport cause, repair it, then retry the identical full verify.run matrix."
+            );
+        }
+        Self { status, data }
+    }
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     command: VerifyCommand,
     out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    run_with_response(env, command, out, &mut None)
+}
+
+pub(super) fn run_with_response<E: CliEnv>(
+    env: &mut E,
+    command: VerifyCommand,
+    out: &mut String,
+    response: &mut Option<RunResponse>,
 ) -> Result<i32, SpecOpsError> {
     let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
@@ -6684,7 +6738,6 @@ pub(super) fn run<E: CliEnv>(
                         &heavy_attempt,
                     )
                     .map(Some)
-                    .map_err(|error| error.to_string())
                 }
             };
             let run = run_verification_for_caller(
@@ -6713,11 +6766,27 @@ pub(super) fn run<E: CliEnv>(
                     ..RunOptions::default()
                 },
             );
+            let run_error = run.as_ref().err().map(ToString::to_string);
             attempt
-                .returned(run.as_ref().err().map(String::as_str), &coordinator)
+                .returned(run_error.as_deref(), &coordinator)
                 .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
-            let (record, transcript) =
-                run.map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            let (record, transcript) = match run {
+                Ok(result) => result,
+                Err(VerificationError::Deferred(deferral)) => {
+                    attempt.ensure_active().map_err(|error| {
+                        SpecOpsError::from(ApiError::Unexpected(error.to_string()))
+                    })?;
+                    out.push_str(&format!("{deferral}\n"));
+                    *response = Some(RunResponse {
+                        status: "deferred",
+                        data: serde_json::to_value(deferral).expect("deferral must serialize"),
+                    });
+                    return Ok(0);
+                }
+                Err(VerificationError::Failed(error)) => {
+                    return Err(SpecOpsError::from(ApiError::Unexpected(error)));
+                }
+            };
             // T-131 core: surface the coverage map of the plan this run
             // covered, so the rationale travels with the evidence output.
             if record.plan_covered {
@@ -6752,6 +6821,7 @@ pub(super) fn run<E: CliEnv>(
             }
             let command_outcome_accepted =
                 record.all_passed || evidence == EvidenceStatus::FreshWithQuarantine;
+            *response = Some(RunResponse::for_record(&record, command_outcome_accepted));
             out.push_str(&RunOutcomeCounts::of(&record.commands).summary());
             out.push_str(&format!(
                 "verify: {status} — record {id} ({count} command(s), owner {owner})\n",
@@ -6776,6 +6846,92 @@ pub(super) fn run<E: CliEnv>(
 pub(crate) mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    #[test]
+    fn verify_transport_failure_returns_cause_and_recovery() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            gwt_core::daemon::RuntimeScope::from_project_root(
+                worktree.path(),
+                gwt_core::daemon::RuntimeTarget::Host,
+            )
+            .unwrap(),
+            std::process::id(),
+            if cfg!(windows) {
+                format!(r"\\.\pipe\gwt-5085-missing-{}", uuid::Uuid::new_v4())
+            } else {
+                worktree
+                    .path()
+                    .join("missing.sock")
+                    .to_string_lossy()
+                    .into_owned()
+            },
+            "fixture-token".into(),
+            "fixture".into(),
+        );
+        let (record, _) = run_verification_inner(
+            worktree.path(),
+            "session-5085-transport",
+            &["git --version".into()],
+            None,
+            &[],
+            RunOptions {
+                host: VerificationHost::Daemon(Box::new(endpoint)),
+                ..RunOptions::default()
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(record.commands[0].exit_code, -1);
+        let response = RunResponse::for_record(&record, false);
+        assert_eq!(response.status, "error");
+        assert!(response.data["cause"]
+            .as_str()
+            .unwrap()
+            .contains("failed to spawn"));
+        assert!(response.data["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("verify.run"));
+        assert!(!response
+            .data
+            .to_string()
+            .contains("unexpected server response"));
+    }
+
+    #[test]
+    fn nextest_evidence_collection_failure_is_an_execution_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut record, _) = run_verification(
+            directory.path(),
+            "session-5085-nextest",
+            &["git --version".into()],
+        )
+        .unwrap();
+        let diagnostic = "nextest JUnit evidence missing or invalid: report is absent";
+        record.commands[0].command = "cargo nextest run --profile gwt-verify".into();
+        record.commands[0].output_tail = diagnostic.into();
+        record.all_passed = false;
+        // Evidence collection replaces a successful exit with -1; it must
+        // not reclassify a raw nextest test failure that also lacks a report.
+        for (exit_code, expected_status) in [(-1, "error"), (100, "failed")] {
+            record.commands[0].exit_code = exit_code;
+            let response = RunResponse::for_record(&record, false);
+            assert_eq!(response.status, expected_status);
+            if expected_status == "error" {
+                assert_eq!(response.data["cause"], diagnostic);
+                assert!(response.data["recovery"]
+                    .as_str()
+                    .unwrap()
+                    .contains("verify.run"));
+            }
+        }
+    }
 
     // A deadlock must fail this regression rather than hang the test runner.
     // The deadline is only a watchdog; admission below uses Duration::ZERO.
@@ -9092,7 +9248,10 @@ mod tests {
             RunOptions::default(),
             || save(dir.path(), &replacement).unwrap(),
         );
-        assert!(result.unwrap_err().contains("replaced or interrupted"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("replaced or interrupted"));
         assert_eq!(
             load(dir.path()).unwrap().unwrap().record_id,
             replacement.record_id
@@ -10698,7 +10857,8 @@ mod tests {
                 &[],
                 RunOptions::default(),
             )
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
             assert!(
                 error.contains(diagnosis) && error.contains("verify.plan"),
                 "{error}"
@@ -10789,8 +10949,9 @@ mod tests {
                 user_verification_result: None,
             })
         };
-        let error = crate::cli::run_collect(&mut env, run()).unwrap_err();
-        assert!(error.to_string().contains("deferred"), "{error}");
+        let (code, output) = crate::cli::run_collect(&mut env, run()).unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(output.contains("deferred"), "{output}");
         let record = load(dir.path())
             .unwrap()
             .expect("partial results must survive deferral");
@@ -10879,7 +11040,15 @@ mod tests {
         .unwrap();
         let mut admit = |command: &str, _: &VerificationHost| {
             if command == commands[1] {
-                Err("verify: deferred — admission timeout".to_string())
+                Err(VerificationError::Deferred(Box::new(
+                    super::super::verification_lease::admission::Deferral::new(
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                        "admission timeout",
+                        None,
+                    ),
+                )))
             } else {
                 Ok(None)
             }
@@ -10895,7 +11064,8 @@ mod tests {
                 ..RunOptions::default()
             },
         )
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("deferred"));
         assert!(
             error.contains(&state_path(dir.path()).display().to_string()),
@@ -12107,7 +12277,8 @@ mod tests {
                 advance_generation_scoped_session_binding(&session_for_hook, current);
             },
         )
-        .expect_err("capability rotation before run commit must fail closed");
+        .expect_err("capability rotation before run commit must fail closed")
+        .to_string();
         assert!(
             error.contains("current verification authority"),
             "run commit denial must be actionable: {error}"

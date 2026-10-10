@@ -43,6 +43,88 @@ const NON_BLOCKING: Duration = Duration::from_millis(250);
 const LEASE_TTL: Duration = Duration::from_secs(DEFAULT_TTL_MINUTES * 60);
 /// Waits shorter than one poll are not worth a Board post.
 const BOARD_NOTICE_AFTER: Duration = POLL;
+
+/// Admission is a control-flow outcome, not a failed verification command.
+/// Keep its recovery facts typed all the way to the JSON envelope (#5085).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct Deferral {
+    pub waited_secs: u64,
+    pub budget_secs: u64,
+    pub cleanup_secs: u64,
+    pub elapsed_secs: u64,
+    pub next_turn_reserved: Option<bool>,
+    pub queue_position: Option<usize>,
+    pub retry_after_secs: Option<u64>,
+    pub reason: String,
+    pub recovery: String,
+    #[serde(skip)]
+    pub output_suffix: String,
+}
+
+impl Deferral {
+    pub(crate) fn new(
+        waited: Duration,
+        budget: Duration,
+        cleanup: Duration,
+        reason: &str,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        let recovery = match retry_after {
+            Some(Duration::ZERO) => "rerun `verify.run` now to recheck admission — TTL expiry does not release a live holder".to_string(),
+            Some(delay) => format!(
+                "rerun `verify.run` in about {}s (timing hint only; a progressing holder renews its TTL)",
+                delay.as_secs()
+            ),
+            None => "rerun `verify.run` to recheck admission when the reported blocker clears".to_string(),
+        };
+        Self {
+            waited_secs: waited.as_secs(),
+            budget_secs: budget.as_secs(),
+            cleanup_secs: cleanup.as_secs(),
+            elapsed_secs: (waited + cleanup).as_secs(),
+            next_turn_reserved: None,
+            queue_position: None,
+            retry_after_secs: retry_after.map(|duration| duration.as_secs()),
+            reason: reason.to_string(),
+            recovery,
+            output_suffix: String::new(),
+        }
+    }
+}
+
+impl std::fmt::Display for Deferral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "verify: deferred — admission waited {}s (budget {}s; cleanup {}s; total {}s): {}; {} — a deferral is not a failure and there is no attempt cap: keep rerunning `verify.run` while the holder makes progress{}",
+            self.waited_secs, self.budget_secs, self.cleanup_secs, self.elapsed_secs,
+            self.reason, self.recovery, self.output_suffix,
+        )
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum VerificationError {
+    #[error("{0}")]
+    Deferred(Box<Deferral>),
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl From<String> for VerificationError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<SpecOpsError> for VerificationError {
+    fn from(error: SpecOpsError) -> Self {
+        Self::Failed(match error {
+            SpecOpsError::Api(ApiError::Unexpected(cause)) => cause,
+            other => other.to_string(),
+        })
+    }
+}
 /// In-process lease holder; dropping releases the heavy lease and completes
 /// the target job, in the reverse of the acquisition order.
 pub(crate) struct Admission {
@@ -381,26 +463,14 @@ fn deferred(
     max_wait: Duration,
     detail: &str,
     retry_after: Option<Duration>,
-) -> SpecOpsError {
-    let next = match retry_after {
-        // A stale holder and a live holder past its TTL both yield zero.
-        // Only admission can establish whether the lock is now available.
-        Some(Duration::ZERO) => {
-            "rerun `verify.run` now to recheck admission — TTL expiry does not release a live holder".to_string()
-        }
-        Some(retry_after) => format!(
-            "rerun `verify.run` in about {}s (timing hint only; a progressing holder renews its TTL)",
-            retry_after.as_secs()
-        ),
-        None => "rerun `verify.run` to recheck admission when the reported blocker clears".to_string(),
-    };
-    unexpected(format!(
-        "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — a deferral is \
-         not a failure and there is no attempt cap: keep rerunning \
-         `verify.run` while the holder makes progress",
-        started.elapsed().as_secs(),
-        max_wait.as_secs()
-    ))
+) -> VerificationError {
+    VerificationError::Deferred(Box::new(Deferral::new(
+        started.elapsed(),
+        max_wait,
+        Duration::ZERO,
+        detail,
+        retry_after,
+    )))
 }
 
 fn sleep_until(deadline: Instant, poll: Duration) {
@@ -458,7 +528,7 @@ pub(crate) fn admit<E: CliEnv>(
     command: Option<&str>,
     max_wait: Duration,
     on_host_deferred: impl FnOnce(Option<&verification_lease::BuildArtifactGuard>) -> String,
-) -> Result<Admission, SpecOpsError> {
+) -> Result<Admission, VerificationError> {
     admit_inner(env, worktree, command, max_wait, on_host_deferred, None)
 }
 
@@ -472,7 +542,7 @@ pub(crate) fn admit_for_attempt<E: CliEnv>(
     max_wait: Duration,
     on_host_deferred: impl FnOnce(Option<&verification_lease::BuildArtifactGuard>) -> String,
     attempt: &HeavyAttempt<'_>,
-) -> Result<Admission, SpecOpsError> {
+) -> Result<Admission, VerificationError> {
     admit_inner(
         env,
         worktree,
@@ -490,7 +560,7 @@ fn admit_inner<E: CliEnv>(
     max_wait: Duration,
     on_host_deferred: impl FnOnce(Option<&verification_lease::BuildArtifactGuard>) -> String,
     attempt: Option<&HeavyAttempt<'_>>,
-) -> Result<Admission, SpecOpsError> {
+) -> Result<Admission, VerificationError> {
     check_cancellation(attempt)?;
     let key = verification_lease::verification_key(env)?;
     let coordinator = verification_lease::open_coordinator()?;
@@ -637,6 +707,7 @@ fn admit_inner<E: CliEnv>(
             Ok(lease) => break lease,
             Err(CoordinatorError::Timeout { .. }) => {
                 check_cancellation(attempt)?;
+                let waited = started.elapsed();
                 let mut holder = describe_holder(&coordinator, &mut probe, worktree);
                 for budget in &budgets {
                     holder.detail.push_str(&format!(
@@ -650,8 +721,9 @@ fn admit_inner<E: CliEnv>(
                 if Instant::now() >= deadline {
                     // Issue #4086 AC-1: the rerun must be admitted before any
                     // background job that queues while recovery is running.
+                    // The budget ends here; required recovery is separate.
                     if let Err(CoordinatorError::Cancelled { attempt_id }) = reserve() {
-                        return Err(cancelled(&attempt_id));
+                        return Err(cancelled(&attempt_id).into());
                     }
                     check_cancellation(attempt)?;
                     // Issue #4982: recover before releasing this worktree's
@@ -665,7 +737,7 @@ fn admit_inner<E: CliEnv>(
                     // TTL. Refresh it before reporting the rerun's final state.
                     let reserved = reserve();
                     if let Err(CoordinatorError::Cancelled { attempt_id }) = &reserved {
-                        return Err(cancelled(attempt_id));
+                        return Err(cancelled(attempt_id).into());
                     }
                     check_cancellation(attempt)?;
                     let _ = guard.complete(JobOutcome::Failed {
@@ -689,25 +761,41 @@ fn admit_inner<E: CliEnv>(
                             ));
                         }
                     }
-                    if let Ok(status) = coordinator.heavy_lease_status() {
-                        if let Some(position) = status.queue.iter().position(|entry| {
-                            entry.target.as_deref() == Some(key.file_stem().as_str())
-                        }) {
-                            detail.push_str(&format!("; queue_position: {}", position + 1));
-                        }
+                    let queue_position = coordinator.heavy_lease_status().ok().and_then(|status| {
+                        status
+                            .queue
+                            .iter()
+                            .position(|entry| {
+                                entry.target.as_deref() == Some(key.file_stem().as_str())
+                            })
+                            .map(|position| position + 1)
+                    });
+                    if let Some(position) = queue_position {
+                        detail.push_str(&format!("; queue_position: {position}"));
                     }
-                    return Err(deferred(started, max_wait, &detail, holder.retry_after));
+                    let mut deferral = Deferral::new(
+                        waited,
+                        max_wait,
+                        started.elapsed().saturating_sub(waited),
+                        &detail,
+                        holder.retry_after,
+                    );
+                    deferral.next_turn_reserved = reserved.as_ref().ok().map(|_| true);
+                    deferral.queue_position = queue_position;
+                    return Err(VerificationError::Deferred(Box::new(deferral)));
                 }
                 notice.maybe_post(env, started, max_wait, &holder.detail);
             }
-            Err(CoordinatorError::Cancelled { attempt_id }) => return Err(cancelled(&attempt_id)),
+            Err(CoordinatorError::Cancelled { attempt_id }) => {
+                return Err(cancelled(&attempt_id).into())
+            }
             Err(err) => {
                 let _ = guard.complete(JobOutcome::Failed {
                     message: err.to_string(),
                 });
-                return Err(unexpected(format!(
-                    "verification lease acquisition failed: {err}"
-                )));
+                return Err(
+                    unexpected(format!("verification lease acquisition failed: {err}")).into(),
+                );
             }
         }
     };
@@ -752,6 +840,27 @@ fn admit_inner<E: CliEnv>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferral_separates_wait_budget_from_required_cleanup() {
+        let deferral = Deferral::new(
+            Duration::from_secs(1500),
+            Duration::from_secs(1500),
+            Duration::from_secs(64),
+            "holder busy; artifact restored",
+            Some(Duration::from_secs(10)),
+        );
+        let data = serde_json::to_value(&deferral).unwrap();
+        assert_eq!(data["waited_secs"], 1500);
+        assert_eq!(data["budget_secs"], 1500);
+        assert_eq!(data["cleanup_secs"], 64);
+        assert_eq!(data["elapsed_secs"], 1564);
+        assert_eq!(data["next_turn_reserved"], serde_json::Value::Null);
+        assert_eq!(data["retry_after_secs"], 10);
+        assert!(deferral.to_string().contains("admission waited 1500s"));
+        assert!(deferral.to_string().contains("cleanup 64s"));
+    }
+
     use gwt_core::index_coordinator::{
         HeavyLeaseStatus, IndexCoordinator, JobAdmission, JobPriority, TargetKey,
     };

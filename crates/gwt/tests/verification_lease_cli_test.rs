@@ -439,7 +439,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
         .to_string()
     };
     let (ok, initial) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
-    assert!(!ok && initial.contains("deferred"), "{initial}");
+    assert!(ok && initial.contains("deferred"), "{initial}");
     assert!(initial.contains("next_turn_reserved: yes"), "{initial}");
     let early = coordinator.heavy_lease_status().unwrap().queue[0].clone();
     let key = TargetKey::verification(
@@ -471,7 +471,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
         fs2::FileExt::lock_exclusive(&probe).unwrap();
         let (ok, contended) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
         fs2::FileExt::unlock(&probe).unwrap();
-        assert!(!ok && contended.contains("deferred"), "{contended}");
+        assert!(ok && contended.contains("deferred"), "{contended}");
         assert!(
             contended.contains("next_turn_reserved: unknown"),
             "{contended}"
@@ -512,7 +512,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
         std::thread::sleep(Duration::from_millis(100));
     }
     let (ok, deferred) = collect_gwtd(waiting.0.take().unwrap());
-    assert!(!ok && deferred.contains("deferred"), "{deferred}");
+    assert!(ok && deferred.contains("deferred"), "{deferred}");
     assert!(started.elapsed() >= Duration::from_secs(max_wait_secs));
     assert!(deferred.contains("next_turn_reserved: yes"), "{deferred}");
     assert!(deferred.contains("queue_position: 1"), "{deferred}");
@@ -554,7 +554,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
         }
     }).to_string();
     let (ok, mixed) = gwtd(arena.home.path(), arena.worktree.path(), &mixed_request);
-    assert!(!ok && mixed.contains("next_turn_reserved: yes"), "{mixed}");
+    assert!(ok && mixed.contains("next_turn_reserved: yes"), "{mixed}");
     let record: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
             arena
@@ -573,7 +573,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
 
     // Another process is materialized after the first one has returned.
     let (ok, resubmitted) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
-    assert!(!ok && resubmitted.contains("deferred"), "{resubmitted}");
+    assert!(ok && resubmitted.contains("deferred"), "{resubmitted}");
     assert!(
         resubmitted.contains("next_turn_reserved: yes"),
         "{resubmitted}"
