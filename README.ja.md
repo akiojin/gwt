@@ -154,6 +154,18 @@ gwt は次の組み込みエージェントに対応しています。Launch Age
 インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
 カスタムエージェントとして引き続き利用できます。
 
+**Settings > Supported Agents** では、全対応エージェントの導入状態と
+インストール済みバージョンを確認し、未導入の CLI をインストールできます。
+npm の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
+最新バージョンの取得に対応していないエージェントにはその理由を表示し、
+更新は手動で行います。
+
+エージェントの自動更新は既定で無効です。有効にすると、次回の gwt 起動時に
+インストール済みの npm エージェントを確認し、新しいバージョンが分かるものだけを
+更新します。PM を含む稼働中のエージェント窓や起動待ちがない場合に限り適用します。
+手動のインストール・更新でも、先に稼働中のエージェントを閉じてください。
+未導入のエージェントを自動でインストールすることはありません。
+
 | エージェント | CLI コマンド |
 | --- | --- |
 | Claude Code | `claude` |
@@ -281,6 +293,11 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+`workspace.update` の応答を失った場合は、表示された `operation_id` を同じ Session の
+`workspace.receipt`（`params: {"operation_id":"<UUID>"}`）に渡して確認できます。
+この読み取り専用照会は Host へ接続せず、更新も再送しません。`applied` は永続化の完了、
+`unconfirmed` は旧 Host を含め証拠がまだ確認できない状態であり、更新の失敗を意味しません。
 
 `board.show` は、選択された workspace / session から見える最新20件を時系列順で
 返します。`params.limit` に非負整数（例: `15`、`0` は空）を指定して件数を変更できます。
@@ -616,6 +633,10 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 担うため、多重起動の防止機構はそのまま維持されます。
 
 - プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
+- PM 設定の **Pause / Resume** で自律ループを一時停止・再開できます。停止状態は
+  再起動後も維持され、PM との会話、Issue Monitor、稼働中の agent は継続します。
+  Resume は最新の状態を再確認します。JSON operations `pm.pause` / `pm.resume`
+  でも操作でき、`pm.status` は登録状態と別に `paused` を返します。
 - PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
   クラッシュループを防ぐバックオフが働きます。
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
@@ -931,6 +952,15 @@ Teams でチャンネル → **チャンネルへのリンクを取得**し、�
 gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
+
+PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
+**Copy** ボタン付きで表示します。閲覧専用で、ターミナル操作には **Execution log** を
+使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存し、
+再起動後も保持します。自動失効・件数制限はなく、空でない本文は 1 件 64 KiB までです。
+
+登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker`）と
+`body` で投稿し、`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
+使用します。投稿成功は保存と読み戻しの確認を意味し、失敗時は明示的なエラーを返します。
 
 常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
 hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には

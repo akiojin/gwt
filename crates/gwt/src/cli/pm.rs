@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use gwt_core::paths::gwt_sessions_dir;
+use gwt_core::pm_report::{self, PmReportKind};
 use gwt_github::{ApiError, SpecOpsError};
 use serde::Serialize;
 
@@ -27,10 +28,23 @@ use crate::pm_registry;
 /// Parsed `pm.*` command surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
+    /// Post a durable PM-authored report; the execution terminal is independent.
+    ReportPost {
+        project_root: Option<String>,
+        kind: PmReportKind,
+        body: String,
+    },
+    /// Read the project's reports in posting order.
+    ReportList { project_root: Option<String> },
     /// `pm.status` — optional explicit `project_root`; defaults to the
     /// current repository path (container/bare setups must pass it
     /// explicitly, same convention as the Issue Monitor queue operations).
     Status { project_root: Option<String> },
+    /// Persistently pause or resume the autonomous resident loop.
+    SetPaused {
+        project_root: Option<String>,
+        paused: bool,
+    },
     /// `pm.stop` — clear a PM registration in this repository and make its
     /// session unrestorable. `session_id` defaults to the caller's own
     /// registration, so a PM can always retire itself.
@@ -145,6 +159,66 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
+        PmCommand::ReportPost {
+            project_root,
+            kind,
+            body,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.report.post requires the registered PM or a direct user CLI call".into(),
+                ));
+            }
+            let report = pm_report::post_report(&repo_path, kind, &body).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to persist PM report: {error}"
+                )))
+            })?;
+            out.push_str(
+                &serde_json::json!({"schema_version": 1, "ok": true, "report": report}).to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::ReportList { project_root } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            let reports = pm_report::load_reports(&repo_path).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to load PM reports: {error}"
+                )))
+            })?;
+            out.push_str(
+                &serde_json::json!({"schema_version": 1, "ok": true, "reports": reports})
+                    .to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::SetPaused {
+            project_root,
+            paused,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.pause / pm.resume require the registered PM or a direct user CLI call"
+                        .into(),
+                ));
+            }
+            pm_registry::set_pm_paused(&repo_path, paused).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to persist PM pause state: {error}"
+                )))
+            })?;
+            run(
+                env,
+                PmCommand::Status {
+                    project_root: Some(repo_path.to_string_lossy().into_owned()),
+                },
+                out,
+            )
+        }
         PmCommand::Status { project_root } => {
             let repo_path = resolve_repo_path(env, project_root);
             let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo_path);

@@ -1,6 +1,55 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.115.0] - 2026-10-10
+
+### Bug Fixes
+
+- **workspace:** Recover persisted updates after response loss
+- **ci:** Base追随のpaired測定による待機を解消
+- **issue-monitor:** Retire closed issues and queue labels
+- **monitor:** Refresh canvas after pane close
+- **pm:** Render launcher status through the shared UI model
+- **test:** Windows容量診断の期待パスを正規化
+- **execution:** Reopen の成功条件を canonical Work と同期
+- **pm:** Preserve reconnect with reports open
+- **test:** Observe target release before deferred readmission
+- **test:** Observe release after cargo artifact refusal
+- **test:** Use sanctioned command constructor in Unix stress fixture
+- **test:** Observe legacy lease release before zero-budget retries
+- **pr:** Include resident PM work in unlanded inventory
+- **verify:** Retain headed E2E attachments after runner cleanup
+- **verify:** Return structured successful admission deferrals
+- **verify:** Distinguish daemon startup timeouts from test failures
+- **verify:** Report nextest evidence collection errors
+- **settings:** Apply agent events through the shared UI model
+- **issue-monitor:** 正常 close の縮小を障害記録から除外する
+
+### Features
+
+- **pm:** Add persistent pause and resume for the resident loop
+- **pm:** Replace chat with durable read-only reports
+- **settings:** Add safe agent maintenance controls
+
+### Miscellaneous Tasks
+
+- **work:** Finalize issue 5242 delivery evidence
+- **work:** Record PR 5260 delivery
+- **work:** Record PR 5259 delivery metadata
+- **work:** Record issue 4998 verification handoff
+- **work:** Record issue 5053 delivery state
+- **work:** Record issue 5053 pull request receipt
+- **work:** Record issue 5060 resume and verification handoff
+- **work:** Record issue 5085 verification handoff
+- **work:** Preserve issue 5085 PR and successor records
+
+### Testing
+
+- **pm:** Serialize JSON pause and resume environment guards
+- **execution:** Monitor の terminal fixture を local close で保持
+- **pm:** Align frontend contracts with reports
+- **verify:** Align mixed and artifact deferral expectations
+
 ## [9.114.0] - 2026-10-10
 
 ### Bug Fixes

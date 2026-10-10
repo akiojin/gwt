@@ -4621,9 +4621,9 @@ fn run_issue_edit<E: CliEnv>(
 /// guards `issue.edit` on `gwt-spec` Issues nor the `auto-merge` acceptance
 /// block guard applies — both exist to protect a body rewrite.
 ///
-/// An Issue already in the target state is reported with `changed: false` and
-/// nothing reaches the API, not even `comment`: replaying the same envelope
-/// after a lost response must not duplicate the rationale on the Issue.
+/// An Issue already in the target state is reported with `changed: false`.
+/// Replays reconcile Monitor/queue-label cleanup without resubmitting the
+/// state change or duplicating the rationale after a lost response.
 fn run_issue_set_state<E: CliEnv>(
     env: &mut E,
     number: u64,
@@ -4639,7 +4639,7 @@ fn run_issue_set_state<E: CliEnv>(
     if current.state == target {
         // A replay after a lost response still reaches the Monitor, so a
         // notification that failed the first time is repaired here.
-        notify_monitor_of_reopen(env, &current)?;
+        reconcile_issue_state(env, &current)?;
         // `reason` describes what was written, and nothing was: echoing the
         // requested one here would claim a rationale GitHub never recorded.
         write_issue_state_result(out, number, target, false, None, None);
@@ -4669,22 +4669,54 @@ fn run_issue_set_state<E: CliEnv>(
     // One-way flow: the cache is refreshed from the post-write server state so
     // the UI and the Monitor never read a state this operation already changed.
     let written = refresh_issue_cache(env, issue)?.snapshot;
-    notify_monitor_of_reopen(env, &written)?;
+    reconcile_issue_state(env, &written)?;
     write_issue_state_result(out, number, target, true, reason, comment_id);
     Ok(0)
 }
 
-/// Issue #4770: lift the Monitor's durable `Closed` record for an Issue that is
-/// now Open, so `issue.monitor.requeue` right after `issue.reopen` is not
-/// refused. Only this Issue's record moves — no candidate scan runs — and the
-/// prefs file is written only when a `Closed` record was actually lifted.
-fn notify_monitor_of_reopen<E: CliEnv>(
+/// Retire admission before label cleanup so a failed GitHub DELETE cannot
+/// leave a confirmed Closed Issue launchable. Replays repair either step.
+fn reconcile_issue_state<E: CliEnv>(
+    env: &mut E,
+    snapshot: &IssueSnapshot,
+) -> Result<(), SpecOpsError> {
+    notify_monitor_of_issue_state(env, snapshot)?;
+    let cleanup =
+        crate::issue_monitor_settlement::remove_closed_queue_label(env.client(), snapshot);
+    match cleanup {
+        Ok(false) => Ok(()),
+        outcome => {
+            // Also resolve a lost DELETE response from authoritative readback;
+            // never submit the mutation twice in the same operation.
+            let written = refresh_issue_cache(env, snapshot.number)?.snapshot;
+            notify_monitor_of_issue_state(env, &written)?;
+            if written.state == IssueState::Closed
+                && !written
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+            {
+                Ok(())
+            } else {
+                let message = match outcome {
+                    Err(
+                        OwnerMutationError::PreSubmit(error)
+                        | OwnerMutationError::RemoteOutcomeUnknown(error),
+                    ) => error.to_string(),
+                    _ => "closed queue-label cleanup was not confirmed".to_string(),
+                };
+                Err(ApiError::Network(message).into())
+            }
+        }
+    }
+}
+
+/// Deliver the revision to the live daemon before its ACK. Only a definitely
+/// unsent control may fall back to the fenced, locked prefs writer.
+fn notify_monitor_of_issue_state<E: CliEnv>(
     env: &E,
     snapshot: &IssueSnapshot,
 ) -> Result<(), SpecOpsError> {
-    if snapshot.state != IssueState::Open {
-        return Ok(());
-    }
     // No resolvable project root means no Monitor store to hold the Issue.
     let Ok(project_root) = issue_monitor_project_root(env, None) else {
         return Ok(());
@@ -4693,14 +4725,43 @@ fn notify_monitor_of_reopen<E: CliEnv>(
     if !prefs_path.exists() {
         return Ok(());
     }
-    crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "issue_state": {
+            "number": snapshot.number.0,
+            "state": match snapshot.state {
+                IssueState::Closed => "closed",
+                IssueState::Open => "open",
+            },
+            "updated_at": snapshot.updated_at.0,
+        }}),
+        std::process::id(),
+    );
+    // GitHub has already committed this revision. Allow scope resolution and
+    // durable acknowledgment beyond the GUI's 200ms hot-path budget.
+    match crate::daemon_publisher::publish_issue_monitor_control_with_timeout(
+        &project_root,
+        payload,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.allows_local_fallback() => {}
+        Err(error) => return Err(io_as_api_error(io::Error::other(error.to_string()))),
+    }
+    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        if monitor.record_reopened(snapshot.number.0, Some(snapshot.updated_at.0.clone())) {
-            *prefs = monitor.prefs();
+        match snapshot.state {
+            IssueState::Closed => {
+                monitor.record_closed(snapshot.number.0, Some(snapshot.updated_at.0.clone()))
+            }
+            IssueState::Open => {
+                monitor.record_reopened(snapshot.number.0, Some(snapshot.updated_at.0.clone()));
+            }
         }
+        *prefs = monitor.prefs();
         Ok(())
     })
     .map_err(io_as_api_error)?;
@@ -6896,6 +6957,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_close_immediately_retires_monitor_membership_and_queue_label() {
+        for reason in [
+            gwt_github::client::IssueCloseReason::Completed,
+            gwt_github::client::IssueCloseReason::NotPlanned,
+        ] {
+            let (tmp, mut env) = seeded_edit_env(&["bug", "gwt-queued"]);
+            env.client.use_rfc3339_timestamps();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(tmp.path());
+            let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+            monitor.terminal_queue_push(&[7, 8], "operator", "2026-09-01T00:00:00Z");
+            monitor.complete_active_launch_at(7, "tab::agent", "2026-09-01T00:00:00Z");
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+
+            run(
+                &mut env,
+                IssueCommand::Close {
+                    number: 7,
+                    reason: Some(reason),
+                    comment: None,
+                },
+                &mut String::new(),
+            )
+            .expect("close");
+
+            let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let mut restarted = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                persisted.clone(),
+            );
+            assert_eq!(restarted.local_terminal_queue_numbers(), vec![8]);
+            assert!(restarted.active_issue_numbers().is_empty());
+            assert!(restarted.inbox_item(7).is_none());
+            monitor.rebase_daemon_driver_prefs(&persisted);
+            assert!(monitor.active_issue_numbers().is_empty());
+            assert_eq!(monitor.local_terminal_queue_numbers(), vec![8]);
+            let closed = fetched(&env, 7);
+            assert_eq!(closed.state, IssueState::Closed);
+            assert_eq!(closed.labels, vec!["bug"]);
+            assert_eq!(
+                Cache::new(env.cache_root())
+                    .load_entry(IssueNumber(7))
+                    .unwrap()
+                    .snapshot,
+                closed
+            );
+            assert!(restarted
+                .claim_next_launch_requests_with_probe(
+                    &env.client,
+                    "host",
+                    "2026-09-01T00:01:00Z",
+                    1,
+                    |_| false,
+                )
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn reopened_issue_can_be_explicitly_pushed_after_closed_scan() {
+        let home = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (_tmp, repo, mut env) = close_scan_reopen(crate::IssueMonitorPrefs::default());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorQueuePush {
+                    project_root: Some(repo.clone()),
+                    issue_numbers: vec![7],
+                    position: None,
+                    force: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "{out}"
+        );
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![8, 7]);
+        let open = fetched(&env, 7);
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[crate::IssueMonitorIssue {
+                number: 7,
+                title: open.title,
+                labels: open.labels,
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+                readiness: crate::IssueMonitorReadiness::default(),
+                updated_at: Some(open.updated_at.0),
+            }],
+            "2026-09-01T00:01:00Z",
+        );
+        assert!(monitor.queued_issue_numbers().contains(&7));
+    }
+
     /// SPEC #4249 FR-001: the close reason reaches the client, and an explaining
     /// comment is posted *before* the close so a reader who finds the Issue
     /// closed already sees why.
@@ -7063,11 +7228,8 @@ mod tests {
         );
     }
 
-    /// SPEC #4249 AC-2: closing and reopening an Issue leaves the Monitor's
-    /// local queue accounting alone, so a `issue.monitor.requeue` right after a
-    /// reopen still returns the Issue to the queue. The operations write GitHub
-    /// and the Issue cache only; if either ever started writing a durable
-    /// closure hold, this test is the one that catches it.
+    /// SPEC #4249 AC-2: an authoritative reopen lifts the close hold so an
+    /// explicit `issue.monitor.requeue` can return the Issue to the queue.
     #[test]
     fn reopened_issue_still_requeues_into_the_monitor_queue() {
         let _env_lock = crate::env_test_lock()
@@ -7093,6 +7255,7 @@ mod tests {
         .expect("save prefs");
 
         let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),
@@ -7152,6 +7315,7 @@ mod tests {
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
 
         let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),

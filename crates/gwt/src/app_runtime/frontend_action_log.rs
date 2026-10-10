@@ -556,6 +556,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ListSupportedAgents => {
             FrontendUserActionLog::new("list_supported_agents", "settings")
         }
+        FrontendEvent::MaintainSupportedAgent { agent_id, .. } => {
+            FrontendUserActionLog::new("maintain_supported_agent", "settings").agent(agent_id)
+        }
+        FrontendEvent::SetAgentAutoUpdate { enabled } => {
+            FrontendUserActionLog::new("set_agent_auto_update", "settings").force(*enabled)
+        }
         FrontendEvent::ListCustomAgentPresets => {
             FrontendUserActionLog::new("list_custom_agent_presets", "custom_agents")
         }
@@ -767,6 +773,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_pm_loop_interval", "pm")
                 .target(loop_interval_secs.to_string())
         }
+        FrontendEvent::SetPmPaused { paused } => FrontendUserActionLog::new("set_pm_paused", "pm")
+            .mode(if *paused { "paused" } else { "active" }),
         FrontendEvent::SetPmLaunchProfile {
             agent_id, model, ..
         } => FrontendUserActionLog::new("set_pm_launch_profile", "pm")
@@ -784,6 +792,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
+        | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachFiles { .. } => return None,

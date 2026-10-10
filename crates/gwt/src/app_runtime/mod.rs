@@ -566,6 +566,7 @@ struct RuntimeStopThreads {
 
 mod issue_monitor_delivery_ack;
 pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
+pub(crate) mod agent_maintenance;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
@@ -1742,6 +1743,7 @@ pub struct AppRuntime {
     pub(crate) project_log_scopes: HashMap<String, gwt_core::logging::ProjectLogScope>,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
+    pub(crate) agent_maintenance: agent_maintenance::AgentMaintenanceState,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
@@ -4284,6 +4286,7 @@ impl AppRuntime {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
             pending_workspace_resume_contexts: HashMap::new(),
@@ -4380,6 +4383,7 @@ impl AppRuntime {
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
         app.seed_restored_window_details();
+        app.start_agent_auto_update();
         Ok(app)
     }
 
@@ -8613,7 +8617,9 @@ impl AppRuntime {
     /// for each enabled canonical project scope. GitHub and claim I/O stays
     /// off tao's event loop, while the in-flight set drops duplicate ticks.
     pub(crate) fn issue_monitor_scheduled_tick_events(&mut self) -> Vec<OutboundEvent> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // Keep the capture clock as precise as close/launch observations so
+        // same-second scans cannot precede a canvas they actually followed.
+        let now = chrono::Utc::now().to_rfc3339();
         self.issue_monitor_scheduled_tick_events_at(&now)
     }
 
@@ -8805,8 +8811,30 @@ impl AppRuntime {
         project_tab_id: &str,
         now: &str,
     ) -> Option<gwt::IssueMonitorWindowSnapshot> {
+        self.issue_monitor_window_snapshot_with_session_metadata(
+            project_tab_id,
+            now,
+            |session_id| {
+                (
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number),
+                    gwt::cli::execution_state::session_launch_route(Some(session_id))
+                        == Some(gwt_agent::LaunchRoute::Autonomous),
+                )
+            },
+        )
+    }
+
+    fn issue_monitor_window_snapshot_with_session_metadata(
+        &self,
+        project_tab_id: &str,
+        now: &str,
+        session_metadata: impl Fn(&str) -> (Option<u64>, bool),
+    ) -> Option<gwt::IssueMonitorWindowSnapshot> {
         self.tab(project_tab_id)?;
         let tab_ids = self.issue_monitor_project_tab_ids(project_tab_id);
+        let session_metadata = &session_metadata;
         let windows =
             self.tabs
                 .iter()
@@ -8825,27 +8853,19 @@ impl AppRuntime {
                                 &window_id,
                                 &tab.project_root,
                             );
+                            let (session_issue, monitor_owned) = window
+                                .session_id
+                                .as_deref()
+                                .map(session_metadata)
+                                .unwrap_or_default();
                             let issue_number = pending
                                 .and_then(|context| context.issue_monitor_issue_number)
                                 .or(window.linked_issue_number)
-                                .or_else(|| {
-                                    let session_id = window.session_id.as_deref()?;
-                                    self.launch_wizard_cache
-                                        .session_by_id(session_id)
-                                        .and_then(|session| session.linked_issue_number)
-                                });
+                                .or(session_issue);
                             gwt::IssueMonitorWindowObservation {
-                                // Use the canonical route resolver: it also recognizes
-                                // legacy Monitor launches stamped Manual (Issue #4510).
                                 monitor_owned: pending.is_some_and(|context| {
                                     context.issue_monitor_issue_number.is_some()
-                                }) || window.session_id.as_deref().is_some_and(
-                                    |session_id| {
-                                        gwt::cli::execution_state::session_launch_route(Some(
-                                            session_id,
-                                        )) == Some(gwt_agent::LaunchRoute::Autonomous)
-                                    },
-                                ),
+                                }) || monitor_owned,
                                 review_dispatch: pending
                                     .is_some_and(|context| context.issue_monitor_review_dispatch)
                                     || self
@@ -9021,7 +9041,7 @@ impl AppRuntime {
                 return reply(false, Some("monitor_state_unavailable"));
             }
         }
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = chrono::Utc::now().to_rfc3339();
         // Issue #4084: an on-demand scan classifies idle windows too, so the
         // PM's `scan_now` frees a slot the same way the periodic tick does.
         let window_snapshot =
@@ -9611,7 +9631,7 @@ impl AppRuntime {
     ) -> (Vec<gwt::update_drain::PaneObservation>, Vec<PathBuf>) {
         let mut window_ids: Vec<&String> = self.window_lookup.keys().collect();
         window_ids.sort();
-        let panes = window_ids
+        let mut panes: Vec<gwt::update_drain::PaneObservation> = window_ids
             .into_iter()
             .filter_map(|window_id| {
                 let address = self.window_lookup.get(window_id)?;
@@ -9636,6 +9656,14 @@ impl AppRuntime {
                 })
             })
             .collect();
+        if self.agent_maintenance.busy {
+            panes.push(gwt::update_drain::PaneObservation {
+                window_id: "agent-maintenance".into(),
+                label: "Agent maintenance process".into(),
+                state: WindowProcessStatus::Running,
+                resident_pm: false,
+            });
+        }
         let worktrees = self
             .active_agent_sessions
             .values()
@@ -10510,6 +10538,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -10683,6 +10712,12 @@ impl AppRuntime {
                 self.spawn_supported_agent_list(client_id);
                 Vec::new()
             }
+            FrontendEvent::MaintainSupportedAgent { agent_id, action } => {
+                self.maintain_supported_agent_events(client_id, agent_id, action)
+            }
+            FrontendEvent::SetAgentAutoUpdate { enabled } => {
+                self.set_agent_auto_update_events(client_id, enabled)
+            }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -10846,6 +10881,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
@@ -10956,7 +10992,12 @@ impl AppRuntime {
             }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady { bounds } => {
-                self.startup_auto_resume_ready_events(bounds)
+                if self.agent_maintenance.busy {
+                    self.agent_maintenance.deferred_startup_bounds = Some(bounds);
+                    Vec::new()
+                } else {
+                    self.startup_auto_resume_ready_events(bounds)
+                }
             }
             FrontendEvent::StartupFirstFrame { navigation_ms } => {
                 gwt::perf::startup::first_frame(navigation_ms);
@@ -10982,6 +11023,7 @@ impl AppRuntime {
             FrontendEvent::SetPmAutoStart { enabled } => {
                 self.set_pm_auto_start_events(context, enabled)
             }
+            FrontendEvent::SetPmPaused { paused } => self.set_pm_paused_events(context, paused),
             FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
                 self.set_pm_loop_interval_events(context, loop_interval_secs)
             }
@@ -11107,6 +11149,9 @@ impl AppRuntime {
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
+            }
+            FrontendEvent::LoadPmReports { id } => {
+                self.load_pm_reports_events(context, client_id, &id)
             }
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
@@ -11811,6 +11856,12 @@ impl AppRuntime {
             FrontendEvent::ListSupportedAgents => {
                 self.spawn_supported_agent_list(client_id);
                 Vec::new()
+            }
+            FrontendEvent::MaintainSupportedAgent { agent_id, action } => {
+                self.maintain_supported_agent_events(client_id, agent_id, action)
+            }
+            FrontendEvent::SetAgentAutoUpdate { enabled } => {
+                self.set_agent_auto_update_events(client_id, enabled)
             }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,

@@ -159,6 +159,17 @@ gwt supports the following built-in agents. Launch Agent lists only installed
 built-in agents that gwt detects; other CLI commands remain available through
 custom agents.
 
+**Settings > Supported Agents** shows the complete catalog, installation status,
+and installed versions. Install missing CLIs there; update actions appear when
+npm metadata confirms a newer version. Agents without supported version metadata
+show that limitation and require manual updates.
+
+Automatic agent updates are off by default. When enabled, gwt checks installed
+npm agents at the next app startup and updates only known newer versions, with
+no live agent panes (including the Project Manager) or pending launches. Manual
+installs and updates also require those agents to be closed. Missing agents are
+never installed automatically.
+
 | Agent | CLI command |
 | --- | --- |
 | Claude Code | `claude` |
@@ -293,6 +304,12 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+If `workspace.update` loses its response, use the reported `operation_id` with
+`workspace.receipt` (`params: {"operation_id":"<UUID>"}`) in the same Session.
+This read-only query does not contact the Host or resend the update. `applied`
+confirms durable publication; `unconfirmed` means proof is not yet available,
+including with an older Host, and does not prove the update failed.
 
 `board.show` returns the latest 20 entries visible to the selected workspace or
 session, in chronological order. Set `params.limit` to a nonnegative integer
@@ -674,6 +691,11 @@ unchanged.
 
 - It starts automatically when you open a project, and there is a per-project
   opt-out.
+- PM settings offers **Pause / Resume** for its autonomous loop. Pause persists
+  across restarts while the PM remains available for conversation; Issue Monitor
+  and running agents keep working. Resume reconciles the latest status. JSON
+  operations `pm.pause` / `pm.resume` provide the same control, and `pm.status`
+  reports `paused` separately from registration.
 - Closing the PM pane stops it; it will not restart itself. A crash does
   auto-resume, with a backoff so a crash loop cannot spin.
 - Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
@@ -997,6 +1019,17 @@ delegated; app-only channel posting is not supported). You must be a
 gwt shows an actionable hint.
 
 ## PM project configuration
+
+The PM window's **Reports** view shows explicit Markdown reports with their kind,
+time, and a **Copy** button. It is read-only; use **Execution log** for terminal
+interaction. Reports survive restarts in
+`~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`, with no automatic
+expiry or count limit. Each non-empty report is limited to 64 KiB.
+
+A registered PM can publish through `pm.report.post` with `kind` (`progress`,
+`decision`, or `blocker`) and `body`; `pm.report.list` reads the saved history.
+These use the standard gwtd JSON envelope. A successful post confirms the report
+was saved and read back; failures return an explicit error.
 
 The resident PM starts in a gwt-owned runtime directory. Repository skills,
 hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are

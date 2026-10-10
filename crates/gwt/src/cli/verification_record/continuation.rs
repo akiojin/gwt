@@ -259,7 +259,15 @@ mod tests {
         let mut admission = |_: &str, _: &VerificationHost| {
             calls += 1;
             if calls == 2 {
-                Err("verify: deferred — admission timeout".into())
+                Err(VerificationError::Deferred(Box::new(
+                    crate::cli::verification_lease::admission::Deferral::new(
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                        "admission timeout",
+                        None,
+                    ),
+                )))
             } else {
                 Ok(None)
             }
@@ -276,6 +284,7 @@ mod tests {
             }
         )
         .unwrap_err()
+        .to_string()
         .contains("deferred"));
         let record = load(dir.path()).unwrap().unwrap();
         let request = Continuation::new(&commands, &[], &authority);

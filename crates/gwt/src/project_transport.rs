@@ -117,6 +117,8 @@ impl OutboundEvent {
                     | BackendEvent::SystemSettingsError { .. }
                     | BackendEvent::AutostartStatus { .. }
                     | BackendEvent::AutostartError { .. }
+                    | BackendEvent::SupportedAgentList { .. }
+                    | BackendEvent::SupportedAgentMaintenance { .. }
                     | BackendEvent::UpdateState(_)
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
@@ -1425,15 +1427,35 @@ async fn workspace_update_handler(
             "workspace_update_requires_active_execution_authority",
         );
     };
+    let operation_id = match headers.get(crate::workspace_update_receipt::OPERATION_HEADER) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .filter(|id| crate::workspace_update_receipt::validate_operation_id(id).is_ok())
+        {
+            Some(id) => Some(id.to_string()),
+            None => {
+                return workspace_update_error_response(
+                    StatusCode::BAD_REQUEST,
+                    AgentWorkspaceUpdateError::new(
+                        AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                        "invalid workspace operation_id",
+                    ),
+                )
+            }
+        },
+        None => None,
+    };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
     let mutation_project_root = project_root.clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::apply_bound_authenticated_workspace_update(
+        crate::apply_bound_authenticated_workspace_update_with_operation_id(
             &mutation_project_root,
             &session_id,
             &execution_binding,
             request,
+            operation_id.as_deref(),
         )
     })
     .await;
@@ -2728,6 +2750,37 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn supported_agent_notifications_are_host_global_and_project_events_stay_scoped() {
+        use super::{DispatchTarget, OutboundEvent};
+        use crate::BackendEvent;
+        for event in [
+            BackendEvent::SupportedAgentList {
+                agents: Vec::new(),
+                auto_update: false,
+                maintenance_pending: false,
+            },
+            BackendEvent::SupportedAgentMaintenance {
+                agent_id: "codex".into(),
+                pending: false,
+                success: Some(true),
+                message: "Updated".into(),
+                before_version: None,
+                after_version: Some("1.2.3".into()),
+            },
+        ] {
+            assert!(matches!(
+                OutboundEvent::broadcast(event).target,
+                DispatchTarget::All
+            ));
+        }
+        assert!(std::panic::catch_unwind(|| OutboundEvent::broadcast(
+            BackendEvent::CloneProjectError {
+                message: "project error".into()
+            }
+        ))
+        .is_err());
+    }
     use super::*;
     use crate::{AttachmentProgressPhase, KnowledgeKind, KnowledgeSemanticRetry};
     use gwt_core::repo_hash::ProjectKey;

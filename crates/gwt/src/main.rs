@@ -827,12 +827,21 @@ fn spawn_update_apply_resolution(
 }
 
 fn admit_prepared_update(
-    app: &AppRuntime,
+    app: &mut AppRuntime,
     manifest: &gwt_core::update::PendingUpdateManifest,
     admission: &mut update_front_door::UpdateApplyAdmission,
 ) -> (bool, Vec<OutboundEvent>) {
     if !admission.begin_commit() {
         return (false, Vec::new());
+    }
+    if app.agent_maintenance.busy {
+        admission.failed();
+        let message = "gwt update is waiting for agent maintenance to finish. Retry after maintenance completes.";
+        app.record_update_apply_observation(&manifest.version, "pending_waiting", message);
+        return (
+            false,
+            vec![OutboundEvent::global_update_notice("info", message)],
+        );
     }
     if let Some(gwt_core::update::UpdateState::Available { latest, .. }) = &app.pending_update {
         if gwt_core::update::pending_version_is_newer(latest, &manifest.version) {
@@ -853,6 +862,7 @@ fn admit_prepared_update(
             );
         }
     }
+    app.agent_maintenance.app_update_committing = true;
     (true, Vec::new())
 }
 
@@ -1768,6 +1778,8 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::UpdateBoardOauthPort { .. }
             | FrontendEvent::ListCustomAgents
             | FrontendEvent::ListSupportedAgents
+            | FrontendEvent::MaintainSupportedAgent { .. }
+            | FrontendEvent::SetAgentAutoUpdate { .. }
             | FrontendEvent::ListCustomAgentPresets
             | FrontendEvent::AddCustomAgentFromPreset { .. }
             | FrontendEvent::UpdateCustomAgent { .. }
@@ -1806,6 +1818,14 @@ fn browser_project_input_allowed(
 )]
 #[derive(Debug, Clone)]
 enum UserEvent {
+    SupportedAgentCatalogReady {
+        client_id: ClientId,
+        generation: u64,
+        event: BackendEvent,
+    },
+    SupportedAgentMaintenanceComplete(
+        Box<app_runtime::agent_maintenance::AgentMaintenanceCompletion>,
+    ),
     IssueMonitorLaunchDeliveryAcknowledged(
         Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
     ),
@@ -2213,6 +2233,13 @@ enum UserEvent {
         window_id: String,
         session_id: String,
         snapshot: gwt::pm_conversation::PmConversationSnapshot,
+    },
+    PmReportsLoaded {
+        client_id: ClientId,
+        window_id: String,
+        session_id: String,
+        reports: Vec<gwt::protocol::PmReportView>,
+        error: Option<String>,
     },
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -4563,6 +4590,7 @@ mod tests {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
 
@@ -5181,7 +5209,7 @@ mod tests {
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
         assert!(admission.begin_resolution());
-        assert!(!super::admit_prepared_update(&runtime, &manifest, &mut admission).0);
+        assert!(!super::admit_prepared_update(&mut runtime, &manifest, &mut admission).0);
         assert!(gwt_core::update::load_pending_update_manifest().is_none());
         assert!(!old_dir.exists());
         assert!(
@@ -5190,17 +5218,83 @@ mod tests {
         );
         let mut current_manifest = manifest.clone();
         current_manifest.version = "9.108.0".into();
-        assert!(super::admit_prepared_update(&runtime, &current_manifest, &mut admission).0);
+        assert!(super::admit_prepared_update(&mut runtime, &current_manifest, &mut admission).0);
         // Duplicate results after commitment must not reopen admission or
         // delete files which an already-started helper may still be using.
         fs::create_dir_all(&old_dir).unwrap();
         fs::write(old_dir.join("gwt"), "helper-owned payload").unwrap();
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
-        let (admitted, events) = super::admit_prepared_update(&runtime, &manifest, &mut admission);
+        let (admitted, events) =
+            super::admit_prepared_update(&mut runtime, &manifest, &mut admission);
         assert!(!admitted && events.is_empty());
         assert!(gwt_core::update::load_pending_update_manifest().is_some());
         assert!(old_dir.exists());
         assert!(!admission.begin_resolution());
+    }
+
+    #[test]
+    fn agent_maintenance_interlock_refuses_prepared_app_update_and_keeps_it_retryable() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let (spawner, _tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let request = serde_json::from_str(
+            r#"{"kind":"maintain_supported_agent","agent_id":"codex","action":"update"}"#,
+        )
+        .unwrap();
+        runtime.handle_frontend_event("settings".into(), request);
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "99.0.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary {
+                path: temp.path().join("prepared"),
+            },
+            downloaded_at: Utc::now().to_rfc3339(),
+        };
+        let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
+        assert!(admission.begin_resolution());
+        let (admitted, _) = super::admit_prepared_update(&mut runtime, &manifest, &mut admission);
+        assert!(
+            !admitted,
+            "self-update must not interrupt the agent installer"
+        );
+        assert!(
+            admission.begin_resolution(),
+            "the staged update remains retryable"
+        );
+    }
+
+    #[test]
+    fn agent_maintenance_interlock_refuses_installer_after_app_update_commit() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "99.0.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary {
+                path: temp.path().join("prepared"),
+            },
+            downloaded_at: Utc::now().to_rfc3339(),
+        };
+        let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
+        assert!(admission.begin_resolution());
+        assert!(super::admit_prepared_update(&mut runtime, &manifest, &mut admission).0);
+        let request = serde_json::from_str(
+            r#"{"kind":"maintain_supported_agent","agent_id":"codex","action":"install"}"#,
+        )
+        .unwrap();
+        let events = runtime.handle_frontend_event("settings".into(), request);
+        assert!(events
+            .iter()
+            .any(|event| serde_json::to_value(&event.event).unwrap()["success"] == false));
+        assert!(
+            tasks.lock().unwrap().is_empty(),
+            "no installer can start before QuitApp is dispatched"
+        );
     }
 
     #[test]
@@ -11574,8 +11668,21 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, reports, error }) => {
+                clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, reports, error));
+            }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::SupportedAgentCatalogReady {
+                client_id,
+                generation,
+                event,
+            }) => {
+                clients.dispatch(app.handle_supported_agent_catalog_ready(client_id, generation, event));
+            }
+            Event::UserEvent(UserEvent::SupportedAgentMaintenanceComplete(completion)) => {
+                clients.dispatch(app.handle_supported_agent_maintenance_complete(*completion));
             }
             Event::UserEvent(UserEvent::AgentBackendConnectionProbeComplete {
                 client_id,
@@ -11858,6 +11965,7 @@ fn main() -> std::io::Result<()> {
                     }
                     Err(message) => {
                         update_apply_admission.failed();
+                        app.agent_maintenance.app_update_committing = false;
                         app.record_update_apply_observation(
                             &marker.to_version,
                             "pending_failed",

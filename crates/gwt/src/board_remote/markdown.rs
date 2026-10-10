@@ -1,4 +1,4 @@
-//! Markdown rendering for Board posts (SPEC-2963).
+//! Shared web Markdown rendering and Board provider formats (SPEC-2963).
 //!
 //! Board post bodies are authored in Markdown (the canonical format). Each
 //! provider renders it differently:
@@ -16,21 +16,46 @@ use std::collections::HashSet;
 
 use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-/// Render Markdown to sanitized HTML for the local web UI.
-pub fn markdown_to_html(markdown: &str) -> String {
+/// Preserve each web surface's existing HTML and task-list contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownHtmlProfile {
+    Board,
+    Knowledge,
+    ReleaseNotes,
+}
+
+/// Render web Markdown through one parser and sanitizer pipeline.
+///
+/// Knowledge keeps task-list checkbox inputs. Release notes display raw HTML
+/// as literal text so commit messages cannot introduce markup or lose text.
+pub fn render_markdown_html(markdown: &str, profile: MarkdownHtmlProfile) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
 
-    let parser = Parser::new_ext(markdown, options);
+    let parser = Parser::new_ext(markdown, options).map(|event| match (profile, event) {
+        (MarkdownHtmlProfile::ReleaseNotes, Event::Html(raw) | Event::InlineHtml(raw)) => {
+            Event::Text(raw)
+        }
+        (_, event) => event,
+    });
     let mut raw_html = String::new();
     html::push_html(&mut raw_html, parser);
 
-    ammonia::Builder::default()
-        .add_tags(["table", "thead", "tbody", "tr", "th", "td"])
-        .clean(&raw_html)
-        .to_string()
+    let mut sanitizer = ammonia::Builder::default();
+    sanitizer.add_tags(["table", "thead", "tbody", "tr", "th", "td"]);
+    if profile == MarkdownHtmlProfile::Knowledge {
+        sanitizer
+            .add_tags(["input"])
+            .add_tag_attributes("input", ["checked", "disabled", "type"]);
+    }
+    sanitizer.clean(&raw_html).to_string()
+}
+
+/// Render Markdown to sanitized HTML for Board posts and reports.
+pub fn markdown_to_html(markdown: &str) -> String {
+    render_markdown_html(markdown, MarkdownHtmlProfile::Board)
 }
 
 /// Render Markdown to the limited HTML subset Microsoft Teams renders in a
@@ -268,6 +293,28 @@ mod tests {
             !dirty.contains("href=\"javascript"),
             "js scheme href stripped: {dirty}"
         );
+
+        let tasks = markdown_to_html("- [x] Accepted item");
+        assert!(!tasks.contains("<input"), "Board inputs stripped: {tasks}");
+    }
+
+    #[test]
+    fn release_notes_html_keeps_raw_markup_literal() {
+        let markdown = concat!(
+            "- **gui:** Use `gwt` and [docs](https://example.com)\n",
+            "- payload <script>alert(1)</script> end\n\n",
+            "<div>raw block</div>\n",
+        );
+        let html = render_markdown_html(markdown, MarkdownHtmlProfile::ReleaseNotes);
+        assert!(html.contains("<strong>gui:</strong>"), "{html}");
+        assert!(html.contains("<code>gwt</code>"), "{html}");
+        assert!(html.contains("href=\"https://example.com\""), "{html}");
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "raw inline HTML must remain visible: {html}"
+        );
+        assert!(html.contains("&lt;div&gt;raw block&lt;/div&gt;"), "{html}");
+        assert!(!html.contains("<script>"), "{html}");
     }
 
     #[test]
