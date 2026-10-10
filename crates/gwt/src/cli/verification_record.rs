@@ -10905,8 +10905,9 @@ mod tests {
                 user_verification_result: None,
             })
         };
-        let error = crate::cli::run_collect(&mut env, run()).unwrap_err();
-        assert!(error.to_string().contains("deferred"), "{error}");
+        let (code, output) = crate::cli::run_collect(&mut env, run()).unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(output.contains("deferred"), "{output}");
         let record = load(dir.path())
             .unwrap()
             .expect("partial results must survive deferral");
