@@ -3491,6 +3491,10 @@ mod tests {
                 Ok(Self(Box::new(handler)))
             }
             fn watch(&mut self, path: &Path, _mode: notify::RecursiveMode) -> notify::Result<()> {
+                // The error callback gates the worker until all ten raw
+                // notifications are queued, regardless of thread scheduling.
+                self.0
+                    .handle_event(Err(notify::Error::generic("burst barrier")));
                 for _ in 0..10 {
                     self.0
                         .handle_event(Ok(notify::Event::new(notify::EventKind::Modify(
@@ -3511,23 +3515,32 @@ mod tests {
         let _home = ScopedGwtHome::set(temp.path());
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).unwrap();
-        let projection =
+        let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&root);
         gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
         let path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&root);
         let (tx, rx) = std::sync::mpsc::channel();
-        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = reloads.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let watched_root = root.clone();
+        let watched_home = temp.path().to_path_buf();
         let mut debouncer = notify_debouncer_mini::new_debouncer_opt::<_, BurstWatcher>(
-            super::workspace_projection_debounce_config(),
+            // recv_timeout consumes queued events before checking its timeout.
+            // Zero makes every path expire on the first tick after that queue
+            // drains, so AnyContinuous cannot split this burst into callbacks.
+            // The production watcher's 250ms configuration stays unchanged.
+            super::workspace_projection_debounce_config().with_timeout(Duration::ZERO),
             move |result: notify_debouncer_mini::DebounceEventResult| {
-                let paths = result
-                    .unwrap()
+                let Ok(events) = result else {
+                    release_rx.recv().expect("release the queued burst");
+                    return;
+                };
+                let _home = ScopedGwtHome::set(&watched_home);
+                let paths = events
                     .into_iter()
                     .map(|event| event.path)
                     .collect::<Vec<_>>();
-                if let Some(event) = super::workspace_projection_watch_event(&root, &paths) {
-                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(event) = super::workspace_projection_watch_event(&watched_root, &paths)
+                {
                     tx.send(event).unwrap();
                 }
             },
@@ -3537,15 +3550,26 @@ mod tests {
             .watcher()
             .watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive)
             .unwrap();
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(10)).unwrap(),
-            UserEvent::WorkspaceProjectionLoaded { .. }
-        ));
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
-        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        projection.title = "final state after ten notifications".to_string();
+        gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
+        release_tx.send(()).unwrap();
+
+        let mut reloads = vec![rx.recv().expect("reload the queued burst")];
+        drop(debouncer);
+        // Shutdown drops the callback's sender. Drain until disconnect to
+        // count every reload instead of assuming a second of silence is final.
+        reloads.extend(rx);
+        assert_eq!(reloads.len(), 1);
+        match &reloads[0] {
+            UserEvent::WorkspaceProjectionLoaded {
+                project_root,
+                projection: Some(actual),
+            } => {
+                assert_eq!(project_root, &root);
+                assert_eq!(actual.as_ref(), &projection);
+            }
+            other => panic!("expected the final workspace snapshot, got {other:?}"),
+        }
     }
 
     #[test]
