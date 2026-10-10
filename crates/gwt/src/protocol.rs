@@ -1021,6 +1021,13 @@ pub enum FrontendEvent {
     ListCustomAgents,
     /// SPEC #1921 L3: list supported built-ins and their cached detection state.
     ListSupportedAgents,
+    MaintainSupportedAgent {
+        agent_id: String,
+        action: crate::agent_maintenance::MaintenanceAction,
+    },
+    SetAgentAutoUpdate {
+        enabled: bool,
+    },
     /// Settings > Custom Agents > Add from preset: enumerate built-in preset
     /// definitions for the picker. Response is
     /// [`BackendEvent::CustomAgentPresetList`].
@@ -1888,6 +1895,11 @@ pub struct SupportedAgentView {
     /// None distinguishes an unavailable version from a known one; `installed`
     /// distinguishes a failed version probe from an agent that was not detected.
     pub installed_version: Option<String>,
+    pub available_version: Option<String>,
+    pub update_check_error: Option<String>,
+    pub update_available: bool,
+    pub up_to_date: bool,
+    pub install_supported: bool,
 }
 
 /// Issue #3906 AC-7 / AC-12: phases of the automatic apply announced through
@@ -2565,6 +2577,16 @@ pub enum BackendEvent {
     /// Response to [`FrontendEvent::ListSupportedAgents`].
     SupportedAgentList {
         agents: Vec<SupportedAgentView>,
+        auto_update: bool,
+        maintenance_pending: bool,
+    },
+    SupportedAgentMaintenance {
+        agent_id: String,
+        pending: bool,
+        success: Option<bool>,
+        message: String,
+        before_version: Option<String>,
+        after_version: Option<String>,
     },
     /// Response to [`FrontendEvent::ListCustomAgentPresets`].
     CustomAgentPresetList {
@@ -3312,6 +3334,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "supported_agent_maintenance",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "agent_backend_saved",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -3516,6 +3543,7 @@ impl BackendEvent {
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
             BackendEvent::CustomAgentList { .. } => "custom_agent_list",
             BackendEvent::SupportedAgentList { .. } => "supported_agent_list",
+            BackendEvent::SupportedAgentMaintenance { .. } => "supported_agent_maintenance",
             BackendEvent::CustomAgentPresetList { .. } => "custom_agent_preset_list",
             BackendEvent::CustomAgentSaved { .. } => "custom_agent_saved",
             BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",
