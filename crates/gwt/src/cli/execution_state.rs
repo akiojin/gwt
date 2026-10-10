@@ -10391,9 +10391,16 @@ fn save_legacy_recovery_record_if_session_unchanged(
     owner: ExecutionOwnerKey,
     expected_session: &gwt_agent::Session,
     record: &ExecutionControlRecord,
+    require_usable_work: bool,
 ) -> io::Result<()> {
     with_generation_owner_lease(worktree, owner, |_| {
-        with_exact_recovery_session_lease(expected_session, || save(worktree, record))
+        with_exact_recovery_session_lease(expected_session, || {
+            if require_usable_work {
+                with_reopen_work_ready(worktree, &expected_session.id, || save(worktree, record))
+            } else {
+                save(worktree, record)
+            }
+        })
     })
 }
 
@@ -10595,33 +10602,43 @@ where
                 } else {
                     record.settled_at.unwrap_or_else(Utc::now)
                 };
-                append_lifecycle_event(
-                    &mut ledger,
-                    GenerationLifecycleEvent {
-                        sequence: 0,
-                        generation_id: current.identity.generation_id,
-                        from_status,
-                        to_status: record.status,
-                        session_id: record.primary_session_id.clone(),
-                        reason: reason.to_string(),
-                        operation_id: None,
-                        recorded_at,
-                        execution_control_json: projection.clone(),
-                        previous_event_hash: String::new(),
-                        content_hash: String::new(),
-                    },
-                );
-                stamp_generation_ledger(&mut ledger);
-                if target_is_current {
-                    write_activated_generation(context, &ledger, &projection)?;
+                let transition = || {
+                    append_lifecycle_event(
+                        &mut ledger,
+                        GenerationLifecycleEvent {
+                            sequence: 0,
+                            generation_id: current.identity.generation_id,
+                            from_status,
+                            to_status: record.status,
+                            session_id: record.primary_session_id.clone(),
+                            reason: reason.to_string(),
+                            operation_id: None,
+                            recorded_at,
+                            execution_control_json: projection.clone(),
+                            previous_event_hash: String::new(),
+                            content_hash: String::new(),
+                        },
+                    );
+                    stamp_generation_ledger(&mut ledger);
+                    if target_is_current {
+                        write_activated_generation(context, &ledger, &projection)?;
+                    } else {
+                        // The flat projection/pointer pair belongs to the current
+                        // generation. A superseded holder commits its lifecycle
+                        // event to the authoritative ledger and must not republish
+                        // over the running successor's projection.
+                        write_owner_ledger(context, &ledger)?;
+                    }
+                    Ok(true)
+                };
+                if expected_session.is_some()
+                    && from_status == ExecutionControlStatus::Blocked
+                    && record.status == ExecutionControlStatus::Active
+                {
+                    with_reopen_work_ready(worktree, &record.primary_session_id, transition)
                 } else {
-                    // The flat projection/pointer pair belongs to the current
-                    // generation. A superseded holder commits its lifecycle
-                    // event to the authoritative ledger and must not republish
-                    // over the running successor's projection.
-                    write_owner_ledger(context, &ledger)?;
+                    transition()
                 }
-                Ok(true)
             },
         )
     })
@@ -11382,8 +11399,8 @@ fn settle_locked(
     Ok(SettleResult::Settled(record))
 }
 
-/// Completion owns the matching build's cleanup too: once the execution is
-/// terminal, a separate build.complete can no longer rely on its live binding.
+/// Completion owns matching build and bookkeeping cleanup: once the execution
+/// is terminal, a separate build.complete cannot rely on its live binding.
 /// Run after the durable transition, and on completion retries, so cleanup I/O
 /// failures never reopen or discard an execution that already completed.
 fn complete_matching_build_lifecycle(
@@ -11393,6 +11410,9 @@ fn complete_matching_build_lifecycle(
     if record.status != ExecutionControlStatus::Completed {
         return Ok(());
     }
+    crate::cli::verification_record::close_completed_work_event_obligation_locked(
+        worktree, record,
+    )?;
     let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
     else {
         return Ok(());
@@ -12587,7 +12607,9 @@ pub fn session_launch_route(session_id: Option<&str>) -> Option<gwt_agent::Launc
     Some(session_launch_route_from_session(&session))
 }
 
-fn session_launch_route_from_session(session: &gwt_agent::Session) -> gwt_agent::LaunchRoute {
+/// Resolve a previously loaded Session without reading durable state.
+#[must_use]
+pub fn session_launch_route_from_session(session: &gwt_agent::Session) -> gwt_agent::LaunchRoute {
     if session.launch_route != gwt_agent::LaunchRoute::Autonomous
         && launched_by_issue_monitor(session)
     {
@@ -13768,7 +13790,62 @@ fn probe_execution_reopen_for_recovery(
     if recovery_context.is_some_and(Result::is_err) {
         return invalid_execution_recovery_scope_probe("execution.reopen");
     }
-    probe_execution_reopen(worktree, session_id)
+    let probe = probe_execution_reopen(worktree, session_id);
+    if probe.advertise() && recovery_context.is_some() {
+        if let Err(refusal) = execution_reopen_work_prerequisite(worktree, session_id) {
+            return crate::cli::governance::RecoveryProbe::unavailable(
+                "execution.reopen",
+                protected_recovery_metadata(Some(refusal.cause), false),
+                refusal.reason,
+            );
+        }
+    }
+    probe
+}
+
+fn execution_reopen_work_prerequisite(
+    worktree: &Path,
+    session_id: &str,
+) -> Result<(), RecoveryPrerequisiteRefusal> {
+    crate::agent_project_state::resolve_execution_recovery_context(worktree, session_id)
+        .and_then(|context| context.validate_usable_work())
+        .map_err(|error| {
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "work_not_ready",
+                "gwt-execute",
+                format!(
+                    "reopen requires an Assigned Session and nonterminal canonical Work: {error}; \
+                     use the linked-owner fresh launch (Launch Agent / Start Work) to materialize \
+                     successor Work after authenticated readiness (#4074)"
+                ),
+            )
+        })
+}
+
+fn with_reopen_work_ready<T>(
+    worktree: &Path,
+    session_id: &str,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let context =
+        crate::agent_project_state::resolve_execution_recovery_context(worktree, session_id)
+            .map_err(io::Error::other)?;
+    let current_path =
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(context.project_state_root());
+    let works_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(context.project_state_root());
+    // Call only under the existing owner -> exact Session lease. Keep Work
+    // authority stable through the ECR write without rewriting its projection.
+    gwt_core::workspace_projection::with_workspace_current_and_work_items_lock(
+        &current_path,
+        &works_path,
+        || {
+            Ok(execution_reopen_work_prerequisite(worktree, session_id)
+                .map_err(|refusal| io::Error::new(ErrorKind::PermissionDenied, refusal))
+                .and_then(|_| operation()))
+        },
+    )
+    .map_err(io::Error::other)?
 }
 
 fn invalid_execution_recovery_scope_probe(
@@ -13873,6 +13950,14 @@ struct RecoveryPrerequisiteRefusal {
     recovery_action: Option<String>,
     escalation_kind: Option<gwt_core::board_escalation::OperationRefusalKind>,
 }
+
+impl std::fmt::Display for RecoveryPrerequisiteRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for RecoveryPrerequisiteRefusal {}
 
 impl RecoveryPrerequisiteRefusal {
     fn new(cause: crate::cli::governance::GovernanceCause, reason: impl Into<String>) -> Self {
@@ -16684,10 +16769,17 @@ fn run_reopen_locked(
             // rolling-upgrade write. A modern idempotent retry stays a true
             // no-op and cannot fail because of an unnecessary rewrite.
             let validate_and_upgrade = || {
-                if recovery_storage_needs_upgrade(worktree)? && binding.is_none() {
-                    save(worktree, &record)?;
+                let upgrade = || {
+                    if recovery_storage_needs_upgrade(worktree)? && binding.is_none() {
+                        save(worktree, &record)?;
+                    }
+                    Ok(())
+                };
+                if expected_session.is_some() {
+                    with_reopen_work_ready(worktree, session_id, upgrade)
+                } else {
+                    upgrade()
                 }
-                Ok(())
             };
             let satisfied = match expected_session {
                 Some(expected_session) => with_satisfied_recovery_session_lease(
@@ -16706,6 +16798,20 @@ fn run_reopen_locked(
                     return Ok(2);
                 }
                 Err(err) => {
+                    if let Some(prerequisite) = err
+                        .get_ref()
+                        .and_then(|source| source.downcast_ref::<RecoveryPrerequisiteRefusal>())
+                    {
+                        out.push_str(&format!("execution: reopen refused - {err}\n"));
+                        *refusal = Some(
+                            recovery_prerequisite_operation_refusal(
+                                "execution.reopen",
+                                prerequisite,
+                            )
+                            .with_owner(Some(record.owner_number)),
+                        );
+                        return Ok(2);
+                    }
                     *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
                     return Err(SpecOpsError::from(ApiError::Unexpected(
                         crate::cli::trusted_store::store_health_error(
@@ -16789,6 +16895,17 @@ fn run_reopen_locked(
             return Ok(2);
         }
         Err(err) => {
+            if let Some(prerequisite) = err
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<RecoveryPrerequisiteRefusal>())
+            {
+                out.push_str(&format!("execution: reopen refused - {err}\n"));
+                *refusal = Some(
+                    recovery_prerequisite_operation_refusal("execution.reopen", prerequisite)
+                        .with_owner(Some(record.owner_number)),
+                );
+                return Ok(2);
+            }
             *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
             return Err(SpecOpsError::from(ApiError::Unexpected(
                 crate::cli::trusted_store::store_health_error("settling execution state", &err),
@@ -16806,6 +16923,7 @@ fn run_reopen_locked(
                 owner,
                 expected_session,
                 &record,
+                true,
             ),
             None => save(worktree, &record),
         };
@@ -16817,6 +16935,17 @@ fn run_reopen_locked(
                 return Ok(2);
             }
             Err(err) => {
+                if let Some(prerequisite) = err
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<RecoveryPrerequisiteRefusal>())
+                {
+                    out.push_str(&format!("execution: reopen refused - {err}\n"));
+                    *refusal = Some(
+                        recovery_prerequisite_operation_refusal("execution.reopen", prerequisite)
+                            .with_owner(Some(record.owner_number)),
+                    );
+                    return Ok(2);
+                }
                 *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
@@ -17177,6 +17306,7 @@ fn run_adopt_locked(
             owner,
             expected_session,
             &record,
+            false,
         ) {
             Ok(()) => {}
             Err(err) if is_recovery_session_changed_error(&err) => {
@@ -25721,10 +25851,16 @@ mod tests {
             )
             .expect("load bound Session fixture");
             let worktree = dunce::canonicalize(repo).expect("canonical fixture worktree");
-            let work_id = format!("work-build-abort-{}-{}", owner.kind.as_str(), owner.number);
+            let work_id = gwt_core::workspace_projection::canonical_work_id(
+                repo,
+                Some(&session.branch),
+                Some(&worktree),
+            )
+            .expect("canonical fixture Work id");
             let now = Utc::now();
             let mut projection =
                 gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+            projection.id = work_id.clone();
             projection
                 .agents
                 .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
@@ -29482,6 +29618,7 @@ exit 1
                 blocked_binding.ledger_head_hash,
                 active_binding.ledger_head_hash
             );
+            seed_build_abort_work_authority(dir.path(), "sess-reopen", owner);
             let verification_record_id = save_covering_evidence(dir.path(), "sess-reopen", true);
 
             let (code, out) = run_cmd(
@@ -30529,6 +30666,242 @@ exit 1
         }
 
         #[test]
+        fn reopen_requires_usable_work_and_preserves_invalid_authority() {
+            use gwt_core::workspace_projection::{
+                WorkEvent, WorkEventKind, WorkspaceAgentAffiliationStatus,
+            };
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session_id = "session-reopen-work";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+
+            for (terminal, canonical) in [
+                (Some(WorkEventKind::Done), true),
+                (Some(WorkEventKind::Discard), true),
+                (None, true),
+                (None, false),
+            ] {
+                let home = tempfile::tempdir().unwrap();
+                let _home = ScopedEnvVar::set("HOME", home.path());
+                let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+                let repo = tempfile::tempdir().unwrap();
+                let owner = prepare_generation_bound_execution(
+                    repo.path(),
+                    session_id,
+                    3248,
+                    ExecutionControlStatus::Blocked,
+                );
+                seed_build_abort_work_authority(repo.path(), session_id, owner);
+                let work_path =
+                    gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo.path());
+                let mut works =
+                    gwt_core::workspace_projection::load_workspace_work_items(repo.path())
+                        .unwrap()
+                        .unwrap();
+                if let Some(kind) = terminal {
+                    let work_id = works.work_items[0].id.clone();
+                    works.apply_event(WorkEvent::new(kind, work_id, Utc::now()));
+                    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                        &work_path, &works,
+                    )
+                    .unwrap();
+                } else {
+                    let mut projection =
+                        gwt_core::workspace_projection::load_workspace_projection(repo.path())
+                            .unwrap()
+                            .unwrap();
+                    if canonical {
+                        projection.agents[0].affiliation_status =
+                            WorkspaceAgentAffiliationStatus::Unassigned;
+                        projection.agents[0].workspace_id = None;
+                    } else {
+                        let work_id = "noncanonical-reopen-work";
+                        works.work_items[0].id = work_id.to_string();
+                        for event in &mut works.work_items[0].events {
+                            event.work_item_id = work_id.to_string();
+                        }
+                        projection.id = work_id.to_string();
+                        projection.agents[0].workspace_id = Some(work_id.to_string());
+                        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(&work_path, &works).unwrap();
+                    }
+                    gwt_core::workspace_projection::save_workspace_projection(
+                        repo.path(),
+                        &projection,
+                    )
+                    .unwrap();
+                }
+                save_covering_evidence(repo.path(), session_id, true);
+                let before = recovery_operation_authority_bytes(repo.path(), owner, &[session_id]);
+                let result = run_governed_cmd(
+                    repo.path(),
+                    ExecutionCommand::Reopen {
+                        reason: "verification alone cannot restore Work authority".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.exit_code, 2, "{}", result.output);
+                let refusal = result.refusal.expect("named Work prerequisite refusal");
+                assert_eq!(refusal.reason_code, "execution_reopen_work_not_ready");
+                assert_eq!(refusal.recovery_action.as_deref(), Some("gwt-execute"));
+                assert_eq!(
+                    recovery_operation_authority_bytes(repo.path(), owner, &[session_id]),
+                    before
+                );
+                let context = crate::agent_project_state::resolve_execution_recovery_context(
+                    repo.path(),
+                    session_id,
+                );
+                assert_eq!(
+                    probe_execution_reopen_for_recovery(repo.path(), session_id, Some(&context))
+                        .state,
+                    crate::cli::governance::RecoveryProbeState::Unavailable
+                );
+            }
+        }
+
+        #[test]
+        fn reopen_rechecks_work_when_close_wins_before_generation_commit() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-reopen-close-race";
+            let repo = tempfile::tempdir().unwrap();
+            let owner = prepare_generation_bound_execution(
+                repo.path(),
+                session_id,
+                3248,
+                ExecutionControlStatus::Blocked,
+            );
+            seed_build_abort_work_authority(repo.path(), session_id, owner);
+            let session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .unwrap();
+            let work = crate::agent_project_state::resolve_session_work_mutation_target(
+                repo.path(),
+                session_id,
+            )
+            .unwrap();
+            let before = recovery_operation_authority_bytes(repo.path(), owner, &[session_id]);
+            let mut record = load(repo.path()).unwrap().unwrap();
+            record.status = ExecutionControlStatus::Active;
+            record.settled_at = None;
+            let result = persist_generation_lifecycle_transition_if_owned_with_session_snapshot_and_before_lease(
+                repo.path(), &record, ExecutionControlStatus::Blocked, "close race", Some(&session), || {
+                    gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+                        repo.path(), &work.work_id, Utc::now(),
+                    ).unwrap();
+                },
+            );
+            assert!(
+                result.is_err(),
+                "terminal close must win over reopen: {result:?}"
+            );
+            let error = result.unwrap_err();
+            let refusal = error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<RecoveryPrerequisiteRefusal>())
+                .expect("close race must return a named Work refusal");
+            assert_eq!(refusal.reason_code, "work_not_ready");
+            let after = recovery_operation_authority_bytes(repo.path(), owner, &[session_id]);
+            assert_eq!(after.generation, before.generation);
+            assert_eq!(after.sessions, before.sessions);
+        }
+
+        #[test]
+        fn reopen_preserves_usable_work_and_idempotent_session_readback() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-reopen-usable-work";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+            let repo = tempfile::tempdir().unwrap();
+            let owner = prepare_generation_bound_execution(
+                repo.path(),
+                "previous-reopen-work",
+                3248,
+                ExecutionControlStatus::Blocked,
+            );
+            persist_recovery_session_snapshot(repo.path(), owner, session_id);
+            let adopted = run_governed_cmd(
+                repo.path(),
+                ExecutionCommand::Adopt {
+                    reason: "recover the previous Blocked Session".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(adopted.exit_code, 0, "{}", adopted.output);
+            seed_build_abort_work_authority(repo.path(), session_id, owner);
+            save_covering_evidence(repo.path(), session_id, true);
+            let before = recovery_operation_authority_bytes(repo.path(), owner, &[session_id]);
+            let adopted_session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .unwrap();
+            let context = crate::agent_project_state::resolve_execution_recovery_context(
+                repo.path(),
+                session_id,
+            );
+            assert_eq!(
+                probe_execution_reopen_for_recovery(repo.path(), session_id, Some(&context)).state,
+                crate::cli::governance::RecoveryProbeState::Available
+            );
+            assert_eq!(
+                recovery_operation_authority_bytes(repo.path(), owner, &[session_id]),
+                before
+            );
+            let result = run_governed_cmd(
+                repo.path(),
+                ExecutionCommand::Reopen {
+                    reason: "verified recovery retains the usable canonical Work".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(result.exit_code, 0, "{}", result.output);
+            let target = crate::agent_project_state::resolve_session_work_mutation_target(
+                repo.path(),
+                session_id,
+            )
+            .expect("successful reopen must read back Assigned and nonterminal Work");
+            assert_eq!(target.session_id, session_id);
+            let reopened = recovery_operation_authority_bytes(repo.path(), owner, &[session_id]);
+            assert_eq!(reopened.work, before.work, "reopen must not rewrite Work");
+            let recovered_session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .unwrap();
+            let mut expected_session = adopted_session;
+            expected_session.execution_binding = recovered_session.execution_binding.clone();
+            assert_eq!(
+                canonical_recovery_session_snapshot(&recovered_session).unwrap(),
+                canonical_recovery_session_snapshot(&expected_session).unwrap(),
+                "recovery must preserve Session metadata outside its execution binding"
+            );
+            let retry = run_governed_cmd(
+                repo.path(),
+                ExecutionCommand::Reopen {
+                    reason: "idempotent retry".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(retry.exit_code, 0, "{}", retry.output);
+            assert_eq!(
+                recovery_operation_authority_bytes(repo.path(), owner, &[session_id]),
+                reopened
+            );
+        }
+
+        #[test]
         fn reopen_is_idempotent_for_current_active_owner() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -30547,6 +30920,14 @@ exit 1
                     number: 3248,
                 },
                 "sess-reopen",
+            );
+            seed_build_abort_work_authority(
+                dir.path(),
+                "sess-reopen",
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 3248,
+                },
             );
             let (code, out) = run_cmd(
                 dir.path(),
@@ -32125,6 +32506,14 @@ exit 1
             save(&fixture.repo, &active_record("sess-op")).unwrap();
             save_covering_evidence(&fixture.repo, "sess-op", false);
             fixture.append_event("terminal-update-awaiting-delivery");
+            let foreign_receipt =
+                crate::cli::verification_record::save_work_event_settlement_record(
+                    &fixture.repo,
+                    "review-session",
+                    true,
+                )
+                .unwrap();
+            assert!(foreign_receipt.obligation_open);
 
             let mut env = TestEnv::new(fixture.repo.clone());
             env.stdin =
@@ -32141,6 +32530,19 @@ exit 1
                 load(&fixture.repo).unwrap().unwrap().status,
                 ExecutionControlStatus::Completed,
                 "unsettled Work bookkeeping must not keep a delivered execution Active"
+            );
+            let preserved =
+                crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                preserved.obligation_open,
+                "another Session owns this obligation"
+            );
+            assert_eq!(preserved.session_id, foreign_receipt.session_id);
+            assert_eq!(
+                preserved.execution_binding,
+                foreign_receipt.execution_binding
             );
         }
 
@@ -33035,6 +33437,14 @@ exit 1
             assert_eq!(adopted.transfers.len(), 1);
             assert_eq!(adopted.transfers[0].from_session_id, "sess-reaped");
             assert!(integrity_ok(&adopted));
+            seed_build_abort_work_authority(
+                dir.path(),
+                "sess-relaunched",
+                ExecutionOwnerKey {
+                    kind: adopted.owner_kind,
+                    number: adopted.owner_number,
+                },
+            );
 
             let commands = vec!["git --version".to_string()];
             let (plan_code, plan_out) = run_collect(

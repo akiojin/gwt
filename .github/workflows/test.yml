@@ -20,8 +20,9 @@ on:
 # so it cannot distinguish a product push from base-only synchronization. Give
 # each run its own group, then bound each workload to one running/one pending
 # job per PR below. A proven product push replaces running jobs (#4119); a
-# base sync replaces only pending jobs and lets the running measurement finish.
-# Unknown history preserves running work rather than guessing the cause.
+# base sync replaces only pending jobs and lets running work finish, except
+# paired timings: a proven base sync skips that dependency entirely (#5258).
+# Other workloads preserve running work for unknown history.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ github.run_id }}
   cancel-in-progress: true
@@ -491,11 +492,13 @@ jobs:
     name: Windows derived verification timings (paired)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-verify-timings
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: true
     needs: [changes, source-sync]
-    # Admission must cancel obsolete paired work on a product push even when
-    # the new PR no longer needs measurement. That case uses a cheap Ubuntu job.
-    if: ${{ !cancelled() }}
+    # Issue #5258: a proven base sync needs no new product measurement and must
+    # not queue behind an obsolete paired job before Test (Rust) can conclude.
+    # Other heads replace old paired work, even if measurement is no longer
+    # relevant (cheap Ubuntu admission). Unknown classification still measures.
+    if: ${{ !cancelled() && needs.source-sync.outputs.base_only != 'true' }}
     runs-on: ${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 120
     steps:

@@ -1,5 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { markdownContent, renderUiContent } from "/ui-content.js";
+import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -3467,8 +3468,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
       // the backend marked `is_pm`; null while no PM pane exists.
       let pmWindowId = null;
+      const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
 
       function updatePmLauncher(workspace) {
+        pmLauncherModel.update(state => ({ ...state, workspace }));
+      }
+
+      pmLauncherModel.subscribe(state => state, ({ workspace, paused }) => {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
         pmWindowId = pmWindow?.id ?? null;
@@ -3483,6 +3489,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               ? "stopped"
               : "running";
           railEntry.dataset.pmState = state;
+          railEntry.dataset.pmPaused = String(paused);
           // Issue #4777: the hover text says what the PM is, not only its name.
           const role = "your point of contact, not one of the agents";
           railEntry.title =
@@ -3491,6 +3498,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               : state === "stopped"
                 ? `Project Manager (stopped): ${role}. Click to resume`
                 : `Project Manager: ${role}. Click to start`;
+          if (paused) railEntry.title += ". Autonomous loop paused";
         }
 
         const floating = document.getElementById("canvas-pm-launcher");
@@ -3499,7 +3507,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           // reachable on screen, so a visible PM never gets a duplicate CTA.
           floating.hidden = Boolean(pmWindow) && isWindowWithinViewport(pmWindow);
         }
-      }
+      });
 
       // True when the window's rectangle intersects the visible canvas area.
       function isWindowWithinViewport(windowData) {
@@ -6468,6 +6476,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);
+            pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});

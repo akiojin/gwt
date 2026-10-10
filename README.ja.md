@@ -282,6 +282,11 @@ gwtd <<'JSON'
 JSON
 ```
 
+`workspace.update` の応答を失った場合は、表示された `operation_id` を同じ Session の
+`workspace.receipt`（`params: {"operation_id":"<UUID>"}`）に渡して確認できます。
+この読み取り専用照会は Host へ接続せず、更新も再送しません。`applied` は永続化の完了、
+`unconfirmed` は旧 Host を含め証拠がまだ確認できない状態であり、更新の失敗を意味しません。
+
 `board.show` は、選択された workspace / session から見える最新20件を時系列順で
 返します。`params.limit` に非負整数（例: `15`、`0` は空）を指定して件数を変更できます。
 `params.all: true` は全宛先を対象にして既定上限を解除しますが、明示した `limit` が
@@ -616,6 +621,10 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 担うため、多重起動の防止機構はそのまま維持されます。
 
 - プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
+- PM 設定の **Pause / Resume** で自律ループを一時停止・再開できます。停止状態は
+  再起動後も維持され、PM との会話、Issue Monitor、稼働中の agent は継続します。
+  Resume は最新の状態を再確認します。JSON operations `pm.pause` / `pm.resume`
+  でも操作でき、`pm.status` は登録状態と別に `paused` を返します。
 - PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
   クラッシュループを防ぐバックオフが働きます。
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは

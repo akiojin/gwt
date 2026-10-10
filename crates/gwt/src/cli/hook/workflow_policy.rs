@@ -838,6 +838,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
+            | "workspace.receipt"
             | "workspace.projection_list"
             | "workspace.projection-list"
             | "board.show"
@@ -1900,6 +1901,21 @@ mod tests {
             "a GET-only Actions diagnostic must stay available before Work identity is set"
         );
         assert!(!is_read_only_json_envelope_operation("actions.cancel"));
+    }
+
+    #[test]
+    fn workspace_receipt_is_read_only_before_title_identity_is_set() {
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        let command = envelope_command(
+            "workspace.receipt",
+            r#"{"operation_id":"aafc5f24-e5a5-4270-956d-86ac31dafb88"}"#,
+        );
+        assert_eq!(
+            evaluate_with_context(&bash_event(&command), repo.path(), &context).expect("policy"),
+            HookOutput::Silent,
+            "receipt recovery must stay available before Work identity is set"
+        );
     }
 
     #[test]
