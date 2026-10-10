@@ -1674,7 +1674,8 @@ fn refresh_unpersisted_pending_record(
 /// previous open obligation remains open across refreshes until the exact
 /// event path is clean and HEAD is confirmed on the configured upstream
 /// remote. Refreshes and duplicate opens do not replace the originating
-/// session provenance.
+/// session provenance. A closed pending delivery remains audit evidence on
+/// refresh; opening a new terminal obligation replaces that closed receipt.
 pub fn save_work_event_settlement_record(
     worktree: &Path,
     session_id: &str,
@@ -1684,7 +1685,10 @@ pub fn save_work_event_settlement_record(
     crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
         let previous = load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?;
-        if let Some(record) = previous.as_ref().filter(|record| record.obligation_open) {
+        if let Some(record) = previous
+            .as_ref()
+            .filter(|record| record.obligation_open || !open_obligation)
+        {
             if let Some(delivery) = pending_delivery_for_record(record) {
                 match pending_work_event_is_persisted(
                     worktree,
@@ -1709,7 +1713,7 @@ pub fn save_work_event_settlement_record(
         let pending_delivery = previous
             .as_ref()
             .filter(|record| {
-                record.obligation_open
+                (record.obligation_open || !open_obligation)
                     && record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
             })
             .and_then(pending_delivery_for_record);
@@ -1832,6 +1836,38 @@ fn persist_work_event_settlement_record_to_resolved_dir(
         WORK_EVENT_SETTLEMENT_RECORD_FILE,
         &bytes,
     )
+}
+
+/// #5216 / FR-026: verified delivery ends only its own bookkeeping obligation.
+/// Called under the owner write lease after the durable Completed transition.
+/// Preserve dirty/pending facts and immutable events as audit evidence; another
+/// Session or generation must still settle its own receipt independently.
+pub(crate) fn close_completed_work_event_obligation_locked(
+    worktree: &Path,
+    execution: &execution_state::ExecutionControlRecord,
+) -> io::Result<()> {
+    if execution.status != execution_state::ExecutionControlStatus::Completed
+        || execution.completion_evidence.is_none()
+        || !execution_state::integrity_ok(execution)
+    {
+        return Ok(());
+    }
+    let Some(mut receipt) = load_work_event_settlement_record(worktree)? else {
+        return Ok(());
+    };
+    if !receipt.obligation_open
+        || receipt.session_id != execution.primary_session_id
+        || !work_event_receipt_authorizes_current_generation(worktree, &receipt)?
+    {
+        return Ok(());
+    }
+    receipt.obligation_open = false;
+    receipt.updated_at = Utc::now();
+    if !receipt.status.is_settled() {
+        tracing::warn!(status = ?receipt.status, "verified delivery retains unsettled Work bookkeeping for audit");
+    }
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &receipt)
 }
 
 pub(crate) fn pending_shard_refresh_failure_must_block(record: &WorkEventSettlementRecord) -> bool {
@@ -13769,6 +13805,17 @@ mod tests {
         assert!(
             !refusal.contains("dirty") && refusal.contains("has not been persisted"),
             "{refusal}"
+        );
+
+        // #5216: verified delivery can close this obligation independently of
+        // bookkeeping. Later refreshes must retain the unpersisted identity.
+        let mut completed = refreshed;
+        completed.obligation_open = false;
+        persist_work_event_settlement_record(&fixture.repo, &completed).unwrap();
+        assert_eq!(
+            save_work_event_settlement_record(&fixture.repo, session_id, false).unwrap(),
+            completed,
+            "completion must preserve the pending event as audit evidence"
         );
     }
 

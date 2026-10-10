@@ -11382,8 +11382,8 @@ fn settle_locked(
     Ok(SettleResult::Settled(record))
 }
 
-/// Completion owns the matching build's cleanup too: once the execution is
-/// terminal, a separate build.complete can no longer rely on its live binding.
+/// Completion owns matching build and bookkeeping cleanup: once the execution
+/// is terminal, a separate build.complete cannot rely on its live binding.
 /// Run after the durable transition, and on completion retries, so cleanup I/O
 /// failures never reopen or discard an execution that already completed.
 fn complete_matching_build_lifecycle(
@@ -11393,6 +11393,9 @@ fn complete_matching_build_lifecycle(
     if record.status != ExecutionControlStatus::Completed {
         return Ok(());
     }
+    crate::cli::verification_record::close_completed_work_event_obligation_locked(
+        worktree, record,
+    )?;
     let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
     else {
         return Ok(());
@@ -32125,6 +32128,14 @@ exit 1
             save(&fixture.repo, &active_record("sess-op")).unwrap();
             save_covering_evidence(&fixture.repo, "sess-op", false);
             fixture.append_event("terminal-update-awaiting-delivery");
+            let foreign_receipt =
+                crate::cli::verification_record::save_work_event_settlement_record(
+                    &fixture.repo,
+                    "review-session",
+                    true,
+                )
+                .unwrap();
+            assert!(foreign_receipt.obligation_open);
 
             let mut env = TestEnv::new(fixture.repo.clone());
             env.stdin =
@@ -32141,6 +32152,19 @@ exit 1
                 load(&fixture.repo).unwrap().unwrap().status,
                 ExecutionControlStatus::Completed,
                 "unsettled Work bookkeeping must not keep a delivered execution Active"
+            );
+            let preserved =
+                crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                preserved.obligation_open,
+                "another Session owns this obligation"
+            );
+            assert_eq!(preserved.session_id, foreign_receipt.session_id);
+            assert_eq!(
+                preserved.execution_binding,
+                foreign_receipt.execution_binding
             );
         }
 
