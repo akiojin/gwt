@@ -2398,7 +2398,11 @@ esac
         .expect_err("a quota wait longer than the remaining quantum must defer the read");
         assert!(error.contains("deadline expired"), "{error}");
         assert!(waits.is_empty(), "do not sleep outside the refresh budget");
-        assert_eq!(invocations(&log), vec![LIST_CALL]);
+        assert_eq!(
+            invocations(&log),
+            vec![LIST_CALL, QUEUED_LIST_CALL],
+            "both REST lists precede the refused GraphQL quota wait"
+        );
         assert!(Cache::new(cache_root).load_entry(IssueNumber(42)).is_none());
     }
 
