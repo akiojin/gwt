@@ -123,6 +123,7 @@ pub(super) const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PmWakeDecision {
     project_root: PathBuf,
+    wake_id: Option<String>,
     pub(crate) window_id: String,
     pub(crate) prompt: String,
 }
@@ -148,6 +149,7 @@ enum PmWakeWrite {
     Injected,
     Deferred,
     Queued,
+    Discarded,
 }
 
 #[derive(Clone)]
@@ -178,6 +180,12 @@ fn pm_wake_signals(inbox: &[gwt::IssueMonitorInboxItem]) -> std::collections::BT
         signals.insert(format!("issue:{}", item.issue.number));
         if item.state == gwt::MonitorInboxState::NeedsHuman {
             signals.insert(format!("needs_human:{}", item.issue.number));
+        }
+        if matches!(
+            item.state,
+            gwt::MonitorInboxState::LaunchFailed | gwt::MonitorInboxState::AgentFailed
+        ) {
+            signals.insert(format!("failed:{}", item.issue.number));
         }
     }
     signals
@@ -626,6 +634,7 @@ impl AppRuntime {
             return BackendEvent::PmStatus {
                 available: false,
                 auto_start: true,
+                paused: false,
                 loop_interval_secs,
                 loop_interval_secs_decimal: loop_interval_secs.to_string(),
                 agent_options: Vec::new(),
@@ -665,6 +674,7 @@ impl AppRuntime {
         BackendEvent::PmStatus {
             available: true,
             auto_start: prefs.settings.auto_start,
+            paused: prefs.settings.paused,
             loop_interval_secs,
             loop_interval_secs_decimal: loop_interval_secs.to_string(),
             agent_options,
@@ -773,6 +783,21 @@ impl AppRuntime {
             prefs.settings.auto_start = enabled;
         }) {
             tracing::warn!(%error, "failed to persist the PM auto-start setting");
+            return Vec::new();
+        }
+        self.pm_status_broadcast_events(context)
+    }
+
+    pub(crate) fn set_pm_paused_events(
+        &mut self,
+        context: &super::ProjectContext,
+        paused: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.pm_project_root(context) else {
+            return Vec::new();
+        };
+        if let Err(error) = pm_registry::set_pm_paused(&project_root, paused) {
+            tracing::warn!(%error, "failed to persist the PM pause setting");
             return Vec::new();
         }
         self.pm_status_broadcast_events(context)
@@ -911,6 +936,11 @@ impl AppRuntime {
         now: &str,
     ) -> Option<PmWakeDecision> {
         let context = self.project_context_for_root(project_root)?;
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
+        if prefs.settings.paused {
+            return None;
+        }
         let signals = pm_wake_signals(inbox);
         let Some(seen) = self.project_state(&context)?.pm_wake_seen.get(project_root) else {
             self.project_state_mut(&context)?
@@ -938,14 +968,6 @@ impl AppRuntime {
                 .insert(project_root.to_path_buf(), signals);
             return None;
         }
-        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
-        let prefs = match pm_registry::load_pm_prefs(&prefs_path) {
-            Ok(prefs) => prefs,
-            Err(error) => {
-                tracing::warn!(%error, "PM wake skipped: pm prefs unreadable");
-                return None;
-            }
-        };
         let Some(registration) = prefs.registration else {
             // No PM to wake; a later PM start reads status in its bootstrap.
             self.project_state_mut(&context)?
@@ -977,19 +999,23 @@ impl AppRuntime {
         // Re-arm the budget and stamp the wake clock: new actionable work is
         // exactly what the park was waiting for, and the stamp keeps the
         // periodic wake from stacking a second prompt in the same window.
+        let wake_id = Some(uuid::Uuid::new_v4().to_string());
         if let Err(error) = pm_registry::save_pm_loop_state(
             &loop_path,
             &pm_registry::PmLoopState {
                 last_wake_at: Some(now.to_string()),
+                last_wake_id: wake_id.clone(),
                 ..pm_registry::PmLoopState::default()
             },
         ) {
             tracing::warn!(%error, "PM wake could not re-arm the loop budget");
+            return None;
         }
         let mut reasons = fresh;
         reasons.truncate(5);
         Some(PmWakeDecision {
             project_root: project_root.to_path_buf(),
+            wake_id,
             window_id,
             prompt: format!(
                 "[gwt] Monitor activity while the PM was idle ({}). Reconcile now: fresh \
@@ -1051,6 +1077,11 @@ impl AppRuntime {
         if !monitor.config.enabled {
             return None;
         }
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
+        if prefs.settings.paused {
+            return None;
+        }
         let status = monitor.agent_status();
         // Issue #3655 AC-5: a standing unblock request is supervision work in
         // its own right. Without this the worst case parks itself — the queue
@@ -1059,12 +1090,16 @@ impl AppRuntime {
         if status.active_launches.is_empty()
             && status.queue.is_empty()
             && status.needs_human.is_empty()
+            && !monitor.inbox.iter().any(|item| {
+                matches!(
+                    item.state,
+                    gwt::MonitorInboxState::LaunchFailed | gwt::MonitorInboxState::AgentFailed
+                )
+            })
             && !standing_durable_work.unwrap_or_else(|| pm_has_standing_durable_work(project_root))
         {
             return None;
         }
-        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
-        let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
         let registration = prefs.registration?;
         let window_id = self.live_pm_window_id(&registration.session_id)?;
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
@@ -1075,17 +1110,21 @@ impl AppRuntime {
         {
             return None;
         }
+        let wake_id = Some(uuid::Uuid::new_v4().to_string());
         if let Err(error) = pm_registry::save_pm_loop_state(
             &loop_path,
             &pm_registry::PmLoopState {
                 last_wake_at: Some(now.to_string()),
+                last_wake_id: wake_id.clone(),
                 ..pm_registry::PmLoopState::default()
             },
         ) {
             tracing::warn!(%error, "PM periodic wake could not re-arm the loop budget");
+            return None;
         }
         Some(PmWakeDecision {
             project_root: project_root.to_path_buf(),
+            wake_id,
             window_id,
             prompt: format!(
                 "[gwt] Scheduled supervision tick: reconcile now — read a fresh \
@@ -1143,7 +1182,7 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(PmWakeWrite::Queued) => {}
+            Ok(PmWakeWrite::Queued | PmWakeWrite::Discarded) => {}
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
@@ -1195,7 +1234,7 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(PmWakeWrite::Queued) => {}
+            Ok(PmWakeWrite::Queued | PmWakeWrite::Discarded) => {}
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
@@ -1891,6 +1930,28 @@ impl AppRuntime {
     /// Issue #3702: if the PM TUI composer already has unsent keystrokes,
     /// hold one coalesced prompt instead of splicing `[gwt]` into the line.
     fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<PmWakeWrite, String> {
+        let prefs = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(
+            &decision.project_root,
+        ))
+        .map_err(|error| error.to_string())?;
+        if prefs.settings.paused {
+            if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+                state
+                    .pending_pm_wakes
+                    .insert(decision.window_id.clone(), decision.clone());
+            }
+            return Ok(PmWakeWrite::Deferred);
+        }
+        let loop_state = pm_registry::load_pm_loop_state(
+            &pm_registry::pm_loop_state_path_for_repo_path(&decision.project_root),
+        )
+        .map_err(|error| error.to_string())?;
+        if loop_state.last_wake_id != decision.wake_id {
+            if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+                state.pending_pm_wakes.remove(&decision.window_id);
+            }
+            return Ok(PmWakeWrite::Discarded);
+        }
         let pane = match self.runtimes.get(&decision.window_id) {
             None => return Err(format!("no live runtime for pane {}", decision.window_id)),
             Some(runtime) => Arc::clone(&runtime.pane),
@@ -1918,19 +1979,34 @@ impl AppRuntime {
             // Resolve current subjects at physical delivery, after any time spent
             // queued. The captured pane is the exact original runtime; a later
             // pane at the same address must never receive this wake.
-            let prompt = worker_decision.delivery_prompt();
-            let result = pane
-                .lock()
-                .map(|pane| pane.has_unsent_user_input())
-                .map_err(|error| error.to_string())
-                .and_then(|unsent| {
-                    if unsent {
-                        Ok(PmWakeWrite::Deferred)
-                    } else {
-                        super::pty_io::write_pane_input_then_submit(&pane, &prompt)
-                            .map(|()| PmWakeWrite::Injected)
+            let result = pm_registry::with_active_pm_loop(
+                &pm_registry::pm_prefs_path_for_repo_path(&worker_decision.project_root),
+                || {
+                    let loop_state = pm_registry::load_pm_loop_state(
+                        &pm_registry::pm_loop_state_path_for_repo_path(
+                            &worker_decision.project_root,
+                        ),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    if loop_state.last_wake_id != worker_decision.wake_id {
+                        return Ok(PmWakeWrite::Discarded);
                     }
-                });
+                    pane.lock()
+                        .map(|pane| pane.has_unsent_user_input())
+                        .map_err(|error| error.to_string())
+                        .and_then(|unsent| {
+                            if unsent {
+                                Ok(PmWakeWrite::Deferred)
+                            } else {
+                                let prompt = worker_decision.delivery_prompt();
+                                super::pty_io::write_pane_input_and_submit_blocking(&pane, &prompt)
+                                    .map(|()| PmWakeWrite::Injected)
+                            }
+                        })
+                },
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.unwrap_or(Ok(PmWakeWrite::Deferred)));
             proxy.send(UserEvent::PmWakeDeliveryComplete(PmWakeDelivery {
                 context,
                 decision: worker_decision,
@@ -1974,7 +2050,7 @@ impl AppRuntime {
                     "delivered a PM wake prepared outside the GUI event loop"
                 );
             }
-            Ok(PmWakeWrite::Queued) => {}
+            Ok(PmWakeWrite::Queued | PmWakeWrite::Discarded) => {}
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -2001,7 +2077,7 @@ impl AppRuntime {
             return;
         }
         match self.write_pm_wake_prompt(&decision) {
-            Ok(PmWakeWrite::Queued) => {}
+            Ok(PmWakeWrite::Queued | PmWakeWrite::Discarded) => {}
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id,
@@ -2217,6 +2293,7 @@ impl AppRuntime {
                 let status = BackendEvent::PmStatus {
                     available: true,
                     auto_start: prefs.settings.auto_start,
+                    paused: prefs.settings.paused,
                     loop_interval_secs,
                     loop_interval_secs_decimal: loop_interval_secs.to_string(),
                     agent_options: Self::pm_agent_options(&configured.agent_id),
@@ -2570,8 +2647,10 @@ impl AppRuntime {
             .unwrap_or(gwt_agent::AgentId::ClaudeCode);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id)
             .working_dir(worktree.to_path_buf())
-            .skip_permissions(true)
-            .extra_arg(PM_BOOTSTRAP_PROMPT);
+            .skip_permissions(true);
+        if pm_registry::pm_autonomous_bootstrap_allowed(worktree) {
+            builder = builder.extra_arg(PM_BOOTSTRAP_PROMPT);
+        }
         if let Some(model) = profile.model.as_deref() {
             builder = builder.model(model);
         }
@@ -2676,6 +2755,7 @@ mod delivery_tests {
         let capture = PromptCapture::begin();
         let decision = PmWakeDecision {
             project_root: repo,
+            wake_id: None,
             window_id: window_id.clone(),
             prompt: "WORKER-WAKE\r".to_string(),
         };
@@ -2714,6 +2794,7 @@ mod delivery_tests {
         let capture = PromptCapture::begin();
         let decision = PmWakeDecision {
             project_root: repo,
+            wake_id: None,
             window_id: window_id.clone(),
             prompt: "WORKER-WAKE\r".to_string(),
         };
@@ -2757,6 +2838,7 @@ mod delivery_tests {
         let capture = PromptCapture::begin();
         let decision = PmWakeDecision {
             project_root: repo,
+            wake_id: None,
             window_id: window_id.clone(),
             prompt: "WORKER-WAKE\r".to_string(),
         };
@@ -2784,6 +2866,55 @@ mod delivery_tests {
             .is_empty());
         let task = tasks.lock().unwrap().remove(0);
         task();
-        assert_eq!(capture.prompts(), vec!["WORKER-WAKE\r", "WORKER-WAKE\r"]);
+        assert_eq!(capture.prompts(), vec!["WORKER-WAKE\r"]);
+    }
+
+    #[test]
+    fn resumed_pm_drops_a_pre_pause_wake_before_a_same_timestamp_fresh_tick() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        let (proxy, recorded) = AppEventProxy::stub();
+        runtime.proxy = proxy;
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let capture = PromptCapture::begin();
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        let now = "2026-10-10T01:00:00Z";
+        runtime.pm_periodic_wake_events_for_prepared_monitor_at(&repo, &monitor, now, true);
+        pm_registry::set_pm_paused(&repo, true).unwrap();
+        let task = tasks.lock().unwrap().remove(0);
+        task();
+        let event = recorded.lock().unwrap().pop().unwrap();
+        let UserEvent::ProjectCompletion { event, .. } = event else {
+            panic!("wake completion must keep its project generation");
+        };
+        let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+            panic!("expected wake delivery completion");
+        };
+        assert_eq!(delivery.result, Ok(PmWakeWrite::Deferred));
+        let before_resume = capture.prompts().len();
+
+        pm_registry::set_pm_paused(&repo, false).unwrap();
+        runtime.pm_wake_delivery_complete(delivery);
+        // A same-second fresh scan must replace, rather than revive, the old wake.
+        runtime.pm_periodic_wake_events_for_prepared_monitor_at(&repo, &monitor, now, true);
+        for task in std::mem::take(&mut *tasks.lock().unwrap()) {
+            task();
+        }
+
+        assert_eq!(
+            capture.prompts().len() - before_resume,
+            1,
+            "Resume must deliver one fresh reconciliation instead of both old and new wakes"
+        );
     }
 }

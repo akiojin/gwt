@@ -3467,6 +3467,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
       // the backend marked `is_pm`; null while no PM pane exists.
       let pmWindowId = null;
+      let pmPaused = false;
 
       function updatePmLauncher(workspace) {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
@@ -3483,6 +3484,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               ? "stopped"
               : "running";
           railEntry.dataset.pmState = state;
+          railEntry.dataset.pmPaused = String(pmPaused);
           // Issue #4777: the hover text says what the PM is, not only its name.
           const role = "your point of contact, not one of the agents";
           railEntry.title =
@@ -3491,6 +3493,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               : state === "stopped"
                 ? `Project Manager (stopped): ${role}. Click to resume`
                 : `Project Manager: ${role}. Click to start`;
+          if (pmPaused) railEntry.title += ". Autonomous loop paused";
         }
 
         const floating = document.getElementById("canvas-pm-launcher");
@@ -6468,6 +6471,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);
+            pmPaused = Boolean(event.paused);
+            updatePmLauncher(activeWorkspace());
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});

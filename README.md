@@ -674,6 +674,11 @@ unchanged.
 
 - It starts automatically when you open a project, and there is a per-project
   opt-out.
+- PM settings offers **Pause / Resume** for its autonomous loop. Pause persists
+  across restarts while the PM remains available for conversation; Issue Monitor
+  and running agents keep working. Resume reconciles the latest status. JSON
+  operations `pm.pause` / `pm.resume` provide the same control, and `pm.status`
+  reports `paused` separately from registration.
 - Closing the PM pane stops it; it will not restart itself. A crash does
   auto-resume, with a backoff so a crash loop cannot spin.
 - Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on

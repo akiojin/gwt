@@ -31,6 +31,11 @@ pub enum PmCommand {
     /// current repository path (container/bare setups must pass it
     /// explicitly, same convention as the Issue Monitor queue operations).
     Status { project_root: Option<String> },
+    /// Persistently pause or resume the autonomous resident loop.
+    SetPaused {
+        project_root: Option<String>,
+        paused: bool,
+    },
     /// `pm.stop` — clear a PM registration in this repository and make its
     /// session unrestorable. `session_id` defaults to the caller's own
     /// registration, so a PM can always retire itself.
@@ -145,6 +150,30 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
+        PmCommand::SetPaused {
+            project_root,
+            paused,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.pause / pm.resume require the registered PM or a direct user CLI call"
+                        .into(),
+                ));
+            }
+            pm_registry::set_pm_paused(&repo_path, paused).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to persist PM pause state: {error}"
+                )))
+            })?;
+            run(
+                env,
+                PmCommand::Status {
+                    project_root: Some(repo_path.to_string_lossy().into_owned()),
+                },
+                out,
+            )
+        }
         PmCommand::Status { project_root } => {
             let repo_path = resolve_repo_path(env, project_root);
             let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo_path);

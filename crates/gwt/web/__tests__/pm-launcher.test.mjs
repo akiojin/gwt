@@ -164,6 +164,34 @@ test("FR-021: rail の PM 状態は running / stopped / absent を持つ", () =>
   );
 });
 
+test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
+  const document = doc();
+  const start = appJs.indexOf("      function updatePmLauncher(workspace) {");
+  const end = appJs.indexOf("      // True when the window's rectangle", start);
+  assert.ok(start >= 0 && end > start);
+  const update = new Function("document", "pmPaused", "isWindowWithinViewport", `
+    let pmWindowId;
+    ${appJs.slice(start, end)}
+    return updatePmLauncher;
+  `)(document, true, () => true);
+  const entry = document.getElementById("op-pm-entry");
+
+  update({ windows: [] });
+  assert.equal(entry.dataset.pmState, "absent");
+  assert.equal(entry.dataset.pmPaused, "true");
+  assert.match(entry.title, /autonomous loop paused/i);
+
+  update({ windows: [{ id: "pm", is_pm: true, status: "running" }] });
+  assert.equal(entry.dataset.pmState, "running");
+  assert.equal(entry.dataset.pmPaused, "true");
+  assert.equal(document.getElementById("canvas-pm-launcher").hidden, true);
+  assert.match(
+    componentsCss,
+    /\[data-pm-paused="true"\]\s+\.op-rail__pm-dot\s*\{[^}]*background:\s*var\(--color-state-idle\)/,
+  );
+  assert.match(appJs, /case "pm_status":[\s\S]{0,420}pmPaused = Boolean\(event\.paused\);[\s\S]{0,160}updatePmLauncher\(activeWorkspace\(\)\)/);
+});
+
 test("FR-019: PM クリックはローカルの camera-focus 経路を使う", () => {
   // 実機検証（2026-08-06）で判明した欠陥の回帰固定。
   //

@@ -1,5 +1,140 @@
 use super::*;
 
+fn write_pm_pause_fixture(repo: &Path, paused: bool) {
+    let path = gwt::pm_registry::pm_prefs_path_for_repo_path(repo);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("PM prefs")).expect("PM prefs JSON");
+    value["settings"]["paused"] = paused.into();
+    fs::write(path, serde_json::to_vec(&value).expect("pause JSON")).expect("write pause");
+}
+
+#[test]
+fn paused_pm_retains_needs_human_and_fatal_deltas_for_one_resume_wake() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    let monitor_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let monitor_before = fs::read(&monitor_path).expect("Monitor prefs");
+    let baseline = [pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued)];
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &baseline, "2026-08-10T01:00:00Z")
+        .is_none());
+    write_pm_pause_fixture(&repo, true);
+    let mut failed = pm_wake_inbox_item(41, gwt::MonitorInboxState::AgentFailed);
+    failed.error_message = Some("fatal agent failure".into());
+    let accumulated = [
+        failed,
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &accumulated, "2026-08-10T01:01:00Z")
+        .is_none());
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
+        .is_none());
+    write_pm_pause_fixture(&repo, false);
+    let wake = runtime
+        .pm_wake_decision_at(&repo, &accumulated, "2026-08-10T01:01:00Z")
+        .expect("resume must reconcile the retained snapshot");
+    assert!(wake.prompt.contains("needs_human:42"));
+    assert!(wake.prompt.contains("failed:41"));
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
+        .is_none());
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &accumulated, "2026-08-10T02:00:00Z")
+        .is_none());
+    write_pm_pause_fixture(&repo, true);
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
+        .is_none());
+    assert_eq!(
+        fs::read(monitor_path).expect("Monitor prefs unchanged"),
+        monitor_before
+    );
+}
+
+#[test]
+fn paused_pm_blocks_queued_and_pending_wakes_but_accepts_direct_input() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+    runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    // Pause after scheduling, before physical delivery.
+    write_pm_pause_fixture(&repo, true);
+    drain_pm_wake_delivery_tasks(&mut runtime);
+    assert!(
+        runtime
+            .project_state_for_root(&repo)
+            .unwrap()
+            .pending_pm_wakes
+            .contains_key(&window_id),
+        "the queued worker must defer instead of injecting while paused"
+    );
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &window_id);
+    runtime.flush_pending_pm_wake(&window_id);
+    assert!(runtime
+        .project_state_for_root(&repo)
+        .unwrap()
+        .pending_pm_wakes
+        .contains_key(&window_id));
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &window_id);
+    runtime.terminal_input_events(&window_id, "hello PM");
+    assert!(
+        runtime.pane_has_unsent_user_input(&window_id),
+        "direct user input stays available"
+    );
+    let prefs =
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .expect("PM prefs");
+    assert_eq!(
+        serde_json::to_value(prefs).unwrap()["settings"]["paused"],
+        true
+    );
+}
+
+#[test]
+fn resumed_pm_reconciles_fatal_only_monitor_work_after_restart() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)).unwrap(),
+    );
+    let mut failed = pm_wake_inbox_item(41, gwt::MonitorInboxState::LaunchFailed);
+    failed.error_message = Some("fatal launch failure".into());
+    monitor.inbox = vec![failed];
+    // A fresh runtime has no pre-pause delta baseline to compare against.
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &monitor.inbox, "2026-08-10T01:00:00Z")
+        .is_none());
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_for_monitor_at(&repo, &monitor, "2026-08-10T01:00:00Z")
+            .is_some(),
+        "fatal-only standing work must reconcile after resume/restart"
+    );
+    assert!(runtime
+        .pm_periodic_wake_decision_for_monitor_at(&repo, &monitor, "2026-08-10T01:00:00Z")
+        .is_none());
+}
+
 /// T-093 (FR-012): a parked PM is woken by a NeedsHuman transition, the wake
 /// targets exactly the registered PM's pane, and the loop budget is re-armed.
 #[test]
@@ -1244,15 +1379,8 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
         .lock()
         .expect("pane lock")
         .shared_pty();
-    match pty.reserve_input_transaction() {
-        Ok(_) => panic!("idle delivery must start the protected inject"),
-        Err(error) => assert!(
-            error
-                .to_string()
-                .contains("another protected PTY input transaction is active"),
-            "{error}"
-        ),
-    }
+    pty.reserve_input_transaction()
+        .expect("delivery completion includes the physical submit and releases its reservation");
 }
 
 /// Issue #3702 AC-2: a held tick is delivered once (coalesced) after submit.
@@ -1328,15 +1456,8 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
         .lock()
         .expect("pane lock")
         .shared_pty();
-    match pty.reserve_input_transaction() {
-        Ok(_) => panic!("the held tick must inject after submit"),
-        Err(error) => assert!(
-            error
-                .to_string()
-                .contains("another protected PTY input transaction is active"),
-            "{error}"
-        ),
-    }
+    pty.reserve_input_transaction()
+        .expect("the held tick completes its physical submit before its worker returns");
 }
 
 /// Issue #3702 AC-2: clearing the composer (Ctrl+C) also releases the tick.

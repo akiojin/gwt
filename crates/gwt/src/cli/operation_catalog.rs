@@ -500,6 +500,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.pause",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.resume",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.stop",
         aliases: &["pm.deregister"],
     },
