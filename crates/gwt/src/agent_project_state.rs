@@ -617,6 +617,48 @@ impl ExecutionRecoveryContext {
     pub(crate) fn exact_unbound_host(&self) -> bool {
         self.exact_unbound_host
     }
+
+    pub(crate) fn validate_usable_work(&self) -> Result<()> {
+        let branch_authority = resolve_session_branch_authority(
+            &self.session,
+            &self.project_state_root,
+            &self.worktree,
+        );
+        let (owner, agent_id) = durable_session_work_authority(&self.session, branch_authority)?;
+        let branch = required_session_branch(&self.session)?;
+        let work_id = resolve_unique_existing_work_id(
+            &self.project_state_root,
+            &self.worktree,
+            &self.session.id,
+            &branch,
+            &self.worktree,
+            SessionWorkAuthorityExpectation {
+                owner: owner.as_deref(),
+                agent_id: &agent_id,
+                require_single_session_assignment: true,
+                allow_terminal: false,
+                require_exclusive_container: true,
+            },
+        )?;
+        let works =
+            gwt_core::workspace_projection::load_workspace_work_items(&self.project_state_root)?
+                .ok_or_else(|| {
+                    workspace_ensure_error(&self.session.id, "canonical Work is missing")
+                })?;
+        if gwt_core::workspace_projection::current_work_id(
+            &works,
+            &self.project_state_root,
+            Some(&branch),
+            Some(&self.worktree),
+        ) != Some(work_id)
+        {
+            return Err(workspace_ensure_error(
+                &self.session.id,
+                "Session has a noncanonical Workspace assignment",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn session_requires_execution_continuation(session_id: &str) -> bool {

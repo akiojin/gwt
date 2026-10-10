@@ -2019,12 +2019,12 @@ pub(super) fn ensure_workspace_for_agent(
                 // container resolves, instead of refusing the session forever.
                 // #3684's claim heal does not reach this: the stale Work keeps
                 // its own container, so it is never a whole-Work duplicate.
-                // Discarded Works retain their container history, including
+                // Terminal Works retain their container history, including
                 // the provenance needed to resolve an active successor.
                 let repairable_work_ids = work_items
                     .work_items
                     .iter()
-                    .filter(|item| !item.discarded)
+                    .filter(|item| !item.is_terminal())
                     .map(|item| item.id.clone())
                     .collect::<Vec<_>>();
                 let detached = gwt_core::workspace_projection::detach_foreign_container_refs_for_work_event_root(
