@@ -1404,12 +1404,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function handleSocketClose() {
-        for (const [windowId, view] of pmChatViews) {
-          view.pendingSessions.length = 0;
-          view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
-          applyPmWindowReceiveEvent({ kind: "pm_conversation", id: windowId, session_id: view.sessionId,
-            snapshot: { availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." } });
-        }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;

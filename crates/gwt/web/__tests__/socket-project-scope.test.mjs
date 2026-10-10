@@ -172,6 +172,22 @@ test("route-bound Project tab reconnects to the same Project only", () => {
 });
 
 
+test("Reports history survives disconnect while the Project reconnects", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const reportsView = { sessionId: "pm-session", controller: { update() {} } };
+  context.pmChatViews.set("pm-window", reportsView);
+  context.connectSocket();
+  sockets[1].open();
+  sockets[1].close();
+  assert.equal(context.closeResetCount, 1, "disconnect must reach the Project lifecycle");
+  assert.equal(context.reconnectTimer, 1, "disconnect must schedule reconnect");
+  assert.equal(context.pmChatViews.get("pm-window"), reportsView, "durable Reports view is retained");
+  context.connectSocket();
+  assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
+  sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+});
+
 test("project not found stops every reconnect for the route", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
