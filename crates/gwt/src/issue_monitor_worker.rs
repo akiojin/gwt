@@ -391,6 +391,27 @@ pub fn read_execution_observations(
                 Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
                 None => IssueMonitorExecutionSettlement::Unknown,
             };
+            // Reaper interruption is normally retryable, but retrying a window
+            // with no gate-admitted recovery only repeats the same loop.
+            // Preserve real settlements and process liveness; this diagnosis
+            // does not write the ECR or claim that unfinished work was delivered.
+            let recovery_exhausted = (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
+                || diagnosis.ecr_settled_by_host_reaper)
+                && worktree
+                    .zip(diagnosis.holder_session_id.as_deref())
+                    .is_some_and(|(worktree, session_id)| {
+                        crate::cli::hook::workflow_policy::identity_gate_closed_for_session(
+                            worktree, session_id,
+                        ) && crate::cli::execution_state::diagnose(worktree, Some(session_id))
+                            .recovery_hint
+                            .as_deref()
+                            == Some(crate::cli::execution_state::RECOVERY_HINT_RECOVERY_EXHAUSTED)
+                    });
+            let settlement = if recovery_exhausted {
+                IssueMonitorExecutionSettlement::RecoveryExhausted
+            } else {
+                settlement
+            };
             (
                 *issue_number,
                 crate::issue_monitor::IssueMonitorExecutionObservation {

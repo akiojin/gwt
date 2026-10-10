@@ -2634,6 +2634,10 @@ pub enum IssueMonitorExecutionSettlement {
     /// restart is the usual cause. The work was interrupted, not decided, so
     /// it must not be treated as a settled outcome.
     Interrupted,
+    /// The identity gate has no executable recovery. This is a diagnostic,
+    /// not settlement: retain the unfinished owner for PM steering and never
+    /// requeue the same dead window into the recovery loop (Issue #5078).
+    RecoveryExhausted,
     Unknown,
 }
 
