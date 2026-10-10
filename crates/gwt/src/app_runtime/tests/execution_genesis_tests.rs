@@ -2049,6 +2049,20 @@ fn continue_work_ready_timeout_handoff_records_the_missing_hook_config() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-handoff-ledger");
+    let project_root = temp.path().join("separate-project-state-root");
+    fs::create_dir_all(&project_root).unwrap();
+    fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&fixture.window_id)
+        .unwrap()
+        .project_root = project_root.clone();
+    let works_lock = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)
+        .with_extension("lock");
+    fs::create_dir_all(works_lock.parent().unwrap()).unwrap();
+    let _holder =
+        gwt_core::operation_deadline::NamedFileLock::acquire_quiet(&works_lock, "startup intake")
+            .unwrap();
     insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
     fixture
         .runtime
@@ -2066,7 +2080,23 @@ fn continue_work_ready_timeout_handoff_records_the_missing_hook_config() {
         .find(|row| row.target.window_id.as_deref() == Some(fixture.window_id.as_str()))
         .unwrap_or_else(|| panic!("the handoff must be recorded: {rows:#?}"));
     assert_eq!(row.kind, gwt_core::error_ledger::ErrorKind::LaunchFailure);
+    assert_eq!(row.target.issue, Some(fixture.owner.number));
+    assert_eq!(
+        fixture.runtime.window_details.get(&fixture.window_id),
+        Some(&row.message),
+        "the pane and errors.list must share the same readiness diagnosis",
+    );
+    assert_eq!(
+        fixture.runtime.pane_hold_reason(&fixture.window_id),
+        Some(row.message.clone()),
+        "the Monitor canvas must carry the pending readiness diagnosis",
+    );
     assert!(row.message.contains("SessionStart"), "{}", row.message);
+    assert!(
+        row.message.contains("works.lock contention observed: yes;"),
+        "{}",
+        row.message
+    );
     assert!(
         row.message.contains(".codex") && row.message.contains("hooks.json missing"),
         "the ledger row must name the undiscovered hook config: {}",
@@ -2205,6 +2235,7 @@ fn continue_work_ready_timeout_late_session_start_still_activates_after_a_handof
             .contains_key(&fixture.window_id),
         "activating must retire the readiness handoff diagnostic",
     );
+    assert_eq!(fixture.runtime.pane_hold_reason(&fixture.window_id), None);
     assert!(!fixture
         .runtime
         .pending_fresh_execution_launches

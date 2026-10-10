@@ -5959,7 +5959,7 @@ impl AppRuntime {
                         });
                         proxy.send(crate::UserEvent::IssueMonitorDaemonInbox {
                             project_root: root.to_path_buf(),
-                            items: monitor.inbox,
+                            items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
                         });
                     }
                 }
@@ -7075,7 +7075,7 @@ impl AppRuntime {
                             });
                             proxy.send(UserEvent::IssueMonitorDaemonInbox {
                                 project_root: project_root.to_path_buf(),
-                                items: monitor.inbox,
+                                items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
                             });
                         }
                         Vec::new()
@@ -7501,7 +7501,7 @@ impl AppRuntime {
                     events.push(OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::IssueMonitorInbox {
-                            items: monitor.inbox,
+                            items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
                         },
                     ));
                 }
@@ -8773,13 +8773,19 @@ impl AppRuntime {
 
     /// Issue #4584: why this window is held, when something is holding it.
     ///
-    /// The two causes that mean a pane stopped but its process did not: the
-    /// provider's account ran out (Issue #3616) or a provider API error ended
-    /// the turn. Both already store a rendered detail; this is where they are
-    /// handed to a reader who cannot see the pane.
+    /// Provider holds and pending authenticated readiness already store a
+    /// rendered detail. Share those with readers who cannot see the pane.
     pub(crate) fn pane_hold_reason(&self, window_id: &str) -> Option<String> {
+        let readiness_pending = (self
+            .pending_fresh_execution_launches
+            .contains_key(window_id)
+            || self.pending_continue_work.contains_key(window_id))
+            && self.window_details.get(window_id).is_some_and(|detail| {
+                detail.starts_with(gwt::issue_monitor::SESSION_START_READINESS_PENDING_PREFIX)
+            });
         if !self.provider_quota_holds.contains_key(window_id)
             && !self.provider_api_error_holds.contains_key(window_id)
+            && !readiness_pending
         {
             return None;
         }
@@ -8876,8 +8882,8 @@ impl AppRuntime {
                                 // Issue #4584: only a real hold explains itself here.
                                 // `window_details` also carries ordinary launch chatter,
                                 // and a row that always says something is a row nobody
-                                // reads, so the reason is taken from the two maps that
-                                // mean the pane actually stopped.
+                                // reads, so only a provider hold or pending readiness
+                                // is projected.
                                 hold_reason: self.pane_hold_reason(&window_id),
                                 // Issue #4608: the hook-independent liveness signal.
                                 last_output_at: self.window_last_output_at.get(&window_id).map(
@@ -9314,7 +9320,7 @@ impl AppRuntime {
         events.push(OutboundEvent::project(
             context.project_key,
             BackendEvent::IssueMonitorInbox {
-                items: monitor.inbox,
+                items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
             },
         ));
         events
@@ -9553,7 +9559,7 @@ impl AppRuntime {
             status: Box::new(status),
         };
         let inbox_event = BackendEvent::IssueMonitorInbox {
-            items: monitor.inbox,
+            items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
         };
         match client_id {
             Some(client_id) => vec![

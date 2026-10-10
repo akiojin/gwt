@@ -4951,9 +4951,29 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
     let repo = temp_root.join(format!("repo-{operation_id}"));
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    pending_fresh_execution_fixture_in_worktree(
+        temp_root,
+        operation_id,
+        owner_kind,
+        completed,
+        repo,
+        2359,
+    )
+}
+
+fn pending_fresh_execution_fixture_in_worktree(
+    temp_root: &Path,
+    operation_id: &str,
+    owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
+    completed: bool,
+    repo: PathBuf,
+    owner_number: u64,
+) -> PendingFreshExecutionFixture {
+    let branch = format!("work/issue-{owner_number}");
+    let entrypoint = format!("$gwt-execute #{owner_number}");
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: owner_kind,
-        number: 2359,
+        number: owner_number,
     };
     let predecessor_session_id = format!("blocked-{operation_id}");
     let candidate_session_id = format!("candidate-{operation_id}");
@@ -4962,7 +4982,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
         owner.kind,
         owner.number,
         &predecessor_session_id,
-        "$gwt-execute #2359",
+        &entrypoint,
         false,
     )
     .expect("materialize predecessor");
@@ -5003,7 +5023,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
         .to_string(),
         session_binding_id: format!("binding-{operation_id}"),
         initial_session_id: candidate_session_id.clone(),
-        entrypoint: "$gwt-execute #2359".to_string(),
+        entrypoint,
         requested_at: Utc::now(),
     };
     if completed {
@@ -5038,8 +5058,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
     let (spawner, _) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let window_id = combined_window_id("tab-1", "agent-1");
-    let mut candidate =
-        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    let mut candidate = gwt_agent::Session::new(&repo, &branch, gwt_agent::AgentId::Codex);
     candidate.id = candidate_session_id.clone();
     candidate.project_state_root = Some(repo.clone());
     candidate.linked_issue_number = Some(owner.number);
@@ -5068,7 +5087,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     let mut active = sample_active_agent_session("tab-1", &window_id);
     active.session_id = candidate_session_id.clone();
-    active.branch_name = "work/issue-2359".to_string();
+    active.branch_name = branch;
     active.worktree_path = repo.clone();
     active.agent_project_root = repo.display().to_string();
     runtime

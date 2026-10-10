@@ -40,6 +40,20 @@ async function drag(page: Page, number: number, target: Locator) {
   await row(page, number).dragTo(target);
 }
 
+test("pending SessionStart diagnosis clears when late readiness arrives", async ({page}) => {
+  const diagnosis = "SessionStart readiness pending: hooks.json missing; check hook discovery and works.lock contention";
+  await page.evaluate(diagnosis => (window as any).__queueInbox([
+    {issue:{number:5},state:"launching",error_message:diagnosis}]), diagnosis);
+  await expect(row(page,5)).toContainText(diagnosis);
+  await expect(column(page,"active").locator('[data-issue-number="5"]')).toBeVisible();
+  const pendingScreenshot = test.info().outputPath("readiness-pending.png");
+  await page.screenshot({path:pendingScreenshot});
+  await test.info().attach("readiness-pending", {path:pendingScreenshot,contentType:"image/png"});
+  await page.evaluate(() => (window as any).__queueInbox([{issue:{number:5},state:"launched"}]));
+  await expect(row(page,5)).not.toContainText("SessionStart readiness pending:");
+  await expect(column(page,"active").locator('[data-issue-number="5"]')).toBeVisible();
+});
+
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {
   await expect(page.locator("[data-queue-column]")).toHaveCount(4);
   await expect(column(page,"backlog")).toContainText("First backlog issue");

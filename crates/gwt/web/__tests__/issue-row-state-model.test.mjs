@@ -35,6 +35,16 @@ async function importSurfaceModule() {
   return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
+test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {
+  const { issueRowStateModel } = await importSurfaceModule();
+  const entry = knowledgeEntry(4940, { monitor_state: "launching",
+    readiness_diagnosis: "SessionStart readiness pending: hooks.json missing" });
+  const pending = issueRowStateModel({ entry });
+  assert.equal(pending.primary.label, "Launching");
+  assert.deepEqual(pending.secondary, [{ kind: "reason", key: "reason", label: entry.readiness_diagnosis }]);
+  assert.deepEqual(issueRowStateModel({ entry: { ...entry, readiness_diagnosis: null } }).secondary, []);
+});
+
 function knowledgeEntry(number, overrides = {}) {
   return {
     number,

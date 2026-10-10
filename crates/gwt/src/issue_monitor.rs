@@ -2649,6 +2649,9 @@ impl fmt::Display for IssueMonitorIdleKind {
     }
 }
 
+/// A warning shared by the pane, Monitor row and error ledger (Issue #4940).
+pub const SESSION_START_READINESS_PENDING_PREFIX: &str = "SessionStart readiness pending:";
+
 /// Issue #4084: one agent window as the GUI observed it on the owning project
 /// tab's canvas. `issue_number` is the window's linked Issue;
 /// `review_dispatch` marks an independent review window (Issue #4041).
@@ -11628,6 +11631,56 @@ impl IssueMonitorState {
         expired
     }
 
+    /// Read-only inbox projection; readiness warnings never change scheduling state.
+    pub fn inbox_view_at(&self, now: &str) -> Vec<IssueMonitorInboxItem> {
+        self.inbox
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.error_message = item
+                    .error_message
+                    .or_else(|| self.pending_session_start_diagnosis_at(item.issue.number, now));
+                item
+            })
+            .collect()
+    }
+
+    fn pending_session_start_diagnosis_at(&self, issue_number: u64, now: &str) -> Option<String> {
+        if !self.active_launches.contains(&issue_number) {
+            return None;
+        }
+        let claim_id = self.live_claim_id(issue_number)?;
+        let delivery = self.pending_launch_deliveries.iter().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.claim_id == claim_id
+        })?;
+        if self
+            .window_snapshot_host
+            .is_some_and(|(pid, _)| delivery.materializer_pid != Some(pid))
+        {
+            return None;
+        }
+        let window_id = delivery
+            .materialized_window_id
+            .as_deref()
+            .or(delivery.materializer_window_id.as_deref())?;
+        let snapshot = self.fresh_window_snapshot(now)?;
+        snapshot
+            .windows
+            .iter()
+            .find(|pane| {
+                pane.window_id == window_id
+                    && pane.issue_number == Some(issue_number)
+                    && pane.monitor_owned
+                    && !pane.review_dispatch
+                    && idle_window_is_alive(pane.status)
+                    && issue_monitor_qualified_window_id(window_id)
+                        .is_some_and(|(tab, _)| self.window_snapshot_tabs.contains(tab))
+            })
+            .and_then(|pane| pane.hold_reason.as_ref())
+            .filter(|reason| reason.starts_with(SESSION_START_READINESS_PENDING_PREFIX))
+            .cloned()
+    }
+
     fn windowless_launch_stall_at(&self, issue_number: u64, now: &str) -> Option<String> {
         let delivery = self
             .pending_launch_deliveries
@@ -12476,6 +12529,9 @@ impl IssueMonitorState {
                         error_message: item
                             .error_message
                             .clone()
+                            .or_else(|| {
+                                self.pending_session_start_diagnosis_at(item.issue.number, now)
+                            })
                             .or_else(|| self.windowless_launch_stall_at(item.issue.number, now)),
                         // SPEC-3431 FR-068: the autonomous record already carries
                         // the heartbeat that hook arrivals refresh. Surfacing it here
@@ -22596,6 +22652,87 @@ mod tests {
             observed_at: observed_at.to_string(),
             windows,
         }
+    }
+
+    #[test]
+    fn pending_session_start_diagnosis_uses_only_the_current_fresh_delivery_pane() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui",
+            "tab-1::agent-42",
+        ));
+        let diagnosis = "SessionStart readiness pending: hooks.json missing";
+        let mut pane = live_pane_observation("tab-1::agent-42", 42, WindowState::Running);
+        pane.hold_reason = Some(diagnosis.to_string());
+        monitor.record_window_snapshot(pane_snapshot(IDLE_NOW, vec![pane.clone()]));
+        let row = monitor
+            .agent_status_without_scan_at(IDLE_NOW)
+            .inbox
+            .remove(0);
+        assert_eq!(row.error_message.as_deref(), Some(diagnosis));
+        assert_eq!(
+            monitor.inbox_view_at(IDLE_NOW)[0].error_message.as_deref(),
+            Some(diagnosis)
+        );
+        assert!(
+            monitor.inbox[0].error_message.is_none(),
+            "the warning must not be persisted"
+        );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "diagnosis must not release the slot"
+        );
+
+        monitor.record_window_snapshot_from_host(
+            pane_snapshot(IDLE_NOW, vec![pane.clone()]),
+            std::process::id().wrapping_add(1),
+            1,
+            BTreeSet::from(["tab-1".to_string()]),
+        );
+        assert!(
+            monitor.inbox_view_at(IDLE_NOW)[0].error_message.is_none(),
+            "another Host's restored window id cannot diagnose this delivery"
+        );
+
+        pane.window_id = "tab-1::foreign-pane".to_string();
+        monitor.record_window_snapshot(pane_snapshot(IDLE_NOW, vec![pane.clone()]));
+        assert!(monitor.agent_status_without_scan_at(IDLE_NOW).inbox[0]
+            .error_message
+            .is_none());
+        pane.window_id = "tab-1::agent-42".to_string();
+        monitor.record_window_snapshot(pane_snapshot(IDLE_NOW, vec![pane.clone()]));
+        assert!(
+            monitor
+                .agent_status_without_scan_at("2026-09-07T05:00:00Z")
+                .inbox[0]
+                .error_message
+                .is_none(),
+            "a stale canvas cannot diagnose the current launch"
+        );
+
+        pane.hold_reason = None;
+        monitor.record_window_snapshot(pane_snapshot(IDLE_NOW, vec![pane]));
+        assert!(
+            monitor.agent_status_without_scan_at(IDLE_NOW).inbox[0]
+                .error_message
+                .is_none(),
+            "late readiness clears the projected warning without mutating the inbox"
+        );
+        assert_eq!(monitor.active_count(), 1);
     }
 
     /// Issue #4802 AC-1: the stale-unbound expiry used to requeue a launch
