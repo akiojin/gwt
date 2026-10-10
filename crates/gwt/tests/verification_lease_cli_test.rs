@@ -352,6 +352,41 @@ fn status_reports_the_verification_holders_remaining_commands() {
     guard.complete(JobOutcome::Completed).unwrap();
 }
 
+/// Issue #4998: observe kernel release before retrying the legacy host lock.
+fn assert_heavy_lock_released(coordinator: &gwt_core::index_coordinator::IndexCoordinator) {
+    let path = coordinator.heavy_lock_path();
+    let probe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs2::FileExt::try_lock_exclusive(&probe) {
+            Ok(()) => {
+                // Explicit unlock also releases any fork-inherited copy of
+                // this probe's own file description.
+                fs2::FileExt::unlock(&probe).unwrap();
+                return;
+            }
+            Err(error) => {
+                assert_eq!(
+                    error.raw_os_error(),
+                    fs2::lock_contended_error().raw_os_error(),
+                    "release probe failed: {error}; {}",
+                    path.display()
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "lock still held after release: {}",
+                    path.display()
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 /// Issue #4969: cross-process admission must preserve the same arrival during
 /// polling, after a Windows status-probe lock, and across deferred resubmission.
 fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
@@ -501,6 +536,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
     // queued. Handoff sweeps must not assign the claimant a new arrival.
     lease.release().unwrap();
     guard.complete(JobOutcome::Completed).unwrap();
+    assert_heavy_lock_released(&coordinator);
     let successor = TargetKey::verification(project.as_str(), "successor-holder");
     let JobAdmission::Owner(guard) = coordinator
         .request_job(&successor, JobPriority::InteractiveSearch, Duration::ZERO)
@@ -552,6 +588,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
     // free host while the later reservation remains queued behind it.
     lease.release().unwrap();
     guard.complete(JobOutcome::Completed).unwrap();
+    assert_heavy_lock_released(&coordinator);
     let (ok, admitted) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
     assert!(ok && admitted.contains("verify: PASS"), "{admitted}");
     assert!(!coordinator.heavy_reservation_path(&key).exists());
