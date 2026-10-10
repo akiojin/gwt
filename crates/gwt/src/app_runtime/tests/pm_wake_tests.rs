@@ -1,5 +1,334 @@
 use super::*;
 
+#[test]
+fn agent_idle_wake_rechecks_a_pm_turn_started_before_physical_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    let _pane = attach_live_pm_pane(&mut runtime, &pm_id);
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    runtime.pm_agent_idle_wake_events(&context);
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    drain_pm_wake_delivery_tasks(&mut runtime);
+    assert!(
+        gwt::pm_registry::load_pm_loop_state(&gwt::pm_registry::pm_loop_state_path_for_repo_path(
+            &repo
+        ))
+        .unwrap()
+        .last_wake_at
+        .is_none(),
+        "a new PM turn must retain the queued edge instead of submitting it"
+    );
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    assert!(
+        runtime
+            .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_some(),
+        "the first quiet cycle can retry the retained edge"
+    );
+}
+
+#[test]
+fn agent_idle_wake_does_not_treat_session_start_as_a_finished_turn() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "idle",
+        "SessionStart",
+        "other-session",
+    ));
+    assert!(
+        runtime
+            .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_none(),
+        "a pane's launch-time Running placeholder is not an observed turn"
+    );
+}
+
+#[test]
+fn agent_idle_wake_delivery_excludes_other_wakes_until_completion() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    let _pane = attach_live_pm_pane(&mut runtime, &pm_id);
+    runtime.pm_wake_decision_at(&repo, &[], "2026-08-10T01:00:00Z");
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    runtime.pm_agent_idle_wake_events(&context);
+    assert!(
+        runtime
+            .pm_wake_decision_at(
+                &repo,
+                &[pm_wake_inbox_item(43, gwt::MonitorInboxState::Queued)],
+                "2026-08-10T01:00:00Z"
+            )
+            .is_none(),
+        "a queued idle delivery owns this quiet window"
+    );
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+    drain_pm_wake_delivery_tasks(&mut runtime);
+    assert!(gwt::pm_registry::load_pm_loop_state(
+        &gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo)
+    )
+    .unwrap()
+    .last_wake_at
+    .is_some());
+}
+
+#[test]
+fn agent_idle_wake_completion_ignores_a_replaced_pm_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    let _pane = attach_live_pm_pane(&mut runtime, &pm_id);
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    runtime.pm_agent_idle_wake_events(&context);
+    // Completion belongs to the original PTY, even at an unchanged window id.
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued worker")
+    };
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    let tasks = Arc::clone(tasks);
+    let _replacement = attach_live_pm_pane(&mut runtime, &pm_id);
+    runtime.blocking_tasks = BlockingTaskSpawner::Queued(tasks);
+    drain_pm_wake_delivery_tasks(&mut runtime);
+    assert!(gwt::pm_registry::load_pm_loop_state(
+        &gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo)
+    )
+    .unwrap()
+    .last_wake_at
+    .is_none());
+}
+
+/// Issue #3932 AC-1/2/4: manual and Monitor panes share the hook edge;
+/// neither repeated Idle nor an unrelated PM Stop creates another signal.
+#[test]
+fn agent_idle_wake_is_immediate_and_rearms_only_after_running() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    let agent_id = "tab-1::other-window";
+    runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .set_purpose_title("other-window", Some("修正担当".into()));
+    runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .set_linked_issue_number("other-window", Some(3932));
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    let first = runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .expect("manual Agent idle wakes without a scan");
+    assert_eq!(first.window_id, pm_id);
+    assert!(
+        first.prompt.contains("[gwt] Agent idle: 修正担当 (#3932)"),
+        "{}",
+        first.prompt
+    );
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
+        .is_none());
+
+    seed_quiet_standing_supervision(&repo); // the same pane is now Monitor-bound
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
+        .is_some());
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T03:00:00Z")
+        .is_none());
+    assert_eq!(
+        runtime.window_status(agent_id),
+        Some(WindowProcessStatus::Idle)
+    );
+}
+
+/// AC-3: use the final composed status, including human/quota overlays.
+#[test]
+fn agent_idle_wake_excludes_waiting_and_waiting_release() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let id = "tab-1::other-window";
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "waiting",
+        "PreToolUse",
+        "other-session",
+    ));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime
+        .window_approval_waiting
+        .insert(id.into(), Default::default());
+    runtime
+        .window_hook_states
+        .insert(id.into(), WindowProcessStatus::Idle);
+    assert_eq!(
+        runtime.recompute_window_state(id),
+        Some(WindowProcessStatus::Waiting)
+    );
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+    runtime.window_approval_waiting.remove(id);
+    runtime.recompute_window_state(id);
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.provider_quota_holds.insert(
+        id.into(),
+        gwt::IssueMonitorFailure::ProviderUsageLimit {
+            provider: "codex".into(),
+            resets_at: None,
+            evidence: None,
+        },
+    );
+    runtime
+        .window_hook_states
+        .insert(id.into(), WindowProcessStatus::Idle);
+    assert_eq!(
+        runtime.recompute_window_state(id),
+        Some(WindowProcessStatus::Waiting)
+    );
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+}
+
+/// AC-5: no inbox snapshot is needed when the PM turn ends; clock quietness
+/// remains authoritative, and a held signal is consumed exactly once.
+#[test]
+fn agent_idle_wake_survives_busy_pm_and_recent_loop_clock() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            last_continued_at: Some("2026-08-10T01:00:00Z".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    assert!(
+        runtime
+            .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
+            .is_none(),
+        "busy is retained even past the old stuck-pane override"
+    );
+    assert!(gwt::pm_registry::load_pm_loop_state(&loop_path)
+        .unwrap()
+        .last_wake_at
+        .is_none());
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    assert!(
+        runtime
+            .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:30Z")
+            .is_none(),
+        "Stop does not bypass quiet clocks"
+    );
+    let decision = runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
+        .expect("first quiet after the turn delivers the held edge");
+    assert_eq!(decision.window_id, pm_id);
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
+        .is_none());
+}
+
+/// AC-1: the shared composer guard retains the idle signal, and the final
+/// payload stays one bounded UTF-8 line even for a long window title.
+#[test]
+fn agent_idle_wake_holds_composer_and_bounds_the_delivered_prompt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    let _pane = attach_live_pm_pane(&mut runtime, &pm_id);
+    runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .set_purpose_title("other-window", Some("担当\n".repeat(400)));
+    runtime.terminal_input_events(&pm_id, "unfinished prompt");
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+    runtime.terminal_input_events(&pm_id, "\u{15}");
+    let decision = runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .expect("clearing the composer retains the edge");
+    let prompt = decision.delivery_prompt();
+    assert!(prompt.len() <= 960, "{} bytes", prompt.len());
+    assert!(prompt.ends_with('\r'));
+    assert!(!prompt[..prompt.len() - 1].contains(['\n', '\r']));
+}
+
 /// T-093 (FR-012): a parked PM is woken by a NeedsHuman transition, the wake
 /// targets exactly the registered PM's pane, and the loop budget is re-armed.
 #[test]

@@ -426,6 +426,10 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.repo = self.base / "repo"
         self.repo.mkdir()
         self._git("init", "--quiet", str(self.repo))
+        # Auto maintenance can detach and write objects/maintenance.lock after
+        # commit returns, racing TemporaryDirectory cleanup (Issue #5167).
+        self._git("-C", str(self.repo), "config", "maintenance.auto", "false")
+        self._git("-C", str(self.repo), "config", "gc.auto", "0")
         self._git("-C", str(self.repo), "symbolic-ref", "HEAD", "refs/heads/develop")
         (self.repo / "src").mkdir()
         (self.repo / "docs").mkdir()
@@ -498,6 +502,21 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
             "-m",
             message,
         )
+
+    def test_fixture_commit_does_not_spawn_auto_maintenance(self):
+        trace = self.base / "git-trace.jsonl"
+        (self.repo / "src" / "feature.rs").write_text(
+            "fn feature_v2() {}\n", encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(trace)}):
+            self._commit("fixture maintenance probe")
+        maintenance = [
+            event["argv"]
+            for line in trace.read_text(encoding="utf-8").splitlines()
+            if (event := json.loads(line)).get("event") == "child_start"
+            and event["argv"][1:2] in (["maintenance"], ["gc"])
+        ]
+        self.assertEqual(maintenance, [], "fixture commits must finish before cleanup")
 
     def _build(self, compatibility_descriptor=None) -> dict:
         return runner.action_index_files_v2(

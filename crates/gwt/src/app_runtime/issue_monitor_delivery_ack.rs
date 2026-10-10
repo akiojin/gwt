@@ -266,7 +266,7 @@ impl AppRuntime {
         };
         let barrier = if require_durable && delivery_id.is_some() {
             match self.persist_dispatcher.reserve_workspace_durable(
-                gwt::workspace_state_path(&context.project_root),
+                gwt_core::paths::gwt_project_dir(&context.project_key).join("workspace.json"),
                 self.persistable_workspace_state(tab),
             ) {
                 Ok(barrier) => Some(barrier),

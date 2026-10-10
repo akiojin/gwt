@@ -3015,15 +3015,15 @@ mod tests {
             Some(&fixture.repo),
         )
         .unwrap();
-        let mut start = gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Start,
+        let mut done = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
             &work_id,
             chrono::Utc::now(),
         );
-        start.owner = Some(s("Issue #42"));
-        start.title = Some(s("PR shard delivery"));
-        start.agent_session_id = Some(s(session_id));
-        start.execution_container = Some(
+        done.owner = Some(s("Issue #42"));
+        done.title = Some(s("PR shard delivery"));
+        done.agent_session_id = Some(s(session_id));
+        done.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some(s("main")),
                 worktree_path: Some(fixture.repo.clone()),
@@ -3037,7 +3037,7 @@ mod tests {
         projection.id = work_id.clone();
         gwt_core::workspace_projection::save_workspace_projection(&fixture.repo, &projection)
             .unwrap();
-        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start).unwrap();
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, done).unwrap();
         git(&["add", "--", ".gwt/work/events"]);
         fixture.commit("chore(work): seed canonical Work");
         fixture.push();
@@ -3127,6 +3127,27 @@ mod tests {
             crate::cli::verification_record::EvidenceStatus::Fresh
         );
 
+        // #5216: a review Session may resume this same Work after final Done.
+        // Its immutable shard must survive delivery without another commit/PR.
+        let mut resume = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Resume,
+            &work_id,
+            chrono::Utc::now(),
+        );
+        resume.agent_session_id = Some(s("independent-review-session"));
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, resume.clone())
+            .unwrap();
+        let resume_path =
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &resume.id);
+        let resume_bytes = std::fs::read(&resume_path).unwrap();
+        let pending = crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            session_id,
+            true,
+        )
+        .unwrap();
+        assert!(pending.obligation_open && !pending.status.is_settled());
+
         // A real source change must still refuse completion with this same run.
         std::fs::write(fixture.repo.join("src.txt"), "changed source\n").unwrap();
         assert_eq!(
@@ -3149,9 +3170,17 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("stale"), "{out}");
+        assert!(
+            crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap()
+                .obligation_open,
+            "refused delivery must not close the bookkeeping obligation"
+        );
         // Restore the fixture's delivery commit, without rerunning verification.
         git(&["reset", "--hard", "HEAD^"]);
         git(&["push", "--force", "origin", "main"]);
+        env.completion_prs.get_mut(&7).unwrap().state = gwt_git::pr_status::PrState::Merged;
         out.clear();
         assert_eq!(
             crate::cli::execution_state::run(
@@ -3166,6 +3195,17 @@ mod tests {
         let completed = crate::cli::execution_state::load(&fixture.repo)
             .unwrap()
             .unwrap();
+        let bookkeeping =
+            crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap();
+        assert!(
+            !bookkeeping.obligation_open,
+            "verified merged delivery must close its own bookkeeping obligation"
+        );
+        assert_eq!(bookkeeping.status, pending.status, "keep the audit warning");
+        assert_eq!(std::fs::read(&resume_path).unwrap(), resume_bytes);
+        assert_eq!(bookkeeping.execution_binding, pending.execution_binding);
         assert_eq!(
             crate::cli::hook::work_event_settlement_stop_check::handle_with_input(
                 &fixture.repo,
@@ -3204,11 +3244,10 @@ mod tests {
             )
             .unwrap();
             assert!(
-                receipt.status.is_settled(),
+                !receipt.obligation_open,
                 "post-delivery PR editing must close in one cycle: {:?}",
                 receipt.status
             );
-            assert!(!receipt.obligation_open);
             sync_edited_workspace_pr_metadata(&mut env, &merged_pr).unwrap();
         }
         assert_eq!(
@@ -3830,7 +3869,9 @@ mod tests {
         .unwrap();
 
         let command = "git definitely-not-a-subcommand".to_string();
-        let second_command = "git still-not-a-subcommand".to_string();
+        // #5094: commands after a blocking raw FAIL are skipped, so only the
+        // final command can fail for a Board decision to be consumable.
+        let passing_command = "git --version".to_string();
         crate::cli::verification_record::save_plan(
             tmp.path(),
             &crate::cli::verification_record::VerificationPlanRecord::from(
@@ -3839,7 +3880,7 @@ mod tests {
                     session_id: "sess-pr".to_string(),
                     owner_number: Some(42),
                     execution_binding: None,
-                    commands: vec![command.clone(), second_command.clone()],
+                    commands: vec![passing_command.clone(), command.clone()],
                     derived: false,
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
@@ -3854,7 +3895,7 @@ mod tests {
         let (record, _) = crate::cli::verification_record::run_verification(
             tmp.path(),
             "sess-pr",
-            &[command.clone(), second_command.clone()],
+            &[passing_command, command.clone()],
         )
         .unwrap();
         assert!(!record.all_passed);
@@ -3875,28 +3916,20 @@ mod tests {
         let decision_id = decision.id.clone();
         gwt_core::coordination::post_entry(tmp.path(), decision).unwrap();
 
-        let second_decision = gwt_core::coordination::BoardEntry::new(
-            gwt_core::coordination::AuthorKind::Agent,
-            "PM",
-            gwt_core::coordination::BoardEntryKind::Decision,
-            format!(
-                "Verification record: {}\nFailing command: {second_command}\nReason: accepted for PR handoff",
-                record.record_id
-            ),
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-        );
-        let second_decision_id = second_decision.id.clone();
-        gwt_core::coordination::post_entry(tmp.path(), second_decision).unwrap();
-
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
         seed_readable_pr_body(&mut env);
         env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
             "User Verification Result: n/a (autonomous)\n".to_string();
         env.seed_created_pr(seeded_pr());
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+            .expect("run unadjudicated pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_ready_call_log.is_empty());
+        assert!(env.pr_comments.is_empty());
+
         let mut verify_out = String::new();
         let code = crate::cli::verification_record::run(
             &mut env,
@@ -3934,26 +3967,6 @@ mod tests {
 
         let mut out = String::new();
         let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
-            .expect("run partially adjudicated pr ready");
-        assert_eq!(code, 2, "{out}");
-        assert!(env.pr_ready_call_log.is_empty());
-        assert!(env.pr_comments.is_empty());
-
-        let mut verify_out = String::new();
-        let code = crate::cli::verification_record::run(
-            &mut env,
-            crate::cli::verification_record::VerifyCommand::Adjudicate {
-                record_id: record.record_id.clone(),
-                command: second_command.clone(),
-                board_entry_id: second_decision_id.clone(),
-            },
-            &mut verify_out,
-        )
-        .expect("attach second Board decision");
-        assert_eq!(code, 0, "{verify_out}");
-
-        let mut out = String::new();
-        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
             .expect("run adjudicated pr ready");
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_ready_call_log, vec![7]);
@@ -3961,8 +3974,6 @@ mod tests {
         assert_eq!(env.pr_comments[0].0, 7);
         assert!(env.pr_comments[0].1.contains(&decision_id));
         assert!(env.pr_comments[0].1.contains(&command));
-        assert!(env.pr_comments[0].1.contains(&second_decision_id));
-        assert!(env.pr_comments[0].1.contains(&second_command));
 
         let worktree = tmp.path().to_path_buf();
         let mut replacement = crate::cli::verification_record::load(&worktree)

@@ -15,6 +15,7 @@ const RAM_FLOOR_BYTES: u64 = 512 * 1024 * 1024;
 const SCAN_ENTRIES_PER_REFRESH: usize = 2_048;
 const SCAN_TIME_PER_REFRESH: Duration = Duration::from_millis(20);
 const MACHINE_REFRESH_SECS: u64 = 5;
+const MAX_REASON_CHARS: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -436,21 +437,58 @@ fn project_capacity_at(
     view.other_review_agents = count_role(&other, MachineSessionRole::Review);
     view.observed_at = Some(snapshot.observed_at);
     view.expires_at = Some(snapshot.expires_at);
+    let mut diagnostics = Vec::new();
     if !current {
-        view.reason.push_str("; snapshot_expired");
+        diagnostics.push("snapshot_expired: wait for the next measurement".to_string());
     }
-    if !disk_observed {
-        view.reason
-            .push_str("; project_disk_measurement_unavailable");
+    if !disk_observed || snapshot.free_disk_bytes.is_none() {
+        diagnostics.push(
+            "project_disk_measurement_unavailable: check volume/path access or use Manual"
+                .to_string(),
+        );
     }
-    for uncertainty in &snapshot.inventory.uncertainties {
-        view.reason
-            .push_str(&format!("; inventory_uncertain: {}", uncertainty.reason));
+    if target.is_none() {
+        diagnostics.push(
+            "target measurement unavailable: wait for the scan; if missing/empty, build the project or use Manual"
+                .to_string(),
+        );
     }
-    for diagnostic in &snapshot.diagnostics {
-        view.reason.push_str(&format!("; {diagnostic}"));
+    // Keep recovery advice and grouped inventory ahead of verbose paths.
+    diagnostics.extend(
+        snapshot
+            .inventory
+            .uncertainties
+            .iter()
+            .map(|uncertainty| format!("inventory_uncertain: {}", uncertainty.reason)),
+    );
+    if target.is_none() {
+        diagnostics.push(format!("target: {}", root.join("target").display()));
     }
+    diagnostics.extend(snapshot.diagnostics.iter().cloned());
+    view.reason = capacity_reason_summary(view.reason, &diagnostics);
     view
+}
+
+fn capacity_reason_summary(mut reason: String, diagnostics: &[String]) -> String {
+    let mut counts = BTreeMap::new();
+    for diagnostic in diagnostics {
+        *counts.entry(diagnostic).or_insert(0_usize) += 1;
+    }
+    for diagnostic in diagnostics {
+        let Some(count) = counts.remove(diagnostic) else {
+            continue;
+        };
+        reason.push_str("; ");
+        reason.push_str(diagnostic);
+        if count > 1 {
+            reason.push_str(&format!(" ×{count}"));
+        }
+    }
+    if reason.chars().count() > MAX_REASON_CHARS {
+        reason = reason.chars().take(MAX_REASON_CHARS - 1).collect();
+        reason.push('…');
+    }
+    reason
 }
 
 /// GUI-independent refresh. CPU baselines and target walks survive ticks;
@@ -538,7 +576,10 @@ impl RuntimeProbe {
                 let available = match fs2::available_space(root) {
                     Ok(bytes) => Some(bytes),
                     Err(error) => {
-                        disk_errors.push(format!("disk_measurement_unavailable: {error}"));
+                        disk_errors.push(format!(
+                            "disk_measurement_unavailable: {}: {error}; check volume/path access or use Manual",
+                            root.display()
+                        ));
                         None
                     }
                 };
@@ -599,14 +640,23 @@ impl RuntimeProbe {
                         );
                     } else {
                         targets.remove(&path);
-                        diagnostics.push("target_measurement_empty".to_string());
+                        diagnostics.push(format!(
+                            "target_measurement_empty: {}; build the project or use Manual",
+                            path.display()
+                        ));
                     }
                 }
-                Ok(None) => diagnostics.push("target_measurement_in_progress".to_string()),
+                Ok(None) => diagnostics.push(format!(
+                    "target_measurement_in_progress: {}; wait for the scan or use Manual",
+                    path.display()
+                )),
                 Err(error) => {
                     self.walks.remove(&path);
                     targets.remove(&path);
-                    diagnostics.push(format!("target_measurement_unavailable: {error}"));
+                    diagnostics.push(format!(
+                        "target_measurement_unavailable: {}: {error}; check path access, build the project or use Manual",
+                        path.display()
+                    ));
                 }
             }
         }
@@ -1346,6 +1396,56 @@ mod tests {
             after_registration, baseline,
             "registered projects leave the shared budget and consumption unchanged"
         );
+    }
+
+    #[test]
+    fn repeated_capacity_diagnostics_are_grouped_and_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("long-project-name-".repeat(5));
+        std::fs::create_dir(&root).unwrap();
+        let mut snapshot = snapshot(&root);
+        snapshot.inventory.uncertainties = (0..37)
+            .map(
+                |_| crate::session_inventory::SessionObservationUncertainty {
+                    runtime_path: PathBuf::new(),
+                    session_id: None,
+                    reason: "child_identity_missing".to_string(),
+                },
+            )
+            .collect();
+        let view = project_capacity_at(&snapshot, &root, &BTreeSet::new(), 0, 101);
+        assert!(view
+            .reason
+            .contains("inventory_uncertain: child_identity_missing ×37"));
+        assert_eq!(view.reason.matches("child_identity_missing").count(), 1);
+        snapshot.diagnostics = (0..40)
+            .map(|index| format!("cause-{index}: {}", "測".repeat(80)))
+            .collect();
+        snapshot.free_disk_bytes = None;
+        snapshot.targets.clear();
+        let view = project_capacity_at(&snapshot, &root, &BTreeSet::new(), 0, 101);
+        assert!(view.reason.chars().count() <= 512);
+        assert!(view.reason.ends_with('…'));
+        assert!(view.reason.contains("child_identity_missing ×37"));
+        assert!(view.reason.contains("build the project or use Manual"));
+    }
+
+    #[test]
+    fn unavailable_disk_slots_explain_pending_or_missing_target_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut snapshot = snapshot(temp.path());
+        snapshot.targets.clear();
+        snapshot.diagnostics = vec!["target_measurement_in_progress".to_string()];
+        let pending = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
+        assert!(!pending.measurement_complete);
+        assert!(pending.reason.contains("wait"), "{}", pending.reason);
+        snapshot.diagnostics.clear();
+        let missing = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
+        assert!(missing.reason.contains("build"), "{}", missing.reason);
+        assert!(missing.reason.contains("Manual"), "{}", missing.reason);
+        assert!(missing
+            .reason
+            .contains(&temp.path().join("target").display().to_string()));
     }
 
     #[test]

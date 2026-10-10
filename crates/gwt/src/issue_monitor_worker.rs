@@ -8,10 +8,77 @@ use crate::{
     IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState,
     IssueReadinessFailure, MonitorInboxState,
 };
-use gwt_github::client::{IssueClient, LabelAssignment};
+use gwt_github::client::{IssueClient, LabelAssignment, OwnerMutationResult};
+use gwt_github::issue_auto_claim::{renew_claim_mutation, ClaimRenewOutcome};
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
 pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+
+/// Only an exact current, live Active holder can extend an existing claim.
+pub fn live_claim_renewal_generations(
+    project_root: &Path,
+    monitor: &IssueMonitorState,
+    now: &str,
+) -> BTreeMap<u64, String> {
+    monitor
+        .claim_renewal_candidates(now)
+        .into_iter()
+        .filter_map(|identity| {
+            crate::cli::execution_state::live_active_owner_generation(
+                project_root,
+                identity.issue_number,
+            )
+            .map(|generation| (identity.issue_number, generation))
+        })
+        .collect()
+}
+
+pub fn execute_claim_renewal<C: IssueClient + ?Sized>(
+    project_root: &Path,
+    payload: &crate::IssueMonitorEffectPayload,
+    client: &C,
+    now: &str,
+) -> OwnerMutationResult<ClaimRenewOutcome> {
+    let crate::IssueMonitorEffectPayload::RenewClaim {
+        issue_number,
+        claim_id,
+        owner,
+        generation_id,
+        ttl_secs,
+    } = payload
+    else {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "effect is not a claim renewal".to_string(),
+            conflicting_claims: Vec::new(),
+        });
+    };
+    if crate::cli::execution_state::live_active_owner_generation(project_root, *issue_number)
+        .as_deref()
+        != Some(generation_id.as_str())
+    {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "the exact Active execution holder is no longer live".to_string(),
+            conflicting_claims: Vec::new(),
+        });
+    }
+    let expires_at = chrono::DateTime::parse_from_rfc3339(now)
+        .ok()
+        .and_then(|now| {
+            now.checked_add_signed(chrono::Duration::seconds(
+                (*ttl_secs).min(i64::MAX as u64) as i64
+            ))
+        })
+        .map(|expires| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| now.to_string());
+    renew_claim_mutation(
+        client,
+        IssueNumber(*issue_number),
+        claim_id,
+        owner,
+        now,
+        &expires_at,
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
@@ -390,6 +457,27 @@ pub fn read_execution_observations(
                 }
                 Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
                 None => IssueMonitorExecutionSettlement::Unknown,
+            };
+            // Reaper interruption is normally retryable, but retrying a window
+            // with no gate-admitted recovery only repeats the same loop.
+            // Preserve real settlements and process liveness; this diagnosis
+            // does not write the ECR or claim that unfinished work was delivered.
+            let recovery_exhausted = (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
+                || diagnosis.ecr_settled_by_host_reaper)
+                && worktree
+                    .zip(diagnosis.holder_session_id.as_deref())
+                    .is_some_and(|(worktree, session_id)| {
+                        crate::cli::hook::workflow_policy::identity_gate_closed_for_session(
+                            worktree, session_id,
+                        ) && crate::cli::execution_state::diagnose(worktree, Some(session_id))
+                            .recovery_hint
+                            .as_deref()
+                            == Some(crate::cli::execution_state::RECOVERY_HINT_RECOVERY_EXHAUSTED)
+                    });
+            let settlement = if recovery_exhausted {
+                IssueMonitorExecutionSettlement::RecoveryExhausted
+            } else {
+                settlement
             };
             (
                 *issue_number,
