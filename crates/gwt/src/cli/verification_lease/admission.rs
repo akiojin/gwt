@@ -1403,6 +1403,11 @@ mod tests {
             std::fs::write(directory.join("src/lib.rs"), "").unwrap();
         }
         let shared = home.path().join("shared-target");
+        let lease_root = IsolatedLeaseRoot {
+            coordinator: verification_lease::open_coordinator().unwrap(),
+            home,
+            _home_guard: _home,
+        };
         let command = format!(
             "cargo test --workspace --target-dir \"{}\"",
             shared.display()
@@ -1426,6 +1431,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("Cargo target"), "{error}");
+        lease_root.assert_target_free(
+            &verification_key_for(second.path()),
+            "an artifact-conflict refusal must release its caller target",
+        );
         let independent_command = format!(
             "cargo test --workspace --target-dir \"{}\"",
             second.path().join("target").display()
@@ -1780,11 +1789,11 @@ mod tests {
         holder.complete(JobOutcome::Completed).unwrap();
     }
 
-    /// Issue #4998 AC-2: exercise the actual deferred-admission assertions
+    /// Issue #4998 AC-2/3: exercise the deferred and artifact-conflict retries
     /// while unrelated fork/exec windows can inherit their target lock.
     #[cfg(unix)]
     #[test]
-    #[ignore = "20 admissions with two concurrent spawners; run explicitly for Issue #4998"]
+    #[ignore = "20 retry rounds with two concurrent spawners; run explicitly for Issue #4998"]
     fn deferred_readmission_with_two_concurrent_spawners() {
         use std::os::unix::process::CommandExt;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1816,6 +1825,7 @@ mod tests {
             let result = std::panic::catch_unwind(|| {
                 for iteration in 0..20 {
                     admit_defers_when_another_target_holds_the_lease();
+                    independent_worktrees_use_two_slots_but_a_shared_cargo_target_waits();
                     eprintln!("deferred readmission iteration {} passed", iteration + 1);
                 }
             });
