@@ -1810,14 +1810,8 @@ fn monitor_launch_admission_hold(
                 continue;
             };
             let live = if fence.version == 2 {
-                match crate::issue_monitor::acquire_issue_monitor_daemon_lease(&path) {
-                    Ok(lease) => {
-                        drop(lease);
-                        false
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
-                    Err(error) => return Err(io_as_api_error(error)),
-                }
+                crate::issue_monitor::issue_monitor_daemon_lease_is_held(&path)
+                    .map_err(io_as_api_error)?
             } else {
                 crate::process::is_process_alive(fence.pid)
             };
@@ -8060,6 +8054,13 @@ mod tests {
         assert!(
             monitor_launch_admission_hold(&prefs).unwrap().is_none(),
             "a stale same-PID fence cannot hold admission"
+        );
+        let authority_path = path.with_extension("authority.lock");
+        std::fs::remove_file(&authority_path).unwrap();
+        assert!(monitor_launch_admission_hold(&prefs).unwrap().is_none());
+        assert!(
+            !authority_path.exists(),
+            "an admission probe must not create a daemon authority lock"
         );
     }
 
