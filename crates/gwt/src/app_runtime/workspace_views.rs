@@ -1530,6 +1530,7 @@ pub(crate) fn workspace_work_item_view_from_item(
                 workspace_execution_container_view_from_ref(
                     container,
                     item.agents.first().map(|agent| agent.session_id.as_str()),
+                    session_index,
                 )
             })
             .collect(),
@@ -1633,6 +1634,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
 fn workspace_execution_container_view_from_ref(
     container: &gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
     session_id: Option<&str>,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceExecutionContainerView {
     gwt::WorkspaceExecutionContainerView {
         branch: container.branch.clone(),
@@ -1644,9 +1646,12 @@ fn workspace_execution_container_view_from_ref(
         pr_url: container.pr_url.clone(),
         pr_state: container.pr_state.clone(),
         diagnosis: container.worktree_path.as_deref().map(|worktree| {
-            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose_for_projection(
-                worktree, session_id,
-            ))
+            let session = session_id.and_then(|id| session_index.get(id.trim()).copied());
+            workspace_execution_diagnosis_view(
+                gwt::cli::execution_state::diagnose_for_projection_with_session(
+                    worktree, session_id, session,
+                ),
+            )
         }),
     }
 }
@@ -2423,15 +2428,16 @@ pub(super) fn attach_registry_sessions_to_active_works(
 pub(super) fn assign_and_merge_workspace_groups(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     project_root: &Path,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) {
-    assign_and_merge_workspace_groups_impl(active_works, project_root, true);
+    assign_and_merge_workspace_groups_impl(active_works, project_root, Some(session_index));
 }
 
 fn assign_and_merge_workspace_groups_cache_only(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     project_root: &Path,
 ) {
-    assign_and_merge_workspace_groups_impl(active_works, project_root, false);
+    assign_and_merge_workspace_groups_impl(active_works, project_root, None);
 }
 
 /// Rows mix second-precision `...Z` and fractional `...+00:00` stamps, so
@@ -2447,11 +2453,11 @@ fn updated_at_is_newer(candidate: &str, current: &str) -> bool {
 fn assign_and_merge_workspace_groups_impl(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     project_root: &Path,
-    include_execution_diagnosis: bool,
+    session_index: Option<&std::collections::HashMap<&str, &gwt_agent::Session>>,
 ) {
     for work in active_works.iter_mut() {
         if work.works.is_empty() {
-            let child = active_workspace_child_work(work, include_execution_diagnosis);
+            let child = active_workspace_child_work(work, session_index);
             work.works.push(child);
         }
         let branch = work
@@ -2554,7 +2560,7 @@ fn assign_and_merge_workspace_groups_impl(
 
 fn active_workspace_child_work(
     work: &gwt::ActiveWorkItemView,
-    include_execution_diagnosis: bool,
+    session_index: Option<&std::collections::HashMap<&str, &gwt_agent::Session>>,
 ) -> gwt::ActiveWorkspaceWorkView {
     let lifecycle_state = work.lifecycle_state.clone();
     let manual_close_allowed = lifecycle_state == "paused" && work.active_agents == 0;
@@ -2573,18 +2579,19 @@ fn active_workspace_child_work(
         manual_close_allowed,
         close_blocked_reason,
         agents: work.agents.clone(),
-        execution_diagnosis: if include_execution_diagnosis {
+        execution_diagnosis: session_index.and_then(|session_index| {
             work.worktree_path.as_deref().map(|worktree| {
+                let session_id = work.agents.first().map(|agent| agent.session_id.as_str());
+                let session = session_id.and_then(|id| session_index.get(id.trim()).copied());
                 workspace_execution_diagnosis_view(
-                    gwt::cli::execution_state::diagnose_for_projection(
+                    gwt::cli::execution_state::diagnose_for_projection_with_session(
                         Path::new(worktree),
-                        work.agents.first().map(|agent| agent.session_id.as_str()),
+                        session_id,
+                        session,
                     ),
                 )
             })
-        } else {
-            None
-        },
+        }),
         updated_at: work.updated_at.clone(),
     }
 }
@@ -2982,6 +2989,8 @@ fn prepare_active_work_projection(
     });
     let projection_started = Instant::now();
 
+    #[cfg(test)]
+    ACTIVE_WORK_PROJECTION_SESSION_LEDGER_LOADS.with(|count| count.set(count.get() + 1));
     let agent_sessions = input
         .session_ledger_cache
         .lock()
@@ -3009,6 +3018,8 @@ fn prepare_active_work_projection(
         if had_saved_agents && !projection.has_current_agents() {
             projection.reset_idle_identity(&input.tab.title, updated_at);
         }
+        #[cfg(test)]
+        ACTIVE_WORK_PROJECTION_JOURNAL_LOADS.with(|count| count.set(count.get() + 1));
         let journal_entries =
             gwt_core::workspace_projection::load_recent_workspace_journal_entries(
                 &input.project_root,
@@ -3030,6 +3041,8 @@ fn prepare_active_work_projection(
             workspaces,
             cleanup_candidate,
         );
+        #[cfg(test)]
+        ACTIVE_WORK_PROJECTION_HOOK_SNAPSHOT_LOADS.with(|count| count.set(count.get() + 1));
         let hook_failures = ManagedHookFailureSnapshot::read();
         view.managed_hook_health = managed_hook_health_view_for_project(
             &input.project_root,
@@ -3037,7 +3050,11 @@ fn prepare_active_work_projection(
             &sessions,
             &hook_failures,
         );
-        assign_and_merge_workspace_groups(&mut view.active_works, &input.project_root);
+        assign_and_merge_workspace_groups(
+            &mut view.active_works,
+            &input.project_root,
+            &session_index,
+        );
         attach_registry_sessions_to_active_works(
             &mut view.active_works,
             &agent_sessions,
@@ -3083,6 +3100,8 @@ fn prepare_active_work_projection(
         );
         view
     } else {
+        #[cfg(test)]
+        ACTIVE_WORK_PROJECTION_HOOK_SNAPSHOT_LOADS.with(|count| count.set(count.get() + 1));
         let hook_failures = ManagedHookFailureSnapshot::read();
         let mut view = active_work_projection_from_live_sessions(
             &input.tab_id,
@@ -4934,6 +4953,8 @@ fn build_active_work_projection(
         if had_saved_agents && !projection.has_current_agents() {
             projection.reset_idle_identity(&job.tab_title, updated_at);
         }
+        #[cfg(test)]
+        ACTIVE_WORK_PROJECTION_JOURNAL_LOADS.with(|count| count.set(count.get() + 1));
         let journal_entries =
             gwt_core::workspace_projection::load_recent_workspace_journal_entries(
                 &job.project_root,
@@ -4943,6 +4964,8 @@ fn build_active_work_projection(
             .iter()
             .map(workspace_journal_entry_view_from_entry)
             .collect::<Vec<_>>();
+        #[cfg(test)]
+        ACTIVE_WORK_PROJECTION_SESSION_LEDGER_LOADS.with(|count| count.set(count.get() + 1));
         let agent_sessions = lock_recover(&job.session_ledger_cache).load(&job.sessions_dir);
         let session_index = work_session_index(&agent_sessions);
         // Issue #3611: resumability is answered from the background merge
@@ -4969,6 +4992,8 @@ fn build_active_work_projection(
         );
         // Issue #4172: one ledger read for the whole projection instead of
         // one per Work row, so hook health stops scaling with Work count.
+        #[cfg(test)]
+        ACTIVE_WORK_PROJECTION_HOOK_SNAPSHOT_LOADS.with(|count| count.set(count.get() + 1));
         let hook_failures = ManagedHookFailureSnapshot::read();
         view.managed_hook_health = managed_hook_health_view_for_project(
             &job.project_root,
@@ -4979,7 +5004,11 @@ fn build_active_work_projection(
         // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
         // branch into one Workspace row before the ledger attach, so the
         // attach / identity-collapse / cap run once per Workspace.
-        assign_and_merge_workspace_groups(&mut view.active_works, &job.project_root);
+        assign_and_merge_workspace_groups(
+            &mut view.active_works,
+            &job.project_root,
+            &session_index,
+        );
         // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
         // ledger to each Workspace (branch) row so sessions surface even
         // when works.json never recorded an agent for the branch.
@@ -5045,6 +5074,8 @@ fn build_active_work_projection(
     }
 
     // Issue #4172: same single ledger read for the live-session projection.
+    #[cfg(test)]
+    ACTIVE_WORK_PROJECTION_HOOK_SNAPSHOT_LOADS.with(|count| count.set(count.get() + 1));
     let hook_failures = ManagedHookFailureSnapshot::read();
     let mut view = active_work_projection_from_live_sessions(
         &job.tab_id,
@@ -5058,6 +5089,8 @@ fn build_active_work_projection(
         ),
     );
     if let Some(view) = view.as_mut() {
+        #[cfg(test)]
+        ACTIVE_WORK_PROJECTION_SESSION_LEDGER_LOADS.with(|count| count.set(count.get() + 1));
         let agent_sessions = lock_recover(&job.session_ledger_cache).load(&job.sessions_dir);
         attach_active_work_issue_numbers(
             &mut view.active_works,
@@ -5083,6 +5116,12 @@ fn build_active_work_projection(
 thread_local! {
     static FULL_ACTIVE_WORK_PROJECTION_BUILDS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static ACTIVE_WORK_PROJECTION_HOOK_SNAPSHOT_LOADS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static ACTIVE_WORK_PROJECTION_JOURNAL_LOADS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static ACTIVE_WORK_PROJECTION_SESSION_LEDGER_LOADS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -5093,6 +5132,17 @@ pub(super) fn reset_full_active_work_projection_builds() {
 #[cfg(test)]
 pub(super) fn full_active_work_projection_builds() -> usize {
     FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(std::cell::Cell::get)
+}
+
+// Logical loader invocations, in hook snapshot / journal / Session ledger order.
+// The hook snapshot includes the shared error ledger; these are not OS read counts.
+#[cfg(test)]
+pub(super) fn active_work_projection_shared_loads() -> [usize; 3] {
+    [
+        ACTIVE_WORK_PROJECTION_HOOK_SNAPSHOT_LOADS.with(std::cell::Cell::get),
+        ACTIVE_WORK_PROJECTION_JOURNAL_LOADS.with(std::cell::Cell::get),
+        ACTIVE_WORK_PROJECTION_SESSION_LEDGER_LOADS.with(std::cell::Cell::get),
+    ]
 }
 
 #[cfg(test)]

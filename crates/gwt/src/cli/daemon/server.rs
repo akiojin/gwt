@@ -2041,6 +2041,9 @@ enum IssueMonitorControl {
         window_id: String,
         message: String,
         failure: Option<crate::IssueMonitorFailure>,
+        // Legacy callers omit the source. The new private discriminator must
+        // decode a captured source before it can construct this control.
+        source: Option<crate::runtime_daemon_events::IssueMonitorAgentFailureSource>,
     },
     WindowClosed {
         window_id: String,
@@ -2351,11 +2354,28 @@ fn reconcile_deferred_grant_after_authority_commit(
     }
 }
 
+fn issue_monitor_agent_failure_source_matches(
+    control: &IssueMonitorControl,
+    monitor: &crate::IssueMonitorState,
+) -> bool {
+    match control {
+        IssueMonitorControl::AgentFailed {
+            window_id,
+            source: Some(source),
+            ..
+        } => source.matches(monitor, window_id),
+        _ => true,
+    }
+}
+
 fn try_apply_issue_monitor_control(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
     now: &str,
 ) -> Option<bool> {
+    if !issue_monitor_agent_failure_source_matches(&control, monitor) {
+        return Some(false);
+    }
     match control {
         IssueMonitorControl::Enabled(enabled) => monitor
             .set_enabled_with_effect_revocation(enabled)
@@ -2503,6 +2523,7 @@ fn try_apply_typed_issue_monitor_failure(
             window_id,
             message,
             failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict { holder_window_id }),
+            ..
         } => {
             let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
             let Some(issue_number) = issue_number else {
@@ -2520,6 +2541,7 @@ fn try_apply_typed_issue_monitor_failure(
             window_id,
             message,
             failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+            ..
         } => {
             let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
             let Some(issue_number) = issue_number else {
@@ -2545,6 +2567,7 @@ fn try_apply_typed_issue_monitor_failure(
                     resets_at,
                     evidence,
                 }),
+            ..
         } => {
             let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
             let Some(issue_number) = issue_number else {
@@ -2768,6 +2791,7 @@ fn apply_routine_issue_monitor_control(
             window_id,
             message,
             failure,
+            ..
         } => match failure {
             Some(crate::IssueMonitorFailure::ResumeWriterConflict { holder_window_id }) => {
                 let issue_number =
@@ -2941,6 +2965,14 @@ fn rebase_issue_monitor_control_candidate(
         | IssueMonitorControl::TerminalDelivered { target } => {
             monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, target.issue_number)
         }
+        IssueMonitorControl::AgentFailed {
+            source:
+                Some(crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Bound {
+                    issue_number,
+                    ..
+                }),
+            ..
+        } => monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, *issue_number),
         _ => monitor.rebase_daemon_driver_prefs(disk),
     }
 }
@@ -3016,6 +3048,13 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
     let mut applied = None;
     let mut authority_changed = false;
     let typed_failure = issue_monitor_control_has_typed_failure(&accepted.control);
+    let fenced_agent_failure = matches!(
+        accepted.control,
+        IssueMonitorControl::AgentFailed {
+            source: Some(_),
+            ..
+        }
+    );
     let wait_declaration = matches!(accepted.control, IssueMonitorControl::WaitDeclared { .. });
     let failure_control = matches!(
         accepted.control,
@@ -3084,6 +3123,19 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 authority_changed = receipt.authority_changed;
                 return;
             }
+            if fenced_agent_failure {
+                // Only fresh admissions compare their source with canonical disk.
+                // A matching durable receipt already consumed that source and
+                // must retain the failure receipt recovery path above.
+                let canonical = crate::IssueMonitorState::with_prefs(
+                    crate::IssueMonitorConfig::default(),
+                    disk.clone(),
+                );
+                if !issue_monitor_agent_failure_source_matches(&accepted.control, &canonical) {
+                    rejected = true;
+                    return;
+                }
+            }
             let authority_epoch_before = candidate.effect_authority_epoch();
             applied = Some(try_apply_issue_monitor_control(
                 &mut candidate,
@@ -3091,7 +3143,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 &accepted.processed_at,
             ));
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
-            if (typed_failure && applied == Some(Some(false)))
+            if ((typed_failure || fenced_agent_failure) && applied == Some(Some(false)))
                 || (wait_declaration && applied == Some(None))
             {
                 // An unrecorded wait is refused, not ACKed and not a terminal
@@ -3545,6 +3597,35 @@ fn decode_issue_monitor_control_in_repo(
                     failure,
                 });
             }
+            if let Some(agent_failed) = payload.get("agent_failed_from_launch") {
+                let source: crate::runtime_daemon_events::IssueMonitorAgentFailureSource =
+                    serde_json::from_value(agent_failed.get("source")?.clone()).ok()?;
+                let issue_number = match &source {
+                    crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Unbound => None,
+                    crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Bound {
+                        issue_number,
+                        ..
+                    } => Some(*issue_number),
+                };
+                let window_id = agent_failed.get("window_id")?.as_str()?.trim();
+                if window_id.is_empty() {
+                    return None;
+                }
+                let message = agent_failed.get("message")?.as_str()?.to_string();
+                let failure = agent_failed
+                    .get("failure")
+                    .filter(|failure| !failure.is_null())
+                    .map(|failure| serde_json::from_value(failure.clone()))
+                    .transpose()
+                    .ok()?;
+                return Some(IssueMonitorControl::AgentFailed {
+                    issue_number,
+                    window_id: window_id.to_string(),
+                    message,
+                    failure,
+                    source: Some(source),
+                });
+            }
             if let Some(agent_failed) = payload.get("agent_failed") {
                 let issue_number = agent_failed
                     .get("issue_number")
@@ -3570,6 +3651,7 @@ fn decode_issue_monitor_control_in_repo(
                     window_id,
                     message,
                     failure,
+                    source: None,
                 });
             }
             if let Some(launched) = payload.get("launched") {
@@ -5975,6 +6057,224 @@ async fn heal_endpoint_descriptor_loop(
 
 fn config_error(message: impl Into<String>) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(message.into()))
+}
+
+#[cfg(test)]
+mod agent_failure_source_contract_tests {
+    use super::{decode_issue_monitor_control, IssueMonitorControl};
+
+    use gwt_core::{operation_deadline::ScopedOperationClock, test_support::ScopedGwtHome};
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    use super::{
+        try_apply_accepted_issue_monitor_control_with_disk_migration, AcceptedIssueMonitorControl,
+        IssueMonitorControlCommit,
+    };
+    use crate::runtime_daemon_events::IssueMonitorAgentFailureSource;
+
+    fn monitor_with_launch(claim_id: &str, window_id: &str) -> crate::IssueMonitorState {
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: window_id.to_string(),
+                }],
+                launched_claims: std::collections::BTreeMap::from([(42, claim_id.to_string())]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let identity = monitor.launch_identity(42);
+        assert!(identity.active);
+        assert_eq!(identity.claim_id.as_deref(), Some(claim_id));
+        monitor
+    }
+
+    #[test]
+    fn agent_failed_from_launch_rejects_durable_same_window_successor() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let prefs_path = temp.path().join("monitor.json");
+        let window_id = "tab-1::agent-42";
+        let mut volatile = monitor_with_launch("claim-old", window_id);
+        let source = IssueMonitorAgentFailureSource::Bound {
+            issue_number: 42,
+            identity: volatile.launch_identity(42),
+        };
+        let successor_monitor = monitor_with_launch("claim-successor", window_id);
+        assert_ne!(
+            volatile.launch_identity(42),
+            successor_monitor.launch_identity(42)
+        );
+        assert!(!source.matches(&successor_monitor, window_id));
+        let successor = successor_monitor.prefs();
+        crate::save_issue_monitor_prefs(&prefs_path, &successor).expect("seed successor");
+
+        let result = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut volatile,
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+                issue_number: Some(42),
+                window_id: window_id.to_string(),
+                message: "predecessor failed".to_string(),
+                failure: None,
+                source: Some(source),
+            }),
+        );
+
+        assert_eq!(result, IssueMonitorControlCommit::Rejected);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            successor
+        );
+        assert_eq!(
+            volatile.launch_identity(42).claim_id.as_deref(),
+            Some("claim-successor")
+        );
+        assert!(volatile.launch_identity(42).active);
+    }
+
+    #[test]
+    fn agent_failed_from_launch_rejects_unbound_source_that_became_bound_on_disk() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let prefs_path = temp.path().join("monitor.json");
+        let window_id = "tab-1::agent-42";
+        // Ordinary daemon rebase preserves this same-Issue volatile window.
+        // Checking only that projection would miss the canonical new binding.
+        let mut volatile = monitor_with_launch("claim-old", "tab-1::other-window");
+        assert!(volatile.launched_window_issue(window_id).is_none());
+        let successor = monitor_with_launch("claim-successor", window_id).prefs();
+        crate::save_issue_monitor_prefs(&prefs_path, &successor).expect("seed binding");
+
+        let result = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut volatile,
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+                issue_number: None,
+                window_id: window_id.to_string(),
+                message: "unbound predecessor failed".to_string(),
+                failure: None,
+                source: Some(IssueMonitorAgentFailureSource::Unbound),
+            }),
+        );
+
+        assert_eq!(result, IssueMonitorControlCommit::Rejected);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            successor
+        );
+    }
+
+    #[test]
+    fn agent_failed_from_launch_typed_receipt_replay_keeps_consumed_source_committed() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let prefs_path = temp.path().join("monitor.json");
+        let window_id = "tab-1::agent-42";
+        let mut monitor = monitor_with_launch("claim-old", window_id);
+        let mut stale_volatile = monitor.clone();
+        let source = IssueMonitorAgentFailureSource::Bound {
+            issue_number: 42,
+            identity: monitor.launch_identity(42),
+        };
+        let accepted = AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+            issue_number: Some(42),
+            window_id: window_id.to_string(),
+            message: "active writer".to_string(),
+            failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict {
+                holder_window_id: None,
+            }),
+            source: Some(source),
+        });
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed source");
+
+        let first = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            accepted.clone(),
+        );
+        assert!(matches!(first, IssueMonitorControlCommit::Committed { .. }));
+        assert!(
+            !monitor.launch_identity(42).active,
+            "the first failure consumes its source"
+        );
+        let committed = monitor.prefs();
+        let replay = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut stale_volatile,
+            accepted,
+        );
+        assert_eq!(
+            replay, first,
+            "a durable receipt remains committed after consuming its source"
+        );
+        assert_eq!(stale_volatile.prefs(), committed);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            committed
+        );
+    }
+
+    #[test]
+    fn agent_failed_from_launch_decoder_requires_captured_source() {
+        let notification = serde_json::json!({
+            "window_id": "tab-1::agent-42",
+            "message": "predecessor failed",
+            "source": {
+                "state": "bound",
+                "issue_number": 42,
+                "identity": {
+                    "active": true,
+                    "claim_id": "claim-old",
+                    "delivery_id": "delivery-old",
+                    "window_id": "tab-1::agent-42"
+                }
+            },
+            "failure": {
+                "kind": "resume_writer_conflict",
+                "holder_window_id": "tab-1::holder"
+            }
+        });
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "agent_failed_from_launch": notification.clone() }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload)
+            .expect("a captured launch source must decode as an AgentFailed control");
+        assert!(matches!(
+            control,
+            IssueMonitorControl::AgentFailed {
+                issue_number: Some(42),
+                window_id,
+                message,
+                failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict {
+                    holder_window_id: Some(holder),
+                }),
+                ..
+            } if window_id == "tab-1::agent-42"
+                && message == "predecessor failed"
+                && holder == "tab-1::holder"
+        ));
+
+        let mut missing_source = notification;
+        missing_source
+            .as_object_mut()
+            .expect("notification object")
+            .remove("source");
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "agent_failed_from_launch": missing_source }),
+            std::process::id() + 1,
+        );
+        assert!(decode_issue_monitor_control(payload).is_none());
+    }
 }
 
 // The server fixtures below run fake `gh` shell scripts and raw Unix
@@ -9910,6 +10210,7 @@ exit 0
             window_id: "tab-1::agent-old".to_string(),
             message: "stale directory prompt".to_string(),
             failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+            source: None,
         };
         let launch_failure = IssueMonitorControl::LaunchFailed {
             issue_number: 42,
@@ -9954,6 +10255,7 @@ exit 0
                         window_id: "tab-1::agent-match".to_string(),
                         message: "active writer".to_string(),
                         failure: failure.clone(),
+                        source: None,
                     },
                 )
             },
@@ -10023,6 +10325,7 @@ exit 0
                         window_id: "tab-1::agent-stale".to_string(),
                         message: "active writer".to_string(),
                         failure: failure.clone(),
+                        source: None,
                     },
                 )
             },
@@ -10104,6 +10407,7 @@ exit 0
                 window_id: "tab-1::agent-replay".to_string(),
                 message: "active writer".to_string(),
                 failure,
+                source: None,
             },
         };
         assert!(matches!(
@@ -10458,6 +10762,7 @@ exit 0
                     resets_at: Some(resets_at.to_string()),
                     evidence: None,
                 }),
+                source: None,
             },
             "2026-08-22T03:00:00Z",
         ));
@@ -21416,6 +21721,7 @@ exit 1
                         window_id: "tab-1::agent-max".to_string(),
                         message: "active writer".to_string(),
                         failure: typed_failure.clone(),
+                        source: None,
                     },
                 )
             },

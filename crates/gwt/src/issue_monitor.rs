@@ -2860,7 +2860,7 @@ pub struct IssueMonitorTerminalWindowFacts {
 /// answer. A PM that only learns `claim_mismatch` cannot tell a stale request
 /// apart from a race it lost, and the durable snapshot it would have to read
 /// instead is the one thing a short-lived `gwtd` process does not have.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct IssueMonitorLaunchIdentity {
     /// Whether the issue still holds an active slot.
     pub active: bool,

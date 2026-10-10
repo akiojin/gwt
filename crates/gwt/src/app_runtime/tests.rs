@@ -1424,6 +1424,7 @@ fn sample_runtime_with_events(
         // Issue #3878: own the fallback commit budget instead of inheriting
         // the GUI-thread one; tests that assert that budget set it explicitly.
         issue_monitor_fallback_commit_timeout: super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        runtime_hook_agent_failures_in_flight: HashMap::new(),
         // Issue #3676 AC-2: tests default to fail-open so ambient developer /
         // CI credential state never decides a launch; auth-preflight tests
         // install a real or explicit probe themselves.
@@ -1517,6 +1518,18 @@ fn sample_runtime_with_events(
 /// release path itself is generated from one shared list, so these stand in for
 /// every entry on it.
 fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
+    let address = runtime.window_lookup[window_id].clone();
+    let project_root = runtime
+        .tab(&address.tab_id)
+        .expect("seeded window tab")
+        .project_root
+        .clone();
+    let identity = runtime
+        .runtime_hook_agent_failure_identity(&project_root, window_id)
+        .expect("seeded failure identity");
+    runtime
+        .runtime_hook_agent_failures_in_flight
+        .insert(window_id.to_string(), identity);
     runtime
         .launch_error_terminal_details
         .insert(window_id.to_string(), "x".repeat(64 * 1024));
@@ -9137,3 +9150,51 @@ mod work_projection_tests;
 mod workspace_resume_tests;
 #[cfg(test)]
 mod workspace_watcher_tests;
+
+fn drain_runtime_hook_agent_failure(
+    runtime: &mut AppRuntime,
+    queued_tasks: &BlockingTestTaskQueue,
+    recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    drain_queued_blocking_tasks(queued_tasks);
+    let mut outbound = Vec::new();
+    loop {
+        let completion = {
+            let mut events = recorded_events.lock().expect("recorded events");
+            events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::RuntimeHookAgentFailurePrepared(_)
+                            | UserEvent::IssueMonitorDaemonStatus { .. }
+                            | UserEvent::IssueMonitorDaemonInbox { .. }
+                    )
+                })
+                .map(|index| events.remove(index))
+        };
+        let Some(completion) = completion else {
+            break;
+        };
+        match runtime.accept_project_completion(completion) {
+            Some(UserEvent::RuntimeHookAgentFailurePrepared(prepared)) => {
+                outbound.extend(runtime.handle_runtime_hook_agent_failure_prepared(*prepared));
+            }
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root,
+                status,
+            }) => {
+                outbound.extend(runtime.issue_monitor_daemon_status_events(&project_root, status));
+            }
+            Some(UserEvent::IssueMonitorDaemonInbox {
+                project_root,
+                items,
+            }) => {
+                outbound.extend(runtime.issue_monitor_daemon_inbox_events(&project_root, items));
+            }
+            None => {}
+            _ => unreachable!("matched RuntimeHook monitor completion"),
+        }
+    }
+    outbound
+}

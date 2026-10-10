@@ -449,9 +449,9 @@ fn late_runtime_hook_stop_preserves_same_session_successor_generation() {
     assert!(runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.runtimes.contains_key(&window_id));
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
-    // A Stop legitimately queues one blocking task now: Issue #3777 AC-3 moves
-    // the Active Work projection rebuild off the Tao loop, so reaching a
-    // terminal state schedules that background refresh. Counting queued tasks
+    // A Stop legitimately queues blocking work: Issue #3777 AC-3 moves the
+    // Active Work projection rebuild off the Tao loop, and Issue #4411 moves
+    // heartbeat publication off it too. Counting queued tasks
     // therefore no longer distinguishes "scheduled a projection rebuild" from
     // "scheduled a window teardown". Run whatever was queued and re-assert the
     // window instead: a destructive finalizer would tear it down here, so this

@@ -5816,6 +5816,17 @@ fn snapshot_verification_caller_authority(
     worktree: &Path,
     session_id: &str,
 ) -> io::Result<VerificationCallerAuthority> {
+    snapshot_verification_caller_authority_with_session_loader(worktree, session_id, || {
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+        gwt_agent::Session::load(&session_path)
+    })
+}
+
+fn snapshot_verification_caller_authority_with_session_loader(
+    worktree: &Path,
+    session_id: &str,
+    load_session: impl FnOnce() -> io::Result<gwt_agent::Session>,
+) -> io::Result<VerificationCallerAuthority> {
     let Some(execution) =
         execution_state::load(worktree).map_err(|_| verification_caller_authority_error())?
     else {
@@ -5856,9 +5867,7 @@ fn snapshot_verification_caller_authority(
     }
     gwt_agent::validate_session_id_path_component(session_id)
         .map_err(|_| verification_caller_authority_error())?;
-    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
-    let session = gwt_agent::Session::load(&session_path)
-        .map_err(|_| verification_caller_authority_error())?;
+    let session = load_session().map_err(|_| verification_caller_authority_error())?;
     let session_binding = session
         .execution_binding
         .clone()
@@ -6059,6 +6068,31 @@ pub(crate) fn snapshot_current_generation_caller_binding(
     worktree: &Path,
     session_id: Option<&str>,
 ) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    snapshot_current_generation_caller_binding_with_session_loader(worktree, session_id, |id| {
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{id}.toml"));
+        gwt_agent::Session::load(&session_path)
+    })
+}
+
+/// Read-only projection diagnosis uses its already parsed Session snapshot.
+/// An absent snapshot remains absent; operation callers retain the disk loader.
+pub(crate) fn snapshot_current_generation_caller_binding_for_projection(
+    worktree: &Path,
+    session_id: Option<&str>,
+    session: Option<&gwt_agent::Session>,
+) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    snapshot_current_generation_caller_binding_with_session_loader(worktree, session_id, |_| {
+        session
+            .cloned()
+            .ok_or_else(verification_caller_authority_error)
+    })
+}
+
+fn snapshot_current_generation_caller_binding_with_session_loader(
+    worktree: &Path,
+    session_id: Option<&str>,
+    load_session: impl FnOnce(&str) -> io::Result<gwt_agent::Session>,
+) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
     let (_, current_binding) =
         current_execution_context(worktree).map_err(|_| verification_caller_authority_error())?;
     if current_binding.is_none() {
@@ -6068,7 +6102,10 @@ pub(crate) fn snapshot_current_generation_caller_binding(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(verification_caller_authority_error)?;
-    let authority = snapshot_verification_caller_authority(worktree, session_id)?;
+    let authority =
+        snapshot_verification_caller_authority_with_session_loader(worktree, session_id, || {
+            load_session(session_id)
+        })?;
     if authority.execution_binding != current_binding {
         return Err(verification_caller_authority_error());
     }
