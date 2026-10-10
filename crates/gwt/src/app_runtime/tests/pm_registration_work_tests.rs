@@ -2339,6 +2339,35 @@ fn persisted_pm_resume_config_reinjects_the_pm_bootstrap_prompt() {
         "restoring a PM session that already recorded the prompt must not duplicate it: {:?}",
         rebuilt.args
     );
+
+    // Issue #3812: auto-start/restore preserves Pause without issuing an
+    // autonomous bootstrap; the same conversation can still accept user input.
+    gwt::pm_registry::set_pm_paused(&repo, true).expect("pause");
+    let restored = super::super::launch_config_from_persisted_session(&recorded);
+    let fresh = AppRuntime::pm_launch_config(
+        &pm_worktree,
+        &gwt::pm_registry::PmLaunchProfile::default_profile(),
+    );
+    for config in [restored, fresh] {
+        assert!(
+            !config.args.iter().any(|arg| arg == "$gwt-pm"),
+            "paused PM must stay conversational"
+        );
+    }
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .unwrap()
+            .settings
+            .paused,
+        "restoring must not clear Pause"
+    );
+    gwt::pm_registry::set_pm_paused(&repo, false).expect("resume");
+    assert!(
+        super::super::launch_config_from_persisted_session(&recorded)
+            .args
+            .iter()
+            .any(|arg| arg == "$gwt-pm")
+    );
 }
 
 /// Issue #3965 AC-4: the bootstrap prompt is a PM-role property. Restoring any

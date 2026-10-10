@@ -355,16 +355,25 @@ fn handle_at(
     if stop_hook_active && !state.pending_own_block {
         return HookOutput::Silent;
     }
-    // Every Silent below ends the loop's own chain, so the marker is cleared
-    // (persisted only when it changes) before returning.
-    let end_own_chain = |state: &mut PmLoopState| {
-        if state.pending_own_block {
-            state.pending_own_block = false;
-            let _ = pm_registry::save_pm_loop_state(&state_path, state);
+    let pm_prefs_path = project_state.join("pm.json");
+    // End only this activation's own chain. Pause or a newer wake owns the
+    // durable state and must not be overwritten by the old Stop snapshot.
+    let end_own_chain = |observed: &PmLoopState| {
+        if !observed.pending_own_block {
+            return;
         }
+        let _ = pm_registry::with_active_pm_loop(&pm_prefs_path, || {
+            let Ok(mut current) = pm_registry::load_pm_loop_state(&state_path) else {
+                return;
+            };
+            if current.last_wake_id == observed.last_wake_id && current.pending_own_block {
+                current.pending_own_block = false;
+                let _ = pm_registry::save_pm_loop_state(&state_path, &current);
+            }
+        });
     };
     if !monitor_enabled {
-        end_own_chain(&mut state);
+        end_own_chain(&state);
         return HookOutput::Silent;
     }
     // Issue #3607: the resident loop belongs to the *registered* PM. This gate
@@ -377,7 +386,18 @@ fn handle_at(
     // A caller with no ambient identity is left alone: the loop cannot be
     // attributed to anyone, and retiring a healthy PM over a missing
     // environment variable would be worse than the duplicate this prevents.
-    let pm_prefs_path = project_state.join("pm.json");
+    let pm_prefs = match pm_registry::load_pm_prefs(&pm_prefs_path) {
+        Ok(prefs) => prefs,
+        Err(error) => {
+            tracing::warn!(%error, "resident PM continuation parked: PM prefs unreadable");
+            return HookOutput::Silent;
+        }
+    };
+    // Pause only releases the autonomous Stop chain. The registered Session
+    // remains available for direct user prompts, which keep this setting.
+    if pm_prefs.settings.paused {
+        return HookOutput::Silent;
+    }
     if let Some(caller_session) = current_session
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -388,15 +408,13 @@ fn handle_at(
                 worktree = %worktree.display(),
                 "resident PM loop released: this Session is no longer the registered PM"
             );
-            end_own_chain(&mut state);
+            end_own_chain(&state);
             return HookOutput::Silent;
         }
     }
-    let interval_secs = pm_registry::load_pm_prefs(&pm_prefs_path)
-        .map(|prefs| prefs.settings.loop_interval_secs_clamped())
-        .unwrap_or(pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS);
+    let interval_secs = pm_prefs.settings.loop_interval_secs_clamped();
     if !has_unconsumed_observations && state.consecutive_continuations >= PM_LOOP_MAX_CONSECUTIVE {
-        end_own_chain(&mut state);
+        end_own_chain(&state);
         return HookOutput::Silent;
     }
     if let Some(last) = state.last_continued_at.as_deref() {
@@ -405,7 +423,7 @@ fn handle_at(
             chrono::DateTime::parse_from_rfc3339(last),
         ) {
             if (now_t - last_t).num_seconds() < i64::try_from(interval_secs).unwrap_or(i64::MAX) {
-                end_own_chain(&mut state);
+                end_own_chain(&state);
                 return HookOutput::Silent;
             }
         }
@@ -417,19 +435,10 @@ fn handle_at(
         Ok(context) => context,
         Err(error) => {
             tracing::warn!(%error, "resident PM continuation parked after refresh failure");
-            end_own_chain(&mut state);
+            end_own_chain(&state);
             return HookOutput::Silent;
         }
     };
-    // FR-110: only truly empty cycles spend the park budget; held cycles keep
-    // the count as-is so the brake resumes once the observations are consumed.
-    if !has_unconsumed_observations {
-        state.consecutive_continuations = state.consecutive_continuations.saturating_add(1);
-    }
-    state.last_continued_at = Some(now.to_string());
-    state.pending_own_block = true;
-    state.last_snapshot_fingerprint = snapshot_fingerprint;
-    let _ = pm_registry::save_pm_loop_state(&state_path, &state);
     let refresh_context = refresh_context
         .map(|context| format!(" Worktree status: {context}."))
         .unwrap_or_default();
@@ -441,7 +450,7 @@ fn handle_at(
     } else {
         ""
     };
-    HookOutput::stop_block(format!(
+    let output = HookOutput::stop_block(format!(
         "Resident PM loop: run one cycle before stopping. {execution_clause} \
          If a background task is unavailable or the subscribe fails (e.g. no daemon endpoint), \
          skip it and continue the same cycle in degraded polling mode instead of treating it as a \
@@ -493,7 +502,40 @@ fn handle_at(
         steering_clause = pm_registry::PM_STEERING_CLAUSE,
         execution_clause = pm_registry::PM_GWTD_EXECUTION_CLAUSE,
         clause = pm_registry::PM_CYCLE_REPORTING_CLAUSE,
-    ))
+    ));
+    // Refresh can outlive a Pause toggle. Recheck under Pause's prefs lock
+    // when committing the continuation, without holding that lock over Git I/O.
+    match pm_registry::with_active_pm_loop(&pm_prefs_path, || {
+        let current = match pm_registry::load_pm_loop_state(&state_path) {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::warn!(%error, "resident PM continuation parked: loop state unreadable");
+                return HookOutput::Silent;
+            }
+        };
+        if current.last_wake_id != state.last_wake_id {
+            return HookOutput::Silent;
+        }
+        state = current;
+        // FR-110: only truly empty cycles spend the park budget; held cycles
+        // keep the count until the observations are consumed.
+        if !has_unconsumed_observations {
+            state.consecutive_continuations = state.consecutive_continuations.saturating_add(1);
+        }
+        state.last_continued_at = Some(now.to_string());
+        state.pending_own_block = true;
+        state.last_snapshot_fingerprint = snapshot_fingerprint;
+        let _ = pm_registry::save_pm_loop_state(&state_path, &state);
+        output
+    }) {
+        Ok(Some(output)) => output,
+        result => {
+            if let Err(error) = result {
+                tracing::warn!(%error, "resident PM continuation parked: PM prefs unavailable");
+            }
+            HookOutput::Silent
+        }
+    }
 }
 
 /// SPEC #4093 FR-008 (Issue #3879): what a PM cycle can act on, reduced to a
@@ -897,6 +939,140 @@ mod tests {
             matches!(output, HookOutput::Silent),
             "only the registered PM drives the loop, got {output:?}"
         );
+    }
+
+    #[test]
+    fn paused_pm_stops_its_own_chain_and_preserves_registration() {
+        let (_env_lock, home, repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+        assert!(matches!(
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
+            HookOutput::StopBlock { .. }
+        ));
+        let state_path = pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).unwrap();
+        let before = pm_registry::load_pm_loop_state(&state_path).expect("initial loop state");
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let mut prefs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).expect("PM prefs")).unwrap();
+        prefs["settings"]["paused"] = serde_json::json!(true);
+        std::fs::write(&prefs_path, serde_json::to_vec(&prefs).unwrap()).expect("pause PM");
+
+        assert_eq!(
+            handle_at(
+                &worktree,
+                "2026-08-08T00:02:00Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
+            HookOutput::Silent,
+            "pause must end the PM's autonomous continuation chain"
+        );
+        assert!(pm_registry::session_is_registered_pm(
+            &prefs_path,
+            FIXTURE_PM_SESSION
+        ));
+        let state = pm_registry::load_pm_loop_state(&state_path).expect("loop state");
+        assert_eq!(state, before, "a paused Stop must preserve the loop state");
+    }
+
+    #[test]
+    fn paused_pm_accepts_user_prompts_without_resuming_the_loop() {
+        let (_env_lock, home, repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let mut prefs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).expect("PM prefs")).unwrap();
+        prefs["settings"]["paused"] = serde_json::json!(true);
+        std::fs::write(&prefs_path, serde_json::to_vec(&prefs).unwrap()).expect("pause PM");
+
+        handle_user_prompt_submit(&worktree).expect("direct user prompts must still be accepted");
+
+        let state_path = pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).unwrap();
+        let state = pm_registry::load_pm_loop_state(&state_path).expect("loop state");
+        assert!(state.last_user_prompt_at.is_some());
+        let prefs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).expect("PM prefs")).unwrap();
+        assert_eq!(prefs["settings"]["paused"], true);
+        assert_eq!(
+            handle_at(
+                &worktree,
+                "2026-08-08T00:02:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
+            HookOutput::Silent,
+            "a direct user prompt must not resume autonomous PM cycles"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pause_during_refresh_prevents_the_next_autonomous_cycle() {
+        // The active case models Pause → Resume → a fresh wake during refresh.
+        for paused in [false, true] {
+            let (_env_lock, home, repo, worktree) = pm_fixture();
+            let _guard = set_fixture_gwt_home(&home);
+            run_git(
+                &home.path().join("origin.git"),
+                &["symbolic-ref", "HEAD", "refs/heads/develop"],
+            );
+            let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+            let state_path = pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).unwrap();
+            pm_registry::save_pm_loop_state(
+                &state_path,
+                &PmLoopState {
+                    pending_own_block: true,
+                    last_wake_id: Some("old-cycle".to_string()),
+                    ..PmLoopState::default()
+                },
+            )
+            .expect("old cycle");
+            let fresh = PmLoopState {
+                last_wake_id: Some("fresh-wake".to_string()),
+                ..PmLoopState::default()
+            };
+            let mut changed_prefs = pm_registry::load_pm_prefs(&prefs_path).expect("PM prefs");
+            changed_prefs.settings.paused = paused;
+            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+            let change_on_fetch = format!(
+                "printf '%s' {} > {}; printf '%s' {} > {}; git-upload-pack",
+                quote(&serde_json::to_string(&changed_prefs).unwrap()),
+                quote(prefs_path.to_str().expect("prefs path")),
+                quote(&serde_json::to_string(&fresh).unwrap()),
+                quote(state_path.to_str().expect("loop state path")),
+            );
+            run_git(
+                &repo,
+                &["config", "remote.origin.uploadpack", &change_on_fetch],
+            );
+
+            let output = handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION),
+            );
+
+            assert_eq!(
+                pm_registry::load_pm_prefs(&prefs_path)
+                    .expect("PM prefs after refresh")
+                    .settings
+                    .paused,
+                paused,
+                "the refresh must observe the concurrent toggle"
+            );
+            assert_eq!(output, HookOutput::Silent);
+            let state = pm_registry::load_pm_loop_state(&state_path).expect("loop state");
+            assert_eq!(
+                state, fresh,
+                "the old Stop must preserve the new activation"
+            );
+        }
     }
 
     /// Without a caller identity the gate cannot attribute the loop to anyone,

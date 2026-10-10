@@ -10998,6 +10998,7 @@ impl AppRuntime {
             FrontendEvent::SetPmAutoStart { enabled } => {
                 self.set_pm_auto_start_events(context, enabled)
             }
+            FrontendEvent::SetPmPaused { paused } => self.set_pm_paused_events(context, paused),
             FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
                 self.set_pm_loop_interval_events(context, loop_interval_secs)
             }

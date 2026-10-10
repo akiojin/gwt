@@ -621,6 +621,10 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 担うため、多重起動の防止機構はそのまま維持されます。
 
 - プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
+- PM 設定の **Pause / Resume** で自律ループを一時停止・再開できます。停止状態は
+  再起動後も維持され、PM との会話、Issue Monitor、稼働中の agent は継続します。
+  Resume は最新の状態を再確認します。JSON operations `pm.pause` / `pm.resume`
+  でも操作でき、`pm.status` は登録状態と別に `paused` を返します。
 - PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
   クラッシュループを防ぐバックオフが働きます。
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
