@@ -1339,6 +1339,11 @@ fn app_runtime_issue_monitor_cache_only_control_bounds_origin_probe() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Issue #4045: this test bounds the origin probe, so pin the independent
+    // prefs commit budget instead of depending on CI fsync completing in 250 ms.
+    let _prefs_budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -2097,7 +2102,9 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     };
     let at = |secs: i64| since + chrono::Duration::seconds(secs);
 
-    assert!(runtime.update_drain_tick_events_at(at(15)).is_empty());
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(15))
+        .is_empty());
     let early_log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
     assert!(
         early_log.lines().any(|line| {
@@ -2110,7 +2117,9 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         }),
         "waiting must be observable before the warning cadence: {early_log}"
     );
-    assert!(runtime.update_drain_tick_events_at(at(30)).is_empty());
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(30))
+        .is_empty());
     assert_eq!(drained_events(&user_events), 0, "a Running pane blocks");
     assert_eq!(
         runtime
@@ -2123,8 +2132,10 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
-    assert!(runtime.update_drain_tick_events_at(at(45)).is_empty());
-    let scheduled = runtime.update_drain_tick_events_at(at(60));
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(45))
+        .is_empty());
+    let scheduled = runtime.update_drain_tick_events_and_drain_at(at(60));
     assert!(
         scheduled.iter().any(|event| matches!(
             &event.event,
@@ -2141,7 +2152,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         0,
         "nothing applies inside the grace"
     );
-    let applying = runtime.update_drain_tick_events_at(at(120));
+    let applying = runtime.update_drain_tick_events_and_drain_at(at(120));
     assert!(
         applying.iter().any(|event| matches!(
             &event.event,
@@ -2295,9 +2306,11 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
         .collect();
     let (mut runtime, user_events) = sample_runtime_with_events(temp.path(), tabs, Some("tab-0"));
     let at = |secs| since + chrono::Duration::seconds(secs);
-    assert!(runtime.update_drain_tick_events_at(at(15)).is_empty());
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(15))
+        .is_empty());
     runtime.active_tab_id = Some("tab-1".into());
-    let scheduled = runtime.update_drain_tick_events_at(at(30));
+    let scheduled = runtime.update_drain_tick_events_and_drain_at(at(30));
     assert_eq!(
         scheduled
             .iter()
@@ -2323,7 +2336,7 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
         gwt::update_drain::UpdateAutoApplyPlanner::default(),
         "both project planners must retain the quiescence streak",
     );
-    runtime.update_drain_tick_events_at(at(90));
+    runtime.update_drain_tick_events_and_drain_at(at(90));
     assert_eq!(
         user_events
             .lock()
@@ -2402,9 +2415,13 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
 
     // Blocked by the Running pane: quiet ticks, nothing sent, until the
     // AC-9 notice cadence (1800 s) is reached — then the blockers are named.
-    assert!(runtime.update_drain_tick_events_at(at(15)).is_empty());
-    assert!(runtime.update_drain_tick_events_at(at(30)).is_empty());
-    let notice = runtime.update_drain_tick_events_at(at(1800));
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(15))
+        .is_empty());
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(30))
+        .is_empty());
+    let notice = runtime.update_drain_tick_events_and_drain_at(at(1800));
     let toasts = update_resume_toasts(&notice);
     assert_eq!(toasts.len(), 1, "long-drain notice: {toasts:?}");
     assert_eq!(toasts[0].0, "warn");
@@ -2427,7 +2444,9 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
         serde_json::from_str(entry["blockers"].as_str().expect("serialized blockers"))
             .expect("blocker JSON");
     assert_eq!(blockers[0]["window_id"], "tab-1::agent-1");
-    assert!(runtime.update_drain_tick_events_at(at(1801)).is_empty());
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(1801))
+        .is_empty());
     assert_eq!(
         fs::read_to_string(&log_path).expect("update log"),
         log,
@@ -2445,8 +2464,10 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
-    assert!(runtime.update_drain_tick_events_at(at(1815)).is_empty());
-    let scheduled = runtime.update_drain_tick_events_at(at(1830));
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(1815))
+        .is_empty());
+    let scheduled = runtime.update_drain_tick_events_and_drain_at(at(1830));
     assert!(
         scheduled.iter().any(|event| matches!(
             &event.event,
@@ -2468,9 +2489,11 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
         0,
         "nothing applies inside the grace"
     );
-    assert!(runtime.update_drain_tick_events_at(at(1845)).is_empty());
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(1845))
+        .is_empty());
     assert_eq!(drained_events(&user_events), 0);
-    let applying = runtime.update_drain_tick_events_at(at(1890));
+    let applying = runtime.update_drain_tick_events_and_drain_at(at(1890));
     assert!(
         applying.iter().any(|event| matches!(
             &event.event,
@@ -2532,8 +2555,8 @@ fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() 
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let at = |secs: i64| since + chrono::Duration::seconds(secs);
-    runtime.update_drain_tick_events_at(at(15));
-    let scheduled = runtime.update_drain_tick_events_at(at(30));
+    runtime.update_drain_tick_events_and_drain_at(at(15));
+    let scheduled = runtime.update_drain_tick_events_and_drain_at(at(30));
     assert!(scheduled.iter().any(|event| matches!(
         &event.event,
         BackendEvent::UpdateAutoApply {
@@ -2566,7 +2589,9 @@ fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() 
     assert_eq!(toasts.len(), 1, "the cancellation is recorded: {toasts:?}");
     assert!(toasts[0].1.contains("cancel"), "{}", toasts[0].1);
     for secs in [45, 60, 120, 600] {
-        assert!(runtime.update_drain_tick_events_at(at(secs)).is_empty());
+        assert!(runtime
+            .update_drain_tick_events_and_drain_at(at(secs))
+            .is_empty());
     }
     assert!(
         user_events
@@ -3538,6 +3563,10 @@ fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
 fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
+    // Rebase assertions depend on a successful commit, not CI fsync latency.
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
     let prefs_path = temp.path().join("issue-monitor.json");
     let stale_record = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Implementing, 1);
     let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
@@ -5028,4 +5057,83 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         1,
         "Issue Monitor auto launch must pass the generated prompt to the agent exactly once: {payload:?}"
     );
+}
+#[test]
+fn terminal_convergence_tick_defers_durable_update_reads_and_coalesces_scans() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().join("repo"),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let now = chrono::Utc::now();
+
+    assert!(runtime.update_drain_tick_events_at(now).is_empty());
+    assert!(runtime.update_drain_tick_events_at(now).is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "durable update observations must run on one queued worker, not the GUI dispatch"
+    );
+    assert!(runtime.window_lookup.contains_key("tab-1::agent-1"));
+}
+
+#[test]
+fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
+    use crate::app_runtime::UpdateDrainObservation;
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().join("repo"),
+        WindowPreset::Agent,
+        WindowProcessStatus::Idle,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.project_context("tab-1").unwrap();
+    let now = chrono::Utc::now();
+    let observe = || UpdateDrainObservation {
+        context: context.clone(),
+        drain: Some((
+            gwt::IssueMonitorPrefs::default(),
+            gwt::IssueMonitorUpdateDrain {
+                version: "9.99.0".into(),
+                since: now.to_rfc3339(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            },
+        )),
+        snapshot: gwt::update_drain::UpdateQuiescenceSnapshot {
+            panes: Vec::new(),
+            pending_acquire_claims: Vec::new(),
+            active_executions: Vec::new(),
+            held_verification_leases: Vec::new(),
+        },
+    };
+    assert!(runtime
+        .update_drain_observed_events(now, vec![observe()])
+        .is_empty());
+    runtime
+        .window_hook_states
+        .insert("tab-1::agent-1".into(), WindowProcessStatus::Running);
+    let outbound =
+        runtime.update_drain_observed_events(now + chrono::Duration::seconds(15), vec![observe()]);
+    assert!(!outbound
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::UpdateAutoApply { .. })));
+    assert!(!events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. })));
+    drain_queued_blocking_tasks(&tasks);
 }

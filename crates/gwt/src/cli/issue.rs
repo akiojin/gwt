@@ -5589,6 +5589,7 @@ mod tests {
             completion_reason: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            claim_diagnostics: Default::default(),
             blocked_by_claim_id: None,
             exclusion_reason: None,
             launched_window_id: launched_window_id.map(str::to_string),
@@ -8855,6 +8856,7 @@ mod tests {
                 completion_reason: None,
                 blocked_by_owner: None,
                 claim_expires_at: None,
+                claim_diagnostics: Default::default(),
                 blocked_by_claim_id: None,
                 exclusion_reason: None,
                 launched_window_id: None,
@@ -8999,6 +9001,7 @@ mod tests {
                     completion_reason: None,
                     blocked_by_owner: None,
                     claim_expires_at: None,
+                    claim_diagnostics: Default::default(),
                     blocked_by_claim_id: None,
                     exclusion_reason: None,
                     launched_window_id: None,
@@ -9290,6 +9293,16 @@ mod tests {
             status["active_launches"].as_array().unwrap().len()
         );
         assert_eq!(gui_status["max_active_agents"], status["max_active"]);
+        let expected_unclaimed_claim = serde_json::json!({
+            "state": "unclaimed",
+            "claim_id": null,
+            "owner": null,
+            "expires_at": null,
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "last_failure_at": null,
+            "last_failure": null,
+        });
         // Issue #5140 AC-3: the legacy launching row reports its stalled
         // deadline too. Check the live-time diagnostic before comparing the
         // remaining stable projection.
@@ -9384,6 +9397,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 1,
@@ -9394,6 +9408,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 9,
@@ -9403,6 +9418,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                 ],
                 "inbox_coverage": {
@@ -11780,6 +11796,7 @@ mod tests {
                 completion_reason: None,
                 blocked_by_owner: Some("akiojin:77083".to_string()),
                 claim_expires_at: Some("2026-09-07T02:37:00Z".to_string()),
+                claim_diagnostics: Default::default(),
                 blocked_by_claim_id: Some("gwt-auto-improve:df524fc5".to_string()),
                 exclusion_reason: Some("blocked by claim".to_string()),
                 launched_window_id: None,

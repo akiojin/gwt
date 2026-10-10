@@ -2023,7 +2023,7 @@ pub(super) fn ensure_workspace_for_agent(
                         )))
                     })?;
             let result =
-                crate::cli::execution_state::with_current_active_session_execution_identity_lease(
+                crate::cli::execution_state::with_current_projection_session_execution_identity_lease(
                     &gwt_core::paths::gwt_sessions_dir(),
                     &exact_session,
                     || {
@@ -2080,7 +2080,7 @@ pub(super) fn ensure_workspace_for_agent(
                         )))
                     })?;
             let result =
-                crate::cli::execution_state::with_current_active_session_execution_identity_lease(
+                crate::cli::execution_state::with_current_projection_session_execution_identity_lease(
                     &gwt_core::paths::gwt_sessions_dir(),
                     &exact_session,
                     || {
@@ -8954,7 +8954,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_terminal_binding_guides_status_recovery_without_build_abort_loop() {
+    fn workspace_ensure_blocked_binding_restores_identity_before_verified_reopen() {
         let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
@@ -8989,9 +8989,6 @@ pub(crate) mod tests {
             .expect("settle execution Blocked"),
             crate::cli::execution_state::SettleResult::Settled(_)
         ));
-        let paths = workspace_recovery_state_paths(&project_root, &worktree);
-        let before = workspace_recovery_state_bytes(&paths);
-
         let ensure_input = WorkspaceEnsureInput {
             agent_session: session_id.to_string(),
             title_summary: "Recover terminal binding".to_string(),
@@ -9001,19 +8998,13 @@ pub(crate) mod tests {
             topic: None,
             boundary: None,
         };
-        let error = ensure_workspace_for_agent(&worktree, ensure_input.clone())
-            .expect_err("terminal execution binding must refuse workspace.ensure");
-        let message = error.to_string();
-
-        assert!(message.contains("terminal"), "{message}");
-        assert!(message.contains("execution.status"), "{message}");
-        assert!(message.contains("recovery_probes"), "{message}");
-        assert!(message.contains("verify.plan"), "{message}");
-        assert!(
-            !message.contains("`build.abort`"),
-            "workspace.ensure must not unconditionally restart the build.abort loop: {message}"
+        ensure_workspace_for_agent(&worktree, ensure_input.clone())
+            .expect("current Blocked binding must permit identity recovery");
+        assert_eq!(
+            crate::cli::execution_state::diagnose(&worktree, Some(session_id)).ecr_status,
+            crate::cli::execution_state::ExecutionDiagnosisState::Blocked,
+            "identity recovery must not reopen execution"
         );
-        assert_eq!(workspace_recovery_state_bytes(&paths), before);
 
         let _session =
             crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
@@ -9130,7 +9121,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_noncurrent_execution_binding_before_workspace_write() {
+    fn workspace_ensure_rejects_completed_execution_binding_before_workspace_write() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -9147,10 +9138,7 @@ pub(crate) mod tests {
             crate::cli::execution_state::settle(
                 &worktree,
                 "session-stale-binding",
-                crate::cli::execution_state::ExecutionSettlement::Blocked {
-                    reason: "terminal test binding".to_string(),
-                    missing_verification: Some("test evidence".to_string()),
-                },
+                crate::cli::execution_state::ExecutionSettlement::Completed,
             )
             .expect("terminalize bound execution"),
             crate::cli::execution_state::SettleResult::Settled(_)
@@ -10267,7 +10255,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_noncurrent_docker_binding_without_mutation() {
+    fn workspace_ensure_rejects_completed_docker_binding_without_mutation() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -10291,10 +10279,7 @@ pub(crate) mod tests {
             crate::cli::execution_state::settle(
                 &repo,
                 "session-docker-stale-binding",
-                crate::cli::execution_state::ExecutionSettlement::Blocked {
-                    reason: "terminal Docker binding".to_string(),
-                    missing_verification: Some("test evidence".to_string()),
-                },
+                crate::cli::execution_state::ExecutionSettlement::Completed,
             )
             .expect("terminalize Docker execution"),
             crate::cli::execution_state::SettleResult::Settled(_)

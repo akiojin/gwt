@@ -38,8 +38,8 @@ fn issue_3777_runtime_hook_returns_before_full_projection_build() {
     );
     assert_eq!(
         tasks.lock().expect("queued tasks").len(),
-        1,
-        "one background projection worker must be queued",
+        2,
+        "one heartbeat worker and one background projection worker must be queued",
     );
 }
 

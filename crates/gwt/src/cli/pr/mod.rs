@@ -3830,7 +3830,9 @@ mod tests {
         .unwrap();
 
         let command = "git definitely-not-a-subcommand".to_string();
-        let second_command = "git still-not-a-subcommand".to_string();
+        // #5094: commands after a blocking raw FAIL are skipped, so only the
+        // final command can fail for a Board decision to be consumable.
+        let passing_command = "git --version".to_string();
         crate::cli::verification_record::save_plan(
             tmp.path(),
             &crate::cli::verification_record::VerificationPlanRecord::from(
@@ -3839,7 +3841,7 @@ mod tests {
                     session_id: "sess-pr".to_string(),
                     owner_number: Some(42),
                     execution_binding: None,
-                    commands: vec![command.clone(), second_command.clone()],
+                    commands: vec![passing_command.clone(), command.clone()],
                     derived: false,
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
@@ -3854,7 +3856,7 @@ mod tests {
         let (record, _) = crate::cli::verification_record::run_verification(
             tmp.path(),
             "sess-pr",
-            &[command.clone(), second_command.clone()],
+            &[passing_command, command.clone()],
         )
         .unwrap();
         assert!(!record.all_passed);
@@ -3875,28 +3877,20 @@ mod tests {
         let decision_id = decision.id.clone();
         gwt_core::coordination::post_entry(tmp.path(), decision).unwrap();
 
-        let second_decision = gwt_core::coordination::BoardEntry::new(
-            gwt_core::coordination::AuthorKind::Agent,
-            "PM",
-            gwt_core::coordination::BoardEntryKind::Decision,
-            format!(
-                "Verification record: {}\nFailing command: {second_command}\nReason: accepted for PR handoff",
-                record.record_id
-            ),
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-        );
-        let second_decision_id = second_decision.id.clone();
-        gwt_core::coordination::post_entry(tmp.path(), second_decision).unwrap();
-
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
         seed_readable_pr_body(&mut env);
         env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
             "User Verification Result: n/a (autonomous)\n".to_string();
         env.seed_created_pr(seeded_pr());
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+            .expect("run unadjudicated pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_ready_call_log.is_empty());
+        assert!(env.pr_comments.is_empty());
+
         let mut verify_out = String::new();
         let code = crate::cli::verification_record::run(
             &mut env,
@@ -3934,26 +3928,6 @@ mod tests {
 
         let mut out = String::new();
         let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
-            .expect("run partially adjudicated pr ready");
-        assert_eq!(code, 2, "{out}");
-        assert!(env.pr_ready_call_log.is_empty());
-        assert!(env.pr_comments.is_empty());
-
-        let mut verify_out = String::new();
-        let code = crate::cli::verification_record::run(
-            &mut env,
-            crate::cli::verification_record::VerifyCommand::Adjudicate {
-                record_id: record.record_id.clone(),
-                command: second_command.clone(),
-                board_entry_id: second_decision_id.clone(),
-            },
-            &mut verify_out,
-        )
-        .expect("attach second Board decision");
-        assert_eq!(code, 0, "{verify_out}");
-
-        let mut out = String::new();
-        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
             .expect("run adjudicated pr ready");
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_ready_call_log, vec![7]);
@@ -3961,8 +3935,6 @@ mod tests {
         assert_eq!(env.pr_comments[0].0, 7);
         assert!(env.pr_comments[0].1.contains(&decision_id));
         assert!(env.pr_comments[0].1.contains(&command));
-        assert!(env.pr_comments[0].1.contains(&second_decision_id));
-        assert!(env.pr_comments[0].1.contains(&second_command));
 
         let worktree = tmp.path().to_path_buf();
         let mut replacement = crate::cli::verification_record::load(&worktree)

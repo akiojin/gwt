@@ -1940,6 +1940,173 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
     );
 }
 
+/// Issue #4411 AC-3: shared loader invocations stay constant as the rail
+/// grows from one Work to 592, in both complete projection build paths.
+#[test]
+fn active_work_projection_592_rows_keep_shared_loader_counts_constant() {
+    use crate::app_runtime::workspace_views;
+    use gwt_core::error_ledger::{record, ErrorKind, ErrorRecord, ErrorTarget};
+    use gwt_core::workspace_projection::{
+        WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItemsProjection,
+        WorkspaceExecutionContainerRef,
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("isolated shared projection sources");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _hook_bin = ScopedEnvVar::unset("GWT_HOOK_BIN");
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let first_worktree = repo.join("work/0");
+    fs::create_dir_all(&first_worktree).expect("create first worktree");
+
+    let session_id = "session-shared-projection";
+    let mut session = gwt_agent::Session::new(
+        &first_worktree,
+        "work/shared-read-0",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = session_id.to_string();
+    session.display_name = "Shared ledger session".to_string();
+    session.project_state_root = Some(repo.clone());
+    session.agent_session_id = Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string());
+    append_workspace_resume_journal(
+        &repo,
+        "journal-shared-projection",
+        repo.clone(),
+        "shared projection",
+        "Retained journal content",
+    );
+    let failure = record(ErrorRecord::new(
+        ErrorKind::HookFailure,
+        "Retained hook failure",
+        ErrorTarget {
+            project_root: Some(first_worktree.display().to_string()),
+            ..Default::default()
+        },
+    ))
+    .expect("save shared error ledger evidence");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save one Session ledger entry");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    for rows in [1, 592] {
+        for index in projection.work_items.len()..rows {
+            let worktree = repo.join("work").join(index.to_string());
+            for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+                let path = worktree.join(artifact);
+                fs::create_dir_all(path.parent().expect("hook artifact parent"))
+                    .expect("create Work hook surface");
+                fs::write(path, "{}").expect("save Work hook surface");
+            }
+            let mut event = WorkEvent::new(
+                WorkEventKind::Update,
+                format!("work-shared-read-{index}"),
+                now,
+            );
+            event.title = Some(format!("Shared source work {index}"));
+            event.summary = Some(format!("Retained summary {index}"));
+            if index == 0 {
+                event.agent_session_id = Some(session_id.to_string());
+                event.agent_id = Some("codex".to_string());
+            }
+            event.execution_container = Some(WorkspaceExecutionContainerRef {
+                branch: Some(format!("work/shared-read-{index}")),
+                worktree_path: Some(worktree),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            });
+            assert_eq!(
+                projection.apply_event(event),
+                WorkEventApplyOutcome::Applied
+            );
+        }
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            &projection,
+        )
+        .expect("save complete Work fixture");
+
+        for refresh in [false, true] {
+            let before = workspace_views::active_work_projection_shared_loads();
+            let builds = workspace_views::full_active_work_projection_builds();
+            let view = if refresh {
+                let job = runtime
+                    .active_work_projection_refresh_job(&repo)
+                    .expect("refresh job");
+                workspace_views::run_active_work_projection_refresh(job)
+                    .view
+                    .expect("refresh build")
+            } else {
+                runtime
+                    .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+                    .expect("prepare build")
+            };
+            let after = workspace_views::active_work_projection_shared_loads();
+            let loads: [usize; 3] = std::array::from_fn(|index| after[index] - before[index]);
+            assert_eq!(loads, [1, 1, 1], "rows={rows}, refresh={refresh}");
+            assert_eq!(
+                workspace_views::full_active_work_projection_builds() - builds,
+                1
+            );
+            assert_eq!(view.active_works.len(), rows);
+            for work in &view.active_works {
+                let index = work
+                    .branch
+                    .as_deref()
+                    .expect("rendered Work branch")
+                    .strip_prefix("work/shared-read-")
+                    .expect("fixture Work branch")
+                    .parse::<usize>()
+                    .expect("fixture Work index");
+                assert_eq!(work.title, format!("Shared source work {index}"));
+                assert_eq!(work.summary, Some(format!("Retained summary {index}")));
+                let health = work
+                    .managed_hook_health
+                    .as_ref()
+                    .expect("rendered hook health");
+                assert_eq!(
+                    health
+                        .issues
+                        .iter()
+                        .any(|issue| issue.contains(&failure.id)),
+                    index == 0,
+                    "shared failure remains scoped to its Work"
+                );
+            }
+            let first = view
+                .active_works
+                .iter()
+                .find(|work| work.branch.as_deref() == Some("work/shared-read-0"))
+                .expect("first Work");
+            let agent = first
+                .agents
+                .iter()
+                .find(|agent| agent.session_id == session_id)
+                .expect("rendered ledger Session");
+            assert_eq!(agent.display_name, "Shared ledger session");
+            assert!(agent.sessions.iter().any(|conversation| {
+                conversation.agent_session_id == "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            }));
+            assert_eq!(view.journal_entries.len(), 1);
+            assert_eq!(view.journal_entries[0].id, "journal-shared-projection");
+            assert_eq!(
+                view.journal_entries[0].summary.as_deref(),
+                Some("Retained journal content")
+            );
+        }
+    }
+}
+
 #[test]
 fn active_work_projection_source_has_no_live_process_scan_helper() {
     let source = include_str!("../workspace_views.rs");
@@ -2410,4 +2577,108 @@ fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent
         row.cleanup_candidate, None,
         "live Agent branch must be absent from row-level cleanup candidates"
     );
+}
+
+#[test]
+fn active_work_projection_592_container_rows_reuse_the_prepared_session_binding() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("isolated Session ledger");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let project = temp.path().join("project");
+    let session_id = "session-projection-snapshot";
+    let binding = materialize_active_agent_pane_binding(&project, session_id);
+    assert_eq!(binding.capability_generation, 1);
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let mut cache = gwt_agent::session_ledger::SessionLedgerCache::new();
+    let sessions = cache.load(&sessions_dir);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(cache.parse_count, 1);
+    assert_eq!(cache.load(&sessions_dir).len(), 1);
+    assert_eq!(cache.parse_count, 1, "unchanged ledger is parsed once");
+    let session_index = super::super::workspace_views::work_session_index(&sessions);
+    assert_eq!(
+        session_index[session_id]
+            .execution_binding
+            .as_ref()
+            .expect("captured Session binding")
+            .capability_generation,
+        1
+    );
+    let rotated = gwt_agent::rotate_session_execution_capability(&sessions_dir, session_id)
+        .expect("rotate the disk Session after preparing the projection index");
+    assert_eq!(rotated.capability_generation, 2);
+
+    let now = Utc::now();
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Update,
+        "work-session-snapshot",
+        now,
+    );
+    event.agent_session_id = Some(session_id.to_string());
+    event.agent_id = Some("codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/pane-lease".to_string()),
+            worktree_path: Some(project.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    let mut projection = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+    assert_eq!(
+        projection.apply_event(event),
+        gwt_core::workspace_projection::WorkEventApplyOutcome::Applied
+    );
+    let template = projection.work_items.pop().expect("populated Work fixture");
+    let views = (0..592)
+        .map(|index| {
+            let mut item = template.clone();
+            item.id = format!("work-session-snapshot-{index}");
+            super::super::workspace_views::workspace_work_item_view_from_item(
+                &item,
+                &session_index,
+                scanned_without_branches(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(views.len(), 592);
+    let mut grouped = super::super::active_work_projection_from_saved_with_journal(
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project),
+        Vec::new(),
+        vec![views[0].clone()],
+        None,
+    );
+    super::super::assign_and_merge_workspace_groups(
+        &mut grouped.active_works,
+        &project,
+        &session_index,
+    );
+    let child_diagnosis = grouped.active_works[0].works[0]
+        .execution_diagnosis
+        .as_ref()
+        .expect("child Work execution diagnosis");
+    assert_eq!(child_diagnosis.binding_state, "bound");
+    assert_eq!(
+        child_diagnosis.capability_generation,
+        Some(1),
+        "child Work diagnosis must reuse the same prepared Session"
+    );
+    for view in views {
+        assert_eq!(view.agents[0].session_id, session_id);
+        let diagnosis = view.execution_containers[0]
+            .diagnosis
+            .as_ref()
+            .expect("rendered execution diagnosis");
+        assert_eq!(diagnosis.binding_state, "bound");
+        assert_eq!(
+            diagnosis.capability_generation,
+            Some(1),
+            "every container must use the prepared Session, not reread disk epoch 2"
+        );
+    }
+    assert_eq!(cache.parse_count, 1);
 }
