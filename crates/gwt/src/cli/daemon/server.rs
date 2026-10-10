@@ -21378,8 +21378,14 @@ exit 1
 
     #[tokio::test]
     async fn typed_exact_source_at_authority_epoch_max_is_terminal_and_atomically_unreceipted() {
+        // Keep the seeded prefs root and the worker's environment stable until
+        // shutdown has joined it, even while sibling fixtures change HOME.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
         let typed_failure = Some(crate::IssueMonitorFailure::ResumeWriterConflict {
             holder_window_id: Some("tab-1::holder".to_string()),
         });
