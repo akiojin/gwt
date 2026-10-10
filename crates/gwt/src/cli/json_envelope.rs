@@ -403,6 +403,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?))
         }
         "workspace.update" => workspace_update(params)?,
+        "workspace.receipt" => CliCommand::Workspace(WorkspaceCommand::Receipt {
+            operation_id: required_string(params, "operation_id")?,
+        }),
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
