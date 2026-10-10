@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_runtime::UpdateDrainObservation;
 
 #[test]
 fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
@@ -1462,6 +1463,118 @@ fn daemon_monitor_frames_update_each_owner_project() {
 }
 
 #[test]
+fn issue_5062_daemon_drain_status_includes_other_project_window() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let active_root = temp.path().join("gwt");
+    let other_root = temp.path().join("llmlb");
+    fs::create_dir_all(&active_root).expect("active project");
+    fs::create_dir_all(&other_root).expect("other project");
+    init_repo_with_initial_commit(&active_root);
+    init_repo_with_initial_commit(&other_root);
+    let mut other = sample_project_tab_with_window_at(
+        "other",
+        "agent-14",
+        other_root,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    other.title = "llmlb".to_string();
+    assert!(other
+        .workspace
+        .set_purpose_title("agent-14", Some("SPEC #821 T012c".to_string())));
+    let active = sample_project_tab("active", "gwt", active_root.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![active, other], Some("active"));
+    runtime.rebuild_window_lookup();
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.set_update_drain(
+        gwt::IssueMonitorUpdateDrainReason::Auto,
+        "9.110.0",
+        "2026-10-10T08:21:17Z",
+    );
+
+    let events =
+        runtime.issue_monitor_daemon_status_events(&active_root, Box::new(monitor.status_view()));
+    let BackendEvent::IssueMonitorStatus { status } = &events[0].event else {
+        panic!("status event")
+    };
+    let blockers = &status.update_drain.as_ref().expect("drain").blocking;
+    assert_eq!(blockers, &runtime.update_drain_blockers(&monitor));
+    assert_eq!(
+        blockers.len(),
+        1,
+        "another project's lone blocker must not become zero"
+    );
+    let gwt::update_drain::UpdateBlocker::ActivePane { label, .. } = &blockers[0] else {
+        panic!("pane blocker")
+    };
+    assert!(
+        label.contains("llmlb") && label.contains("SPEC #821 T012c"),
+        "{label}"
+    );
+}
+
+#[test]
+fn issue_5062_deferred_update_releases_drain_on_the_next_observation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let payload = temp.path().join("staged-gwt");
+    fs::write(&payload, b"staged payload").unwrap();
+    let pending_dir = gwt_core::update::pending_update_dir();
+    fs::create_dir_all(&pending_dir).unwrap();
+    fs::write(
+        pending_dir.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": "9.110.0", "asset_url": "https://example.invalid/update",
+            "payload": { "PortableBinary": { "path": payload } },
+            "downloaded_at": "2026-10-10T00:00:00Z", "auto_apply_deferred": true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let tab = sample_project_tab("active", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.set_update_drain(
+        gwt::IssueMonitorUpdateDrainReason::Auto,
+        "9.110.0",
+        "2026-10-10T00:00:00Z",
+    );
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .unwrap();
+    let context = runtime.project_context("active").unwrap();
+    let snapshot = runtime.update_quiescence_snapshot(&monitor);
+    let events = runtime.update_drain_observed_events(
+        chrono::Utc::now(),
+        vec![UpdateDrainObservation {
+            context,
+            drain: Some((monitor.prefs(), monitor.update_drain().unwrap().clone())),
+            snapshot,
+        }],
+    );
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)).unwrap();
+    assert!(
+        prefs.update_drain.is_none(),
+        "defer must release admission on the next evaluation"
+    );
+    assert!(payload.exists() && gwt_core::update::load_pending_update_manifest().is_some());
+    assert!(!events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateAutoApply {
+            phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn list_issue_monitor_uses_the_daemon_gui_projection_without_local_scan() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
@@ -1838,7 +1951,7 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
         vec![
             gwt::update_drain::UpdateBlocker::ActivePane {
                 window_id: "tab-1::agent-1".to_string(),
-                label: "Sample".to_string(),
+                label: "Repo: Sample".to_string(),
                 state: WindowProcessStatus::Starting,
             },
             gwt::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 },
@@ -1926,6 +2039,70 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     );
 }
 
+/// Issue #5062 AC-2: once a staged update raised the drain, every drain tick
+/// past `next_evaluation_at` re-evaluates it and moves the persisted
+/// observation forward, even when the blockers are unchanged.
+#[test]
+fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.rebuild_window_lookup();
+    runtime.update_staged_events_with("9.110.0", None);
+    let raised = gwt_core::update::load_update_wait_observation(&repo).expect("observation");
+    assert_eq!(raised.reason, "waiting for drain evaluation");
+    let next = chrono::DateTime::parse_from_rfc3339(
+        raised
+            .next_evaluation_at
+            .as_deref()
+            .expect("next evaluation"),
+    )
+    .expect("next evaluation time")
+    .with_timezone(&chrono::Utc);
+
+    for tick in [next, next + chrono::Duration::seconds(15)] {
+        runtime.update_drain_tick_events_at(tick);
+        drain_queued_blocking_tasks(&tasks);
+        let queued = std::mem::take(&mut *user_events.lock().unwrap());
+        for event in queued {
+            if let UserEvent::UpdateDrainObserved { now, observations } = event {
+                runtime.update_drain_observed_events(now, observations);
+            }
+        }
+        drain_queued_blocking_tasks(&tasks);
+        let wait = gwt_core::update::load_update_wait_observation(&repo).expect("observation");
+        assert_eq!(wait.stage, "pending_waiting");
+        assert_eq!(wait.observed_at, tick.to_rfc3339(), "{wait:?}");
+        assert!(wait.reason.contains("tab-1::agent-1"), "{wait:?}");
+        assert_eq!(
+            wait.next_evaluation_at,
+            Some((tick + chrono::Duration::seconds(15)).to_rfc3339())
+        );
+    }
+}
+
 /// Issue #4376 AC-1 / AC-2 / AC-7: a manual Update click (attended monitor,
 /// no auto-apply) whose download lands while an agent pane is Running joins
 /// the `Auto` drain instead of offering an immediate restart: the hold is
@@ -1986,7 +2163,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
         drain.blocking,
         vec![gwt::update_drain::UpdateBlocker::ActivePane {
             window_id: "tab-1::agent-1".to_string(),
-            label: "Sample".to_string(),
+            label: "Repo: Sample".to_string(),
             state: WindowProcessStatus::Starting,
         }],
         "the status names what the click is waiting for"

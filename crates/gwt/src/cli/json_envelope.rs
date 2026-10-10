@@ -968,6 +968,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ensure_release_pr: optional_bool(params, "ensure_release_pr")?.unwrap_or(false),
             })
         }
+        "release.update.defer" => {
+            reject_unknown_params(params, &["version"], "release.update.defer")?;
+            CliCommand::Release(super::release::ReleaseCommand::UpdateDefer {
+                version: required_string(params, "version")?,
+            })
+        }
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -6089,6 +6095,113 @@ mod tests {
         ));
         assert!(matches!(
             err("release.status", json!({"ensure": true})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    /// Issue #5062 AC-3: deferring a staged release is a host-wide, durable,
+    /// version-scoped mutation that preserves its manual-apply payload.
+    #[test]
+    fn release_update_defer_envelope_preserves_payload_and_rejects_other_versions() {
+        use gwt_core::update::{self, PendingUpdateManifest, PreparedPayload};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let payload_path = home.path().join("prepared-binary");
+        std::fs::write(&payload_path, "prepared payload").unwrap();
+        let manifest = PendingUpdateManifest {
+            version: "9.200.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: PreparedPayload::PortableBinary {
+                path: payload_path.clone(),
+            },
+            downloaded_at: "2026-10-01T00:00:00Z".into(),
+            auto_apply_deferred: false,
+        };
+        // Seed the format used before the explicit defer control existed.
+        let mut legacy = serde_json::to_value(&manifest).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_apply_deferred");
+        std::fs::create_dir_all(update::pending_update_dir()).unwrap();
+        std::fs::write(
+            update::pending_update_manifest_path(),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let mut env = TestEnv::new(home.path().to_path_buf());
+        let call = |env: &mut TestEnv, version: &str| {
+            let parsed = parse(&envelope(
+                "release.update.defer",
+                json!({"version":version}),
+            ))
+            .expect("the explicit defer operation must be available");
+            super::run_collect_governed(env, parsed.command)
+        };
+        let output = call(&mut env, "9.200.0").unwrap().output;
+        let response: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(response["pending_update_version"], "9.200.0");
+        assert_eq!(response["auto_apply_deferred"], true);
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(update::pending_update_manifest_path()).unwrap())
+                .unwrap();
+        assert_eq!(saved["auto_apply_deferred"], true);
+        assert_eq!(saved["version"], "9.200.0");
+        assert_eq!(saved["asset_url"], manifest.asset_url);
+        assert_eq!(saved["downloaded_at"], manifest.downloaded_at);
+        assert_eq!(
+            saved["payload"],
+            serde_json::to_value(&manifest.payload).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&payload_path).unwrap(),
+            "prepared payload"
+        );
+
+        call(&mut env, "9.200.0").expect("same-version retry is idempotent");
+        let before = std::fs::read(update::pending_update_manifest_path()).unwrap();
+        update::persist_update_resume_marker(&update::UpdateResumeMarker {
+            from_version: "9.199.0".into(),
+            to_version: "9.200.0".into(),
+            started_at: "2026-10-01T00:10:00Z".into(),
+            restart_args: Vec::new(),
+            projects: Vec::new(),
+            attempt: 1,
+        })
+        .unwrap();
+        assert!(
+            call(&mut env, "9.200.0").is_err(),
+            "a committed apply cannot be deferred"
+        );
+        assert_eq!(
+            std::fs::read(update::pending_update_manifest_path()).unwrap(),
+            before
+        );
+        update::clear_update_resume_marker().unwrap();
+        assert!(call(&mut env, "9.201.0").is_err());
+        assert_eq!(
+            std::fs::read(update::pending_update_manifest_path()).unwrap(),
+            before
+        );
+        std::fs::remove_file(payload_path).unwrap();
+        assert!(call(&mut env, "9.200.0").is_err());
+        assert_eq!(
+            std::fs::read(update::pending_update_manifest_path()).unwrap(),
+            before
+        );
+        update::clear_pending_update_manifest().unwrap();
+        assert!(call(&mut env, "9.200.0").is_err());
+
+        assert!(matches!(
+            err("release.update.defer", json!({})),
+            CliParseError::MissingFlag("version")
+        ));
+        assert!(matches!(
+            err(
+                "release.update.defer",
+                json!({"version":"9.200.0", "force":true})
+            ),
             CliParseError::InvalidJson(_)
         ));
     }

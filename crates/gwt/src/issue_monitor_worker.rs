@@ -584,11 +584,25 @@ pub fn issue_monitor_read_only_daemon_payloads(
     monitor: &IssueMonitorState,
 ) -> Vec<IssueMonitorDaemonPayload> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut status = monitor.status_view_at(&now);
+    if let Some(drain) = status.update_drain.as_mut() {
+        drain.blocking = monitor
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match &effect.payload {
+                crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                    Some(crate::update_drain::UpdateBlocker::PendingAcquireClaim {
+                        issue_number: *issue_number,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+    }
     vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
-            payload: serde_json::to_value(monitor.status_view_at(&now))
-                .expect("issue monitor status serializes"),
+            payload: serde_json::to_value(status).expect("issue monitor status serializes"),
         },
         IssueMonitorDaemonPayload {
             event: "inbox".to_string(),

@@ -1451,6 +1451,7 @@ fn sample_runtime_with_events(
         terminal_close_candidates: HashMap::new(),
         terminal_convergence_scan_in_flight: false,
         update_drain_scan_in_flight: false,
+        update_drain_host_blockers: None,
         terminal_close_grace: Duration::from_secs(60),
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),

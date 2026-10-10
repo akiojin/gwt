@@ -830,9 +830,25 @@ fn admit_prepared_update(
     app: &mut AppRuntime,
     manifest: &gwt_core::update::PendingUpdateManifest,
     admission: &mut update_front_door::UpdateApplyAdmission,
+    client_id: &str,
 ) -> (bool, Vec<OutboundEvent>) {
     if !admission.begin_commit() {
         return (false, Vec::new());
+    }
+    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID {
+        let release = match gwt_core::update::load_pending_update_manifest() {
+            Some(current) if current.version == manifest.version => current
+                .auto_apply_deferred
+                .then_some(app_runtime::UpdateAutoApplyRelease::Cancelled),
+            _ => Some(app_runtime::UpdateAutoApplyRelease::PayloadMissing),
+        };
+        if let Some(release) = release {
+            admission.failed();
+            return (
+                false,
+                app.release_update_auto_apply_events(&manifest.version, release),
+            );
+        }
     }
     if app.agent_maintenance.busy {
         admission.failed();
@@ -3179,6 +3195,7 @@ mod tests {
             agent_blackout: None,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
             provider_quota_holds: Vec::new(),
@@ -4622,6 +4639,7 @@ mod tests {
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             update_drain_scan_in_flight: false,
+            update_drain_host_blockers: None,
             terminal_close_grace: std::time::Duration::from_secs(60),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
@@ -5163,6 +5181,7 @@ mod tests {
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: Utc::now().to_rfc3339(),
+            auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
         let mut state = gwt_core::update::UpdateState::Available {
@@ -5202,7 +5221,7 @@ mod tests {
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
         assert!(admission.begin_resolution());
-        assert!(!super::admit_prepared_update(&mut runtime, &manifest, &mut admission).0);
+        assert!(!super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual").0);
         assert!(gwt_core::update::load_pending_update_manifest().is_none());
         assert!(!old_dir.exists());
         assert!(
@@ -5211,18 +5230,68 @@ mod tests {
         );
         let mut current_manifest = manifest.clone();
         current_manifest.version = "9.108.0".into();
-        assert!(super::admit_prepared_update(&mut runtime, &current_manifest, &mut admission).0);
+        assert!(
+            super::admit_prepared_update(&mut runtime, &current_manifest, &mut admission, "manual")
+                .0
+        );
         // Duplicate results after commitment must not reopen admission or
         // delete files which an already-started helper may still be using.
         fs::create_dir_all(&old_dir).unwrap();
         fs::write(old_dir.join("gwt"), "helper-owned payload").unwrap();
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
         let (admitted, events) =
-            super::admit_prepared_update(&mut runtime, &manifest, &mut admission);
+            super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual");
         assert!(!admitted && events.is_empty());
         assert!(gwt_core::update::load_pending_update_manifest().is_some());
         assert!(old_dir.exists());
         assert!(!admission.begin_resolution());
+    }
+
+    #[test]
+    fn issue_5062_deferred_update_blocks_queued_automatic_commit_but_allows_manual() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let payload_path = temp.path().join("prepared-binary");
+        fs::write(&payload_path, "prepared payload").unwrap();
+        let mut saved = serde_json::json!({
+            "version": "99.0.0",
+            "asset_url": "https://example.invalid/update",
+            "payload": {"PortableBinary": {"path": payload_path}},
+            "downloaded_at": "2026-10-01T00:00:00Z",
+            "auto_apply_deferred": false,
+        });
+        let queued_manifest = serde_json::from_value(saved.clone()).unwrap();
+        // An automatic event already in the queue must re-read a defer that
+        // arrived after its manifest snapshot was captured.
+        saved["auto_apply_deferred"] = serde_json::json!(true);
+        fs::create_dir_all(gwt_core::update::pending_update_dir()).unwrap();
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        fs::write(gwt_core::update::pending_update_manifest_path(), &bytes).unwrap();
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
+        assert!(admission.begin_resolution());
+        assert!(
+            !super::admit_prepared_update(
+                &mut runtime,
+                &queued_manifest,
+                &mut admission,
+                crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+            )
+            .0
+        );
+        assert!(!runtime.agent_maintenance.app_update_committing);
+        assert_eq!(
+            fs::read(gwt_core::update::pending_update_manifest_path()).unwrap(),
+            bytes
+        );
+        assert!(
+            admission.begin_resolution(),
+            "manual apply remains retryable"
+        );
+        assert!(
+            super::admit_prepared_update(&mut runtime, &queued_manifest, &mut admission, "manual",)
+                .0
+        );
     }
 
     #[test]
@@ -5244,10 +5313,12 @@ mod tests {
                 path: temp.path().join("prepared"),
             },
             downloaded_at: Utc::now().to_rfc3339(),
+            auto_apply_deferred: false,
         };
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
         assert!(admission.begin_resolution());
-        let (admitted, _) = super::admit_prepared_update(&mut runtime, &manifest, &mut admission);
+        let (admitted, _) =
+            super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual");
         assert!(
             !admitted,
             "self-update must not interrupt the agent installer"
@@ -5272,10 +5343,11 @@ mod tests {
                 path: temp.path().join("prepared"),
             },
             downloaded_at: Utc::now().to_rfc3339(),
+            auto_apply_deferred: false,
         };
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
         assert!(admission.begin_resolution());
-        assert!(super::admit_prepared_update(&mut runtime, &manifest, &mut admission).0);
+        assert!(super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual").0);
         let request = serde_json::from_str(
             r#"{"kind":"maintain_supported_agent","agent_id":"codex","action":"install"}"#,
         )
@@ -11793,6 +11865,7 @@ fn main() -> std::io::Result<()> {
                                 asset_url: prepared.asset_url.clone(),
                                 payload: prepared.payload.clone(),
                                 downloaded_at: chrono::Utc::now().to_rfc3339(),
+                                auto_apply_deferred: false,
                             };
                             if let Err(message) =
                                 gwt_core::update::persist_pending_update_manifest(&manifest)
@@ -11872,6 +11945,13 @@ fn main() -> std::io::Result<()> {
                     &[("version", &version)],
                 );
                 match gwt_core::update::load_pending_update_manifest() {
+                    Some(manifest) if manifest.version == version && manifest.auto_apply_deferred => {
+                        update_apply_admission.failed();
+                        clients.dispatch(app.release_update_auto_apply_events(
+                            &version,
+                            app_runtime::UpdateAutoApplyRelease::Cancelled,
+                        ));
+                    }
                     Some(manifest) if manifest.version == version => {
                         if !record_update_dispatch_result(
                             proxy.send_event(UserEvent::ApplyUpdateGraceful {
@@ -11919,7 +11999,7 @@ fn main() -> std::io::Result<()> {
                 manifest,
                 client_id,
             }) => {
-                let (admitted, events) = admit_prepared_update(app, &manifest, &mut update_apply_admission);
+                let (admitted, events) = admit_prepared_update(app, &manifest, &mut update_apply_admission, &client_id);
                 clients.dispatch(events);
                 if !admitted {
                     return;
@@ -11940,7 +12020,11 @@ fn main() -> std::io::Result<()> {
                     projects: app.update_resume_projects(),
                     attempt: 1,
                 };
-                match update_front_door::stage_graceful_update_apply(manifest, &marker) {
+                match update_front_door::stage_graceful_update_apply(
+                    manifest,
+                    &marker,
+                    client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+                ) {
                     Ok(version) => {
                         gwt_core::update::log_update_event(
                             "graceful_apply_committed",

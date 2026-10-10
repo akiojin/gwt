@@ -5863,6 +5863,24 @@ impl AppRuntime {
         }
     }
 
+    pub(super) fn host_update_drain_launch_hold(&self) -> Result<Option<String>, String> {
+        for context in self.project_contexts() {
+            let prefs = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+            )
+            .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
+            if let Some(drain) = prefs.update_drain {
+                return Ok(Some(format!(
+                    "Host update_drain for v{} in {} holds new agent launches; {}",
+                    drain.version,
+                    context.project_root.display(),
+                    gwt::UPDATE_DRAIN_RELEASE_OPERATION,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     fn spawn_agent_window_with_placement(
         &mut self,
         tab_id: &str,
@@ -5947,6 +5965,14 @@ impl AppRuntime {
                         Some(placement.bounds()),
                     ));
                 }
+            }
+        }
+        // Resident PM launches suppress execution control and remain available
+        // to steer the draining agents. Every implementation/review launch
+        // shares the host gate, even when its own project has no drain.
+        if !config.suppress_execution_control {
+            if let Some(hold) = self.host_update_drain_launch_hold()? {
+                return Err(hold);
             }
         }
         // Resolve every synchronously fallible launch dependency before adding

@@ -753,6 +753,41 @@ fn run_monitor_status<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
+    if let Some(mut drain) = status.update_drain.clone() {
+        let wait = gwt_core::update::load_update_wait_observation(&project_root).filter(|wait| {
+            wait.version == drain.version
+                && matches!((
+                    chrono::DateTime::parse_from_rfc3339(&wait.observed_at),
+                    chrono::DateTime::parse_from_rfc3339(&drain.since),
+                ), (Ok(observed), Ok(since)) if observed >= since)
+        });
+        if let Some(blockers) = wait.as_ref().and_then(|wait| {
+            serde_json::from_str::<Vec<crate::update_drain::UpdateBlocker>>(&wait.reason).ok()
+        }) {
+            drain.blocking = blockers;
+        }
+        let notify_at = chrono::DateTime::parse_from_rfc3339(&drain.since)
+            .ok()
+            .filter(|_| prefs.autonomous_tuning.update_drain_notify_after_secs > 0)
+            .zip(chrono::Duration::try_seconds(
+                i64::try_from(prefs.autonomous_tuning.update_drain_notify_after_secs)
+                    .unwrap_or(i64::MAX),
+            ))
+            .and_then(|(since, delay)| since.checked_add_signed(delay))
+            .map(|at| at.to_rfc3339());
+        output["update_drain_evaluation"] = serde_json::json!({
+            "observed_at": wait.as_ref().map(|wait| &wait.observed_at),
+            "next_evaluation_at": wait.as_ref().and_then(|wait| wait.next_evaluation_at.as_ref()),
+            "notify_at": notify_at,
+            "waiting_window_count": drain.blocking.iter().filter(|blocker| matches!(
+                blocker, crate::update_drain::UpdateBlocker::ActivePane { .. }
+            )).count(),
+            "release": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
+            } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
+        });
+        output["update_drain"] = serde_json::to_value(drain).expect("update drain serializes");
+    }
     let mut effective_queue = prefs
         .terminal_queues
         .get(&crate::process::current_hostname())
@@ -1704,6 +1739,18 @@ fn run_monitor_launch_now<E: CliEnv>(
     // ends, so say so — with the resume time — instead of answering as if the
     // instruction will take effect now.
     let github_backoff = github_backoff_windows(chrono::Utc::now());
+    // Issue #5062 AC-4: an update drain holds every new launch, this one
+    // included, so name it and its release instead of answering as if the
+    // Issue will start.
+    let admission_hold = prefs.update_drain.as_ref().map(|drain| {
+        serde_json::json!({
+            "reason": "update_drain",
+            "drain_reason": drain.reason,
+            "version": drain.version,
+            "since": drain.since,
+            "release": crate::UPDATE_DRAIN_RELEASE_OPERATION,
+        })
+    });
 
     out.push_str(
         &serde_json::json!({
@@ -1715,11 +1762,16 @@ fn run_monitor_launch_now<E: CliEnv>(
             "scan_delivery": delivery.scan_delivery,
             "scan_error": delivery.scan_error,
             "github_backoff": github_backoff,
+            "admission_hold": admission_hold,
         })
         .to_string(),
     );
     out.push('\n');
-    Ok(if delivery.scan_requested { 0 } else { 1 })
+    Ok(if delivery.scan_requested && admission_hold.is_none() {
+        0
+    } else {
+        1
+    })
 }
 
 /// The GitHub refusal windows still open on this machine (per resource), as
@@ -7770,6 +7822,114 @@ mod tests {
         assert!(prefs.enabled);
     }
 
+    /// Issue #5062 AC-4: an update drain refuses every new launch, so
+    /// `launch_now` names it (with its release operation) instead of answering
+    /// as if the Issue will start.
+    #[test]
+    fn issue_5062_monitor_status_exposes_host_drain_evaluation_and_deadline() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            "2026-10-10T00:00:00Z",
+        );
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &monitor.prefs(),
+        )
+        .unwrap();
+        let blockers =
+            serde_json::to_string(&vec![crate::update_drain::UpdateBlocker::ActivePane {
+                window_id: "other::agent-14".into(),
+                label: "llmlb: SPEC #821 T012c".into(),
+                state: crate::persistence::WindowState::Running,
+            }])
+            .unwrap();
+        gwt_core::update::log_update_event(
+            "pending_waiting",
+            &[
+                ("project_root", repo.to_str().unwrap()),
+                ("version", "9.110.0"),
+                ("reason", &blockers),
+                ("observed_at", "2026-10-10T00:01:00Z"),
+                ("next_evaluation_at", "2026-10-10T00:01:15Z"),
+            ],
+        );
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(status["update_drain_evaluation"]["waiting_window_count"], 1);
+        assert_eq!(
+            status["update_drain_evaluation"]["observed_at"],
+            "2026-10-10T00:01:00Z"
+        );
+        assert_eq!(
+            status["update_drain_evaluation"]["next_evaluation_at"],
+            "2026-10-10T00:01:15Z"
+        );
+        assert_eq!(
+            status["update_drain_evaluation"]["notify_at"],
+            "2026-10-10T00:30:00+00:00"
+        );
+        assert!(status["update_drain"]["blocking"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("llmlb"));
+        assert!(status["update_drain_evaluation"]["release"]
+            .as_str()
+            .unwrap()
+            .contains("release.update.defer"));
+    }
+
+    #[test]
+    fn launch_now_reports_the_update_drain_that_holds_admission() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            "2026-10-05T17:00:24Z",
+        );
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 5061,
+            },
+            &mut out,
+        )
+        .expect("launch_now");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 1, "a held launch is not success");
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["admission_hold"]["reason"], "update_drain");
+        assert_eq!(result["admission_hold"]["version"], "9.110.0");
+        assert_eq!(result["admission_hold"]["since"], "2026-10-05T17:00:24Z");
+        assert_eq!(
+            result["admission_hold"]["release"],
+            crate::UPDATE_DRAIN_RELEASE_OPERATION
+        );
+    }
+
     // ---- Issue #4819: `queue.push` must never refuse silently ----
 
     #[test]
@@ -8941,6 +9101,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -9000,6 +9161,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -9145,6 +9307,7 @@ mod tests {
                 has_launch_profile: true,
                 quota_hold: None,
                 update_drain: None,
+                update_drain_release: None,
                 launch_profile_summary: String::new(),
                 launch_profile_candidates: Vec::new(),
                 effective_launch_profile: None,
@@ -9264,6 +9427,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -11940,6 +12104,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,

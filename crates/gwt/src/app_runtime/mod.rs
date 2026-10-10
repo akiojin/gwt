@@ -1860,6 +1860,7 @@ pub struct AppRuntime {
     /// One background terminal-convergence scan at a time.
     pub(crate) terminal_convergence_scan_in_flight: bool,
     pub(crate) update_drain_scan_in_flight: bool,
+    pub(crate) update_drain_host_blockers: Option<Vec<gwt::update_drain::UpdateBlocker>>,
     /// Grace applied to terminal close candidates; refreshed from Agent
     /// settings by every observer scan.
     pub(crate) terminal_close_grace: std::time::Duration,
@@ -4321,6 +4322,7 @@ impl AppRuntime {
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             update_drain_scan_in_flight: false,
+            update_drain_host_blockers: None,
             terminal_close_grace: std::time::Duration::from_secs(
                 gwt_config::agent_config::DEFAULT_TERMINAL_CLOSE_GRACE_SECS,
             ),
@@ -9391,6 +9393,31 @@ impl AppRuntime {
         mut status: Box<gwt::IssueMonitorStatusView>,
     ) -> Vec<OutboundEvent> {
         self.retain_missing_issue_monitor_capacity(project_root, &mut status);
+        if let Some(drain) = status.update_drain.as_mut() {
+            drain.blocking.retain(|blocker| {
+                !matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })
+            });
+            if let Some(host_blockers) = &self.update_drain_host_blockers {
+                drain.blocking.retain(|blocker| {
+                    !matches!(
+                        blocker,
+                        gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
+                            | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
+                    )
+                });
+                drain.blocking.extend(host_blockers.iter().cloned());
+            }
+            let (panes, _) = self.capture_update_quiescence_inputs();
+            let snapshot = gwt::update_drain::UpdateQuiescenceSnapshot {
+                panes,
+                ..Default::default()
+            };
+            let mut blocking = gwt::update_drain::update_quiescence(&snapshot)
+                .err()
+                .unwrap_or_default();
+            blocking.append(&mut drain.blocking);
+            drain.blocking = blocking;
+        }
         self.replace_knowledge_terminal_queue(project_root, &status.terminal_queue);
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
@@ -9647,10 +9674,11 @@ impl AppRuntime {
                         });
                 Some(gwt::update_drain::PaneObservation {
                     window_id: window_id.clone(),
-                    label: window
-                        .purpose_title
-                        .clone()
-                        .unwrap_or_else(|| window.title.clone()),
+                    label: format!(
+                        "{}: {}",
+                        tab.title,
+                        window.purpose_title.as_deref().unwrap_or(&window.title)
+                    ),
                     state: self.window_status(window_id).unwrap_or(window.status),
                     resident_pm,
                 })
@@ -9777,6 +9805,12 @@ impl AppRuntime {
         version: &str,
         refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
     ) -> Vec<OutboundEvent> {
+        if gwt_core::update::load_pending_update_manifest()
+            .is_some_and(|manifest| manifest.version == version && manifest.auto_apply_deferred)
+        {
+            return self
+                .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Cancelled);
+        }
         let mut events = Vec::new();
         let contexts = self.project_contexts();
         if contexts.is_empty() {
@@ -10041,6 +10075,35 @@ impl AppRuntime {
         observations: Vec<UpdateDrainObservation>,
     ) -> Vec<OutboundEvent> {
         self.update_drain_scan_in_flight = false;
+        if let Some(manifest) = gwt_core::update::load_pending_update_manifest()
+            .filter(|manifest| manifest.auto_apply_deferred)
+        {
+            return self.release_update_auto_apply_events(
+                &manifest.version,
+                UpdateAutoApplyRelease::Cancelled,
+            );
+        }
+        if let Some(observation) = observations
+            .iter()
+            .find(|observation| self.project_context_is_current(&observation.context))
+        {
+            // Reuse the same worker observation as automatic apply. Status
+            // callbacks only refresh GUI panes and never scan leases or ECRs.
+            self.update_drain_host_blockers = Some(
+                gwt::update_drain::update_quiescence(&observation.snapshot)
+                    .err()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|blocker| {
+                        matches!(
+                            blocker,
+                            gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
+                                | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
+                        )
+                    })
+                    .collect(),
+            );
+        }
         // A launch can arrive while the durable scan is running. Recheck GUI-owned
         // activity before planning an apply; never trust its older pane snapshot.
         let (panes, _) = self.capture_update_quiescence_inputs();

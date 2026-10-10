@@ -3462,6 +3462,12 @@ impl AppRuntime {
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };
+        match self.host_update_drain_launch_hold() {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => {
+                return self.defer_issue_monitor_review_dispatch_events(&context, &dispatch);
+            }
+        }
         let prompt = build_review_dispatch_prompt(&dispatch);
         tracing::info!(
             issue = dispatch.issue_number,
@@ -3507,10 +3513,35 @@ impl AppRuntime {
                     issue_number: Some(dispatch.issue_number),
                 },
             )],
+            Err(error) if error.contains("update_drain") => {
+                self.defer_issue_monitor_review_dispatch_events(&context, &dispatch)
+            }
             Err(error) => self.issue_monitor_launch_failed_events(
                 Some(project_root),
                 dispatch.issue_number,
                 &error,
+            ),
+        }
+    }
+
+    fn defer_issue_monitor_review_dispatch_events(
+        &self,
+        context: &super::ProjectContext,
+        dispatch: &gwt::AutonomousReviewDispatch,
+    ) -> Vec<OutboundEvent> {
+        match self.publish_project_issue_monitor_control(
+            context,
+            serde_json::json!({
+                "review_dispatch_deferred": dispatch,
+            }),
+        ) {
+            Ok(()) => Vec::new(),
+            Err(error) => self.issue_monitor_control_error_events(
+                Some(&context.project_root),
+                None,
+                error,
+                "review-update-drain",
+                Some(dispatch.issue_number),
             ),
         }
     }
