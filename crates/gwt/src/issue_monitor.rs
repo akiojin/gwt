@@ -19397,8 +19397,10 @@ impl IssueMonitorState {
         if self.window_snapshot.as_ref().is_some_and(|previous| {
             previous.project_tab_id == snapshot.project_tab_id
                 && self.window_snapshot_host == host
-                && rfc3339_elapsed_secs(&previous.observed_at, &snapshot.observed_at)
-                    .is_some_and(|age| age < 0)
+                && chrono::DateTime::parse_from_rfc3339(&previous.observed_at)
+                    .ok()
+                    .zip(chrono::DateTime::parse_from_rfc3339(&snapshot.observed_at).ok())
+                    .is_some_and(|(previous, incoming)| incoming < previous)
         }) {
             return;
         }
@@ -31963,6 +31965,66 @@ mod tests {
             "binding repair does not assert a process exit"
         );
         assert!(monitor.queued_issue_numbers().is_empty());
+    }
+
+    #[test]
+    fn issue_5248_post_close_snapshot_survives_delayed_scan_and_requeue() {
+        let window_id = "tab-1::agent-42";
+        let before_close = "2026-10-10T00:00:00.100Z";
+        let closed_at = "2026-10-10T00:00:00.500Z";
+        let mut monitor = launched_monitor(42, window_id);
+        let running = pane_snapshot(
+            before_close,
+            vec![live_pane_observation(window_id, 42, WindowState::Running)],
+        );
+        monitor.record_window_snapshot(running.clone());
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.stop_only(&target, "operator stop", before_close),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+        assert_eq!(monitor.launched_window_issue(window_id), None);
+
+        // Successful pane.close publishes this complete canvas even when
+        // Stop already revoked the exact WindowClosed target.
+        let closed = pane_snapshot(closed_at, Vec::new());
+        monitor.record_window_snapshot(closed.clone());
+        monitor.record_window_snapshot(running);
+        assert!(
+            monitor
+                .fresh_window_snapshot(closed_at)
+                .unwrap()
+                .windows
+                .is_empty(),
+            "a delayed pre-close scan must not revive the closed pane"
+        );
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "fresh launch", closed_at),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        for now in ["2026-10-10T00:00:01Z", "2026-10-10T00:00:02Z"] {
+            scan_queued_candidates(&mut monitor, &[issue(42)], now);
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::Queued
+            );
+        }
+
+        // The same ordering protects a same-ID successor from a delayed
+        // predecessor close, including when both were captured in one second.
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-10-10T00:00:00.900Z",
+            vec![live_pane_observation(window_id, 43, WindowState::Running)],
+        ));
+        monitor.record_window_snapshot(closed);
+        assert_eq!(
+            monitor
+                .fresh_window_snapshot("2026-10-10T00:00:02Z")
+                .unwrap()
+                .windows[0]
+                .issue_number,
+            Some(43)
+        );
     }
 
     #[test]
