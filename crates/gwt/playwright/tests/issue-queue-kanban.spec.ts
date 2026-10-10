@@ -117,9 +117,17 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   }
   const queued = column(page, "queued").locator(".issue-queue-heading");
   await queued.focus();
+  const backlog = column(page, "backlog").locator(".issue-queue-heading");
+  await backlog.hover();
+  await expect(popup).toHaveText(await backlog.getAttribute("aria-description") as string);
+  const hoverPopup = await popup.boundingBox();
+  await page.mouse.move(hoverPopup!.x + 20, hoverPopup!.y + 10);
+  await expect(popup).toHaveText(await backlog.getAttribute("aria-description") as string);
   await confirm(page, [3, 4, 1]);
   await expect(column(page, "queued").locator(".issue-queue-heading")).toHaveText("Queued · 3");
   await expect(column(page, "queued").locator(".issue-queue-heading")).toBeFocused();
+  await expect(popup).toHaveText(await backlog.getAttribute("aria-description") as string);
+  await page.mouse.move(1590, 1090);
   await expect(popup).toBeVisible();
   await page.keyboard.press("Escape");
   await confirm(page, [3, 4, 1, 2]);

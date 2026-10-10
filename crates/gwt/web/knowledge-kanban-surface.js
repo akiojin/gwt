@@ -692,6 +692,8 @@ export function createKnowledgeKanbanSurface({
         let hovered = null;
         let dragging = false;
         let pointerActive = false;
+        let restoringFocus = false;
+        let popupHovered = false;
         const target = event => event.target?.closest?.("[data-issue-explanation]");
         const hide = () => {
           if (anchor) {
@@ -738,8 +740,8 @@ export function createKnowledgeKanbanSurface({
           if (popup.contains(event.relatedTarget)) return;
           if (focused) show(focused); else hide();
         };
-        const focus = event => { focused = pointerActive ? null : target(event); if (focused) show(focused); };
-        const blur = () => { focused = null; if (hovered) show(hovered); else hide(); };
+        const focus = event => { focused = pointerActive ? null : target(event); if (focused && !restoringFocus) show(focused); };
+        const blur = () => { focused = null; if (restoringFocus || popupHovered) return; if (hovered) show(hovered); else hide(); };
         const escape = event => {
           if (event.key !== "Escape" || popup.hidden) return;
           focused = null;
@@ -748,7 +750,7 @@ export function createKnowledgeKanbanSurface({
           event.preventDefault();
           event.stopPropagation();
         };
-        const leavePopup = () => { if (focused) show(focused); else hide(); };
+        const leavePopup = () => { popupHovered = false; if (focused) show(focused); else hide(); };
         const refresh = () => {
           if (!anchor) return;
           const previous = anchor;
@@ -766,6 +768,7 @@ export function createKnowledgeKanbanSurface({
         const listeners = { mouseover: over, mouseout: out, focusin: focus, focusout: blur,
           pointerdown: pointerDown, dragstart: dragStart, dragend: dragEnd };
         for (const [type, listener] of Object.entries(listeners)) root.addEventListener(type, listener);
+        popup.addEventListener("mouseenter", () => { popupHovered = true; });
         popup.addEventListener("mouseleave", leavePopup);
         document.addEventListener("keydown", escape);
         document.addEventListener("scroll", refresh, true);
@@ -777,7 +780,9 @@ export function createKnowledgeKanbanSurface({
           root,
           get visible() { return !popup.hidden; },
           restoreFocus(node, visible) {
-            node?.focus();
+            // Preserve the explanation being read while rebinding keyboard focus.
+            restoringFocus = true;
+            try { node?.focus(); } finally { restoringFocus = false; }
             // Cache refresh restores focus, not a dismissed explanation.
             if (!visible) { focused = null; hovered = null; hide(); }
           },
