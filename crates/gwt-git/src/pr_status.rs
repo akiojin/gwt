@@ -1344,16 +1344,22 @@ pub struct PrInventoryRead {
     pub hydrated: usize,
     /// PRs skipped as unchanged after a live bulk comparison; zero on cache reads.
     pub skipped_unchanged: usize,
-    /// Issue #4074 FR-005: `work/issue-*` branches with commits and no open PR
+    /// Issue #4074 FR-005 / #5053: delivery branches with commits and no open PR
     /// to land them. Read from local refs, so it stays truthful even when the
     /// PR rows came from cache.
     pub unlanded_branches: Vec<UnlandedBranch>,
 }
 
-/// The base every `work/issue-*` branch is expected to land on.
+/// The base every tracked delivery branch is expected to land on.
 pub const UNLANDED_BRANCH_BASE_REF: &str = "origin/develop";
 
-/// One remote `work/issue-*` branch carrying commits the base does not have
+/// Remote refs included in the unlanded delivery inventory (Issue #5053).
+const UNLANDED_DELIVERY_REFS: &[&str] = &[
+    "refs/remotes/origin/work/",
+    "refs/remotes/origin/pm/resident",
+];
+
+/// One remote delivery branch carrying commits the base does not have
 /// (Issue #4074 FR-005), before the open-PR filter is applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnlandedBranchProbe {
@@ -1525,7 +1531,7 @@ pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<DateTime<
         .collect()
 }
 
-/// Read the remote `work/issue-*` branches that are not merged into `base_ref`
+/// Read tracked remote delivery branches that are not merged into `base_ref`
 /// and count how far each is ahead.
 ///
 /// `git for-each-ref --no-merged` narrows the set in one local command so the
@@ -1534,17 +1540,15 @@ pub fn collect_unlanded_work_branches(
     repo_path: &Path,
     base_ref: &str,
 ) -> std::result::Result<Vec<UnlandedBranchProbe>, String> {
-    let output = gwt_core::process::run_git_logged(
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)%09%(committerdate:iso-strict)",
-            "--no-merged",
-            base_ref,
-            "refs/remotes/origin/work/",
-        ],
-        Some(repo_path),
-    )
-    .map_err(|error| error.to_string())?;
+    let mut args = vec![
+        "for-each-ref",
+        "--format=%(refname:short)%09%(committerdate:iso-strict)",
+        "--no-merged",
+        base_ref,
+    ];
+    args.extend_from_slice(UNLANDED_DELIVERY_REFS);
+    let output = gwt_core::process::run_git_logged(&args, Some(repo_path))
+        .map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
@@ -1552,6 +1556,15 @@ pub fn collect_unlanded_work_branches(
     for (branch, last_commit_at) in
         parse_unlanded_branch_refs(&String::from_utf8_lossy(&output.stdout))
     {
+        // Plain Git ref patterns also include descendants; only entries ending
+        // in '/' declare a prefix in our delivery inventory.
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        if !UNLANDED_DELIVERY_REFS.iter().any(|reference| {
+            remote_ref == *reference
+                || (reference.ends_with('/') && remote_ref.starts_with(reference))
+        }) {
+            continue;
+        }
         let Ok(divergence) =
             crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
         else {
@@ -6053,6 +6066,78 @@ mod tests {
         git(tmp.path(), &["add", "."]);
         git(tmp.path(), &["commit", "-m", "initial"]);
         tmp
+    }
+
+    #[test]
+    fn unlanded_inventory_collects_pm_resident_and_work_branches() {
+        let tmp = init_merge_projection_repo();
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        std::fs::write(tmp.path().join("source.txt"), "feature\n").expect("write feature");
+        git(tmp.path(), &["commit", "-am", "source work"]);
+        for reference in [
+            "refs/remotes/origin/pm/resident",
+            "refs/remotes/origin/work/issue-5053",
+        ] {
+            git(tmp.path(), &["update-ref", reference, "HEAD"]);
+        }
+
+        let probes = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
+            .expect("collect delivery branches");
+        let rows = classify_unlanded_branches(probes, &[]);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].branch, "pm/resident");
+        assert_eq!(rows[0].owner_issue, None);
+        assert_eq!(rows[1].branch, "work/issue-5053");
+        assert_eq!(rows[1].owner_issue, Some(5053));
+        for row in rows {
+            assert_eq!(row.ahead, 1);
+            assert!(row.last_commit_at.is_some());
+            assert!(!row.has_open_pr);
+            assert_eq!(row.has_non_gwt_changes, Some(true));
+        }
+
+        // Git also treats a plain ref pattern as a slash-delimited prefix.
+        git(
+            tmp.path(),
+            &["update-ref", "-d", "refs/remotes/origin/pm/resident"],
+        );
+        git(
+            tmp.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/pm/resident/other",
+                "HEAD",
+            ],
+        );
+        let rows = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
+            .expect("collect exact PM ref and work prefix");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].branch, "work/issue-5053");
+    }
+
+    #[test]
+    fn unlanded_inventory_collects_pm_bookkeeping_only_residue() {
+        let tmp = init_merge_projection_repo();
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        std::fs::write(tmp.path().join(".gwt/state"), "bookkeeping\n").expect("write state");
+        git(tmp.path(), &["commit", "-am", "bookkeeping"]);
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/pm/resident", "HEAD"],
+        );
+
+        let rows = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
+            .expect("collect PM bookkeeping");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].branch, "pm/resident");
+        assert_eq!(rows[0].ahead, 1);
+        assert_eq!(rows[0].has_non_gwt_changes, Some(false));
     }
 
     #[test]

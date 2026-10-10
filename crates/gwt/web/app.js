@@ -1332,6 +1332,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // operations it still shows as running.
         syncRunningBranchCleanups();
         requestVisiblePmReports();
+        requestSupportedAgentRefresh();
       }
 
       function handleSocketMessage(event) {
@@ -5668,6 +5669,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyCustomAgentDeleted,
         applyCustomAgentError,
         applySupportedAgentList,
+        applySupportedAgentMaintenance,
+        requestSupportedAgentRefresh,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -6770,6 +6773,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "supported_agent_list":
             applySupportedAgentList(event);
+            break;
+          case "supported_agent_maintenance":
+            applySupportedAgentMaintenance(event);
             break;
           // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends WebSocket
           // events. `agent_backend_list` is a snapshot reply per

@@ -159,6 +159,17 @@ gwt supports the following built-in agents. Launch Agent lists only installed
 built-in agents that gwt detects; other CLI commands remain available through
 custom agents.
 
+**Settings > Supported Agents** shows the complete catalog, installation status,
+and installed versions. Install missing CLIs there; update actions appear when
+npm metadata confirms a newer version. Agents without supported version metadata
+show that limitation and require manual updates.
+
+Automatic agent updates are off by default. When enabled, gwt checks installed
+npm agents at the next app startup and updates only known newer versions, with
+no live agent panes (including the Project Manager) or pending launches. Manual
+installs and updates also require those agents to be closed. Missing agents are
+never installed automatically.
+
 | Agent | CLI command |
 | --- | --- |
 | Claude Code | `claude` |

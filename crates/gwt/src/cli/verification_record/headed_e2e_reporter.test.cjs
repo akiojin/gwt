@@ -16,7 +16,7 @@ function trace(colorScheme, { headless = false, browserName = "chromium", launch
   ];
 }
 
-async function capture(results, status = "passed", runnerError = false) {
+async function capture(results, status = "passed", runnerError = false, outputDir) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-headed-test-"));
   const report = path.join(temporary, "report.json");
   const previous = process.env.GWT_HEADED_E2E_REPORT;
@@ -24,9 +24,10 @@ async function capture(results, status = "passed", runnerError = false) {
   try {
     const reporter = new Reporter();
     reporter.traceEvents = async result => result.trace;
-    for (const [colorScheme, resultStatus, events = trace(colorScheme), workerIndex = 0] of results) {
+    reporter.onBegin({ projects: [{ outputDir }] });
+    for (const [colorScheme, resultStatus, events = trace(colorScheme), workerIndex = 0, attachments = []] of results) {
       const currentTest = { parent: { project: () => ({ use: { headless: false, browserName: "chromium", colorScheme } }) } };
-      const result = { status: resultStatus, workerIndex, trace: events };
+      const result = { status: resultStatus, workerIndex, trace: events, attachments };
       reporter.onTestEnd(currentTest, result);
     }
     if (runnerError) reporter.onError(new Error("runner failed"));
@@ -43,6 +44,49 @@ test("records actual headed Chromium passes in both themes", async () => {
   assert.deepEqual(await capture([["dark", "passed"], ["light", "passed"]]), {
     chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed",
   });
+});
+
+test("records readable absolute paths for screenshot and trace attachments", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-headed-artifacts-"));
+  const screenshot = path.join(temporary, "screenshot.png");
+  const archive = path.join(temporary, "trace.zip");
+  fs.writeFileSync(screenshot, "screenshot");
+  fs.writeFileSync(archive, "trace");
+  try {
+    const evidence = await capture([["dark", "passed", trace("dark"), 0, [
+      { name: "screenshot", path: path.relative(process.cwd(), screenshot) },
+      { name: "trace", path: archive },
+      { name: "missing", path: path.join(temporary, "missing.png") },
+      { name: "inline", body: Buffer.from("inline") },
+    ]]]);
+    assert.deepEqual(evidence.artifacts, [screenshot, archive]);
+    assert.ok(evidence.artifacts.every(artifact => path.isAbsolute(artifact)));
+    assert.deepEqual(evidence.artifacts.map(artifact => fs.readFileSync(artifact, "utf8")), ["screenshot", "trace"]);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("persists inline PNG attachments beyond reporter cleanup", async () => {
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-headed-output-"));
+  const png = Buffer.from("png attachment");
+  try {
+    const evidence = await capture([["dark", "passed", trace("dark"), 0, [
+      { name: "dark screenshot", contentType: "image/png", body: png },
+      { name: "text", contentType: "text/plain", body: Buffer.from("text") },
+      { name: "another screenshot", contentType: "image/png", body: png },
+    ]]], "passed", false, outputDir);
+    assert.equal(evidence.artifacts.length, 2);
+    assert.notEqual(evidence.artifacts[0], evidence.artifacts[1]);
+    for (const artifact of evidence.artifacts) {
+      assert.ok(path.isAbsolute(artifact));
+      assert.ok(artifact.startsWith(outputDir + path.sep));
+      assert.equal(path.extname(artifact), ".png");
+      assert.deepEqual(fs.readFileSync(artifact), png);
+    }
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
 });
 
 test("all skipped and browser-unused tests do not supply evidence", async () => {

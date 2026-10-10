@@ -566,6 +566,7 @@ struct RuntimeStopThreads {
 
 mod issue_monitor_delivery_ack;
 pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
+pub(crate) mod agent_maintenance;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
@@ -1742,6 +1743,7 @@ pub struct AppRuntime {
     pub(crate) project_log_scopes: HashMap<String, gwt_core::logging::ProjectLogScope>,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
+    pub(crate) agent_maintenance: agent_maintenance::AgentMaintenanceState,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
@@ -4284,6 +4286,7 @@ impl AppRuntime {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
             pending_workspace_resume_contexts: HashMap::new(),
@@ -4380,6 +4383,7 @@ impl AppRuntime {
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
         app.seed_restored_window_details();
+        app.start_agent_auto_update();
         Ok(app)
     }
 
@@ -9627,7 +9631,7 @@ impl AppRuntime {
     ) -> (Vec<gwt::update_drain::PaneObservation>, Vec<PathBuf>) {
         let mut window_ids: Vec<&String> = self.window_lookup.keys().collect();
         window_ids.sort();
-        let panes = window_ids
+        let mut panes: Vec<gwt::update_drain::PaneObservation> = window_ids
             .into_iter()
             .filter_map(|window_id| {
                 let address = self.window_lookup.get(window_id)?;
@@ -9652,6 +9656,14 @@ impl AppRuntime {
                 })
             })
             .collect();
+        if self.agent_maintenance.busy {
+            panes.push(gwt::update_drain::PaneObservation {
+                window_id: "agent-maintenance".into(),
+                label: "Agent maintenance process".into(),
+                state: WindowProcessStatus::Running,
+                resident_pm: false,
+            });
+        }
         let worktrees = self
             .active_agent_sessions
             .values()
@@ -10700,6 +10712,12 @@ impl AppRuntime {
                 self.spawn_supported_agent_list(client_id);
                 Vec::new()
             }
+            FrontendEvent::MaintainSupportedAgent { agent_id, action } => {
+                self.maintain_supported_agent_events(client_id, agent_id, action)
+            }
+            FrontendEvent::SetAgentAutoUpdate { enabled } => {
+                self.set_agent_auto_update_events(client_id, enabled)
+            }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -10974,7 +10992,12 @@ impl AppRuntime {
             }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady { bounds } => {
-                self.startup_auto_resume_ready_events(bounds)
+                if self.agent_maintenance.busy {
+                    self.agent_maintenance.deferred_startup_bounds = Some(bounds);
+                    Vec::new()
+                } else {
+                    self.startup_auto_resume_ready_events(bounds)
+                }
             }
             FrontendEvent::StartupFirstFrame { navigation_ms } => {
                 gwt::perf::startup::first_frame(navigation_ms);
@@ -11833,6 +11856,12 @@ impl AppRuntime {
             FrontendEvent::ListSupportedAgents => {
                 self.spawn_supported_agent_list(client_id);
                 Vec::new()
+            }
+            FrontendEvent::MaintainSupportedAgent { agent_id, action } => {
+                self.maintain_supported_agent_events(client_id, agent_id, action)
+            }
+            FrontendEvent::SetAgentAutoUpdate { enabled } => {
+                self.set_agent_auto_update_events(client_id, enabled)
             }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,

@@ -1,6 +1,7 @@
 pub mod agent_backend_dispatch;
 pub mod agent_capability;
 pub mod agent_capacity;
+pub mod agent_maintenance;
 pub(crate) mod agent_project_state;
 pub mod agent_resource_policy;
 pub mod pane_runtime;

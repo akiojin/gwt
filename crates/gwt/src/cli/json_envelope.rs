@@ -101,7 +101,28 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     // operation on this thread left behind before this one runs.
     super::operation_warnings::take();
     let mut pr_checks_data = None;
+    let mut verification_response = None;
     let outcome = match parsed.command {
+        CliCommand::Verify(command) => {
+            let mut output = String::new();
+            super::verification_record::run_with_response(
+                env,
+                command,
+                &mut output,
+                &mut verification_response,
+            )
+            .map(|exit_code| super::governance::GovernedCommandOutput {
+                exit_code,
+                output,
+                refusal: None,
+            })
+            .map_err(|error| {
+                Box::new(super::governance::GovernedCommandFailure {
+                    error,
+                    refusal: None,
+                })
+            })
+        }
         CliCommand::Pr(PrCommand::Checks { number }) => env
             .fetch_pr_checks(number)
             .map(|report| {
@@ -140,6 +161,12 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             });
             if let Some(data) = pr_checks_data {
                 payload["data"] = data;
+            }
+            if let Some(response) = verification_response {
+                payload["status"] = response.status.into();
+                payload["data"] = response.data;
+            } else if operation == "verify.run" && code != 0 {
+                attach_verification_error(&mut payload, &output);
             }
             if let Some(refusal) = refusal.as_ref() {
                 payload["refusal"] = serde_json::to_value(refusal)
@@ -180,13 +207,24 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         // could not distinguish "the operation failed at stage X" from "the
         // process never answered". The stderr line stays for humans.
         Err(failure) => {
-            let message = failure.error.to_string();
+            let message = match (&failure.error, operation.as_str()) {
+                (
+                    gwt_github::SpecOpsError::Api(gwt_github::client::ApiError::Unexpected(cause)),
+                    "verify.run",
+                ) => {
+                    format!("verification operation failed: {cause}")
+                }
+                _ => failure.error.to_string(),
+            };
             let mut payload = serde_json::json!({
                 "ok": false,
                 "operation": operation,
                 "exit_code": 1,
                 "error": message,
             });
+            if operation == "verify.run" {
+                attach_verification_error(&mut payload, &message);
+            }
             if let Some(refusal) = failure.refusal.as_ref() {
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
@@ -211,6 +249,14 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+fn attach_verification_error(payload: &mut Value, cause: &str) {
+    payload["status"] = "error".into();
+    payload["data"] = serde_json::json!({
+        "cause": cause,
+        "recovery": "Inspect verify.status and verify.lease.status, repair the reported cause, then retry the identical full verify.run matrix; re-register verify.plan if its inputs changed.",
+    });
 }
 
 /// Exit code for an operation whose response never reached the caller.
@@ -3132,6 +3178,128 @@ mod tests {
         ))
         .is_err());
         assert!(parse(&envelope("verify.status", json!({}))).is_ok());
+    }
+
+    #[test]
+    fn verify_run_deferral_is_success_with_structured_recovery() {
+        use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        use std::time::Duration;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _config_home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-5085");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let coordinator = crate::cli::verification_lease::open_coordinator().unwrap();
+        let key = TargetKey::verification("fixture-5085", "holder");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::ZERO)
+            .unwrap()
+        else {
+            panic!("fixture must own its target");
+        };
+        let _lease = guard.acquire_heavy(Duration::ZERO).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git --version"], "max_wait_secs": 0}),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["exit_code"], 0);
+        assert_eq!(payload["status"], "deferred");
+        assert_eq!(payload["data"]["next_turn_reserved"], true);
+        assert_eq!(payload["data"]["budget_secs"], 0);
+        assert!(payload["data"]["waited_secs"].is_u64());
+        assert_eq!(payload["data"]["queue_position"], 1);
+        assert!(!payload.to_string().contains("unexpected server response"));
+        assert!(crate::cli::verification_record::load(&repo)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn verify_run_test_failure_and_execution_failure_are_distinct() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _config_home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-5085-fail");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo);
+        for (command, status) in [
+            ("git rev-parse --verify refs/heads/missing", "failed"),
+            ("gwt-missing-5085-executable", "error"),
+        ] {
+            env.stdout.clear();
+            env.stdin = envelope(
+                "verify.run",
+                json!({"commands": [command], "max_wait_secs": 0}),
+            );
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+            let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["exit_code"], 1);
+            assert_eq!(payload["status"], status, "{payload}");
+            if status == "error" {
+                assert!(payload["data"]["cause"].as_str().unwrap().contains(command));
+                assert!(payload["data"]["recovery"]
+                    .as_str()
+                    .unwrap()
+                    .contains("verify.run"));
+            }
+        }
+    }
+
+    #[test]
+    fn verify_run_operation_error_has_actionable_diagnostic() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(repo.path().to_path_buf());
+        env.stdin = envelope("verify.run", json!({"commands": ["git --version"]}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["status"], "error");
+        assert!(payload["data"]["cause"]
+            .as_str()
+            .unwrap()
+            .contains("requires GWT_SESSION_ID"));
+        assert!(payload["data"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("verify.run"));
+        assert!(!payload.to_string().contains("unexpected server response"));
     }
 
     #[test]
