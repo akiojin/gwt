@@ -39,8 +39,8 @@ METADATA_ARGS = ["metadata", "--offline", "--no-deps", "--format-version", "1"]
 # with the guard armed. Only used when the artifact is not already armed.
 ARM_COMMAND = [
     "cargo", "test", "-p", "gwt", "--all-features",
-    "--test", "gwtd_cli_test",
-    "gwtd_help_describes_the_headless_cli_surface", "--", "--exact",
+    "--test", "cli_contracts",
+    "gwtd_cli_test::gwtd_help_describes_the_headless_cli_surface", "--", "--exact",
 ]
 
 

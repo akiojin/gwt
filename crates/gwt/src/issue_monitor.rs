@@ -5,6 +5,7 @@ use std::{
     path::Path,
 };
 
+use crate::agent_capacity::AgentCapacity;
 use crate::autonomous_handoff::{
     parse_protected_autonomous_handoff_answer_prompt, protected_autonomous_handoff_answer_prompt,
     AutonomousHandoffDeliveryState, AutonomousHandoffDeliveryTarget,
@@ -61,6 +62,9 @@ pub const ISSUE_COMPLETION_MIGRATION_VERSION: u32 = 1;
 const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
 const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
+const WINDOWLESS_LAUNCH_TIMEOUT_SECS: i64 = 120;
+const WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE: &str =
+    "Launch timed out: no window was created within 120s";
 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
@@ -916,10 +920,21 @@ pub struct IssueClosureRecord {
     pub reopened_after_close: bool,
 }
 
+/// Missing provenance preserves positive limits written by older versions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorMaxActiveMode {
+    Auto,
+    #[default]
+    Manual,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
+    #[serde(default)]
+    pub max_active_agents_mode: IssueMonitorMaxActiveMode,
     pub priority_order: Vec<u64>,
     /// Project-local any-of admission; an empty list preserves existing policy.
     #[serde(default)]
@@ -1166,6 +1181,8 @@ pub struct IssueMonitorRuntimeCounts {
     pub host_pid: u32,
     pub host_started_at: u64,
     pub counts: BTreeMap<u64, usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub windows: BTreeMap<String, u64>,
     pub observed_at: String,
 }
 
@@ -1199,6 +1216,7 @@ impl Default for IssueMonitorPrefs {
         Self {
             enabled: false,
             max_active_agents: 1,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
             priority_order: Vec::new(),
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
@@ -3080,7 +3098,8 @@ pub struct IssueMonitorProviderQuotaHoldEvidence {
     /// RFC3339 instant the hold was recorded. Compared against a release's
     /// `released_at` to decide whether that release fences this hold.
     pub recorded_at: String,
-    /// `screen_notice` (a provider notice on the pane), `usage_poller` (the
+    /// `screen_notice` (a provider notice on the pane), `failure_notice` (a
+    /// native provider failure message), `usage_poller` (the
     /// legacy poller-driven release), or `unrecorded` for a path that gave no
     /// detail.
     pub source: String,
@@ -3092,9 +3111,14 @@ pub struct IssueMonitorProviderQuotaHoldEvidence {
     pub issue_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
-    /// The screen tail the notice was matched in.
+    /// The rendered screen, preserving quote boundaries and indentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_text: Option<String>,
+    /// Native CLI region and refusal pattern; absent on legacy evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_pattern: Option<String>,
     /// The poller's `UsageState` for the agent's provider (`ok`, `stale`, ...),
     /// `None` when the poller had no reading for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3132,12 +3156,19 @@ pub struct IssueMonitorProviderQuotaAttempt {
 impl IssueMonitorProviderQuotaHoldEvidence {
     /// Evidence for a hold read from a provider notice on `window_id`'s screen.
     pub fn screen_notice(recorded_at: &str, window_id: &str, screen_text: &str) -> Self {
+        let matched = gwt_core::usage::limit_notice::detect_provider_limit_screen_match(
+            screen_text,
+            &chrono::Local::now(),
+        );
         Self {
             recorded_at: recorded_at.to_string(),
             source: "screen_notice".to_string(),
             issue_number: None,
             window_id: Some(window_id.to_string()),
-            screen_text: Some(screen_text.trim().to_string()).filter(|text| !text.is_empty()),
+            screen_text: Some(screen_text.trim_end().to_string())
+                .filter(|text| !text.trim().is_empty()),
+            screen_region: matched.as_ref().map(|matched| matched.region.to_string()),
+            matched_pattern: matched.as_ref().map(|matched| matched.pattern.to_string()),
             account_id: None,
             poller_observed_at: None,
             poller_state: None,
@@ -3329,6 +3360,10 @@ pub struct IssueMonitorStatusView {
     pub other_terminal_queue_count: usize,
     pub active_count: usize,
     pub max_active_agents: usize,
+    #[serde(default)]
+    pub max_active_agents_override: Option<usize>,
+    #[serde(default)]
+    pub agent_capacity: AgentCapacity,
     pub total_candidates: usize,
     pub active_issue_number: Option<u64>,
     pub last_scan_at: Option<String>,
@@ -3524,6 +3559,10 @@ pub struct IssueMonitorAgentStatus {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub active_launches_incomplete: bool,
     pub max_active: usize,
+    #[serde(default)]
+    pub max_active_agents_override: Option<usize>,
+    #[serde(default)]
+    pub agent_capacity: AgentCapacity,
     pub enabled: bool,
     /// Issue #4273: the authoritative GUI projection; absent in older daemons.
     #[serde(default)]
@@ -4459,6 +4498,11 @@ pub struct IssueMonitorState {
     #[serde(default)]
     label_excluded_issues: BTreeSet<u64>,
     pub config: IssueMonitorConfig,
+    #[serde(default)]
+    max_active_agents_mode: IssueMonitorMaxActiveMode,
+    /// Machine observations are refreshed separately and never stored in prefs.
+    #[serde(skip)]
+    agent_capacity: AgentCapacity,
     pub gui_connected: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
     legacy_git_launch_failure_migration_version: u32,
@@ -4642,6 +4686,10 @@ pub struct IssueMonitorState {
     /// project tab. In-memory only; a restart simply waits for the next tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_snapshot: Option<IssueMonitorWindowSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_snapshot_host: Option<(u32, u64)>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    window_snapshot_tabs: BTreeSet<String>,
     /// Issue #4084 AC-1: idle windows keyed by window id, carrying the first
     /// scan at which each was seen idle.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -6799,6 +6847,8 @@ impl IssueMonitorState {
         Self {
             queue_label_observation: None,
             config,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            agent_capacity: AgentCapacity::default(),
             gui_connected: false,
             inbox: Vec::new(),
             legacy_git_launch_failure_migration_version:
@@ -6871,6 +6921,8 @@ impl IssueMonitorState {
             launching_claimed_at: BTreeMap::new(),
             autonomous_handoffs: Vec::new(),
             window_snapshot: None,
+            window_snapshot_host: None,
+            window_snapshot_tabs: BTreeSet::new(),
             review_windows: BTreeMap::new(),
             idle_windows: BTreeMap::new(),
             pending_idle_pane_closes: VecDeque::new(),
@@ -6883,6 +6935,8 @@ impl IssueMonitorState {
         config.enabled = prefs.enabled;
         config.max_active = prefs.max_active_agents.max(1);
         let mut state = Self::new(config);
+        state.max_active_agents_mode = prefs.max_active_agents_mode;
+        state.apply_agent_capacity_limit();
         state.legacy_git_launch_failure_migration_version =
             prefs.legacy_git_launch_failure_migration_version;
         state.launch_profiles = prefs.launch_profile_pool();
@@ -7051,7 +7105,9 @@ impl IssueMonitorState {
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
             enabled: self.config.enabled,
-            max_active_agents: self.config.max_active.max(1),
+            // Auto's recommendation is machine state, not a saved project limit.
+            max_active_agents: self.max_active_agents_override().unwrap_or(1),
+            max_active_agents_mode: self.max_active_agents_mode,
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
@@ -7949,7 +8005,13 @@ impl IssueMonitorState {
         }
         self.autonomous_record(issue_number)
             .and_then(|record| record.last_failure_message.as_deref())
-            == Some(message)
+            .is_some_and(|previous| {
+                previous == message
+                    // Delivery IDs and elapsed time describe the same timeout,
+                    // rather than new information that resets the retry ladder.
+                    || (previous.starts_with(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE)
+                        && message.starts_with(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE))
+            })
     }
 
     /// SPEC #3200 T-022: set the lifecycle phase of an issue's current attempt.
@@ -9420,7 +9482,55 @@ impl IssueMonitorState {
     }
 
     pub fn set_max_active_agents(&mut self, max_active_agents: usize) {
-        self.config.max_active = max_active_agents.max(1);
+        self.set_max_active_agents_override(Some(max_active_agents));
+    }
+
+    /// `None` returns to measured Auto admission; positive values are Manual.
+    pub fn set_max_active_agents_override(&mut self, max_active_agents: Option<usize>) {
+        match max_active_agents {
+            Some(value) => {
+                self.max_active_agents_mode = IssueMonitorMaxActiveMode::Manual;
+                self.config.max_active = value.max(1);
+            }
+            None => {
+                self.max_active_agents_mode = IssueMonitorMaxActiveMode::Auto;
+                self.apply_agent_capacity_limit();
+            }
+        }
+    }
+
+    pub fn max_active_agents_override(&self) -> Option<usize> {
+        (self.max_active_agents_mode == IssueMonitorMaxActiveMode::Manual)
+            .then_some(self.config.max_active.max(1))
+    }
+
+    pub fn effective_max_active_agents(&self) -> usize {
+        match self.max_active_agents_mode {
+            IssueMonitorMaxActiveMode::Manual => self.config.max_active.max(1),
+            IssueMonitorMaxActiveMode::Auto
+                if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() =>
+            {
+                self.agent_capacity.recommended_worker_limit
+            }
+            IssueMonitorMaxActiveMode::Auto => 0,
+        }
+    }
+
+    fn apply_agent_capacity_limit(&mut self) {
+        self.config.max_active = self.effective_max_active_agents();
+    }
+
+    pub fn set_agent_capacity(&mut self, capacity: AgentCapacity) {
+        self.agent_capacity = capacity;
+        self.apply_agent_capacity_limit();
+    }
+
+    pub fn refresh_agent_capacity(&mut self, project_root: &Path) {
+        self.set_agent_capacity(crate::agent_capacity::project_capacity(
+            project_root,
+            &BTreeSet::new(),
+            self.review_windows.len(),
+        ));
     }
 
     /// Put back the durable scan timestamp after a projection-only rebuild.
@@ -9470,23 +9580,151 @@ impl IssueMonitorState {
     /// Review processes are accounted for separately by `review_windows`.
     pub fn active_issue_numbers(&self) -> Vec<u64> {
         let mut active = self.active_launches.clone();
-        let mut physical = BTreeMap::<u64, usize>::new();
+        let mut panes = BTreeMap::<(Option<(u32, u64)>, String), u64>::new();
+        let mut residual = BTreeMap::<(u32, u64), BTreeMap<u64, usize>>::new();
+        let mut legacy_hosts = BTreeSet::new();
         for observation in self.monitor_runtime_counts.values() {
-            for (&issue, &count) in &observation.counts {
+            let host = (observation.host_pid, observation.host_started_at);
+            let mut known = BTreeMap::<u64, usize>::new();
+            for (window, &issue) in &observation.windows {
+                panes.insert((Some(host), window.clone()), issue);
+                *known.entry(issue).or_default() += 1;
+            }
+            if observation.windows.is_empty() {
+                legacy_hosts.insert(host);
+            }
+            residual.insert(
+                host,
+                observation
+                    .counts
+                    .iter()
+                    .filter_map(|(&issue, &count)| {
+                        let extra = count.saturating_sub(known.get(&issue).copied().unwrap_or(0));
+                        (extra > 0).then_some((issue, extra))
+                    })
+                    .collect(),
+            );
+        }
+        let canvas = self
+            .monitor_canvas_windows()
+            .filter(|window| !window.review_dispatch)
+            .filter_map(|window| {
+                window
+                    .issue_number
+                    .map(|issue| (window.window_id.clone(), issue))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut canvas_counts = BTreeMap::<u64, usize>::new();
+        for (window, &issue) in &canvas {
+            panes
+                .entry((self.window_snapshot_host, window.clone()))
+                .or_insert(issue);
+            *canvas_counts.entry(issue).or_default() += 1;
+        }
+        // Old censuses have no pane identities. Preserve their count-only
+        // merge, but only within the canvas's host when its origin is known.
+        for host in &legacy_hosts {
+            if self
+                .window_snapshot_host
+                .is_some_and(|origin| origin != *host)
+            {
+                continue;
+            }
+            if let Some(counts) = residual.get_mut(host) {
+                for (&issue, count) in counts {
+                    let overlap = (*count).min(canvas_counts.get(&issue).copied().unwrap_or(0));
+                    *count -= overlap;
+                    if self.window_snapshot_host.is_none() {
+                        if let Some(available) = canvas_counts.get_mut(&issue) {
+                            *available -= overlap;
+                        }
+                    }
+                }
+            }
+        }
+        let mut physical = BTreeMap::<u64, usize>::new();
+        let mut legacy_unknown = BTreeMap::<u64, usize>::new();
+        for &issue in panes.values() {
+            *physical.entry(issue).or_default() += 1;
+        }
+        for (host, counts) in residual {
+            for (issue, count) in counts {
                 *physical.entry(issue).or_default() += count;
+                if legacy_hosts.contains(&host) {
+                    *legacy_unknown.entry(issue).or_default() += count;
+                }
             }
         }
         for (issue, count) in physical {
-            let reserved = usize::from(active.contains(&issue));
+            let delivery = self
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| delivery.issue_number == issue);
+            let represented = panes.iter().any(|((origin, window), observed_issue)| {
+                *observed_issue == issue
+                    && match delivery {
+                        Some(delivery) => {
+                            delivery.materializer_window_id.as_deref() == Some(window.as_str())
+                                && origin
+                                    .is_none_or(|(pid, _)| delivery.materializer_pid == Some(pid))
+                        }
+                        None => {
+                            self.launched_windows
+                                .get(&issue)
+                                .is_some_and(|bound| bound == window)
+                                || (!self.launching_claimed_at.contains_key(&issue)
+                                    && self.launch_bindings.get(window) == Some(&issue))
+                        }
+                    }
+            });
+            let reserved = usize::from(
+                active.contains(&issue)
+                    && (represented || legacy_unknown.get(&issue).copied().unwrap_or(0) > 0),
+            );
             active.extend(std::iter::repeat_n(issue, count.saturating_sub(reserved)));
         }
         active
     }
 
-    fn has_observed_monitor_runtime(&self, issue_number: u64) -> bool {
+    fn monitor_canvas_windows(&self) -> impl Iterator<Item = &IssueMonitorWindowObservation> {
+        self.window_snapshot.iter().flat_map(move |snapshot| {
+            snapshot.windows.iter().filter(move |window| {
+                window.monitor_owned
+                    && issue_monitor_qualified_window_id(&window.window_id).is_some_and(
+                        |(tab, _)| {
+                            self.window_snapshot_tabs.contains(tab)
+                                || (self.window_snapshot_tabs.is_empty()
+                                    && tab == snapshot.project_tab_id)
+                        },
+                    )
+            })
+        })
+    }
+
+    /// Process-census evidence only. Canvas panes need a fresh snapshot to
+    /// stand in for a lost launch ACK (#4802), so expiry consults this alone.
+    fn has_monitor_runtime_census(&self, issue_number: u64) -> bool {
         self.monitor_runtime_counts
             .values()
             .any(|observation| observation.counts.get(&issue_number).copied().unwrap_or(0) > 0)
+    }
+
+    fn has_observed_monitor_runtime(&self, issue_number: u64) -> bool {
+        self.has_monitor_runtime_census(issue_number)
+            || self.monitor_canvas_windows().any(|window| {
+                !window.review_dispatch
+                    && window.issue_number == Some(issue_number)
+                    && idle_window_is_alive(window.status)
+            })
+    }
+
+    /// Physical implementation presence is independent of launch binding.
+    /// Retained error/stopped panes still prevent a second pane for the Issue.
+    pub fn has_monitor_pane_for_issue(&self, issue_number: u64) -> bool {
+        self.has_observed_monitor_runtime(issue_number)
+            || self
+                .monitor_canvas_windows()
+                .any(|window| !window.review_dispatch && window.issue_number == Some(issue_number))
     }
 
     /// Include untracked Launched rows whose execution may have been interrupted.
@@ -9598,9 +9836,33 @@ impl IssueMonitorState {
                 host_pid,
                 host_started_at,
                 counts,
+                windows: BTreeMap::new(),
                 observed_at,
             },
         );
+        true
+    }
+
+    /// Publish exact pane identities alongside the actual process count. A
+    /// reused pane id may retain multiple incarnations, so counts remain primary.
+    pub fn record_monitor_runtime_windows(
+        &mut self,
+        host_pid: u32,
+        host_started_at: u64,
+        counts: BTreeMap<u64, usize>,
+        mut windows: BTreeMap<String, u64>,
+        observed_at: impl Into<String>,
+    ) -> bool {
+        if !self.record_monitor_runtime_counts(host_pid, host_started_at, counts, observed_at) {
+            return false;
+        }
+        let observation = self
+            .monitor_runtime_counts
+            .get_mut(&format!("{host_pid}:{host_started_at}"))
+            .expect("accepted census exists");
+        windows
+            .retain(|window, issue| !window.is_empty() && observation.counts.contains_key(issue));
+        observation.windows = windows;
         true
     }
 
@@ -9664,6 +9926,8 @@ impl IssueMonitorState {
             .unwrap_or_default();
         self.config.enabled = disk.enabled;
         self.config.max_active = disk.max_active_agents.max(1);
+        self.max_active_agents_mode = disk.max_active_agents_mode;
+        self.apply_agent_capacity_limit();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.priority_order = disk.priority_order.clone();
         self.terminal_queues = disk.terminal_queues.clone();
@@ -10016,6 +10280,8 @@ impl IssueMonitorState {
             issue_number: None,
             window_id: None,
             screen_text: None,
+            screen_region: None,
+            matched_pattern: None,
             account_id: None,
             poller_observed_at: None,
             poller_state: None,
@@ -10402,10 +10668,11 @@ impl IssueMonitorState {
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
         for observation in disk.monitor_runtime_counts.values() {
-            self.record_monitor_runtime_counts(
+            self.record_monitor_runtime_windows(
                 observation.host_pid,
                 observation.host_started_at,
                 observation.counts.clone(),
+                observation.windows.clone(),
                 observation.observed_at.clone(),
             );
         }
@@ -11079,17 +11346,39 @@ impl IssueMonitorState {
                         .insert(entry.issue_number, claimed_at.clone());
                 }
             }
+            if !self.launched_windows.contains_key(&entry.issue_number)
+                && !disk
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == entry.issue_number)
+            {
+                // Compatibility launches have no delivery identity. Their
+                // committed clock and claim must still replace a stale local
+                // predecessor together. Keep a locally started bare-id clock.
+                if let Some(claimed_at) = &entry.claimed_at {
+                    self.launching_claimed_at
+                        .insert(entry.issue_number, claimed_at.clone());
+                }
+                match disk
+                    .claim_identities
+                    .iter()
+                    .find(|identity| identity.issue_number == entry.issue_number)
+                {
+                    Some(identity) => {
+                        self.claim_identities
+                            .insert(entry.issue_number, identity.clone());
+                    }
+                    None => {
+                        self.claim_identities.remove(&entry.issue_number);
+                    }
+                }
+            }
         }
     }
 
-    /// #3223 follow-up (codex P2 / coderabbit): release claimed-but-unbound
-    /// launches whose claim anchor is older than `claim_ttl_secs`. A crash
-    /// between the claim-save and the launch ACK would otherwise hold a
-    /// max-active slot forever. Entries restored without an anchor (legacy
-    /// bare-id shape) are stamped `now` so their clock starts here. Released
-    /// issues return to `Queued` and re-enter the queue so the next scan can
-    /// relaunch them (mirroring the expired GitHub claim, which lapses after
-    /// the same TTL).
+    /// Release windowless launches after their creation deadline. Compatibility
+    /// rows use their claim anchor; legacy bare-id rows start their clock here.
+    /// Created windows retain the existing claim-TTL recovery contract.
     pub fn expire_stale_unbound_launches(&mut self, now: &str) -> Vec<u64> {
         self.expire_stale_unbound_launches_with(now, crate::process::is_host_process_alive)
     }
@@ -11097,13 +11386,10 @@ impl IssueMonitorState {
     /// [`Self::expire_stale_unbound_launches`] with the materializer liveness
     /// probe injected.
     ///
-    /// Issue #3712 AC-2: a pending delivery is ACK-driven, not TTL-expired —
-    /// but only while the materializer that claimed it can still ACK. When
-    /// that process is gone and `claim_ttl_secs` has lapsed, nothing will ever
-    /// ACK the delivery, and the `launching` row is a slot leak (one held a
-    /// slot for 27 hours with no window). A delivery no materializer has
-    /// claimed yet keeps the ACK-driven contract: a restarting GUI claims it
-    /// on its next tick.
+    /// Issue #5140: a delivery with no created or observed window must release
+    /// its slot after 120 seconds, even while its materializer is alive.
+    /// Created windows retain the ACK-driven contract: only a dead materializer
+    /// and an elapsed claim TTL allow the existing recovery path to requeue them.
     pub fn expire_stale_unbound_launches_with(
         &mut self,
         now: &str,
@@ -11118,6 +11404,35 @@ impl IssueMonitorState {
             .collect();
         let mut expired = Vec::new();
         for issue_number in unbound {
+            if let Some(diagnostic) = self.windowless_launch_stall_at(issue_number, now) {
+                if let Some(delivery) = self
+                    .pending_launch_deliveries
+                    .iter()
+                    .find(|delivery| delivery.issue_number == issue_number)
+                {
+                    // A scan rebase can replace the delivery while the local
+                    // claim identity still describes its predecessor.
+                    ensure_claim_release_effect(
+                        &mut self.pending_effects,
+                        self.effect_authority_epoch,
+                        &delivery.delivery_id,
+                        issue_number,
+                        &delivery.claim_id,
+                        &delivery.claim_owner,
+                    );
+                    self.claim_identities.remove(&issue_number);
+                } else {
+                    self.release_confirmed_claim_for_issue(issue_number);
+                }
+                self.clear_active_tracking(issue_number);
+                self.record_launch_failed_at(
+                    issue_number,
+                    format!("{WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE}; {diagnostic}"),
+                    now,
+                );
+                expired.push(issue_number);
+                continue;
+            }
             if let Some(delivery) = self
                 .pending_launch_deliveries
                 .iter()
@@ -11136,7 +11451,7 @@ impl IssueMonitorState {
                 // its first canvas snapshot; that launch is still alive too.
                 if stale
                     && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
-                        || self.has_observed_monitor_runtime(issue_number))
+                        || self.has_monitor_runtime_census(issue_number))
                 {
                     continue;
                 }
@@ -11163,20 +11478,9 @@ impl IssueMonitorState {
                     // Issue #4802 AC-1: see the delivery branch above.
                     if stale
                         && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
-                            || self.has_observed_monitor_runtime(issue_number))
+                            || self.has_monitor_runtime_census(issue_number))
                     {
                         continue;
-                    }
-                    if stale {
-                        self.active_launches
-                            .retain(|active| *active != issue_number);
-                        self.launching_claimed_at.remove(&issue_number);
-                        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
-                        if !self.queue.contains(&issue_number) {
-                            self.queue.push_back(issue_number);
-                            self.apply_priority_order_to_queue();
-                        }
-                        expired.push(issue_number);
                     }
                 }
                 None => {
@@ -11187,6 +11491,37 @@ impl IssueMonitorState {
             }
         }
         expired
+    }
+
+    fn windowless_launch_stall_at(&self, issue_number: u64, now: &str) -> Option<String> {
+        let delivery = self
+            .pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number);
+        if !self.active_launches.contains(&issue_number)
+            || delivery.is_some_and(|delivery| {
+                delivery.materialized_window_id.is_some()
+                    || delivery.workspace_durable_window_id.is_some()
+            })
+            || self.launched_windows.contains_key(&issue_number)
+            || self.has_monitor_runtime_census(issue_number)
+            || self.observed_live_issue_pane(issue_number, now).is_some()
+        {
+            return None;
+        }
+        let created_at = delivery
+            .map(|delivery| &delivery.created_at)
+            .or_else(|| self.launching_claimed_at.get(&issue_number))?;
+        let elapsed = rfc3339_elapsed_secs(created_at, now)?;
+        (elapsed >= WINDOWLESS_LAUNCH_TIMEOUT_SECS).then(|| {
+            let source = delivery.map_or_else(
+                || format!("issue #{issue_number}"),
+                |delivery| format!("delivery {}", delivery.delivery_id),
+            );
+            format!(
+                "Launch stalled: no window for {elapsed}s (deadline {WINDOWLESS_LAUNCH_TIMEOUT_SECS}s; {source})",
+            )
+        })
     }
 
     /// Issue #4802 AC-1: the live implementation pane the latest fresh canvas
@@ -11410,7 +11745,7 @@ impl IssueMonitorState {
         if let Some(hold) = self.launch_admission_hold_at(now) {
             return Some(hold);
         }
-        let (available, candidates) = self.claim_probe_plan(self.config.max_active.max(1));
+        let (available, candidates) = self.claim_probe_plan(self.effective_max_active_agents());
         if available == 0 {
             return Some(Reason::MaxActiveSaturated);
         }
@@ -11642,7 +11977,9 @@ impl IssueMonitorState {
             unqueued_open_count,
             other_terminal_queue_count,
             active_count: self.active_count(),
-            max_active_agents: self.config.max_active,
+            max_active_agents: self.effective_max_active_agents(),
+            max_active_agents_override: self.max_active_agents_override(),
+            agent_capacity: self.agent_capacity.clone(),
             total_candidates: self.inbox.len(),
             active_issue_number: self.active_issue_number(),
             last_scan_at: self.last_scan_at.clone(),
@@ -11925,7 +12262,9 @@ impl IssueMonitorState {
             occupied_slot_count: Some(self.occupied_slot_count()),
             pending_claim_issues: Some(self.pending_claim_issue_numbers().into_iter().collect()),
             active_launches_incomplete: false,
-            max_active: self.config.max_active.max(1),
+            max_active: self.effective_max_active_agents(),
+            max_active_agents_override: self.max_active_agents_override(),
+            agent_capacity: self.agent_capacity.clone(),
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),
             autonomous_mode: self.autonomous_mode,
@@ -11979,7 +12318,10 @@ impl IssueMonitorState {
                         blocked_by_claim_id: item.blocked_by_claim_id.clone(),
                         exclusion_reason: item.exclusion_reason.clone(),
                         launched_window_id: self.launched_window_id(item.issue.number),
-                        error_message: item.error_message.clone(),
+                        error_message: item
+                            .error_message
+                            .clone()
+                            .or_else(|| self.windowless_launch_stall_at(item.issue.number, now)),
                         // SPEC-3431 FR-068: the autonomous record already carries
                         // the heartbeat that hook arrivals refresh. Surfacing it here
                         // rather than adding a parallel field keeps one clock, so
@@ -12938,7 +13280,7 @@ impl IssueMonitorState {
             .collect();
         IssueMonitorSlotOccupancy {
             occupied: self.occupied_slot_count(),
-            max_active: self.config.max_active.max(1),
+            max_active: self.effective_max_active_agents(),
             occupants,
         }
     }
@@ -12946,7 +13288,80 @@ impl IssueMonitorState {
     /// Issue #4117 AC-2: `max_active` slots in use — implementation launches
     /// plus live review windows, which run their own agent each.
     fn occupied_slot_count(&self) -> usize {
-        self.active_count() + self.review_windows.len()
+        let mut reviews = self
+            .monitor_canvas_windows()
+            .filter(|window| window.review_dispatch)
+            .map(|window| window.window_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut pending_reviews = 0;
+        for window in self.review_windows.values() {
+            match window.window_id.as_deref() {
+                Some(window) => {
+                    reviews.insert(window);
+                }
+                None => pending_reviews += 1,
+            }
+        }
+        let unknown_panes = self
+            .monitor_canvas_windows()
+            .filter(|window| !window.review_dispatch && window.issue_number.is_none())
+            .map(|window| window.window_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        self.active_count() + unknown_panes + reviews.len() + pending_reviews
+    }
+
+    /// Check the current cap at the final boundary before adding a pane.
+    /// Only a reservation that has not become a pane supplies its own slot.
+    pub fn has_capacity_for_monitor_spawn(&self, issue_number: u64, review_dispatch: bool) -> bool {
+        let max_active = self.effective_max_active_agents();
+        if max_active == 0 {
+            return false;
+        }
+        let reserved = if review_dispatch {
+            self.review_windows
+                .get(&issue_number)
+                .is_some_and(|window| window.window_id.is_none())
+        } else {
+            self.active_launches.contains(&issue_number)
+                && !self.launched_windows.contains_key(&issue_number)
+                && !self.has_observed_monitor_runtime(issue_number)
+                && self
+                    .pending_launch_deliveries
+                    .iter()
+                    .filter(|delivery| delivery.issue_number == issue_number)
+                    .all(|delivery| {
+                        delivery.materialized_window_id.is_none()
+                            && !self.monitor_canvas_windows().any(|window| {
+                                !window.review_dispatch
+                                    && window.issue_number == Some(issue_number)
+                                    && delivery.materializer_window_id.as_deref()
+                                        == Some(window.window_id.as_str())
+                            })
+                    })
+        };
+        if reserved {
+            if review_dispatch {
+                if let Some(position) = self
+                    .pending_review_dispatches
+                    .iter()
+                    .position(|dispatch| dispatch.issue_number == issue_number)
+                {
+                    return position < self.remaining_materialization_slots();
+                }
+            } else if let Some(delivery) = self
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| delivery.issue_number == issue_number)
+            {
+                return self.can_materialize_delivery(delivery, None);
+            }
+        }
+        let own_issued_reservation = reserved
+            && (review_dispatch || !self.unissued_launch_reservations().contains(&issue_number));
+        self.issued_slot_count()
+            .saturating_sub(usize::from(own_issued_reservation))
+            < max_active
     }
 
     fn forget_review_window(&mut self, issue_number: u64) {
@@ -12982,7 +13397,7 @@ impl IssueMonitorState {
                 ),
             }
         } else {
-            let max_active = self.config.max_active.max(1);
+            let max_active = self.effective_max_active_agents();
             let occupied = self.occupied_slot_count();
             if occupied < max_active {
                 return None;
@@ -13249,10 +13664,18 @@ impl IssueMonitorState {
     /// entry; an entry whose window left this tab's canvas, or that never
     /// appeared within [`REVIEW_WINDOW_SPAWN_GRACE_SECS`], is dropped so it
     /// cannot hold a slot for a pane that does not exist.
-    fn reconcile_review_windows(&mut self, snapshot: &IssueMonitorWindowSnapshot) {
+    fn reconcile_review_windows(
+        &mut self,
+        snapshot: &IssueMonitorWindowSnapshot,
+        project_tabs: &BTreeSet<String>,
+    ) {
         let now = snapshot.observed_at.as_str();
         for observed in &snapshot.windows {
-            if !observed.review_dispatch || !idle_window_is_alive(observed.status) {
+            if !observed.review_dispatch
+                || !idle_window_is_alive(observed.status)
+                || !issue_monitor_qualified_window_id(&observed.window_id)
+                    .is_some_and(|(tab, _)| project_tabs.contains(tab))
+            {
                 continue;
             }
             let Some(issue_number) = observed.issue_number else {
@@ -13295,7 +13718,7 @@ impl IssueMonitorState {
                 let (alive, reason) = match window.window_id.as_deref() {
                     Some(window_id) => {
                         let owned_here = issue_monitor_qualified_window_id(window_id)
-                            .is_some_and(|(tab_id, _)| tab_id == snapshot.project_tab_id);
+                            .is_some_and(|(tab_id, _)| project_tabs.contains(tab_id));
                         if !owned_here {
                             (true, None)
                         } else {
@@ -14340,7 +14763,7 @@ impl IssueMonitorState {
     }
 
     pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
-        let max_active = self.config.max_active.max(1);
+        let max_active = self.effective_max_active_agents();
         if !self.gui_connected
             || self.occupied_slot_count() >= max_active
             || self.launch_admission_is_held_at(now)
@@ -14389,7 +14812,7 @@ impl IssueMonitorState {
             client,
             owner,
             now,
-            self.config.max_active.max(1),
+            self.effective_max_active_agents(),
         )
     }
 
@@ -14459,7 +14882,7 @@ impl IssueMonitorState {
     /// commit anything. The planner below only ever walks this list, so a scan
     /// only ever needs to probe this list.
     pub fn claim_probe_plan(&self, active_cap: usize) -> (usize, Vec<u64>) {
-        let max_active = self.config.max_active.max(1).min(active_cap);
+        let max_active = self.effective_max_active_agents().min(active_cap);
         if !self.config.enabled || max_active == 0 {
             return (0, Vec::new());
         }
@@ -14628,7 +15051,7 @@ impl IssueMonitorState {
         // are consumed, so a lapsed claim can never starve its issue.
         self.requeue_expired_claim_blocks(now);
         let mut launches = Vec::new();
-        let max_active = self.config.max_active.max(1).min(active_cap);
+        let max_active = self.effective_max_active_agents().min(active_cap);
         if max_active == 0 || self.launch_admission_is_held_at(now) {
             return launches;
         }
@@ -14742,21 +15165,66 @@ impl IssueMonitorState {
             .iter()
             .map(|delivery| delivery.issue_number)
             .collect::<BTreeSet<_>>();
-        let mut requests = self
-            .pending_launches
-            .drain(..)
-            .filter(|request| !durable_issue_numbers.contains(&request.issue_number))
-            .collect::<Vec<_>>();
-        requests.extend(self.pending_launch_deliveries.iter().map(|delivery| {
-            IssueMonitorLaunchRequest {
-                issue_number: delivery.issue_number,
-                branch_name: delivery.branch_name.clone(),
-                linked_issue_kind: delivery.linked_issue_kind,
-                delivery_id: Some(delivery.delivery_id.clone()),
-                launch_session_strategy: delivery.launch_session_strategy,
-            }
-        }));
+        self.pending_launches
+            .retain(|request| !durable_issue_numbers.contains(&request.issue_number));
+        let count = self
+            .remaining_materialization_slots()
+            .min(self.pending_launches.len());
+        let mut requests = self.pending_launches.drain(..count).collect::<Vec<_>>();
+        requests.extend(
+            self.pending_launch_deliveries
+                .iter()
+                .filter_map(|delivery| {
+                    if !self.launch_delivery_can_reack(delivery)
+                        && !self.can_materialize_delivery(delivery, None)
+                    {
+                        return None;
+                    }
+                    Some(IssueMonitorLaunchRequest {
+                        issue_number: delivery.issue_number,
+                        branch_name: delivery.branch_name.clone(),
+                        linked_issue_kind: delivery.linked_issue_kind,
+                        delivery_id: Some(delivery.delivery_id.clone()),
+                        launch_session_strategy: delivery.launch_session_strategy,
+                    })
+                }),
+        );
         requests
+    }
+
+    fn launch_delivery_can_reack(&self, delivery: &PendingIssueMonitorLaunchDelivery) -> bool {
+        let Some(window_id) = delivery.materializer_window_id.as_deref() else {
+            return false;
+        };
+        if window_id.is_empty()
+            || delivery
+                .materializer_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || delivery.materializer_pid.is_none_or(|pid| pid == 0)
+        {
+            return false;
+        }
+        if delivery.materialized_window_id.as_deref() == Some(window_id) {
+            return true;
+        }
+        let Some(snapshot) = &self.window_snapshot else {
+            return false;
+        };
+        self.fresh_window_snapshot(
+            self.last_scan_at
+                .as_deref()
+                .unwrap_or(&snapshot.observed_at),
+        )
+        .is_some()
+            && self
+                .window_snapshot_host
+                .is_none_or(|(pid, _)| delivery.materializer_pid == Some(pid))
+            && self.monitor_canvas_windows().any(|window| {
+                !window.review_dispatch
+                    && window.issue_number == Some(delivery.issue_number)
+                    && window.window_id == window_id
+            })
     }
 
     /// SPEC #3200 Option A: queue a review-agent spawn request (orchestration
@@ -14769,7 +15237,89 @@ impl IssueMonitorState {
 
     /// Drain queued review-agent spawn requests for emission to the GUI.
     pub fn take_pending_review_dispatches(&mut self) -> Vec<AutonomousReviewDispatch> {
-        self.pending_review_dispatches.drain(..).collect()
+        let available = self.remaining_materialization_slots();
+        let count = available.min(self.pending_review_dispatches.len());
+        self.pending_review_dispatches.drain(..count).collect()
+    }
+
+    fn unissued_launch_reservations(&self) -> BTreeSet<u64> {
+        let durable = self
+            .pending_launch_deliveries
+            .iter()
+            .map(|delivery| delivery.issue_number)
+            .collect::<BTreeSet<_>>();
+        self.pending_launch_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && delivery.materialized_window_id.is_none()
+                    && !self.launched_windows.contains_key(&delivery.issue_number)
+            })
+            .map(|delivery| delivery.issue_number)
+            .chain(self.pending_launches.iter().filter_map(|request| {
+                (!durable.contains(&request.issue_number)).then_some(request.issue_number)
+            }))
+            .filter(|issue_number| self.active_launches.contains(issue_number))
+            .collect()
+    }
+
+    fn issued_slot_count(&self) -> usize {
+        let queued_reviews = self
+            .pending_review_dispatches
+            .iter()
+            .filter(|dispatch| {
+                self.review_windows
+                    .get(&dispatch.issue_number)
+                    .is_some_and(|window| {
+                        window.pr_number == dispatch.pr_number && window.window_id.is_none()
+                    })
+            })
+            .count();
+        self.occupied_slot_count()
+            .saturating_sub(self.unissued_launch_reservations().len())
+            .saturating_sub(queued_reviews)
+    }
+
+    fn remaining_materialization_slots(&self) -> usize {
+        self.effective_max_active_agents()
+            .saturating_sub(self.issued_slot_count())
+    }
+
+    fn can_materialize_delivery(
+        &self,
+        delivery: &PendingIssueMonitorLaunchDelivery,
+        window_id: Option<&str>,
+    ) -> bool {
+        let matches_window = |existing: &str| {
+            window_id.is_none_or(|incoming| issue_monitor_window_ids_match(existing, incoming))
+        };
+        if delivery
+            .materialized_window_id
+            .as_deref()
+            .is_some_and(matches_window)
+            || self
+                .launched_windows
+                .get(&delivery.issue_number)
+                .is_some_and(|existing| matches_window(existing))
+        {
+            return true;
+        }
+        let max_active = self.effective_max_active_agents();
+        if max_active == 0 {
+            return false;
+        }
+        if delivery.materializer_id.is_some()
+            || self.launched_windows.contains_key(&delivery.issue_number)
+        {
+            // A claim or legacy ACK already occupies this Issue's slot.
+            return self.issued_slot_count() <= max_active;
+        }
+        let unissued = self.unissued_launch_reservations();
+        self.pending_launch_deliveries
+            .iter()
+            .filter(|pending| unissued.contains(&pending.issue_number))
+            .position(|pending| pending.delivery_id == delivery.delivery_id)
+            .is_some_and(|position| position < self.remaining_materialization_slots())
     }
 
     /// SPEC #3200 FR-034 (T-111): queue an operator notice for an unattended
@@ -14944,7 +15494,7 @@ impl IssueMonitorState {
                 item.state == MonitorInboxState::Queued
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_observed_monitor_runtime(issue_number)
-                    && self.occupied_slot_count() < self.config.max_active.max(1)
+                    && self.occupied_slot_count() < self.effective_max_active_agents()
             })
             .map(|item| item.issue.clone())
         else {
@@ -15064,6 +15614,62 @@ impl IssueMonitorState {
         materializer_window_id: &str,
         is_process_alive: impl Fn(u32) -> bool,
     ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) else {
+            return false;
+        };
+        let same_materializer = delivery.materializer_id.as_deref() == Some(materializer_id);
+        if !same_materializer
+            && delivery
+                .materializer_pid
+                .filter(|pid| *pid > 0)
+                .is_some_and(&is_process_alive)
+        {
+            return false;
+        }
+        let recorded_pane = same_materializer
+            && delivery.materializer_pid == Some(materializer_pid)
+            && delivery.materializer_window_id.as_deref() == Some(materializer_window_id)
+            && (self.launch_delivery_can_reack(delivery)
+                || self
+                    .launched_windows
+                    .get(&issue_number)
+                    .is_some_and(|window| {
+                        issue_monitor_window_ids_match(window, materializer_window_id)
+                    }));
+        let observed_pane = self.window_snapshot.as_ref().is_some_and(|snapshot| {
+            self.fresh_window_snapshot(
+                self.last_scan_at
+                    .as_deref()
+                    .unwrap_or(&snapshot.observed_at),
+            )
+            .is_some()
+                && self
+                    .window_snapshot_host
+                    .is_none_or(|(pid, _)| pid == materializer_pid)
+                && snapshot.windows.iter().any(|window| {
+                    issue_monitor_qualified_window_id(&window.window_id).is_some_and(|(tab, _)| {
+                        self.window_snapshot_tabs.contains(tab)
+                            || (self.window_snapshot_tabs.is_empty()
+                                && tab == snapshot.project_tab_id)
+                    }) && ((window.monitor_owned && idle_window_is_alive(window.status))
+                        || (delivery.materialized_window_id.as_deref()
+                            == Some(materializer_window_id)
+                            && delivery.materializer_window_id.as_deref()
+                                == Some(materializer_window_id)))
+                        && !window.review_dispatch
+                        && window.issue_number == Some(issue_number)
+                        && window.window_id == materializer_window_id
+                })
+        });
+        if !recorded_pane
+            && !observed_pane
+            && (self.has_monitor_pane_for_issue(issue_number)
+                || !self.can_materialize_delivery(delivery, Some(materializer_window_id)))
+        {
+            return false;
+        }
         let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
             delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
         }) else {
@@ -15077,13 +15683,6 @@ impl IssueMonitorState {
             }
             delivery.materializer_window_id = Some(materializer_window_id.to_string());
             return true;
-        }
-        if delivery
-            .materializer_pid
-            .filter(|pid| *pid > 0)
-            .is_some_and(is_process_alive)
-        {
-            return false;
         }
         delivery.materializer_id = Some(materializer_id.to_string());
         delivery.materializer_pid = Some(materializer_pid);
@@ -16451,6 +17050,8 @@ impl IssueMonitorState {
                 issue_number: Some(issue_number),
                 window_id: Some(window_id.to_string()),
                 screen_text: None,
+                screen_region: None,
+                matched_pattern: None,
                 account_id: None,
                 poller_observed_at: None,
                 poller_state: None,
@@ -18223,8 +18824,73 @@ impl IssueMonitorState {
 
     /// Issue #4084: record the GUI's canvas observation for the next scan.
     pub fn record_window_snapshot(&mut self, snapshot: IssueMonitorWindowSnapshot) {
-        self.reconcile_review_windows(&snapshot);
+        self.record_window_snapshot_with_origin(snapshot, None, BTreeSet::new());
+    }
+
+    pub fn record_window_snapshot_for_tabs(
+        &mut self,
+        snapshot: IssueMonitorWindowSnapshot,
+        project_tabs: BTreeSet<String>,
+    ) {
+        self.record_window_snapshot_with_origin(snapshot, None, project_tabs);
+    }
+
+    pub fn record_window_snapshot_from_host(
+        &mut self,
+        snapshot: IssueMonitorWindowSnapshot,
+        host_pid: u32,
+        host_started_at: u64,
+        project_tabs: BTreeSet<String>,
+    ) {
+        let host = (host_pid > 0 && host_started_at > 0).then_some((host_pid, host_started_at));
+        self.record_window_snapshot_with_origin(snapshot, host, project_tabs);
+    }
+
+    fn record_window_snapshot_with_origin(
+        &mut self,
+        snapshot: IssueMonitorWindowSnapshot,
+        host: Option<(u32, u64)>,
+        mut project_tabs: BTreeSet<String>,
+    ) {
+        if self.window_snapshot.as_ref().is_some_and(|previous| {
+            previous.project_tab_id == snapshot.project_tab_id
+                && self.window_snapshot_host == host
+                && rfc3339_elapsed_secs(&previous.observed_at, &snapshot.observed_at)
+                    .is_some_and(|age| age < 0)
+        }) {
+            return;
+        }
+        project_tabs.insert(snapshot.project_tab_id.clone());
+        self.reconcile_review_windows(&snapshot, &project_tabs);
         self.window_snapshot = Some(snapshot);
+        self.window_snapshot_host = host;
+        self.window_snapshot_tabs = project_tabs;
+    }
+
+    fn park_unbound_live_monitor_panes(&mut self, now: &str) {
+        let Some(_) = self.fresh_window_snapshot(now) else {
+            return;
+        };
+        let unbound = self
+            .monitor_canvas_windows()
+            .filter_map(|window| {
+                let issue = window.issue_number?;
+                (window.monitor_owned
+                    && !window.review_dispatch
+                    && idle_window_is_alive(window.status)
+                    && !self.active_launches.contains(&issue)
+                    && self.launch_bindings.get(&window.window_id) != Some(&issue)
+                    && self.launched_windows.get(&issue) != Some(&window.window_id)
+                    && self
+                        .inbox_item(issue)
+                        .is_some_and(|item| item.state == MonitorInboxState::Queued))
+                .then_some((issue, window.window_id.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (issue, window) in unbound {
+            self.escalate_to_needs_human(issue, NeedsHumanKind::UserChoiceRequired,
+                format!("unbound live Monitor pane {window}; reconcile its launch binding before requeueing"));
+        }
     }
 
     /// Issue #4084 AC-5: ask the next scan to release idle windows on the
@@ -18386,6 +19052,8 @@ impl IssueMonitorState {
                                 .iter()
                                 .find(|other| {
                                     other.issue_number == Some(*issue_number)
+                                        && issue_monitor_qualified_window_id(&other.window_id)
+                                            .is_some_and(|(tab, _)| tab == snapshot.project_tab_id)
                                         && !other.review_dispatch
                                         && idle_window_is_alive(other.status)
                                         && !issue_monitor_window_ids_match(
@@ -19401,6 +20069,7 @@ pub fn scan_issue_monitor_candidates(
     // lapsed claim block does, and unlike that one it is invisible to the
     // claim planner — the row holds no slot to notice.
     monitor.requeue_stranded_launched_rows(now);
+    monitor.park_unbound_live_monitor_panes(now);
     monitor.reconcile_terminal_queue();
 
     // Issue #3628 (AC-5): observe the fleet after stranded rows are recovered
@@ -19607,6 +20276,372 @@ fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_capacity_new_preferences_wait_for_measurement() {
+        let prefs = IssueMonitorPrefs::default();
+        let saved = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(saved["max_active_agents_mode"], "auto");
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.config.max_active, 0);
+        assert_eq!(monitor.status_view().max_active_agents, 0);
+        assert_eq!(monitor.agent_status().max_active, 0);
+    }
+
+    #[test]
+    fn agent_capacity_legacy_positive_preferences_remain_manual() {
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(r#"{"enabled":false,"max_active_agents":1,"priority_order":[]}"#)
+                .unwrap();
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.config.max_active, 1);
+        let saved = serde_json::to_value(monitor.prefs()).unwrap();
+        assert_eq!(saved["max_active_agents_mode"], "manual");
+        assert_eq!(saved["max_active_agents"], 1);
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(saved).unwrap(),
+        );
+        assert_eq!(restored.config.max_active, 1);
+    }
+
+    #[test]
+    fn agent_capacity_unmeasured_auto_holds_implementation_and_review() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], IDLE_NOW);
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+        assert_eq!(monitor.claim_probe_plan(8), (0, Vec::new()));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert!(monitor
+            .review_dispatch_hold(42, 420, None, IDLE_NOW)
+            .is_some());
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    }
+
+    #[test]
+    fn agent_capacity_auto_tracks_measurements_and_manual_override_survives() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs::default(),
+        );
+        let capacity = AgentCapacity {
+            measurement_complete: true,
+            machine_budget: Some(4),
+            recommended_worker_limit: 3,
+            recommended_implementation_count: 3,
+            recommended_total_count: 4,
+            ..AgentCapacity::default()
+        };
+        monitor.set_agent_capacity(capacity.clone());
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        monitor.set_max_active_agents(8);
+        monitor.set_agent_capacity(capacity.clone());
+        assert_eq!(monitor.effective_max_active_agents(), 8);
+        assert_eq!(monitor.max_active_agents_override(), Some(8));
+        let manual = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(manual.max_active_agents_override(), Some(8));
+        monitor.set_max_active_agents_override(None);
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        let saved = serde_json::to_value(monitor.prefs()).unwrap();
+        assert_eq!(saved["max_active_agents_mode"], "auto");
+        assert_eq!(saved["max_active_agents"], 1);
+        assert!(saved.get("agent_capacity").is_none());
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert_eq!(
+            status["max_active_agents_override"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            status["gui_status"]["max_active_agents_override"],
+            serde_json::Value::Null
+        );
+        assert_eq!(status["agent_capacity"]["recommended_worker_limit"], 3);
+        assert_eq!(
+            status["gui_status"]["agent_capacity"],
+            status["agent_capacity"]
+        );
+        assert_eq!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs())
+                .effective_max_active_agents(),
+            0
+        );
+    }
+
+    #[test]
+    fn agent_capacity_zero_cap_preserves_running_bindings_and_survives_rebase() {
+        let mut monitor = launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            machine_budget: Some(0),
+            ..AgentCapacity::default()
+        });
+        monitor.set_max_active_agents_override(None);
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 1);
+        assert!(monitor
+            .review_dispatch_hold(41, 410, None, IDLE_NOW)
+            .is_some());
+        let saved = monitor.prefs();
+        monitor.refresh_disk_owned_prefs(&saved);
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
+    fn agent_capacity_expired_measurement_stops_new_admissions() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs::default(),
+        );
+        let mut capacity = serde_json::to_value(AgentCapacity {
+            measurement_complete: true,
+            machine_budget: Some(4),
+            recommended_worker_limit: 3,
+            ..AgentCapacity::default()
+        })
+        .unwrap();
+        capacity["observed_at"] = serde_json::json!(1);
+        capacity["expires_at"] = serde_json::json!(2);
+        monitor.set_agent_capacity(serde_json::from_value(capacity).unwrap());
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert!(monitor
+            .review_dispatch_hold(42, 420, None, IDLE_NOW)
+            .is_some());
+    }
+
+    #[test]
+    fn agent_capacity_review_outbox_waits_for_capacity_and_resumes_its_reserved_slot() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(2);
+        let dispatch = review_dispatch_for(41, 410);
+        monitor.dispatch_review(dispatch.clone(), IDLE_NOW).unwrap();
+        monitor.set_agent_capacity(AgentCapacity::default());
+        monitor.set_max_active_agents_override(None);
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+        assert!(!monitor.has_capacity_for_monitor_spawn(41, true));
+        assert_eq!(monitor.review_windows().len(), 1);
+        assert_eq!(monitor.active_count(), 1);
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..AgentCapacity::default()
+        });
+        assert_eq!(monitor.take_pending_review_dispatches(), vec![dispatch]);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+    }
+
+    #[test]
+    fn agent_capacity_review_outbox_only_emits_the_remaining_capacity() {
+        let mut monitor =
+            autonomous_launched_cohort(&[(41, "tab-1::impl-41"), (42, "tab-1::impl-42")]);
+        monitor.set_max_active_agents(4);
+        let first = review_dispatch_for(41, 410);
+        let second = review_dispatch_for(42, 420);
+        monitor.dispatch_review(first.clone(), IDLE_NOW).unwrap();
+        monitor.dispatch_review(second.clone(), IDLE_NOW).unwrap();
+        monitor.set_max_active_agents(3);
+        assert_eq!(monitor.take_pending_review_dispatches(), vec![first]);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+        monitor.forget_review_window(41);
+        assert_eq!(monitor.take_pending_review_dispatches(), vec![second]);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, true));
+    }
+
+    #[test]
+    fn agent_capacity_launch_delivery_waits_for_fresh_capacity_before_materializing() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        monitor.set_max_active_agents_override(None);
+        let held = monitor.prefs();
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert_eq!(monitor.prefs(), held);
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 1,
+            ..AgentCapacity::default()
+        });
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+    }
+
+    #[test]
+    fn agent_capacity_reduced_launch_delivery_budget_keeps_later_reservations() {
+        let mut monitor = launched_cohort(&[(40, "tab-1::impl-40")]);
+        monitor.set_max_active_agents(3);
+        for number in [41, 42] {
+            monitor.terminal_queue_push(&[number], "test", IDLE_NOW);
+            monitor.record_candidate(issue(number));
+            assert!(monitor.apply_confirmed_claim(
+                number,
+                format!("claim-{number}"),
+                "owner",
+                &format!("effect-{number}"),
+                IDLE_NOW
+            ));
+        }
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..AgentCapacity::default()
+        });
+        monitor.set_max_active_agents_override(None);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert_eq!(
+            monitor
+                .take_pending_launch_requests()
+                .iter()
+                .map(|request| request.issue_number)
+                .collect::<Vec<_>>(),
+            vec![41]
+        );
+        assert!(monitor.claim_launch_delivery(
+            41,
+            "launch:effect-41",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-41",
+            |_| false
+        ));
+        assert!(monitor.has_capacity_for_monitor_spawn(41, false));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 2);
+        assert_eq!(monitor.active_count(), 3);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 1);
+    }
+
+    #[test]
+    fn agent_capacity_materialized_delivery_ack_survives_zero_capacity() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui",
+            "tab-1::agent-42"
+        ));
+        monitor.set_max_active_agents_override(None);
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::replacement-42",
+            |_| false
+        ));
+        monitor
+            .pending_launch_deliveries
+            .front_mut()
+            .unwrap()
+            .materialized_window_id = None;
+        monitor
+            .launched_windows
+            .insert(42, "tab-1::agent-42".to_string());
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+    }
+
+    #[test]
+    fn agent_capacity_review_and_launch_outboxes_share_one_remaining_slot() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+            .unwrap();
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..AgentCapacity::default()
+        });
+        monitor.set_max_active_agents_override(None);
+        assert_eq!(monitor.take_pending_review_dispatches().len(), 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false
+        ));
+        monitor.forget_review_window(41);
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+    }
 
     fn label_allowlist_monitor(labels: &[&str]) -> IssueMonitorState {
         let mut saved = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
@@ -19958,6 +20993,8 @@ mod tests {
                 occupied_slot_count: Some(0),
                 pending_claim_issues: Some(Vec::new()),
                 max_active: 3,
+                max_active_agents_override: Some(3),
+                agent_capacity: AgentCapacity::default(),
                 enabled: true,
                 gui_status: Some(monitor.status_view()),
                 autonomous_mode: false,
@@ -20209,6 +21246,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 1,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-1".to_string(),
@@ -20291,6 +21329,7 @@ mod tests {
     #[test]
     fn launch_now_priority_head_claims_the_target_once_across_rescans() {
         let prefs = IssueMonitorPrefs {
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             // exactly what run_monitor_launch_now writes for issue 7
             priority_order: vec![7],
             ..IssueMonitorPrefs::default()
@@ -20452,6 +21491,7 @@ mod tests {
         let stale_prefs = IssueMonitorPrefs {
             // This fixture tests snapshot provenance with two in-flight entries.
             max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-a::agent-1".to_string(),
@@ -20503,6 +21543,7 @@ mod tests {
             // drop persisted launches beyond `max_active`, and this fixture is
             // about window provenance, not slot accounting.
             max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: vec![
                 IssueMonitorLaunchedIssue {
                     issue_number: 42,
@@ -20568,12 +21609,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_unbound_launching_claims_expire_after_claim_ttl() {
-        // #3223 follow-up (codex P2 / coderabbit): a crash between the
-        // claim-save and the launch ACK leaves a restored `Launching` claim
-        // with no window. Without an expiry it holds a max-active slot
-        // forever. After claim_ttl_secs it must be released so the next scan
-        // can re-queue and relaunch the issue.
+    fn issue_5140_compatibility_launching_rows_use_the_windowless_deadline() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
@@ -20582,28 +21618,41 @@ mod tests {
             .is_some());
         assert_eq!(monitor.active_count(), 1);
 
-        // Restart (roundtrip) mid-launch: claim restored, still unbound.
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
-        restored.set_gui_connected(true);
-        assert_eq!(restored.active_count(), 1);
-
-        // Before the TTL: retained.
-        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:10:00Z");
-        assert!(expired.is_empty(), "not expired before claim_ttl_secs");
-        assert_eq!(restored.active_count(), 1);
-
-        // After the TTL (default 1800s): released and re-queueable.
-        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:31:00Z");
-        assert_eq!(expired, vec![42], "stale unbound claim expires");
-        assert_eq!(restored.active_count(), 0, "slot released");
-        scan_queued_candidates(&mut restored, &[issue(42)], "2026-07-02T00:31:10Z");
-        assert!(
-            restored
-                .next_launch_request("2026-07-02T00:31:20Z")
-                .is_some(),
-            "the issue is claimable again after expiry"
-        );
+        for anchor in [Some("2026-07-02T00:00:00Z"), None] {
+            let mut prefs = monitor.prefs();
+            assert!(prefs.pending_launch_deliveries.is_empty());
+            prefs.launching_issues[0].claimed_at = anchor.map(str::to_string);
+            let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            restored.record_candidate(issue(42));
+            assert!(restored
+                .expire_stale_unbound_launches("2026-07-02T00:00:00Z")
+                .is_empty());
+            assert!(restored
+                .expire_stale_unbound_launches("2026-07-02T00:01:59Z")
+                .is_empty());
+            let status = restored.agent_status_at("2026-07-02T00:02:00Z");
+            let reason = status.inbox[0]
+                .error_message
+                .as_deref()
+                .expect("legacy launch diagnostic");
+            assert!(reason.contains("120s") && reason.contains("42"), "{reason}");
+            assert_eq!(
+                restored.expire_stale_unbound_launches("2026-07-02T00:03:00Z"),
+                vec![42],
+            );
+            assert_eq!(restored.active_count(), 0, "slot released");
+            assert!(restored.prefs().launching_issues.is_empty());
+            assert_eq!(
+                restored.inbox_item(42).unwrap().state,
+                MonitorInboxState::LaunchFailed
+            );
+            let status = restored.agent_status_at("2026-07-02T00:03:00Z");
+            assert!(status.inbox[0]
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("180s"));
+        }
         // Bound launches never expire this way.
         monitor.complete_active_launch(42, "tab-1::agent-1");
         assert!(monitor
@@ -20611,11 +21660,146 @@ mod tests {
             .is_empty());
     }
 
-    /// Issue #3712 AC-2: a pending delivery is ACK-driven only while the
-    /// materializer that claimed it can still ACK. Once that process is gone
-    /// and the claim TTL has lapsed, the `launching` row is a slot leak (the
-    /// #4141 specimen held a slot for 27 hours with no window) and must return
-    /// to the queue exactly like an unbound claim does.
+    #[test]
+    fn issue_5140_windowless_deliveries_time_out_and_release_their_claim() {
+        for claimed in [false, true] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+            assert!(monitor.apply_confirmed_claim(
+                42,
+                "claim-42",
+                "host/session",
+                "effect-42",
+                "2026-07-02T00:00:00Z",
+            ));
+            if claimed {
+                assert!(monitor.claim_launch_delivery(
+                    42,
+                    "launch:effect-42",
+                    "gui-a",
+                    101,
+                    "tab-1::agent-42",
+                    |_| false,
+                ));
+            }
+            assert!(monitor
+                .expire_stale_unbound_launches_with("2026-07-02T00:01:59Z", |_| true)
+                .is_empty());
+            let status = monitor.agent_status_at("2026-07-02T00:02:00Z");
+            let stalled = status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .unwrap();
+            let reason = stalled
+                .error_message
+                .as_deref()
+                .expect("launch stall diagnostic");
+            assert!(reason.contains("120s"), "{reason}");
+            assert!(reason.contains("launch:effect-42"), "{reason}");
+            assert_eq!(
+                monitor.expire_stale_unbound_launches_with("2026-07-02T00:03:00Z", |_| true),
+                vec![42],
+            );
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::LaunchFailed
+            );
+            let failed = monitor.agent_status_at("2026-07-02T00:03:00Z");
+            let reason = failed.inbox[0].error_message.as_deref().unwrap();
+            assert!(reason.contains("180s"), "{reason}");
+            assert!(reason.contains("launch:effect-42"), "{reason}");
+            assert!(monitor.pending_effects().iter().any(|effect| matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                    if claim_id == "claim-42" && owner == "host/session"
+            )));
+            assert!(!monitor.claim_launch_delivery(
+                42,
+                "launch:effect-42",
+                "gui-a",
+                101,
+                "tab-1::agent-42",
+                |_| false,
+            ));
+            assert!(!monitor.complete_active_launch_delivery(
+                42,
+                "tab-1::agent-42",
+                Some("launch:effect-42"),
+            ));
+        }
+    }
+
+    #[test]
+    fn issue_5140_a_created_window_or_live_runtime_is_not_a_windowless_timeout() {
+        for window_created in [false, true] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+            assert!(monitor.apply_confirmed_claim(
+                42,
+                "claim-42",
+                "host/session",
+                "effect-42",
+                "2026-07-02T00:00:00Z",
+            ));
+            assert!(monitor.claim_launch_delivery(
+                42,
+                "launch:effect-42",
+                "gui-a",
+                101,
+                "tab-1::agent-42",
+                |_| false,
+            ));
+            if window_created {
+                assert!(monitor.mark_launch_delivery_materialized(
+                    42,
+                    "launch:effect-42",
+                    "gui-a",
+                    "tab-1::agent-42",
+                ));
+            } else {
+                monitor.record_monitor_runtime_counts(
+                    101,
+                    1001,
+                    BTreeMap::from([(42, 1)]),
+                    "2026-07-02T00:02:00Z",
+                );
+            }
+            assert!(monitor
+                .expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true)
+                .is_empty());
+            assert_eq!(monitor.active_count(), 1);
+            assert!(monitor.agent_status_at("2026-07-02T00:02:00Z").inbox[0]
+                .error_message
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn issue_5140_timeout_details_do_not_reset_autonomous_failure_escalation() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.autonomous_mode = true;
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        let max = monitor.autonomous_tuning.max_attempts;
+        monitor.autonomous_record_mut(42).attempts = max;
+        monitor.autonomous_record_mut(42).last_failure_message = Some(
+            "Launch timed out: no window was created within 120s; Launch stalled: no window for 120s (deadline 120s; delivery first)".to_string(),
+        );
+        monitor.record_launch_failed_at(
+            42,
+            "Launch timed out: no window was created within 120s; Launch stalled: no window for 180s (deadline 120s; delivery second)",
+            "2026-07-02T00:03:00Z",
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::NeedsHuman
+        );
+    }
+
+    /// Issue #3712 AC-2: an already-created window keeps the ACK-driven
+    /// contract until the materializer dies and the claim TTL has lapsed.
     #[test]
     fn a_pending_delivery_whose_materializer_died_expires_after_claim_ttl() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
@@ -20634,6 +21818,12 @@ mod tests {
             101,
             "tab-1::agent-42",
             |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
         ));
         assert_eq!(monitor.active_count(), 1);
 
@@ -20914,6 +22104,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -21463,6 +22654,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 5,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-42".to_string(),
@@ -21507,6 +22699,7 @@ mod tests {
         let disk = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 5,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             merged_issues: vec![42, 43, 44, 45, 88],
             autonomous_mode: true,
             ..IssueMonitorPrefs::default()
@@ -22732,6 +23925,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -22802,6 +23996,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 4,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -22830,6 +24025,7 @@ mod tests {
                 IssueMonitorPrefs {
                     enabled: true,
                     max_active_agents: 1,
+                    max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                     launch_profile: Some(test_launch_profile("codex")),
                     ..IssueMonitorPrefs::default()
                 },
@@ -22954,6 +24150,7 @@ mod tests {
     fn a_pool_gate_only_closes_when_every_provider_is_held() {
         let pool_prefs = |holds: BTreeMap<String, String>| {
             let mut prefs = IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 provider_quota_holds: holds,
                 ..IssueMonitorPrefs::default()
@@ -23025,6 +24222,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 3,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -23114,6 +24312,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
@@ -23174,6 +24373,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
@@ -23215,6 +24415,7 @@ mod tests {
         let mut held = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 provider_quota_holds: BTreeMap::from([(
@@ -23279,6 +24480,7 @@ mod tests {
         let mut prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 8,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             ..IssueMonitorPrefs::default()
         };
         prefs.set_launch_profile_pool(vec![
@@ -23518,6 +24720,7 @@ mod tests {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 autonomous_mode: true,
                 launch_profile: Some(test_launch_profile("ClaudeCode")),
@@ -23665,6 +24868,7 @@ mod tests {
         let mut base = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 launch_profile: Some(test_launch_profile("codex")),
                 provider_quota_holds: BTreeMap::from([(
@@ -23714,6 +24918,7 @@ mod tests {
         let mut no_profile = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 provider_quota_holds: BTreeMap::from([(
                     "codex".to_string(),
@@ -23750,6 +24955,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 8,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -23872,6 +25078,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 8,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -23963,6 +25170,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 4,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -24200,6 +25408,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 launch_profile: Some(test_launch_profile("codex")),
                 ..IssueMonitorPrefs::default()
             },
@@ -24700,6 +25909,7 @@ mod tests {
         let prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 5,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: (1..=11)
                 .map(|issue_number| IssueMonitorLaunchedIssue {
                     issue_number,
@@ -24751,6 +25961,7 @@ mod tests {
         let prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
             launched_issues: (1..=4)
                 .map(|issue_number| IssueMonitorLaunchedIssue {
                     issue_number,
@@ -24818,6 +26029,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: bindings.len(),
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -25098,8 +26310,21 @@ mod tests {
         );
         assert_eq!(
             monitor.active_count(),
+            2,
+            "AC-8: the retained duplicate and the working pane both occupy the canvas"
+        );
+        monitor.record_window_snapshot(pane_snapshot(
+            &observed_at,
+            vec![live_pane_observation(
+                "tab-1::agent-1343",
+                4777,
+                WindowState::Running,
+            )],
+        ));
+        assert_eq!(
+            monitor.active_count(),
             1,
-            "AC-4: the slot stays held while that window works, so nothing relaunches over it"
+            "closing the duplicate frees its slot"
         );
     }
 
@@ -30114,6 +31339,509 @@ mod tests {
     }
 
     #[test]
+    fn monitor_unbound_live_pane_stops_relaunch_across_two_scans() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-10-06T00:00:00Z");
+        let mut launches = usize::from(
+            monitor
+                .next_launch_request("2026-10-06T00:00:01Z")
+                .is_some(),
+        );
+        // Reproduce a pane that survived loss of every launch/claim/binding projection.
+        monitor.clear_active_tracking(42);
+        monitor.set_inbox_state(42, MonitorInboxState::Queued);
+        for now in ["2026-10-06T00:01:00Z", "2026-10-06T00:02:00Z"] {
+            monitor.record_window_snapshot(IssueMonitorWindowSnapshot {
+                project_tab_id: "tab-1".to_string(),
+                observed_at: now.to_string(),
+                windows: vec![IssueMonitorWindowObservation {
+                    monitor_owned: true,
+                    window_id: "tab-1::agent-42".to_string(),
+                    issue_number: Some(42),
+                    status: WindowState::Idle,
+                    review_dispatch: false,
+                    hold_reason: None,
+                    last_output_at: None,
+                }],
+            });
+            scan_queued_candidates(&mut monitor, &[issue(42)], now);
+            launches += usize::from(monitor.next_launch_request(now).is_some());
+        }
+        assert_eq!(
+            launches, 1,
+            "an unbound live pane must never trigger a second launch"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::NeedsHuman
+        );
+        assert_eq!(
+            monitor
+                .agent_status_at("2026-10-06T00:02:00Z")
+                .occupied_slot_count,
+            Some(1)
+        );
+        assert!(monitor.prefs().failed_issues[0].message.contains("unbound"));
+    }
+
+    #[test]
+    fn monitor_canvas_counts_untracked_panes_without_double_counting_census() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(44)], "2026-10-06T00:00:00Z");
+        monitor.record_window_snapshot(IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: "2026-10-06T00:00:01Z".to_string(),
+            windows: [
+                ("agent-a", WindowState::Running),
+                ("agent-b", WindowState::Error),
+                ("agent-c", WindowState::Stopped),
+            ]
+            .into_iter()
+            .map(|(id, status)| IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: format!("tab-1::{id}"),
+                issue_number: Some(42),
+                status,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+            })
+            .collect(),
+        });
+        assert_eq!(
+            monitor.active_count(),
+            3,
+            "retained Error/Stopped panes still occupy the canvas"
+        );
+        assert!(monitor
+            .next_launch_request("2026-10-06T00:00:01Z")
+            .is_none());
+        monitor.record_monitor_runtime_counts(
+            101,
+            1001,
+            BTreeMap::from([(42, 2)]),
+            "2026-10-06T00:00:02Z",
+        );
+        assert_eq!(
+            monitor.active_count(),
+            3,
+            "canvas and PTY census describe the same panes"
+        );
+    }
+
+    #[test]
+    fn monitor_delivery_rechecks_lowered_max_active_before_materialization() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        scan_queued_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-10-06T00:00:00Z",
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        assert!(monitor.apply_confirmed_claim(
+            43,
+            "claim-43",
+            "host/session",
+            "effect-43",
+            "2026-10-06T00:00:01Z"
+        ));
+        assert!(monitor.claim_launch_delivery(
+            43,
+            "launch:effect-43",
+            "gui-a",
+            101,
+            "tab-1::agent-43",
+            |_| false
+        ));
+        monitor.set_max_active_agents(1);
+        assert!(
+            !monitor.claim_launch_delivery(
+                43,
+                "launch:effect-43",
+                "gui-a",
+                101,
+                "tab-1::agent-43",
+                |_| true
+            ),
+            "an already-issued/claimed delivery cannot bypass a lowered cap"
+        );
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries.len(),
+            1,
+            "capacity wait preserves the exact delivery"
+        );
+        monitor.set_max_active_agents(2);
+        assert!(
+            monitor.claim_launch_delivery(
+                43,
+                "launch:effect-43",
+                "gui-a",
+                101,
+                "tab-1::agent-43",
+                |_| true
+            ),
+            "the reserved slot is not counted twice"
+        );
+    }
+
+    #[test]
+    fn monitor_census_canvas_merge_keeps_distinct_host_same_issue_panes() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_monitor_runtime_counts(
+            101,
+            1001,
+            BTreeMap::from([(42, 1)]),
+            "2026-10-06T00:00:00Z",
+        );
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-10-06T00:00:01Z",
+            vec![live_pane_observation(
+                "tab-1::retained",
+                42,
+                WindowState::Error,
+            )],
+        ));
+        let mut state = serde_json::to_value(&monitor).unwrap();
+        state["monitor_runtime_counts"]["101:1001"]["windows"] =
+            serde_json::json!({"tab-1::retained": 42});
+        state["window_snapshot_host"] = serde_json::json!([101, 1001]);
+        let same_host: IssueMonitorState = serde_json::from_value(state.clone()).unwrap();
+        assert_eq!(
+            same_host.active_count(),
+            1,
+            "the same exact pane has one slot"
+        );
+        state["window_snapshot_host"] = serde_json::json!([202, 2002]);
+        let mut monitor: IssueMonitorState = serde_json::from_value(state).unwrap();
+        assert_eq!(
+            monitor.active_count(),
+            2,
+            "equal pane ids on distinct hosts are distinct occupants"
+        );
+        monitor.record_monitor_runtime_counts(101, 1001, BTreeMap::new(), "2026-10-06T00:00:02Z");
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "a host census releases only its own pane"
+        );
+    }
+
+    #[test]
+    fn monitor_pending_reservation_does_not_replace_a_retained_same_issue_pane() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-10-06T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim",
+            "owner",
+            "effect",
+            "2026-10-06T00:00:00Z"
+        ));
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-10-06T00:00:01Z",
+            vec![live_pane_observation("tab-1::old", 42, WindowState::Error)],
+        ));
+        monitor.set_max_active_agents(1);
+        assert_eq!(
+            monitor.active_count(),
+            2,
+            "the reservation is for a new pane"
+        );
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "gui",
+            101,
+            "tab-1::new",
+            |_| false
+        ));
+        monitor.set_max_active_agents(3);
+        assert!(
+            !monitor
+                .claim_launch_delivery(42, "launch:effect", "gui", 101, "tab-1::new", |_| false),
+            "headroom must not create another implementation over a retained same-Issue pane"
+        );
+    }
+
+    #[test]
+    fn monitor_review_budget_adds_foreign_ledger_and_local_retained_pane() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.review_windows.insert(
+            41,
+            IssueMonitorReviewWindow {
+                issue_number: 41,
+                pr_number: 410,
+                dispatched_at: "2026-10-06T00:00:00Z".to_string(),
+                window_id: Some("tab-2::review".to_string()),
+            },
+        );
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-10-06T00:00:01Z",
+            vec![IssueMonitorWindowObservation {
+                review_dispatch: true,
+                ..live_pane_observation("tab-1::retained-review", 42, WindowState::Stopped)
+            }],
+        ));
+        assert_eq!(
+            monitor.occupied_slot_count(),
+            2,
+            "the observations describe distinct reviews"
+        );
+    }
+
+    #[test]
+    fn monitor_snapshot_first_intake_parks_unbound_live_pane() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-10-06T00:00:00Z",
+            vec![live_pane_observation(
+                "tab-1::orphan",
+                42,
+                WindowState::Running,
+            )],
+        ));
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-10-06T00:00:01Z");
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+    }
+
+    #[test]
+    fn monitor_materialized_delivery_replays_ack_above_lowered_cap() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        scan_queued_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-10-06T00:00:00Z",
+        );
+        for number in [42, 43] {
+            assert!(monitor.apply_confirmed_claim(
+                number,
+                format!("claim-{number}"),
+                "owner",
+                &format!("effect-{number}"),
+                "2026-10-06T00:00:00Z"
+            ));
+        }
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui",
+            101,
+            "tab-1::existing",
+            |_| false
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui",
+            "tab-1::existing"
+        ));
+        monitor.set_max_active_agents(1);
+        assert_eq!(
+            monitor
+                .take_pending_launch_requests()
+                .iter()
+                .map(|request| request.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn monitor_known_local_tabs_count_retained_panes_and_park_new_candidates() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-10-06T00:00:00Z",
+            vec![
+                live_pane_observation("tab-1::error", 42, WindowState::Error),
+                live_pane_observation("tab-2::stopped", 43, WindowState::Stopped),
+                live_pane_observation("tab-2::bootstrap", 44, WindowState::Starting),
+                live_pane_observation("tab-3::foreign", 45, WindowState::Error),
+            ],
+        ));
+        let mut state = serde_json::to_value(&monitor).unwrap();
+        let anchor_only: IssueMonitorState = serde_json::from_value(state.clone()).unwrap();
+        assert_eq!(
+            anchor_only.active_count(),
+            1,
+            "legacy observations retain anchor-only scope"
+        );
+        state["window_snapshot_tabs"] = serde_json::json!(["tab-1", "tab-2"]);
+        let known_tabs: IssueMonitorState = serde_json::from_value(state.clone()).unwrap();
+        assert_eq!(
+            known_tabs.active_count(),
+            3,
+            "positive local tab scope survives unknown host identity"
+        );
+        state["window_snapshot_host"] = serde_json::json!([101, 1001]);
+        let mut monitor: IssueMonitorState = serde_json::from_value(state).unwrap();
+        assert_eq!(
+            monitor.active_count(),
+            3,
+            "known local tabs share one Monitor budget"
+        );
+        scan_queued_candidates(&mut monitor, &[issue(44)], "2026-10-06T00:00:01Z");
+        assert_eq!(
+            monitor.inbox_item(44).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+    }
+
+    #[test]
+    fn monitor_dead_materializer_reacks_exact_existing_pane_at_cap() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-10-06T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim",
+            "owner",
+            "effect",
+            "2026-10-06T00:00:00Z"
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect",
+            "old-gui",
+            101,
+            "tab-1::existing",
+            |_| false
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect",
+            "old-gui",
+            "tab-1::existing"
+        ));
+        monitor.record_window_snapshot_from_host(
+            pane_snapshot(
+                "2026-10-06T00:00:01Z",
+                vec![live_pane_observation(
+                    "tab-1::existing",
+                    42,
+                    WindowState::Idle,
+                )],
+            ),
+            202,
+            2002,
+            BTreeSet::from(["tab-1".to_string()]),
+        );
+        assert!(
+            !monitor.claim_launch_delivery(
+                42,
+                "launch:effect",
+                "new-gui",
+                202,
+                "tab-1::existing",
+                |pid| pid == 101
+            ),
+            "a live foreign materializer remains authoritative"
+        );
+        assert!(
+            monitor.claim_launch_delivery(
+                42,
+                "launch:effect",
+                "new-gui",
+                202,
+                "tab-1::existing",
+                |_| false
+            ),
+            "a dead owner cannot prevent ACKing the exact existing pane"
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect",
+            "new-gui",
+            "tab-1::existing"
+        ));
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect",
+            "new-gui",
+            "tab-1::existing"
+        ));
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::existing",
+            Some("launch:effect")
+        ));
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
+    fn monitor_first_materializer_claim_adopts_exact_existing_pane_at_cap() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-10-06T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim",
+            "owner",
+            "effect",
+            "2026-10-06T00:00:00Z"
+        ));
+        monitor.record_window_snapshot_from_host(
+            pane_snapshot(
+                "2026-10-06T00:00:01Z",
+                vec![live_pane_observation(
+                    "tab-1::existing",
+                    42,
+                    WindowState::Running,
+                )],
+            ),
+            101,
+            1001,
+            BTreeSet::from(["tab-1".to_string()]),
+        );
+        assert_eq!(
+            monitor.active_count(),
+            2,
+            "the unassigned reservation has not adopted the pane"
+        );
+        monitor.set_max_active_agents(3);
+        assert!(
+            !monitor
+                .claim_launch_delivery(42, "launch:effect", "gui", 101, "tab-1::new", |_| false),
+            "headroom must not permit a second pane while binding is missing"
+        );
+        monitor.set_max_active_agents(1);
+        assert!(
+            monitor.claim_launch_delivery(
+                42,
+                "launch:effect",
+                "gui",
+                101,
+                "tab-1::existing",
+                |_| false
+            ),
+            "claiming the existing pane adds no slot"
+        );
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
     fn runtime_process_counts_include_duplicates_and_untracked_launches_in_admission() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
@@ -30397,9 +32125,9 @@ mod tests {
         );
         assert!(
             restored
-                .expire_stale_unbound_launches("2026-07-28T01:00:00Z")
+                .expire_stale_unbound_launches("2026-07-28T00:01:59Z")
                 .is_empty(),
-            "a durable delivery is ACK-driven, not TTL-expired"
+            "a durable delivery remains replayable before the window creation deadline"
         );
     }
 
@@ -30537,7 +32265,8 @@ mod tests {
     fn matching_launch_ack_consumes_only_its_delivery_and_legacy_ack_consumes_none() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
-            max_active: 2,
+            // The legacy ACK retains its pane while the new delivery claims another.
+            max_active: 3,
             ..IssueMonitorConfig::default()
         });
         monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
@@ -30771,6 +32500,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -30815,6 +32545,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -30863,6 +32594,7 @@ mod tests {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -30954,6 +32686,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -31028,6 +32761,7 @@ mod tests {
                 ..IssueMonitorConfig::default()
             },
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
             },
@@ -32990,7 +34724,15 @@ mod tests {
             ),
             "{recovered:?}"
         );
-        assert_eq!(monitor.active_count(), 0, "the slot is released");
+        assert!(
+            !monitor.active_launches.contains(&42),
+            "the launch is released"
+        );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the pane counts until its close lands"
+        );
         assert_eq!(monitor.autonomous_record(42).unwrap().non_agent_attempts, 1);
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
@@ -33026,6 +34768,8 @@ mod tests {
                 .is_some_and(|message| message.contains("stalled mid-work")),
             "the queued row keeps the reason past the next scan"
         );
+        monitor.record_window_snapshot(pane_snapshot("2026-06-29T01:00:01Z", Vec::new()));
+        assert_eq!(monitor.active_count(), 0, "the closed pane frees its slot");
     }
 
     #[test]
@@ -33082,6 +34826,13 @@ mod tests {
         );
         assert!(!last_error.contains("stalled mid-work"), "{last_error}");
         assert!(last_error.contains(hold), "{last_error}");
+        assert!(!monitor.active_launches.contains(&42));
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the retained pane still occupies a slot"
+        );
+        monitor.record_window_snapshot(pane_snapshot("2026-06-26T04:42:01Z", Vec::new()));
         assert_eq!(monitor.active_count(), 0);
     }
 
@@ -36278,6 +38029,8 @@ mod tests {
                  to purchase more credits or try again at Sep 7th, 2026 12:58 PM."
                     .to_string(),
             ),
+            screen_region: None,
+            matched_pattern: None,
             account_id: None,
             poller_observed_at: None,
             poller_state: Some("ok".to_string()),
@@ -37547,6 +39300,12 @@ mod tests {
                 monitor.reconcile_idle_windows(&settlements(&[(number, settlement)]), IDLE_NOW);
             assert_eq!(outcome.pane_closes, vec!["tab-1::finished"]);
             assert!(outcome.requeued.is_empty());
+            assert_eq!(
+                monitor.active_count(),
+                1,
+                "the close is still pending on the canvas"
+            );
+            monitor.record_window_snapshot(idle_snapshot("2026-09-07T04:00:01Z", Vec::new()));
             assert_eq!(monitor.active_count(), 0);
         }
     }
@@ -37572,12 +39331,20 @@ mod tests {
             IDLE_NOW,
         );
         assert_eq!(outcome.pane_closes, vec!["tab-1::old"]);
-        assert_eq!(monitor.active_issue_numbers(), vec![42]);
+        assert_eq!(monitor.active_issue_numbers(), vec![42, 42]);
         assert_eq!(
             monitor.launched_window_id(42).as_deref(),
             Some("tab-1::successor")
         );
         assert!(outcome.released.is_empty());
+        monitor.record_window_snapshot(idle_snapshot(
+            "2026-09-07T04:00:01Z",
+            vec![
+                idle_observation("tab-1::successor", Some(42), WindowState::Running, false),
+                idle_observation("tab-1::manual-error", Some(42), WindowState::Error, false),
+            ],
+        ));
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
     }
 
     #[test]
@@ -37606,8 +39373,8 @@ mod tests {
         assert_eq!(monitor.active_issue_numbers(), vec![42]);
     }
 
-    /// SPEC #3590 FR-003: only a live launch occupies a slot. A bound pane in
-    /// Error is `Terminal` in the row's own runtime consistency, yet a PTY
+    /// Legacy snapshots without Monitor provenance count only the live launch.
+    /// A bound pane in Error is `Terminal` in the row's runtime consistency, yet a PTY
     /// reader failure reports it without a confirmed exit, so no
     /// `agent_failed` ever arrives. The slot is returned in either Monitor
     /// mode; the pane stays on screen as the diagnostic it is.
@@ -37871,6 +39638,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -37957,6 +39725,7 @@ mod tests {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 autonomous_mode: true,
                 ..IssueMonitorPrefs::default()
@@ -38004,6 +39773,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -38054,6 +39824,7 @@ mod tests {
             IssueMonitorPrefs {
                 enabled: true,
                 max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -38256,7 +40027,7 @@ mod tests {
             .is_empty());
         assert_eq!(monitor.active_count(), 1);
 
-        // The pane ended: the existing re-queue path runs.
+        // The pane ended: the existing re-queue path runs, but the pane remains.
         monitor.record_window_snapshot(pane_snapshot(
             "2026-10-01T13:00:20Z",
             vec![live_pane_observation(
@@ -38269,7 +40040,12 @@ mod tests {
             monitor.reconcile_merged_branches_at(&merged, "2026-10-01T13:00:30Z"),
             vec![4740]
         );
-        assert_eq!(monitor.active_count(), 0, "a finished pane frees the slot");
+        assert!(!monitor.active_launches.contains(&4740));
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the retained finished pane occupies a slot"
+        );
         assert_eq!(
             monitor.inbox_item(4740).map(|item| item.state),
             Some(MonitorInboxState::Queued)
@@ -38278,17 +40054,24 @@ mod tests {
             .prefs()
             .queued_launch_session_strategies
             .contains_key(&4740));
+        monitor.record_window_snapshot(pane_snapshot("2026-10-01T13:00:31Z", Vec::new()));
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "removing the finished pane frees its slot"
+        );
     }
 
     /// Issue #4852 AC-3 (negative half): with no pane on a fresh snapshot, or
     /// no snapshot at all, the merge re-queues exactly as before.
     #[test]
     fn issue_4852_a_merge_without_a_live_pane_requeues() {
-        let cases: Vec<(&str, Option<IssueMonitorWindowSnapshot>)> = vec![
-            ("no snapshot", None),
+        let cases: Vec<(&str, Option<IssueMonitorWindowSnapshot>, usize)> = vec![
+            ("no snapshot", None, 0),
             (
                 "pane missing",
                 Some(pane_snapshot("2026-10-01T12:00:20Z", Vec::new())),
+                0,
             ),
             (
                 "stale snapshot",
@@ -38300,6 +40083,7 @@ mod tests {
                         WindowState::Running,
                     )],
                 )),
+                1,
             ),
             (
                 "another tab's pane",
@@ -38311,9 +40095,10 @@ mod tests {
                         WindowState::Running,
                     )],
                 )),
+                0,
             ),
         ];
-        for (label, snapshot) in cases {
+        for (label, snapshot, retained_panes) in cases {
             let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
             scan_queued_candidates(&mut monitor, &[issue(4740)], "2026-10-01T10:00:00Z");
             monitor.set_gui_connected(true);
@@ -38332,13 +40117,20 @@ mod tests {
             assert_eq!(
                 monitor.reconcile_merged_branches_at(&merged, "2026-10-01T12:00:30Z"),
                 vec![4740],
-                "{label}: nothing live keeps the slot"
+                "{label}: no live pane keeps the launch"
             );
-            assert_eq!(monitor.active_count(), 0, "{label}");
+            assert!(!monitor.active_launches.contains(&4740), "{label}");
+            assert_eq!(monitor.active_count(), retained_panes, "{label}");
             assert_eq!(
                 monitor.inbox_item(4740).map(|item| item.state),
                 Some(MonitorInboxState::Queued),
                 "{label}"
+            );
+            monitor.record_window_snapshot(pane_snapshot("2026-10-01T12:00:31Z", Vec::new()));
+            assert_eq!(
+                monitor.active_count(),
+                0,
+                "{label}: the empty canvas frees its slot"
             );
         }
     }

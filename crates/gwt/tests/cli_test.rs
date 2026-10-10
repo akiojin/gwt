@@ -11,7 +11,6 @@ use gwt_github::{
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     Cache, SectionName,
 };
-use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
 fn s(v: &str) -> String {
@@ -22,9 +21,8 @@ fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(std::string::ToString::to_string).collect()
 }
 
-fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -489,11 +487,72 @@ fn red_104b_parse_pr_edit() {
         cmd,
         CliCommand::Pr(PrCommand::Edit {
             number: 42,
+            base: None,
             title: Some("feat(hooks): updated title".into()),
             file: Some("/tmp/pr-body.md".into()),
             add_labels: vec!["release".into()],
         })
     );
+}
+
+#[test]
+fn issue_3693_pr_recovery_argv_accepts_base_only_edit_and_close() {
+    assert!(parse_pr_args(&argv(&["edit", "42", "--base", "develop"])).is_ok());
+    assert!(parse_pr_args(&argv(&["close", "42"])).is_ok());
+    assert!(parse_pr_args(&argv(&["close", "42", "--comment", "Wrong base"])).is_ok());
+    assert!(parse_pr_args(&argv(&["edit", "42", "--base", ""])).is_err());
+    assert!(parse_pr_args(&argv(&["close", "42", "--comment"])).is_err());
+}
+
+#[test]
+fn issue_3693_json_recovery_retargets_and_closes_wrong_base_pr() {
+    let _lock = env_test_lock();
+    let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_pr(
+        42,
+        PrStatus {
+            head_ref_name: "work/issue-3693".into(),
+            check_counts: None,
+            number: 42,
+            title: "Wrong base PR".into(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://example.com/pr/42".into(),
+            created_at: None,
+            ci_status: "FAILURE".into(),
+            mergeable: "MERGEABLE".into(),
+            merge_state_status: "BLOCKED".into(),
+            review_status: "UNKNOWN".into(),
+        },
+    );
+    env.stdin = serde_json::json!({
+        "schema_version": 1, "operation": "pr.edit",
+        "params": {"number": 42, "base": "develop"}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &argv(&["gwtd"])), 0, "{:?}", env.stderr);
+    assert_eq!(env.pr_edit_call_log.len(), 1);
+    assert_eq!(env.pr_edit_call_log[0].base.as_deref(), Some("develop"));
+
+    env.stdout.clear();
+    env.stdin = serde_json::json!({
+        "schema_version": 1, "operation": "pr.close",
+        "params": {"number": 42, "comment": "Replaced after correcting the base"}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &argv(&["gwtd"])), 0, "{:?}", env.stderr);
+    assert_eq!(
+        gwt::cli::CliEnv::fetch_pr(&mut env, 42).unwrap().state,
+        gwt_git::pr_status::PrState::Closed
+    );
+    assert_eq!(
+        env.pr_comments,
+        vec![(42, "Replaced after correcting the base".into())]
+    );
+    let response: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    assert_eq!(response["ok"], true);
+    assert!(response["output"].as_str().unwrap().contains("[CLOSED]"));
 }
 
 #[test]
@@ -1453,6 +1512,7 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
         env.pr_edit_call_log,
         vec![PrEditCall {
             number: 42,
+            base: None,
             title: Some("Updated PR".to_string()),
             body: Some("## Summary\n\nUpdated".to_string()),
             add_labels: vec!["release".to_string()],
@@ -1667,6 +1727,8 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
             ci_status: "FAILURE".to_string(),
             merge_status: "BEHIND".to_string(),
             review_status: "CHANGES_REQUESTED".to_string(),
+            check_counts: None,
+            required_pending_count: None,
             checks: vec![PrCheckItem {
                 name: "test".to_string(),
                 state: "COMPLETED".to_string(),
@@ -1675,6 +1737,7 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
                 started_at: "2026-04-10T00:00:00Z".to_string(),
                 completed_at: "2026-04-10T00:01:00Z".to_string(),
                 workflow: "CI".to_string(),
+                is_required: None,
             }],
         },
     );

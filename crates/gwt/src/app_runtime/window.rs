@@ -697,6 +697,7 @@ impl AppRuntime {
             };
         }
         // Issue #4084: the review-dispatch marker dies with its window.
+        self.invalidate_workspace_projection_patch(&context.tab_id);
         self.issue_monitor_review_dispatch_windows.remove(id);
         // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
         // in-flight restore marker must not outlive its window.

@@ -1,4 +1,5 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
+import { markdownContent, renderUiContent } from "/ui-content.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -173,7 +174,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
-      import { createPmChat } from "/pm-chat.js";
+      import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -1405,7 +1406,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         for (const [windowId, view] of pmChatViews) {
           view.pendingSessions.length = 0;
           view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
-          view.controller.update({ availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." });
+          applyPmWindowReceiveEvent({ kind: "pm_conversation", id: windowId, session_id: view.sessionId,
+            snapshot: { availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." } });
         }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
@@ -4780,6 +4782,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       // sites, wired through this factory.
       const {
         issueContextForNumber,
+        issueMonitorModel,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
@@ -4794,6 +4797,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
+        applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
       } = createKnowledgeKanbanSurface({
@@ -4854,6 +4858,10 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         reportSurfaceError: (error) => notificationCenter.recordError(error),
         resolveSurfaceError: (key) => notificationCenter.resolveError(key),
       });
+      issueMonitorModel.subscribe(model => model.status, status =>
+        window.__operatorShell?.applyIssueMonitorStatus?.(status));
+      issueMonitorModel.subscribe(model => model.status, status =>
+        updateCtaController.handleIssueMonitorStatus(status));
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
       // state maps, Work-id tracking for the Board Work filter, board chat
@@ -5035,15 +5043,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
-        const node = createNode("div", `${className} knowledge-markdown-body`);
-        const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
-        if (html) {
-          node.innerHTML = html;
-        } else {
-          node.classList.add("is-plaintext");
-          node.textContent = section?.body || "";
-        }
-        return node;
+        return renderUiContent(document, markdownContent(section), className);
       }
 
       // SPEC-2359 US-42 — Workspace Resume Picker controller. The
@@ -5380,10 +5380,24 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
       }
 
       const pmChatViews = new Map();
+      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const renderedTerminalPackets = new Map();
+      subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
+        if (!state) return;
+        const packet = state.terminal;
+        if (packet && renderedTerminalPackets.get(state.windowId) !== packet) {
+          if (packet.kind === "terminal_snapshot") frontendUnits.terminalHost.replaceTerminalSnapshot(state.windowId, packet.dataBase64);
+          else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
+          renderedTerminalPackets.set(state.windowId, packet);
+        }
+        const view = pmChatViews.get(state.windowId);
+        if (view) view.logHost.dataset.stateVersion = String(state.revision);
+      });
 
       function disposePmChat(windowId) {
         const view = pmChatViews.get(windowId);
         if (!view) return;
+        view.unsubscribe();
         view.controller.dispose();
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
@@ -5403,7 +5417,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
         if (view) {
           if (view.sessionId !== windowData.session_id) {
             view.sessionId = windowData.session_id;
-            view.controller.setSession(windowData.session_id);
+            bindPmWindowState(windowData.id, windowData.session_id);
             requestVisiblePmConversations();
           }
           return;
@@ -5437,6 +5451,11 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
           },
         });
         pmChatViews.set(windowData.id, view);
+        bindPmWindowState(windowData.id, windowData.session_id);
+        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
+          view.controller.update(state);
+          if (state) view.logHost.dataset.stateVersion = String(state.revision);
+        });
         requestVisiblePmConversations();
       }
 
@@ -6066,6 +6085,8 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
                   const element = windowMap.get(windowId);
                   if (!element) return;
                   disposePmChat(windowId);
+                  removePmWindowState(windowId);
+                  renderedTerminalPackets.delete(windowId);
                   const runtime = terminalMap.get(windowId);
                   if (runtime && runtime.activationFrame !== null) {
                     cancelAnimationFrame(runtime.activationFrame);
@@ -6425,8 +6446,7 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
           case "pm_conversation": {
-            const view = pmChatViews.get(event.id);
-            if (view && event.session_id === view.sessionId) view.controller.update(event.snapshot);
+            applyPmWindowReceiveEvent(event);
             break;
           }
           case "pane_send_result": {
@@ -6451,14 +6471,13 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
-            window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
             // Issue #3906 AC-12: the update CTA shows the drain progress.
-            updateCtaController.handleIssueMonitorStatus(event.status || {});
             break;
           case "issue_monitor_allowed_labels_write_failed":
             applyKnowledgeReceiveEvent(event);
             break;
           case "issue_monitor_inbox":
+            applyKnowledgeIssueMonitorInbox(event.items);
             scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_launch_failed":
@@ -6486,10 +6505,10 @@ import { createCloseProjectController } from "/close-project-confirm-modal.js";
             break;
           }
           case "terminal_output":
-            frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_snapshot":
-            frontendUnits.terminalHost.replaceTerminalSnapshot(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
             frontendUnits.terminalHost.applyStatus(

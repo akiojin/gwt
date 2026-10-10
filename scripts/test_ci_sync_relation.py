@@ -87,6 +87,15 @@ class SyncRelationTests(unittest.TestCase):
         self.assertIs(result["base_only"], False)
         self.assertEqual(result["product_commits"], [self.git("rev-parse", "HEAD")])
 
+    def test_develop_push_starts_ci_from_its_own_commit_range(self):
+        self.commit("feature.txt", "merged source\n")
+        head = self.git("rev-parse", "HEAD")
+        event = {"ref": "refs/heads/develop", "before": self.before, "after": head}
+        result = ci_sync_relation.event_relation(self.repo, event)
+        self.assertEqual(result["head"], head)
+        self.assertIs(result["base_only"], False)
+        self.assertEqual(result["classification"], "initial")
+
     def test_base_sync_cannot_hide_a_product_push_whose_classifier_was_cancelled(self):
         self.commit("feature.txt", "actual push\n")
         pushed = self.git("rev-parse", "HEAD")

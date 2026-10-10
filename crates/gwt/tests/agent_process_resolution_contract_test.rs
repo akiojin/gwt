@@ -405,7 +405,7 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
         "node scripts/ci-windows-tests.mjs run gwt bin gwt real_bun_global_placeholder_fixture",
         "node scripts/ci-windows-tests.mjs run gwt bin gwt command_prompt_agent_wrapper",
         "node scripts/ci-windows-tests.mjs run gwt-terminal lib gwt_terminal pty::windows_spawn::tests",
-        "node scripts/ci-windows-tests.mjs run gwt test agent_process_resolution_contract_test",
+        "node scripts/ci-windows-tests.mjs run gwt test runtime_tests agent_process_resolution_contract_test::",
     ] {
         assert!(
             workflow.contains(command),
@@ -487,8 +487,8 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
         "node scripts/ci-windows-tests.mjs run gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
         "node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
         "node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_scan_now_ -- --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
+        "node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1",
     ] {
         assert!(
             command_lines.contains(&command),
@@ -518,5 +518,11 @@ fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
             step.contains("\n        shell: bash\n"),
             "Windows multi-command step `{step_name}` must stop at the first failed test command"
         );
+        if step_name == "Run Issue Monitor scheduled driver contracts" {
+            assert!(
+                step.lines().any(|line| line.trim() == "node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1"),
+                "Windows CI must exercise the non-Unix initial Auto-capacity admission regression"
+            );
+        }
     }
 }

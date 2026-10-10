@@ -681,6 +681,11 @@ impl WindowsRealGwtFixture {
             + "/ws"
     }
 
+    /// The exact child owned by this fixture, for cleanup assertions.
+    pub fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running gwt child").id()
+    }
+
     pub fn stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_path)
             .unwrap_or_else(|error| format!("<unreadable: {error}>"))
@@ -885,8 +890,10 @@ const hookSpawnOptions = {{\n\
 // Windows) — running it through cmd.exe here is what let a Windows-only\n\
 // PowerShell hook command pass this boundary while it was silently dead in\n\
 // production. Codex keeps the native shell (Issue #3810).\n\
+// Issue #5102: PATH's bash can be WSL, which drops Windows launch identity.\n\
+const claudeShell = process.env.CLAUDE_CODE_GIT_BASH_PATH || path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe');\n\
 const hook = packageName === '@anthropic-ai/claude-code'\n\
-  ? childProcess.spawnSync('bash', ['-c', hookCommand], hookSpawnOptions)\n\
+  ? childProcess.spawnSync(claudeShell, ['-c', hookCommand], hookSpawnOptions)\n\
   : childProcess.spawnSync(hookCommand, [], Object.assign({{ shell: true }}, hookSpawnOptions));\n\
 const receipt = {{\n\
   argv: process.argv.slice(2),\n\

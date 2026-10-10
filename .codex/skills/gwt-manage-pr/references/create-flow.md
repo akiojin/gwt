@@ -25,11 +25,28 @@
 - Run `git rev-list --left-right --count "HEAD...origin/$base"`.
 - Parse the result as `ahead behind`.
 - If `behind == 0`, continue.
-- If `behind > 0`, merge `origin/$base` into the current branch before PR creation.
-- The update strategy is always `git merge origin/$base`; do not use rebase.
-- After merge, push the branch so the PR branch and worktree stay aligned.
-- If merge conflicts occur, inspect carefully, resolve only when coherent, and continue.
-- If you cannot resolve with high confidence, stop and ask the user.
+- If `behind > 0`, do **not** merge just because the base advanced. Merging
+  moves HEAD, which voids the canonical verification record and forces the
+  whole matrix to run again for a base advance that did not touch this work.
+  Probe for a textual conflict without touching the worktree:
+  `git merge-tree --write-tree HEAD "origin/$base"`.
+  - Exit status `0` (no conflict): keep the verified HEAD and create the PR
+    behind the base. `pr.create` gates on the HEAD + diff fingerprint, not on
+    the base, so the existing record stays fresh. Synchronize after creation:
+    when the base's branch protection is strict (or strict is unknown), run
+    JSON operation `pr.update_branch`; required CI then validates the merged
+    head. When strict is `false`, leave the PR `BEHIND`; post-merge CI on the
+    base covers it.
+  - Exit status `1` (conflict): merge with `git merge "origin/$base"` (never
+    rebase), resolve only when coherent, push, then re-run the canonical
+    matrix (`verify.plan` → `verify.run`) before PR creation. If you cannot
+    resolve with high confidence, stop and ask the user.
+  - Any other exit status (for example a Git too old for `--write-tree`):
+    fall back to the conflict path.
+- Local re-verification is skipped only on that conflict-free result. No
+  file-overlap heuristic is used; semantic breakage across non-conflicting
+  changes is caught by required CI after `pr.update_branch` or by post-merge
+  CI.
 
 ## Step 5: Check existing PR for head branch
 
@@ -42,7 +59,7 @@
 ### Decision rules
 
 1. **Do not create or switch branches.** Always use the current branch as head.
-2. **Only `develop` may target `main`.** Refuse any other branch targeting `main`.
+2. **`main` accepts `develop` or validated `release/vX.Y.Z` snapshots.** A same-repository snapshot must match its merge base's source tree on `develop`, as proven by required `check-source-branch`. Refuse other sources. Prepare Release owns snapshot creation; never create or advance release branches locally.
 3. **No PR exists** --> create a new PR.
 4. **Open unmerged PR exists and merge state is clean** --> push only (do not create a new PR). Only update title/body/labels if explicitly requested.
 5. **Open unmerged PR exists and mergeable is `CONFLICTING` / `DIRTY` / `BEHIND`** --> switch to fix mode before push-only.
@@ -180,9 +197,14 @@ divergence=$(git rev-list --left-right --count "HEAD...origin/$base" 2>/dev/null
 }
 behind_count=$(echo "$divergence" | awk '{print $2}')
 
-if [ "${behind_count:-0}" -gt 0 ]; then
+if [ "${behind_count:-0}" -gt 0 ] &&
+  ! git merge-tree --write-tree HEAD "origin/$base" >/dev/null; then
+  # Conflict only: merge locally, then re-run verify.plan / verify.run.
+  # A conflict-free behind branch keeps its verified HEAD; sync after creation.
   git merge "origin/$base" || { echo "Merge conflicts." >&2; exit 1; }
   git push -u origin "$head"
+  echo "Base merged: re-run verify.plan / verify.run before PR creation." >&2
+  exit 1
 fi
 
 # Check existing PRs (canonical surface)

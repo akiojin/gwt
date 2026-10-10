@@ -75,6 +75,10 @@ pub(super) fn previous_external_terminations(
     if record.content_hash.is_empty() || !integrity_ok(&record) {
         return Ok(None);
     }
+    if super::cancellation::recover_unfinished_run(worktree, &record)? {
+        record =
+            load(worktree)?.ok_or_else(|| io::Error::other("interrupted record disappeared"))?;
+    }
     if let Some(lifecycle) = record
         .lifecycle
         .as_ref()
@@ -114,8 +118,13 @@ pub(super) struct Watchdog {
 impl Watchdog {
     /// Used by the real gwtd entrypoint; unit-level in-process runs have no
     /// gwtd executable and exercise the record transitions directly instead.
-    pub(super) fn start(worktree: &Path, record_id: &str, token: &str) -> io::Result<Self> {
-        let mut child = gwt_core::process::hidden_command(std::env::current_exe()?)
+    pub(super) fn start(
+        worktree: &Path,
+        record_id: &str,
+        token: &str,
+        executable: &Path,
+    ) -> io::Result<Self> {
+        let mut child = gwt_core::process::hidden_command(executable)
             .arg(WATCHDOG_ARG)
             .arg(worktree)
             .arg(record_id)
@@ -169,7 +178,53 @@ pub fn run_watchdog(worktree: &Path, record_id: &str) -> io::Result<()> {
     io::stdout().flush()?;
     let mut returned = [0];
     let normal_return = input.read(&mut returned)? != 0;
-    settle_interrupted(worktree, record_id, token, normal_return)
+    if record_id.starts_with("vat-") {
+        super::cancellation::settle_watchdog(worktree, record_id, token, normal_return)
+    } else {
+        settle_interrupted(worktree, record_id, token, normal_return)
+    }
+}
+
+/// Authenticated attempt control holds the trusted write lease. Intentional
+/// cancellation preserves retry history instead of counting a runner death.
+pub(super) fn interrupt_matching_record(
+    worktree: &Path,
+    id: &str,
+    attempt_id: &str,
+    reason: &str,
+    external: bool,
+    fallback: RunLifecycle,
+) -> io::Result<()> {
+    let Some(mut record) = load(worktree)? else {
+        return Ok(());
+    };
+    if record.record_id != id
+        || !integrity_ok(&record)
+        || record
+            .unknown_fields()
+            .get("verification_attempt_id")
+            .and_then(|id| id.as_str())
+            != Some(attempt_id)
+        || record
+            .lifecycle
+            .as_ref()
+            .is_some_and(|life| life.status == RunStatus::Interrupted)
+    {
+        return Ok(());
+    }
+    // Only the exact authenticated attempt may settle this final-write gap.
+    if record.lifecycle.is_none() {
+        record.lifecycle = Some(fallback);
+    }
+    if external {
+        return persist_interrupted(worktree, &mut record, false, reason);
+    }
+    let lifecycle = record.lifecycle.as_mut().expect("running record");
+    lifecycle.status = RunStatus::Interrupted;
+    lifecycle.reason = Some(reason.to_string());
+    record.all_passed = false;
+    record.plan_covered = false;
+    save(worktree, &record)
 }
 
 fn token_hash(token: &str) -> String {

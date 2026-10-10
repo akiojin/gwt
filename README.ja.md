@@ -215,8 +215,11 @@ gwt open ~/src/my-repo              # そのプロジェクトを (必要なら�
 ephemeral port を選ぶ `--port 0` を含め、保存済みの暗黙ポートを変更しません。
 同一 LAN や VPN-extended LAN の別端末からブラウザ UI に接続したい場合は
 `--bind 0.0.0.0` を指定してください。運用者が選んだ既知のポートを使う場合は
-`--port` を併用できます。`--no-tray` / `--no-open` は SPEC #2920 Phase 4 の
-他作業が完了するまで受け取るだけで no-op の状態です。
+`--port` を併用できます。`--no-tray` はトレイを登録しない一時サーバーを起動します。
+起動元の親プロセスが終了するか、最後のブラウザセッションが閉じて5秒経つと終了します
+（この猶予中は再読み込み・再接続できます）。ブラウザが一度も接続していない場合は
+親プロセスの寿命に従います。`--no-open` はブラウザの自動起動を明示的に抑止します。
+フラグなしの起動も、既定でブラウザを自動では開きません。
 
 `gwt open` は Linux の GNOME 3.26+ など system tray を持たない環境向けの
 fallback です。tray アイコンが見えない場合でも `gwt browser URL: ...` が
@@ -395,6 +398,20 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+
+**Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
+GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
+ない登録済みプロジェクトは配分を消費しません。**Machine budget** には制約になった資源を
+表示し、Monitor の実装・レビュー上限と PM を含む総数を区別します。必要な実測値が
+得られない間、Auto は新規起動を待機させます。実行中のエージェントは継続します。
+大きな `target` ディレクトリの初回実測には数分かかる場合があります。
+更新中に前回の実測値が期限切れになった場合も、新規起動は待機します。
+正の数値を入力すると **Manual** の上書きを保存し、**Use Auto** で推奨値への追従に戻せます。
+既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
+検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
+自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+`{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
+`max_active_agents_override`、共有実測値の `agent_capacity` を返します。
 
 **Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
 ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
@@ -1075,6 +1092,15 @@ Logs サーフェスの **Project** でそのプロジェクトのイベント�
 - プロジェクト単位のワークスペース状態:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### セッション履歴
+
+gwt は最近の Session 履歴を `~/.gwt/sessions/` に保持します。台帳の初回表示時と
+以後24時間以上の間隔でバックグラウンド整理を行い、起動時の復元が無効な停止済み履歴を
+30日間の非活動後に削除します。保存窓、実行中の処理、復旧、未完了の作業が必要とする
+Session は保護します。古い書き込み一時ファイルの残骸も整理します。
+保持方針と読めない記録の扱いは
+[Issue #5025](https://github.com/akiojin/gwt/issues/5025) に記載しています。
+
 ### macOS のファイルシステム負荷と Spotlight
 
 worktree の index watcher は、自身の macOS FSEvents stream から直下の
@@ -1167,6 +1193,50 @@ cargo test -p gwt-core -p gwt --all-features --doc
 
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
+### CI スループットの計測
+
+Python 3.11 以上、認証済みの `gh`、対象 PR のマージ履歴を含むローカル Git
+履歴を用意し、develop の直近 25 マージを収集して入力データを保存します。
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --limit 25 --save target/ci-throughput.json
+python scripts/ci_throughput.py --input target/ci-throughput.json
+```
+
+収集はこの checkout で実行します（別の場所からは `--root` を指定）。不足する
+履歴は先に取得してください。shallow clone は `git fetch --unshallow origin develop`
+で補えます。`--before 2026-10-08T00:30:00Z` はマージ時刻の上限を固定し、
+その時刻も含めます。`--workflow lint.yml` は同じ収集・再計算経路で Lint を計測します。
+保存データの再計算には GitHub 接続や Git 履歴は不要です。保存済みの基準値は次で再現できます。
+
+```bash
+python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
+```
+
+JSON は PR 作成からマージまでの時間、各 PR の最終 head に対する最新成功
+workflow attempt、マージあたりの base 同期回数、runner 待ち、job ごとの所要時間を
+出力します。時間は分単位で、p50 は中央値、p90 は nearest-rank です。
+workflow は `run_started_at` から `updated_at`、job は `started_at` から
+`completed_at` を計測します。runner 待ちは依存 job のスケジューリング後の
+`created_at` から `started_at` で、全 job と required job の分布を分けて示します。
+欠測は取得不能として扱います。再実行で以前の実行時刻が再利用され、作成時刻が
+開始時刻より後になった job は、実行時間を保持して runner 待ちを取得不能とします。
+
+固定した 25 PR の基準値は、作成からマージまでの p50 **130.27 分**、Test attempt
+の p50 **32.43 分**を再現します。base 同期は第二親が base の第一親履歴に属する
+マージを数え、**115/25 = 4.6 回**です。従来の `Merge ... develop` 件名フィルターによる
+**110/25 = 4.4 回**も併記し、独自件名の正当な同期 5 件との差を比較できます。
+
+### フロントエンドの共有状態（SPEC-5016）
+
+移行したフロントエンド domain は `web/ui-state-store.js` で immutable なデータを保持します。
+受信ハンドラはモデルを更新し、各面は selector を購読して確定した snapshot を描画します。
+取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
+通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
+共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
+Markdown 描画を選びます。移行対象と受け入れ条件は
+[SPEC-5016](https://github.com/akiojin/gwt/issues/5016) を参照してください。
+
 ### 重量級検証の容量制御
 
 ホスト全体の verification lease を取得するのは canonical `verify.run`
@@ -1175,6 +1245,27 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 未実行の Light を先に進め、Heavy の相対順序を保ち、gwt の成果物復旧は最後に実行します。
 残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
+
+次の短命な non-Cargo ゲートは Light として Heavy lease を取らずに実行します。
+
+| コマンド | 資源を限定できる根拠 |
+| --- | --- |
+| `git diff --check`（`--cached` を含む） | 差分の空白を検査する |
+| `node scripts/check-coverage-threshold.mjs <summary> <threshold> ...` | 既存の coverage JSON を読む。テストは実行しない |
+| custom checker 指定のない `actionlint`、`shellcheck`、`yamllint` | workflow・shell・YAML ファイルの静的解析 |
+| `taplo check`、`taplo fmt --check` | TOML の検証・書式確認 |
+| `typos` | 静的な綴り検査 |
+
+これらのゲートには local・daemon 両方で 60 秒の実行タイムアウトを設けます。
+時間切れは失敗（exit 124）として診断出力を残し、そのコマンドの process tree を停止します。
+診断されたコマンドを修正してから行列全体を再実行してください。
+既存の markdownlint・スコープ付き Cargo の分類は従来どおりです。
+unknown コマンド、script wrapper、coverage を生成する `coverage-summary.mjs`、Cargo build・
+広範囲の test、headed Playwright は Heavy のままです。
+`actionlint -shellcheck` / `-pyflakes` の上書き指定も任意の wrapper を起動できるため Heavy です。
+bounded command は時間切れ時に加え、通常終了時にも子孫プロセスを回収します。
+Node reader も実効 `NODE_OPTIONS` が空でない場合は、任意 module を preload できるため Heavy です。
+明示的な `NODE_OPTIONS=` は継承オプションを無効にし、Light 分類を維持します。
 
 再試行には同じ要求行列全体と headed E2E の指定を渡します。`verify.run` は、owner・session・
 execution authority・plan content hash・source fingerprint・要求コマンドが完全一致し、
@@ -1208,6 +1299,32 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.status","params":{}}
 JSON
 ```
+
+各 `verify.run` は admission を待つ前に試行記録を作成します。
+`verify.status` で自分の最新の試行を確認し、`params.attempt_id` を渡すと
+特定の試行を確認できます。JSON 出力には試行 ID、状態、中断理由、
+FIFO 予約が残っているかを含みます。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.status","params":{}}
+JSON
+```
+
+不要になった試行は、返された ID と理由を指定して取り消します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.cancel","params":{"attempt_id":"<attempt-id>","reason":"superseded matrix"}}
+JSON
+```
+
+取消には同じ project・worktree・session・execution authority が必要です。
+他者の試行は `not your verification attempt` として拒否します。
+対象を `interrupted` と記録し、その試行の予約だけを直ちに解放して、
+所有する command tree を停止します。runner が終了した場合も予約 TTL を待たずに解放します。
+中断は PASS やテスト失敗とは区別し、同じ行列を再実行すると新しい試行を開始します。
+最初のコマンド開始前に取り消した場合は、以前の検証記録を保持します。
 
 初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
 lint、coverage、直接の headed browser 確認、pre-push 確認は verification
@@ -1263,6 +1380,13 @@ lease の遷移は
 runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### PR HEAD の検証
+
+PR の対象ブランチを訂正するには、`pr.edit` に `params.number` と `params.base`
+（例: `develop`）を渡します。base だけの更新も可能で、既存の編集権限チェックを
+適用します。誤った PR を取り下げるには、`pr.close` に `params.number` と任意の
+`params.comment` を渡します。コメントを指定すると閉鎖前に記録し、記録に失敗した
+場合は PR を開いたままにします。close はブランチを保持し、実装変更の権限や
+検証証跡がない状態でも利用できます。
 
 `pr.head_check` に `params.base`（例: `develop`）と任意の `params.head` を渡すと、
 PR の作成・編集をせずに、正本の PASS 済み検証記録と live remote HEAD を比較できます。
@@ -1330,14 +1454,15 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 
 リリースは GitHub Actions の **Prepare Release** ワークフロー（Actions →
 `Prepare Release` → `Run workflow`）で起動します。CI が `develop` を対象に
-バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
-を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
+バージョン更新・`CHANGELOG` 再生成後、その develop commit を固定した
+`release/vX.Y.Z → main` の Release PR を作成します。以降 develop へ着地しても
+release head とその CI は変わりません。ローカルで `develop` に切り替えずにどのブランチからでも
 リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
 `auto` がメジャーになることはありません。コミットの breaking marker は
 Release PR 本文に列挙されるだけで、メジャー昇格は `major` を明示した場合のみです。
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
-ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+ます。リリース復旧手順は `.claude/commands/release.md` にあります。
 
 Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
 closing keyword は書きません。`main` は default branch なので、そこに

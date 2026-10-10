@@ -50,7 +50,9 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+pub mod cancellation;
 pub mod continuation;
+pub mod driver;
 pub mod headed_e2e;
 pub mod interruption;
 pub mod nextest;
@@ -416,6 +418,10 @@ pub struct VerificationRunData {
     /// Omission preserves legacy record serialization and integrity hashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_head: Option<String>,
+    /// Windows driver image identity, including its embedded source commit.
+    /// Omitted on other hosts so existing evidence hashes remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<driver::DriverProvenance>,
     pub commands: Vec<VerificationCommandResult>,
     pub all_passed: bool,
     /// Conditional dispositions for exact failures. Raw command exits and
@@ -861,15 +867,23 @@ fn derive_and_register_plan_for_caller(
     ),
     String,
 > {
+    let required = if pre_pr.is_some() {
+        crate::cli::verify_derivation::read_pre_pr_required_contexts(worktree)?
+    } else {
+        Vec::new()
+    };
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         let derived = match pre_pr {
-            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, acceptance, local),
-            None => crate::cli::verify_derivation::derive(worktree),
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local, &generated_outputs),
+            None => crate::cli::verify_derivation::derive_excluding(worktree, &generated_outputs),
         }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+        if let Some(reason) = derived.unsupported_reason() {
+            return Err(io::Error::new(ErrorKind::InvalidData, reason));
+        }
         validate_quarantine_requests(&quarantines, &derived.commands)?;
         let fingerprint_after =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
@@ -2659,6 +2673,38 @@ fn is_certified_pr_delivery_event(worktree: &Path, relative: &[u8]) -> bool {
 }
 
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
+    let mut states = work_event_dirty_paths(worktree)?
+        .into_iter()
+        .map(|dirty| dirty.state)
+        .collect::<Vec<_>>();
+    states.sort_unstable();
+    states.dedup();
+    Ok(states)
+}
+
+/// Why a Work event path was judged dirty (Issue #5072 AC-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventDirtyBasis {
+    /// Reported by `git status --porcelain=v1`.
+    GitStatusPorcelain,
+    /// An ignored canonical shard that `git status` hides; gwt still requires
+    /// it to be force-added and delivered.
+    GwtIgnoredShard,
+}
+
+/// One concrete dirty Work event path and the evidence behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkEventDirtyPath {
+    pub path: String,
+    pub state: WorkEventPathState,
+    pub basis: WorkEventDirtyBasis,
+}
+
+/// Live scan of the Work event store: every dirty path with its basis.
+/// An empty list means `git status` is clean for the store and no ignored
+/// canonical shard is pending.
+pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDirtyPath>, ()> {
     let output = gwt_core::process::hidden_command("git")
         .args([
             "status",
@@ -2675,28 +2721,35 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
         return Err(());
     }
     let stdout = String::from_utf8(output.stdout).map_err(|_| ())?;
-    let mut states = Vec::new();
+    let mut dirty = Vec::new();
     for line in stdout.lines() {
         let bytes = line.as_bytes();
         if bytes.len() < 3 {
             return Err(());
         }
         let (index, worktree_state) = (bytes[0], bytes[1]);
+        let mut push = |state| {
+            dirty.push(WorkEventDirtyPath {
+                path: line[3..].to_string(),
+                state,
+                basis: WorkEventDirtyBasis::GitStatusPorcelain,
+            });
+        };
         if index == b'?' && worktree_state == b'?' {
             if is_certified_pr_delivery_event(worktree, &bytes[3..]) {
                 continue;
             }
-            states.push(WorkEventPathState::Untracked);
+            push(WorkEventPathState::Untracked);
             continue;
         }
         if index == b'D' || worktree_state == b'D' {
-            states.push(WorkEventPathState::Deleted);
+            push(WorkEventPathState::Deleted);
         }
         if index != b' ' && index != b'D' {
-            states.push(WorkEventPathState::Staged);
+            push(WorkEventPathState::Staged);
         }
         if worktree_state != b' ' && worktree_state != b'D' {
-            states.push(WorkEventPathState::Unstaged);
+            push(WorkEventPathState::Unstaged);
         }
     }
     let ignored = gwt_core::process::hidden_command("git")
@@ -2715,20 +2768,22 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
     if !ignored.status.success() {
         return Err(());
     }
-    if ignored
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .any(|path| {
-            classify_path(path) == DeliveryPath::WorkEventShard
-                && !is_certified_pr_delivery_event(worktree, path)
-        })
-    {
-        states.push(WorkEventPathState::Untracked);
-    }
-    states.sort_unstable();
-    states.dedup();
-    Ok(states)
+    dirty.extend(
+        ignored
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .filter(|path| {
+                classify_path(path) == DeliveryPath::WorkEventShard
+                    && !is_certified_pr_delivery_event(worktree, path)
+            })
+            .map(|path| WorkEventDirtyPath {
+                path: String::from_utf8_lossy(path).into_owned(),
+                state: WorkEventPathState::Untracked,
+                basis: WorkEventDirtyBasis::GwtIgnoredShard,
+            }),
+    );
+    Ok(dirty)
 }
 
 fn event_commit_has_non_bookkeeping_change(
@@ -3146,8 +3201,9 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
 fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
-    // Windows' canonical matrix is library-only because the running gwtd.exe
-    // cannot be replaced (#4182). That matrix does not overwrite the binary.
+    // Windows' canonical unit-target matrix avoids rebuilding the regular
+    // gwtd.exe (#4182, #4968). That default matrix does not overwrite the binary.
+    // Explicit binary matrices include their own bootstrap as the last command.
     if cfg!(windows)
         || !commands.iter().any(|command| {
             split_command_line(command).is_ok_and(|args| {
@@ -3165,41 +3221,78 @@ fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
     if cfg!(windows) {
         return None;
     }
+    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd")
+}
+
+/// Identify this repository without comparing another project's HEAD to gwt's.
+pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
     let manifest =
         |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
-    let workspace = manifest(&worktree.join("Cargo.toml"))?;
+    let Some(workspace) = manifest(&worktree.join("Cargo.toml")) else {
+        return false;
+    };
     if !workspace
-        .get("workspace")?
-        .get("members")?
-        .as_array()?
-        .iter()
-        .any(|member| member.as_str() == Some("crates/gwt"))
-    {
-        return None;
-    }
-    let package = manifest(&worktree.join("crates/gwt/Cargo.toml"))?;
-    if package.get("package")?.get("name")?.as_str()? != "gwt"
-        || package.get("features")?.get("test-gh-guard").is_none()
-        || !package.get("bin")?.as_array()?.iter().any(|binary| {
-            binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
-                && binary.get("path").and_then(toml::Value::as_str) == Some("src/bin/gwtd.rs")
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|member| member.as_str() == Some("crates/gwt"))
         })
     {
-        return None;
+        return false;
     }
-    Some("cargo build -p gwt --bin gwtd")
+    let Some(package) = manifest(&worktree.join("crates/gwt/Cargo.toml")) else {
+        return false;
+    };
+    package
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        == Some("gwt")
+        && package
+            .get("features")
+            .and_then(|features| features.get("test-gh-guard"))
+            .is_some()
+        && package
+            .get("bin")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|binaries| {
+                binaries.iter().any(|binary| {
+                    binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
+                        && binary.get("path").and_then(toml::Value::as_str)
+                            == Some("src/bin/gwtd.rs")
+                })
+            })
 }
 
 /// Keep recovery (including failures) in the deferred admission diagnostic,
 /// without presenting unexecuted commands as passing verification evidence.
-fn restore_gwtd_after_deferral(worktree: &Path, host: &VerificationHost) -> String {
+#[cfg(all(test, not(windows)))]
+fn restore_gwtd_after_deferral(
+    worktree: &Path,
+    host: &VerificationHost,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+) -> String {
+    restore_gwtd_after_deferral_cancellable(worktree, host, artifacts, None)
+}
+
+fn restore_gwtd_after_deferral_cancellable(
+    worktree: &Path,
+    host: &VerificationHost,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+    check: Option<&CancellationCheck<'_>>,
+) -> String {
     let Some(command) = gwtd_artifact_restore_command(worktree) else {
         return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
     };
     // Restore this checkout's operational path, even when Cargo's environment
     // or user configuration points ordinary builds at another target directory.
     let command = format!("{command} --target-dir target");
-    match execute_command_with_isolation(worktree, &command, true, None, host, None) {
+    match execute_command_with_artifact_guard_cancellable(
+        worktree, &command, true, None, host, None, artifacts, check,
+    ) {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
             "gwtd artifact restoration: failed (`{command}`, exit {code}); \
@@ -3296,6 +3389,7 @@ fn verification_command_arguments(
     args
 }
 
+#[cfg(test)]
 fn execute_command_with_isolation(
     worktree: &Path,
     command: &str,
@@ -3304,6 +3398,82 @@ fn execute_command_with_isolation(
     host: &VerificationHost,
     progress: Option<&CommandProgress>,
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        None,
+    )
+}
+
+type CancellationCheck<'a> = dyn Fn() -> Result<bool, String> + Sync + 'a;
+
+fn check_cancellation(check: Option<&CancellationCheck<'_>>) -> Result<(), String> {
+    if check.map(|check| check()).transpose()?.unwrap_or(false) {
+        Err("verification attempt canceled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn execute_command_cancellable(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard_cancellable(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        None,
+        check,
+    )
+}
+
+#[cfg(test)]
+fn execute_command_with_artifact_guard(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard_cancellable(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        artifacts,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_command_with_artifact_guard_cancellable(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    check_cancellation(check)?;
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
     // Auxiliary baseline proofs and artifact restoration do not produce
     // canonical command rows, so do not leave unreferenced output artifacts.
@@ -3316,10 +3486,35 @@ fn execute_command_with_isolation(
             command,
             isolated_baseline,
         )? {
-            Some(target) => Some(
-                crate::cli::verification_lease::lock_build_artifacts(&target)
-                    .map_err(|error| format!("build artifact coordination failed: {error}"))?,
-            ),
+            Some(target) => {
+                let protected = artifacts
+                    .map(|guard| guard.protects(&target))
+                    .transpose()
+                    .map_err(|error| format!("build artifact coordination failed: {error}"))?
+                    .unwrap_or(false);
+                if protected {
+                    None
+                } else {
+                    Some(if check.is_some() {
+                        loop {
+                            check_cancellation(check)?;
+                            if let Some(guard) =
+                                crate::cli::verification_lease::try_lock_build_artifacts(&target)
+                                    .map_err(|error| {
+                                        format!("build artifact coordination failed: {error}")
+                                    })?
+                            {
+                                break guard;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    } else {
+                        crate::cli::verification_lease::lock_build_artifacts(&target).map_err(
+                            |error| format!("build artifact coordination failed: {error}"),
+                        )?
+                    })
+                }
+            }
             None if Path::new(&args[0])
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -3348,7 +3543,7 @@ fn execute_command_with_isolation(
         .prefix("gwt-verify-")
         .tempdir_in(temporary_base)
         .map_err(|error| error.to_string())?;
-    let result = (|| match host {
+    let result = match host {
         VerificationHost::Daemon(endpoint) => {
             let mut request = delegated_spawn_request(
                 worktree,
@@ -3367,7 +3562,14 @@ fn execute_command_with_isolation(
                     .env
                     .push((key.to_string(), temp.path().to_string_lossy().into_owned()));
             }
-            execute_command_on_daemon(command, &request, endpoint, progress, output_worktree)
+            execute_command_on_daemon(
+                command,
+                &request,
+                endpoint,
+                progress,
+                output_worktree,
+                check,
+            )
         }
         VerificationHost::Inherit => {
             let args = verification_command_arguments(&args, capture);
@@ -3390,55 +3592,18 @@ fn execute_command_with_isolation(
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
             }
-            // Issue #4405: this process runs inside the agent tree, whose
-            // launch policy lowers priority; the workload must not inherit
-            // that. Issue #4409 removes the inheritance at its source by
-            // launching from the daemon instead, but this branch is still
-            // taken whenever the launcher is already at baseline priority or
-            // has declared that it accepts its own.
-            let output = (|| -> io::Result<_> {
-                // Issue #4746 (earlier instance #4105): a grandchild can
-                // inherit stdout/stderr beyond the direct child's lifetime.
-                // Files let us wait for that child without waiting for EOF.
-                let stdout = temp.path().join("stdout");
-                let stderr = temp.path().join("stderr");
-                process
-                    .stdin(std::process::Stdio::null())
-                    .stdout(fs::File::create(&stdout)?)
-                    .stderr(fs::File::create(&stderr)?);
-                let stdout_reader = fs::File::open(stdout)?;
-                let stderr_reader = fs::File::open(stderr)?;
-                let mut spawned = gwt_core::process_tree::spawn_at_normal_priority(&mut process)?;
-                let _command_scope = progress.map(|progress| progress.start(spawned.child.id()));
-                let status = spawned.child.wait()?;
-                let output = std::process::Output {
-                    status,
-                    stdout: captured_output_snapshot(&stdout_reader),
-                    stderr: captured_output_snapshot(&stderr_reader),
-                };
-                Ok((output, spawned.priority))
-            })();
-            let output = match output {
-                Ok(output) => output,
-                Err(err) => {
-                    return spawn_failure_result(output_worktree, command, &err.to_string())
-                }
-            };
-            let (output, priority) = output;
-            let exit_code = output.status.code().unwrap_or(-1);
-            let signal = terminating_signal(output.status);
-            let mut tail = String::new();
-            if !priority.restored {
-                tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
-            }
-            let (streams_tail, output_streams) = render_streams(
+            execute_inherited_command_cancellable(
+                &mut process,
+                temp.path(),
+                command,
+                crate::cli::verification_lease::short_non_cargo_timeout(command),
+                progress,
                 output_worktree,
-                &[("stdout", &output.stdout), ("stderr", &output.stderr)],
-            )?;
-            tail.push_str(&streams_tail);
-            Ok((exit_code, signal, tail, output_streams))
+                std::time::Instant::now,
+                check,
+            )
         }
-    })();
+    };
     match result {
         Ok(result) => Ok(result),
         Err(error) => {
@@ -3449,6 +3614,265 @@ fn execute_command_with_isolation(
             ))
         }
     }
+}
+
+#[cfg(test)]
+fn execute_inherited_command(
+    process: &mut std::process::Command,
+    temporary_directory: &Path,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    progress: Option<&CommandProgress>,
+    output_worktree: Option<&Path>,
+    now: impl FnMut() -> std::time::Instant,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_inherited_command_cancellable(
+        process,
+        temporary_directory,
+        command,
+        timeout,
+        progress,
+        output_worktree,
+        now,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_inherited_command_cancellable(
+    process: &mut std::process::Command,
+    temporary_directory: &Path,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    progress: Option<&CommandProgress>,
+    output_worktree: Option<&Path>,
+    mut now: impl FnMut() -> std::time::Instant,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    check_cancellation(check)?;
+    // Issue #4405: this process runs inside the agent tree, whose
+    // launch policy lowers priority; the workload must not inherit
+    // that. Issue #4409 removes the inheritance at its source by
+    // launching from the daemon instead, but this branch is still
+    // taken whenever the launcher is already at baseline priority or
+    // has declared that it accepts its own.
+    let output = (|| -> io::Result<_> {
+        // Issue #4746 (earlier instance #4105): a grandchild can
+        // inherit stdout/stderr beyond the direct child's lifetime.
+        // Files let us wait for that child without waiting for EOF.
+        let stdout = temporary_directory.join("stdout");
+        let stderr = temporary_directory.join("stderr");
+        process
+            .stdin(std::process::Stdio::null())
+            .stdout(fs::File::create(&stdout)?)
+            .stderr(fs::File::create(&stderr)?);
+        let stdout_reader = fs::File::open(stdout)?;
+        let stderr_reader = fs::File::open(stderr)?;
+        let mut spawned =
+            InheritedVerificationChild::spawn(process, timeout.is_some() || check.is_some())?;
+        let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
+        let (status, timed_out) = spawned.wait_cancellable(timeout, &mut now, check)?;
+        let output = std::process::Output {
+            status,
+            stdout: captured_output_snapshot(&stdout_reader),
+            stderr: captured_output_snapshot(&stderr_reader),
+        };
+        Ok((output, spawned.spawned.priority.clone(), timed_out))
+    })();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => return Err(err.to_string()),
+        Err(err) => return spawn_failure_result(output_worktree, command, &err.to_string()),
+    };
+    let (output, priority, timed_out) = output;
+    let (exit_code, signal, mut tail) = if timed_out {
+        command_timeout_result(
+            command,
+            timeout.expect("a timed-out command has a deadline"),
+        )
+    } else {
+        (
+            output.status.code().unwrap_or(-1),
+            terminating_signal(output.status),
+            String::new(),
+        )
+    };
+    if !priority.restored {
+        tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+    }
+    let (streams_tail, output_streams) = render_streams(
+        output_worktree,
+        &[("stdout", &output.stdout), ("stderr", &output.stderr)],
+    )?;
+    tail.push_str(&streams_tail);
+    Ok((exit_code, signal, tail, output_streams))
+}
+
+/// A bounded child owns its group/Job before any descendants can run.
+struct InheritedVerificationChild {
+    spawned: gwt_core::process_tree::NormalPriorityChild,
+    bounded: bool,
+    reaped: bool,
+    #[cfg(windows)]
+    job: Option<gwt_core::process_tree::WindowsJobObject>,
+}
+
+impl InheritedVerificationChild {
+    fn spawn(process: &mut std::process::Command, bounded: bool) -> io::Result<Self> {
+        #[cfg(unix)]
+        if bounded {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
+        #[cfg(windows)]
+        let mut job = if bounded {
+            use std::os::windows::process::CommandExt;
+            let job = gwt_core::process_tree::WindowsJobObject::new().map_err(io::Error::other)?;
+            process.creation_flags(
+                gwt_core::process_tree::WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS
+                    | gwt_core::process_tree::WINDOWS_NORMAL_PRIORITY_CLASS,
+            );
+            Some(job)
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let spawned = if let Some(job) = &mut job {
+            let mut child = process.spawn()?;
+            if let Err(error) = job.assign_and_resume(child.id()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::other(error));
+            }
+            gwt_core::process_tree::NormalPriorityChild {
+                child,
+                priority: gwt_core::process_tree::ChildPriorityReport {
+                    restored: true,
+                    detail: "normal priority class".to_string(),
+                },
+            }
+        } else {
+            gwt_core::process_tree::spawn_at_normal_priority(process)?
+        };
+        #[cfg(not(windows))]
+        let spawned = gwt_core::process_tree::spawn_at_normal_priority(process)?;
+        Ok(Self {
+            spawned,
+            bounded,
+            reaped: false,
+            #[cfg(windows)]
+            job,
+        })
+    }
+
+    fn wait_cancellable(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+        now: &mut impl FnMut() -> std::time::Instant,
+        check: Option<&CancellationCheck<'_>>,
+    ) -> io::Result<(std::process::ExitStatus, bool)> {
+        if timeout.is_none() && check.is_none() {
+            let status = self.spawned.child.wait()?;
+            self.reaped = true;
+            return Ok((status, false));
+        }
+        let deadline = timeout.map(|timeout| now() + timeout);
+        loop {
+            if let Err(error) = check_cancellation(check) {
+                self.reclaim();
+                let _ = self.spawned.child.wait();
+                self.reaped = true;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, error));
+            }
+            #[cfg(unix)]
+            let completed = if self.exited_without_reaping()? {
+                // Keep the exited leader waitable until its group is reclaimed:
+                // reaping first would allow its PID/PGID to be recycled.
+                self.reclaim();
+                Some(self.spawned.child.wait()?)
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let completed = self.spawned.child.try_wait()?;
+            if let Some(status) = completed {
+                self.reaped = true;
+                return Ok((status, false));
+            }
+            if deadline.is_some_and(|deadline| now() >= deadline) {
+                self.reclaim();
+                let status = self.spawned.child.wait()?;
+                self.reaped = true;
+                return Ok((status, true));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(unix)]
+    fn exited_without_reaping(&mut self) -> io::Result<bool> {
+        // SAFETY: zero-initialized siginfo_t is valid; waitid writes into this
+        // live buffer and WNOWAIT leaves the exact owned child unreaped.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            if libc::waitid(
+                libc::P_PID,
+                self.spawned.child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            ) == -1
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    return Ok(false);
+                }
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    // Lost wait ownership cannot authorize a group signal.
+                    self.reaped = true;
+                }
+                return Err(error);
+            }
+            Ok(info.si_pid() != 0)
+        }
+    }
+
+    fn reclaim(&mut self) {
+        #[cfg(unix)]
+        // SAFETY: the bounded child leads this group and has not been reaped,
+        // so its id cannot have been recycled to an unrelated workload.
+        unsafe {
+            libc::killpg(self.spawned.child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        if let Some(mut job) = self.job.take() {
+            let _ = job.terminate();
+        }
+        let _ = self.spawned.child.kill();
+    }
+}
+
+impl Drop for InheritedVerificationChild {
+    fn drop(&mut self) {
+        if self.bounded && !self.reaped {
+            self.reclaim();
+            let _ = self.spawned.child.wait();
+        }
+    }
+}
+
+fn command_timeout_result(
+    command: &str,
+    timeout: std::time::Duration,
+) -> (i32, Option<i32>, String) {
+    let diagnostic = bounded_output_tail(
+        format!(
+            "verification command '{command}' timed out after {}s; reclaiming its owned workload. \
+         Check the command and retry verify.run.",
+            timeout.as_secs(),
+        )
+        .as_bytes(),
+    );
+    (124, None, format!("--- timeout ---\n{diagnostic}\n"))
 }
 
 fn captured_output_snapshot(file: &fs::File) -> Vec<u8> {
@@ -3518,36 +3942,55 @@ fn execute_command_on_daemon(
     endpoint: &gwt_core::daemon::DaemonEndpoint,
     progress: Option<&CommandProgress>,
     output_worktree: Option<&Path>,
+    check: Option<&CancellationCheck<'_>>,
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
-    let delegated = match crate::cli::daemon::verification_host::run(endpoint, request, |pid| {
-        progress.map(|progress| progress.start(pid))
-    }) {
-        Ok(delegated) => delegated,
-        // A daemon that cannot take the command is a spawn failure like any
-        // other: the record must be written with the partial transcript, not
-        // abandoned. It is emphatically *not* a reason to retry in-process —
-        // that is the implicit fallback AC-5 forbids.
-        Err(error) => return spawn_failure_result(output_worktree, command, &error),
+    use crate::cli::daemon::verification_host::DelegatedRunError;
+
+    let delegated = crate::cli::daemon::verification_host::run_cancellable(
+        endpoint,
+        request,
+        |pid| progress.map(|progress| progress.start(pid)),
+        crate::cli::verification_lease::short_non_cargo_timeout(command),
+        check,
+    );
+    let (exit_code, signal, mut tail, mut output_streams) = match delegated {
+        Err(DelegatedRunError::Cancelled) => {
+            return Err("verification attempt canceled".to_string())
+        }
+        Ok(delegated) => {
+            let mut tail = String::new();
+            if let Some(reason) = &delegated.accepted.nice_reason {
+                tail.push_str(&format!("--- priority ---\n{reason}\n"));
+            }
+            if delegated.reclaimed_survivors {
+                tail.push_str(
+                    "--- reclaimed ---\nthe command left descendants running after it exited; the \
+                     daemon killed its process group (Issue #3845)\n",
+                );
+            }
+            (delegated.exit_code, delegated.signal, tail, Vec::new())
+        }
+        Err(DelegatedRunError::TimedOut(timeout)) => {
+            let (exit_code, signal, tail) = command_timeout_result(command, timeout);
+            (exit_code, signal, tail, Vec::new())
+        }
+        // Keep partial output on errors too; never retry in the caller's tree.
+        Err(DelegatedRunError::Failed(error)) => {
+            spawn_failure_result(output_worktree, command, &error)?
+        }
     };
-    let mut tail = String::new();
-    // AC-6: what the child actually got, recorded even when it is not
-    // baseline. An environment that refuses nice 0 is not the caller's to fix,
-    // so the run continues and says so.
-    if let Some(reason) = &delegated.accepted.nice_reason {
-        tail.push_str(&format!("--- priority ---\n{reason}\n"));
-    }
-    if delegated.reclaimed_survivors {
-        tail.push_str(
-            "--- reclaimed ---\nthe command left descendants running after it exited; the \
-             daemon killed its process group (Issue #3845)\n",
-        );
-    }
-    let stdout = fs::read(&request.stdout_path).map_err(|error| error.to_string())?;
-    let stderr = fs::read(&request.stderr_path).map_err(|error| error.to_string())?;
-    let (streams_tail, output_streams) =
+    let snapshot = |path| {
+        fs::File::open(path)
+            .map(|file| captured_output_snapshot(&file))
+            .unwrap_or_default()
+    };
+    let stdout = snapshot(&request.stdout_path);
+    let stderr = snapshot(&request.stderr_path);
+    let (streams_tail, captured_streams) =
         render_streams(output_worktree, &[("stdout", &stdout), ("stderr", &stderr)])?;
     tail.push_str(&streams_tail);
-    Ok((delegated.exit_code, delegated.signal, tail, output_streams))
+    output_streams.extend(captured_streams);
+    Ok((exit_code, signal, tail, output_streams))
 }
 
 fn spawn_failure_result(
@@ -3635,6 +4078,7 @@ fn measure_baseline(
     request: &VerificationQuarantineRequest,
     host: &VerificationHost,
     progress: Option<&CommandProgress>,
+    check: Option<&CancellationCheck<'_>>,
 ) -> Result<(i32, String), String> {
     request.validate()?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -3657,13 +4101,14 @@ fn measure_baseline(
             std::ffi::OsStr::new(merge_base_sha),
         ],
     )?;
-    let (exit_code, _, output, _) = execute_command_with_isolation(
+    let (exit_code, _, output, _) = execute_command_cancellable(
         &checkout,
         &request.baseline_command,
         true,
         None,
         host,
         progress,
+        check,
     )?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
@@ -3801,6 +4246,8 @@ pub fn run_verification(
 
 #[derive(Default)]
 struct RunOptions<'a> {
+    attempt: Option<&'a cancellation::Attempt>,
+    driver: Option<driver::DriverProvenance>,
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
     /// Where this run launches its commands from (Issue #4409). It belongs
@@ -3990,6 +4437,9 @@ where
             )?;
         }
         let verified_head = current_head_sha(worktree).ok();
+        if let Some(driver) = &options.driver {
+            driver::validate_for_head(worktree, verified_head.as_deref(), &driver.source_head)?;
+        }
         interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
         let predecessor = match (&preview, &request) {
             (Some(preview), Some(request)) => load(worktree)?.filter(|record| {
@@ -4073,12 +4523,29 @@ where
         };
     }
     let record_id = format!("vrr-{}", uuid::Uuid::new_v4().simple());
+    if let Some(attempt) = options.attempt {
+        attempt
+            .mark_running(&record_id)
+            .map_err(|error| error.to_string())?;
+    }
     let watchdog_token = uuid::Uuid::new_v4().simple().to_string();
     // The companion must be ready before commands start. It never inherits
     // the runner's host/target locks (Command uses close-on-exec descriptors).
     let _watchdog = options
         .watch_runner
-        .then(|| interruption::Watchdog::start(worktree, &record_id, &watchdog_token))
+        .then(|| {
+            let watchdog_executable = options
+                .driver
+                .as_ref()
+                .map(|driver| Ok(driver.fixed_path.clone()))
+                .unwrap_or_else(std::env::current_exe)?;
+            interruption::Watchdog::start(
+                worktree,
+                &record_id,
+                &watchdog_token,
+                &watchdog_executable,
+            )
+        })
         .transpose()
         .map_err(|error| format!("failed to start verification watchdog: {error}"))?;
     let mut running = VerificationRunRecord::from(VerificationRunData {
@@ -4093,6 +4560,7 @@ where
         lease_id: options.lease_id.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
         verified_head: verified_head.clone(),
+        driver: options.driver.clone(),
         commands: results.clone(),
         all_passed: false,
         quarantined_failures: Vec::new(),
@@ -4117,6 +4585,11 @@ where
     }
     if let Some(context) = &running.continuation {
         running.planned_missing = context.missing();
+    }
+    if let Some(attempt) = options.attempt {
+        let mut document = serde_json::to_value(&running).map_err(|error| error.to_string())?;
+        document["verification_attempt_id"] = attempt.id().into();
+        running = serde_json::from_value(document).map_err(|error| error.to_string())?;
     }
     crate::cli::trusted_store::with_write_lease(worktree, || {
         if let Some(authority) = authority {
@@ -4167,6 +4640,11 @@ where
             .expect("unfinished run")
             .external_terminations =
             interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
+        if let Some(attempt) = options.attempt {
+            attempt.retain_termination_budget_under_lease(
+                running.lifecycle.as_ref().and_then(|life| life.external_terminations),
+            )?;
+        }
         save(worktree, &running)
     })
     .map_err(|error| format!("failed to save verification start: {error}"))?;
@@ -4184,6 +4662,9 @@ where
         on_progress(results.len(), commands.len(), std::time::Duration::ZERO);
     }
     for (position, index) in execution_indices.iter().copied().enumerate() {
+        if let Some(attempt) = options.attempt {
+            attempt.ensure_active().map_err(|error| error.to_string())?;
+        }
         let command = &commands[index];
         let admission = if position == 0 {
             first_admission.take()
@@ -4268,7 +4749,13 @@ where
             None => command.clone(),
         };
         let command_started = std::time::Instant::now();
-        let executed = execute_command_with_isolation(
+        let check_cancelled = || {
+            options
+                .attempt
+                .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
+                .unwrap_or(Ok(false))
+        };
+        let executed = execute_command_cancellable(
             worktree,
             &execution_command,
             false,
@@ -4278,6 +4765,9 @@ where
                 .as_ref()
                 .map(|granted| granted.command_progress())
                 .or(options.command_progress),
+            options
+                .attempt
+                .map(|_| &check_cancelled as &CancellationCheck<'_>),
         );
         if let Some(granted) = &admission {
             granted.publish_progress(1, 1, command_started.elapsed());
@@ -4420,7 +4910,13 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host, options.command_progress)
+                let check = || {
+                    options
+                        .attempt
+                        .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
+                        .unwrap_or(Ok(false))
+                };
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host, options.command_progress, options.attempt.map(|_| &check as &CancellationCheck<'_>))
                 {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
@@ -4482,6 +4978,7 @@ where
         lease_id: options.lease_id.take(),
         worktree_fingerprint: fingerprint_before.clone(),
         verified_head,
+        driver: options.driver.take(),
         commands: results,
         all_passed,
         quarantined_failures,
@@ -4500,6 +4997,7 @@ where
 
     crate::cli::trusted_store::with_write_lease(worktree, || {
         interruption::ensure_current(worktree, &record.record_id)?;
+        if let Some(attempt) = options.attempt { attempt.ensure_active()?; }
         if let Some(authority) = authority {
             revalidate_verification_caller_authority(worktree, session_id, authority)?;
         }
@@ -4548,7 +5046,9 @@ where
         }
         record.created_at = Utc::now();
         record.content_hash = compute_content_hash(&record);
-        save(worktree, &record)
+        save(worktree, &record)?;
+        if let Some(attempt) = options.attempt { attempt.complete_under_lease()?; }
+        Ok(())
     })
     .map_err(|err| {
         if err.kind() == ErrorKind::PermissionDenied {
@@ -5120,6 +5620,12 @@ fn evaluate_evidence_snapshot_inner(
             interruption::RunStatus::Deferred => EvidenceStatus::Deferred,
         };
     }
+    match cancellation::finalized_status(worktree, record) {
+        Ok(None | Some(cancellation::AttemptStatus::Completed)) => {}
+        Ok(Some(cancellation::AttemptStatus::Interrupted)) => return EvidenceStatus::Interrupted,
+        Ok(Some(_)) => return EvidenceStatus::Running,
+        Err(error) => return evidence_read_error(&error),
+    }
     if let Some(snapshot) = record.verification_plan_snapshot.as_ref() {
         if record.content_hash.is_empty()
             || snapshot.content_hash.is_empty()
@@ -5674,6 +6180,13 @@ pub(crate) fn evaluate_pr_ready_evidence(
 /// Commands of the `verify.*` JSON operation family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyCommand {
+    Cancel {
+        attempt_id: String,
+        reason: String,
+    },
+    Status {
+        attempt_id: Option<String>,
+    },
     Run {
         commands: Vec<String>,
         /// Issue #3913: bound on the host admission wait (seconds).
@@ -5692,7 +6205,10 @@ pub enum VerifyCommand {
     /// T-130-lite: register the required verification matrix before running.
     /// Full T-130 core: `derive` classifies changed surfaces and derives the
     /// matrix when no explicit commands are given.
-    Plan { commands: Vec<String>, derive: bool },
+    Plan {
+        commands: Vec<String>,
+        derive: bool,
+    },
     /// Explicit CI-backed pre-PR policy; existing full/explicit plans keep
     /// their semantics and the trusted persisted record shape is unchanged.
     PrePrPlan {
@@ -5759,9 +6275,23 @@ pub(super) fn run<E: CliEnv>(
             ))
         })?;
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    if let VerifyCommand::Status { attempt_id } = &command {
+        let coordinator = crate::cli::verification_lease::open_coordinator()?;
+        let value =
+            cancellation::status(&worktree, &session_id, attempt_id.as_deref(), &coordinator)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+        out.push_str(&format!("{value}\n"));
+        return Ok(0);
+    }
     let authority =
         snapshot_verification_caller_authority(&worktree, &session_id).map_err(|err| {
-            SpecOpsError::from(ApiError::Unexpected(verification_entry_refusal(&err)))
+            SpecOpsError::from(ApiError::Unexpected(
+                if matches!(&command, VerifyCommand::Cancel { .. }) {
+                    format!("not your verification attempt: {err}")
+                } else {
+                    verification_entry_refusal(&err)
+                },
+            ))
         })?;
     let command = match command {
         VerifyCommand::Plan { commands, derive } => VerifyCommand::PlanWithOutputs {
@@ -5773,6 +6303,26 @@ pub(super) fn run<E: CliEnv>(
         other => other,
     };
     match command {
+        VerifyCommand::Status { .. } => unreachable!("read-only status handled above"),
+        VerifyCommand::Cancel { attempt_id, reason } => {
+            let coordinator = crate::cli::verification_lease::open_coordinator()?;
+            let key = crate::cli::verification_lease::verification_key(env)?;
+            cancellation::cancel_for_caller(
+                &worktree,
+                &session_id,
+                &attempt_id,
+                &reason,
+                &authority,
+                &coordinator,
+                &key,
+            )
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            let value =
+                cancellation::status(&worktree, &session_id, Some(&attempt_id), &coordinator)
+                    .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            out.push_str(&format!("{value}\n"));
+            Ok(0)
+        }
         VerifyCommand::PrePrPlan {
             commands,
             acceptance_commands,
@@ -5863,7 +6413,10 @@ pub(super) fn run<E: CliEnv>(
                 // plan leaves uncovered now, not after a heavy run. Derivation
                 // is best-effort here — an underivable change set is not a
                 // registration failure.
-                if let Ok(derived) = crate::cli::verify_derivation::derive(&worktree) {
+                if let Ok(derived) = crate::cli::verify_derivation::derive_excluding(
+                    &worktree,
+                    &plan.generated_outputs,
+                ) {
                     if let Some(note) = derived_coverage_note(&commands, &derived) {
                         out.push_str(&note);
                     }
@@ -5956,6 +6509,19 @@ pub(super) fn run<E: CliEnv>(
             // subsequent timeouts preserve the preceding command evidence.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
+            let driver = driver::prepare(&worktree, &commands).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to fix verification driver: {error}"
+                )))
+            })?;
+            if let Some(driver) = &driver {
+                out.push_str(&format!(
+                    "verify: driver — {}; SHA256 {}; source HEAD {}\n",
+                    driver.fixed_path.display(),
+                    driver.sha256,
+                    driver.source_head
+                ));
+            }
             match crate::cli::verification_lease::first_heavy_command(&commands) {
                 Some(heavy) => {
                     out.push_str(&format!(
@@ -5977,6 +6543,42 @@ pub(super) fn run<E: CliEnv>(
             })?;
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
+            let key = crate::cli::verification_lease::verification_key(env)?;
+            let coordinator = crate::cli::verification_lease::open_coordinator()?;
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            let attempt = cancellation::begin_for_caller(
+                &worktree,
+                &session_id,
+                &authority,
+                &key,
+                &commands,
+                &token,
+            )
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            let _attempt_watchdog = if cfg!(test) {
+                None
+            } else {
+                let executable = driver
+                    .as_ref()
+                    .map(|driver| Ok(driver.fixed_path.clone()))
+                    .unwrap_or_else(std::env::current_exe)
+                    .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+                Some(
+                    interruption::Watchdog::start(&worktree, attempt.id(), &token, &executable)
+                        .map_err(|error| {
+                            SpecOpsError::from(ApiError::Unexpected(error.to_string()))
+                        })?,
+                )
+            };
+            out.push_str(&format!(
+                "verify: attempt — {} (inspect with verify.status; cancel with verify.cancel)\n",
+                attempt.id()
+            ));
+            let check_cancelled = || attempt.cancelled().map_err(Into::into);
+            let heavy_attempt = gwt_core::index_coordinator::HeavyAttempt {
+                id: attempt.id(),
+                check_cancelled: &check_cancelled,
+            };
             out.push_str(&host_note);
             let mut admit_command = |command: &str, host: &VerificationHost| {
                 if crate::cli::verification_lease::classify_command(command)
@@ -5984,12 +6586,21 @@ pub(super) fn run<E: CliEnv>(
                 {
                     Ok(None)
                 } else {
-                    crate::cli::verification_lease::admission::admit(
+                    crate::cli::verification_lease::admission::admit_for_attempt(
                         env,
                         &worktree,
                         Some(command),
                         max_wait,
-                        || restore_gwtd_after_deferral(&worktree, host),
+                        |artifacts| {
+                            let check = || attempt.cancelled().map_err(|error| error.to_string());
+                            restore_gwtd_after_deferral_cancellable(
+                                &worktree,
+                                host,
+                                artifacts,
+                                Some(&check),
+                            )
+                        },
+                        &heavy_attempt,
                     )
                     .map(Some)
                     .map_err(|error| error.to_string())
@@ -6002,9 +6613,11 @@ pub(super) fn run<E: CliEnv>(
                 &authority,
                 &prepared_quarantines,
                 RunOptions {
+                    attempt: Some(&attempt),
+                    driver,
                     // Unit CLI fixtures are in-process, not a gwtd executable.
                     // Real runner death is covered by verification_admission_cli_test.
-                    watch_runner: !cfg!(test),
+                    watch_runner: false,
                     user_verification_result: if crate::cli::execution_state::session_launch_route(
                         Some(&session_id),
                     ) == Some(gwt_agent::LaunchRoute::Autonomous)
@@ -6019,6 +6632,9 @@ pub(super) fn run<E: CliEnv>(
                     ..RunOptions::default()
                 },
             );
+            attempt
+                .returned(run.as_ref().err().map(String::as_str), &coordinator)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
             let (record, transcript) =
                 run.map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
             // T-131 core: surface the coverage map of the plan this run
@@ -6078,7 +6694,183 @@ pub(super) fn run<E: CliEnv>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use gwt_core::test_support::ScopedEnvVar;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    // A deadlock must fail this regression rather than hang the test runner.
+    // The deadline is only a watchdog; admission below uses Duration::ZERO.
+    fn bounded_artifact_lock_test(name: &str, exercise: impl FnOnce()) {
+        if std::env::var("GWT_ARTIFACT_LOCK_CHILD").as_deref() == Ok(name) {
+            exercise();
+            return;
+        }
+        let mut child = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("GWT_ARTIFACT_LOCK_CHILD", name)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let timed_out = loop {
+            if child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                break true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !timed_out && output.status.success(),
+            "artifact lock regression: timed_out={timed_out}; {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_recovery_keeps_real_artifact_guard() {
+        bounded_artifact_lock_test(
+            "cli::verification_record::tests::timeout_recovery_keeps_real_artifact_guard",
+            || {
+                use crate::cli::verification_lease as lease;
+                use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+                use std::time::Duration;
+
+                let _env_lock = crate::env_test_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let home = tempfile::tempdir().unwrap();
+                let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+                let original_home = dirs::home_dir().unwrap();
+                let _cargo_home = ScopedEnvVar::set(
+                    "CARGO_HOME",
+                    std::env::var_os("CARGO_HOME")
+                        .unwrap_or_else(|| original_home.join(".cargo").into_os_string()),
+                );
+                let _rustup_home = ScopedEnvVar::set(
+                    "RUSTUP_HOME",
+                    std::env::var_os("RUSTUP_HOME")
+                        .unwrap_or_else(|| original_home.join(".rustup").into_os_string()),
+                );
+                let _home_env = ScopedEnvVar::set("HOME", home.path());
+                fs::create_dir_all(home.path().join(".gwt")).unwrap();
+                fs::write(
+                    gwt_config::Settings::global_config_path_for_home(home.path()),
+                    "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+                )
+                .unwrap();
+                let worktree = tempfile::tempdir().unwrap();
+                let package = worktree.path().join("crates/gwt");
+                fs::create_dir_all(package.join("src/bin")).unwrap();
+                fs::write(
+                    worktree.path().join("Cargo.toml"),
+                    "[workspace]\nmembers=['crates/gwt']\nresolver='2'\n",
+                )
+                .unwrap();
+                fs::write(
+                    package.join("Cargo.toml"),
+                    "[package]\nname='gwt'\nversion='0.0.0'\nedition='2021'\n[features]\ntest-gh-guard=[]\n[[bin]]\nname='gwtd'\npath='src/bin/gwtd.rs'\n",
+                )
+                .unwrap();
+                fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
+                let coordinator = lease::open_coordinator().unwrap();
+                let JobAdmission::Owner(holder) = coordinator
+                    .request_job(
+                        &TargetKey::verification("other", "holder"),
+                        JobPriority::ManualRebuild,
+                        Duration::ZERO,
+                    )
+                    .unwrap()
+                else {
+                    panic!("private holder must be admitted");
+                };
+                let _heavy = holder
+                    .acquire_exclusive_heavy_with_disk_budget(
+                        Duration::ZERO,
+                        Duration::from_secs(60),
+                        &[],
+                    )
+                    .unwrap();
+                let target = worktree.path().join("target");
+                let independent = worktree.path().join("independent-target");
+                let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+                let recovery = |artifacts: Option<&lease::BuildArtifactGuard>| {
+                    assert!(lease::try_lock_build_artifacts(&target).unwrap().is_none());
+                    // Probe a fresh FD directly, so process-local bookkeeping
+                    // alone cannot satisfy the target/GC exclusion assertions.
+                    let lock_path = fs::read_dir(coordinator.root().join("build-artifacts"))
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .path();
+                    let assert_kernel_held = || {
+                        let probe = fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&lock_path)
+                            .unwrap();
+                        let error = fs2::FileExt::try_lock_exclusive(&probe).unwrap_err();
+                        assert_eq!(
+                            error.raw_os_error(),
+                            fs2::lock_contended_error().raw_os_error()
+                        );
+                    };
+                    assert_kernel_held();
+                    let other = lease::lock_build_artifacts(&independent).unwrap();
+                    let restored = restore_gwtd_after_deferral(
+                        worktree.path(),
+                        &VerificationHost::Inherit,
+                        artifacts,
+                    );
+                    assert!(restored.contains("restoration: restored"), "{restored}");
+                    assert!(lease::try_lock_build_artifacts(&target).unwrap().is_none());
+                    assert_kernel_held();
+                    drop(other);
+                    restored
+                };
+                let error = lease::admission::admit(
+                    &mut env,
+                    worktree.path(),
+                    Some("cargo test --workspace --target-dir target"),
+                    Duration::ZERO,
+                    recovery,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("deferred"), "{error}");
+                assert!(target.join("debug/gwtd").is_file());
+                assert!(lease::try_lock_build_artifacts(&target).unwrap().is_some());
+            },
+        );
+    }
+
+    #[test]
+    fn duplicate_artifact_lock_reports_holder_instead_of_hanging() {
+        bounded_artifact_lock_test(
+            "cli::verification_record::tests::duplicate_artifact_lock_reports_holder_instead_of_hanging",
+            || {
+                use crate::cli::verification_lease as lease;
+                let home = tempfile::tempdir().unwrap();
+                let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+                let target = home.path().join("target");
+                let held = lease::lock_build_artifacts(&target).unwrap();
+                let error = lease::lock_build_artifacts(&target).unwrap_err().to_string();
+                for expected in ["already", "verification_record.rs", "build-artifacts", "pid"] {
+                    assert!(error.contains(expected), "{error}");
+                }
+                #[cfg(unix)]
+                assert!(error.contains("fd"), "{error}");
+                #[cfg(windows)]
+                assert!(error.contains("handle"), "{error}");
+                drop(held);
+                assert!(lease::lock_build_artifacts(&target).is_ok());
+            },
+        );
+    }
 
     /// Register a plan for the commands, then run them (the standard
     /// T-130-lite flow used everywhere Fresh evidence is needed).
@@ -6125,6 +6917,7 @@ pub(crate) mod tests {
             lease_id: None,
             worktree_fingerprint: fingerprint.to_string(),
             verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
                 headed_e2e: None,
@@ -6300,6 +7093,128 @@ pub(crate) mod tests {
         let loaded = load_plan(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.surfaces, derived.surfaces);
         assert!(plan_integrity_ok(&loaded));
+
+        // Issue #4968: unknown source cannot pass through the fallback matrix.
+        // Declared generated outputs above must remain exempt from this gate.
+        let script = dir.path().join("scripts/no-tests.mjs");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(script, "export {};\n").unwrap();
+        let error = derive_and_register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            vec!["artifacts/report.json".to_string()],
+            Vec::new(),
+            &authority,
+            None,
+        )
+        .expect_err("unsupported source must refuse automatic registration");
+        assert!(
+            error.contains("unsupported(scripts/no-tests.mjs)"),
+            "{error}"
+        );
+        assert!(error.contains("params.commands"), "{error}");
+        assert_eq!(
+            load_plan(dir.path()).unwrap().unwrap().content_hash,
+            plan.content_hash
+        );
+
+        let commands = vec!["git --version".to_string()];
+        register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            commands.clone(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        let (record, _) = run_verification(dir.path(), "sess-cov", &commands).unwrap();
+        assert!(record.all_passed && record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-cov", None),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn pre_pr_context_read_allows_a_concurrent_trusted_writer() {
+        crate::cli::test_support::with_fake_gh("pre-pr-writer-probe", |worktree| {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .status()
+                .unwrap()
+                .success());
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["checkout", "-q", "-b", "work/pre-pr-writer"])
+                .status()
+                .unwrap()
+                .success());
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            for path in [
+                "crates/gwt/Cargo.toml",
+                ".github/workflows/test.yml",
+                ".github/workflows/lint.yml",
+                ".github/workflows/coverage.yml",
+            ] {
+                let destination = worktree.join(path);
+                fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                fs::copy(root.join(path), destination).unwrap();
+            }
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "test: pre-pr baseline"],
+                vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            ] {
+                assert!(gwt_core::process::hidden_command("git")
+                    .current_dir(worktree)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            fs::write(worktree.join("crates/gwt/change.rs"), "// change\n").unwrap();
+            fs::create_dir_all(worktree.join("artifacts")).unwrap();
+            fs::write(worktree.join("artifacts/report.json"), "{}").unwrap();
+            // Initialize the same kernel lease that registration uses; fake gh
+            // attempts an independent writer while its API read is in progress.
+            crate::cli::trusted_store::with_write_lease(worktree, || Ok(())).unwrap();
+            let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree).unwrap();
+            fs::write(
+                std::env::var_os("GWT_FAKE_GH_STATE_FILE").unwrap(),
+                trusted.join(".write-lease").to_str().unwrap(),
+            )
+            .unwrap();
+            let authority =
+                snapshot_verification_caller_authority(worktree, "sess-pre-pr").unwrap();
+            let acceptance = vec!["git --version".to_string()];
+            let (derived, plan) = derive_and_register_plan_for_caller(
+                worktree,
+                "sess-pre-pr",
+                vec!["artifacts/report.json".to_string()],
+                Vec::new(),
+                &authority,
+                Some((&acceptance, &[])),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::cli::trusted_store::read(worktree, "pre-pr-writer-probe.json").unwrap(),
+                Some("written".into())
+            );
+            assert!(derived
+                .surfaces
+                .iter()
+                .any(|s| s.starts_with("ci-delegated(")));
+            assert!(plan.commands.contains(&acceptance[0]));
+            assert!(derived.unsupported_reason().is_none(), "{derived:?}");
+            assert!(plan_integrity_ok(&plan));
+            assert_eq!(load_plan(worktree).unwrap().unwrap(), plan);
+        });
     }
 
     // P9b (T-174 core): the repo-scoped trusted copy wins over a forged
@@ -6827,6 +7742,171 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn verification_timeout_fixture() {
+        let Ok(directory) = std::env::var("GWT_VERIFY_TIMEOUT_FIXTURE") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        let mut grandchild = if std::env::var_os("GWT_VERIFY_TIMEOUT_GRANDCHILD").is_some() {
+            fs::write(
+                directory.join("grandchild.pid"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
+            None
+        } else {
+            let grandchild = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::verification_record::tests::verification_timeout_fixture",
+                ])
+                .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+                .spawn()
+                .unwrap();
+            let safety = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !directory.join("grandchild.pid").exists() {
+                assert!(
+                    std::time::Instant::now() < safety,
+                    "grandchild did not start"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            println!("partial-stdout");
+            eprintln!("partial-stderr");
+            fs::write(directory.join("ready"), "ready").unwrap();
+            Some(grandchild)
+        };
+        if grandchild.is_some() && std::env::var_os("GWT_VERIFY_TIMEOUT_LEADER_EXIT").is_some() {
+            // Leave the grandchild to the bounded runner's completion cleanup.
+            std::process::exit(0);
+        }
+        let safety = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !directory.join("release").exists() && std::time::Instant::now() < safety {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !directory.join("release").exists() {
+            fs::write(directory.join("fixture-deadline-elapsed"), "elapsed").unwrap();
+        }
+        if let Some(grandchild) = &mut grandchild {
+            grandchild.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn inherited_short_command_timeout_keeps_output_and_reclaims_its_tree() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let fixture = "cli::verification_record::tests::verification_timeout_fixture";
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args(["--exact", fixture, "--nocapture"])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root);
+        let unrelated_directory = tempfile::tempdir().unwrap();
+        let mut unrelated = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", fixture, "--nocapture"])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", unrelated_directory.path())
+            .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let mut clock_calls = 0;
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            "git diff --check",
+            Some(Duration::from_secs(60)),
+            None,
+            None,
+            || {
+                clock_calls += 1;
+                if clock_calls == 1 {
+                    return started;
+                }
+                let safety = Instant::now() + Duration::from_secs(30);
+                while !root.join("ready").exists() {
+                    assert!(Instant::now() < safety, "the fixture did not start");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                started + Duration::from_secs(60)
+            },
+        )
+        .unwrap();
+        let unrelated_alive = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let safety = Instant::now() + Duration::from_secs(30);
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(result.0, 124, "{}", result.2);
+        assert_eq!(result.1, None, "owned timeout is not external interruption");
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(result.2.contains("timed out after 60s"), "{}", result.2);
+        assert!(result.2.contains("retry"), "{}", result.2);
+        assert!(!crate::process::is_process_alive(grandchild));
+        assert!(unrelated_alive, "reclamation must stay in the owned tree");
+    }
+
+    #[test]
+    fn inherited_short_command_completion_reclaims_descendants() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_timeout_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root)
+            .env("GWT_VERIFY_TIMEOUT_LEADER_EXIT", "1");
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            "git diff --check",
+            Some(Duration::from_secs(60)),
+            None,
+            None,
+            Instant::now,
+        )
+        .unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let safety = Instant::now() + Duration::from_secs(45);
+        while crate::process::is_process_alive(grandchild)
+            && !root.join("fixture-deadline-elapsed").exists()
+            && Instant::now() < safety
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // A natural fixture exit is not proof that the runner reclaimed it.
+        let survived = crate::process::is_process_alive(grandchild)
+            || root.join("fixture-deadline-elapsed").exists();
+        fs::write(root.join("release"), "release").unwrap();
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(result.0, 0, "{}", result.2);
+        assert_eq!(result.1, None, "{}", result.2);
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(!survived, "bounded completion left its descendant running");
+    }
+
+    #[test]
     fn canonical_output_retains_inventory_before_long_stdout_and_stderr() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".gwt")).unwrap();
@@ -7343,7 +8423,7 @@ mod tests {
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
-        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit);
+        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit, None);
         assert!(
             recovery.contains("gwtd artifact restoration: failed"),
             "{recovery}"
@@ -7599,6 +8679,7 @@ mod tests {
             lease_id: None,
             worktree_fingerprint: "abc".to_string(),
             verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
                 headed_e2e: None,
@@ -8499,6 +9580,47 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_fixture_preserves_completed_evidence_across_home_changes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", original_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", original_home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let commands = ["git --version".to_string()];
+        plan_and_run(&fixture.repo, "sess-home", &commands);
+
+        let other_home = tempfile::tempdir().unwrap();
+        let mut changed_home = None;
+        // Force the parallel HOME writer's interleaving at the existing seam:
+        // Running is already persisted, but Completed has not been written.
+        let (record, _) = run_verification_inner(
+            &fixture.repo,
+            "sess-home",
+            &commands,
+            None,
+            &[],
+            RunOptions::default(),
+            || {
+                changed_home = Some((
+                    ScopedEnvVar::set("HOME", other_home.path()),
+                    ScopedEnvVar::set("USERPROFILE", other_home.path()),
+                ));
+            },
+        )
+        .unwrap();
+        drop(changed_home);
+
+        assert!(record.all_passed);
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-home", None),
+            EvidenceStatus::Fresh,
+            "the fixture must read Completed, not an earlier HOME's Running checkpoint"
+        );
+    }
+
+    #[test]
     fn fingerprint_preserves_base_merges_without_source_changes() {
         let fixture = WorkEventGitFixture::tracked_shards();
         fixture.git_ok(&["branch", "develop"]);
@@ -9115,6 +10237,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let _node_options = ScopedEnvVar::unset("NODE_OPTIONS");
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
 
@@ -9141,17 +10264,37 @@ mod tests {
         // resolves the target, but the missing test answers immediately: the
         // command's outcome is irrelevant here, its classification is not.
         let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         fs::write(
             dir.path().join("Cargo.toml"),
             "[package]\nname='gwt'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
         )
         .unwrap();
         fs::write(dir.path().join("lib.rs"), "").unwrap();
+        // #5086: execute the real short gates while a Heavy holder is active.
+        fs::create_dir(dir.path().join("scripts")).unwrap();
+        fs::write(
+            dir.path().join("scripts/check-coverage-threshold.mjs"),
+            include_str!("../../../../scripts/check-coverage-threshold.mjs"),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("summary.json"),
+            r#"{"data":[{"files":[{"filename":"fixture.rs","summary":{"lines":{"covered":100,"count":100}}}]}]}"#,
+        )
+        .unwrap();
+        let short_gates = [
+            "git diff --check",
+            "node scripts/check-coverage-threshold.mjs summary.json 90",
+        ];
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
         let (_code, out) = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
-                commands: vec!["cargo test -p gwt --test issue-4196-absent".to_string()],
+                commands: std::iter::once("cargo test -p gwt --test issue-4196-absent")
+                    .chain(short_gates)
+                    .map(str::to_owned)
+                    .collect(),
                 headed_e2e_commands: vec![],
                 max_wait_secs: Some(0),
                 user_verification_result: None,
@@ -9166,6 +10309,19 @@ mod tests {
             !out.contains("host admission"),
             "a light matrix must not claim the host lease: {out}"
         );
+        let record = load(dir.path()).unwrap().unwrap();
+        for command in short_gates {
+            let result = record
+                .commands
+                .iter()
+                .find(|result| result.command == command)
+                .unwrap();
+            assert_eq!(result.exit_code, 0, "{}", result.output_tail);
+            assert!(
+                result.admission.is_none(),
+                "short gates must bypass Heavy admission"
+            );
+        }
 
         // #4953: a stale plan must be diagnosed before even attempting the
         // occupied host lease. max_wait=0 observes admission without sleeping.
@@ -9660,6 +10816,7 @@ mod tests {
     const WORK_EVENT_SHARDS_PATH: &str = ".gwt/work/events";
 
     pub(crate) struct WorkEventGitFixture {
+        _gwt_home: Option<ScopedGwtHome>,
         _root: tempfile::TempDir,
         pub(crate) repo: PathBuf,
         remote: PathBuf,
@@ -9671,7 +10828,10 @@ mod tests {
         }
 
         fn tracked_shards() -> Self {
-            let fixture = Self::new(false);
+            let mut fixture = Self::new(false);
+            // These fixtures read trusted verification state while sibling
+            // tests change HOME. Pin the store for the fixture's whole life.
+            fixture._gwt_home = Some(ScopedGwtHome::set(fixture._root.path()));
             fixture.write_event_shard(
                 "base",
                 br#"{"id":"base"}
@@ -9715,6 +10875,7 @@ mod tests {
             );
 
             let fixture = Self {
+                _gwt_home: None,
                 _root: root,
                 repo,
                 remote,

@@ -107,7 +107,7 @@ impossible.**
 1. **Repo + branches:**
    - `git rev-parse --show-toplevel` / `git rev-parse --abbrev-ref HEAD`
    - Base defaults to `develop` unless user specifies.
-2. **Branch protection:** Only `develop` may target `main`. Refuse any other branch targeting `main`.
+2. **Branch protection:** `main` accepts `develop` or same-repository `release/vX.Y.Z` snapshots whose source tree matches their merge base with `develop`. The required `check-source-branch` workflow proves the snapshot; a release branch name alone is insufficient. Refuse other source branches. Never create or advance release branches locally; Prepare Release owns them.
 3. **Working tree state:** `git status --porcelain`. If dirty, pause and present options (continue / abort / cleanup). Do not auto-commit/stash.
 4. **Fetch:** `git fetch origin`
 5. **Commit count against base (mandatory first check):**
@@ -229,7 +229,7 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 3. **If the work fails the Ready PR Gate** → create/update only as Draft PR, or return NO ACTION if the user explicitly rejects Draft.
 4. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode. A Ready/non-draft PR still requires the Ready PR Gate.
 5. **If no open PR** → create new PR with `params.draft:true` unless the Ready PR Gate is satisfied.
-6. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+6. **Branch sync:** Being behind `origin/$base` alone never requires a merge before PR creation. Probe with `git merge-tree --write-tree HEAD "origin/$base"`; merge `origin/$base` (never rebase) and re-run `verify.plan` / `verify.run` only when it reports a conflict. Otherwise create the PR at the verified HEAD and sync afterwards with `pr.update_branch` when the base is strict (see `references/create-flow.md` Step 4).
 
 ### PR Title Rules
 

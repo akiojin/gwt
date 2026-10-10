@@ -9,11 +9,10 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -975,7 +974,7 @@ fn record_launch_container_detachments_locked(
         }
         for item in &work_items.work_items {
             if item.id == event.work_item_id
-                || item.discarded
+                || item.is_terminal()
                 || projection.agents.iter().any(|agent| {
                     agent.workspace_id.as_deref() == Some(item.id.as_str())
                         || item
@@ -2309,7 +2308,9 @@ fn external_workspace_operation_directory() -> PathBuf {
     crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_RECEIPT_DIR)
 }
 
-fn external_workspace_operation_lock_path(
+/// Locate an external operation's OS lock for observational diagnostics.
+/// The path and its holder metadata do not grant transaction authority.
+pub fn external_workspace_operation_lock_path(
     current_path: &Path,
     work_items_path: &Path,
     operation_id: &str,
@@ -2331,32 +2332,43 @@ fn external_workspace_commit_receipt_path(
     ))
 }
 
-fn is_external_workspace_operation_lock_contended(error: &std::io::Error) -> bool {
-    error.kind() == ErrorKind::WouldBlock
-        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-}
-
 fn try_acquire_external_workspace_operation_lock(
     current_path: &Path,
     work_items_path: &Path,
     operation_id: &str,
-) -> Result<Option<fs::File>> {
+) -> Result<Option<crate::operation_deadline::NamedFileLock>> {
     let lock_path =
         external_workspace_operation_lock_path(current_path, work_items_path, operation_id);
     if let Some(parent) = lock_path.parent() {
         create_dir_all_durable(parent)?;
     }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => Ok(Some(lock)),
-        Err(error) if is_external_workspace_operation_lock_contended(&error) => Ok(None),
+    // Closing only the parent's fd leaves a flock held by a fork child's
+    // inherited open file description. The guard explicitly unlocks on every
+    // return path, including an ambiguous external commit error.
+    // Keep this probe nonblocking: Work -> operation acquisition must not wait
+    // against the finalizer's operation -> Work lock order.
+    match crate::operation_deadline::NamedFileLock::try_acquire(&lock_path, operation_id) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Explain a Busy result for the exact path pair that observed contention.
+/// This reads diagnostic metadata only; it does not confer ownership or retry.
+pub fn external_workspace_operation_retry_hint_at(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation_id: &str,
+) -> String {
+    let lock_path =
+        external_workspace_operation_lock_path(current_path, work_items_path, operation_id);
+    let observed =
+        crate::operation_deadline::NamedFileLock::contention_error(&lock_path, operation_id);
+    format!(
+        "External workspace operation {operation_id} is busy at {}. Wait for the holder to release this OS lock, then retry the same operation ID. {observed}",
+        lock_path.display()
+    )
 }
 
 fn load_external_workspace_commit_receipt(
@@ -4334,9 +4346,28 @@ fn with_workspace_work_items_locks_profiled<T>(
         .collect::<Vec<_>>();
     lock_paths.sort();
     lock_paths.dedup();
+    // Issue #5208: these are per-handle OS locks, so a thread that already
+    // holds one of them would wait on itself forever. Refuse instead.
+    if let Some(held) = lock_paths
+        .iter()
+        .find(|path| workspace_work_items_lock_held_by_current_thread(path))
+    {
+        return Err(GwtError::Other(format!(
+            "{WORKSPACE_WORK_ITEMS_LOCK_OPERATION} lock {} is already held by this thread; re-acquiring it would self-deadlock",
+            held.display()
+        )));
+    }
+    // Issue #5208: without an ambient deadline the OS wait used to be
+    // unbounded, so one long holder silently stalled every Work writer. Bound
+    // only the acquisition; the operation keeps the caller's own deadline.
+    let acquisition_deadline = crate::operation_deadline::current().is_none().then(|| {
+        crate::operation_deadline::ScopedOperationDeadline::enter(
+            crate::operation_deadline::now() + workspace_work_items_lock_default_wait(),
+        )
+    });
     let mut locks = Vec::with_capacity(lock_paths.len());
     let mut lock_wait_micros = 0u64;
-    for lock_path in lock_paths {
+    for lock_path in &lock_paths {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -4346,16 +4377,70 @@ fn with_workspace_work_items_locks_profiled<T>(
         // operation / since) instead of only that the deadline expired.
         // Ordinary contention is routine here and is not logged.
         let lock = crate::operation_deadline::NamedFileLock::acquire_quiet(
-            &lock_path,
+            lock_path,
             WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
         )?;
         lock_wait_micros =
             lock_wait_micros.saturating_add(lock_started.elapsed().as_micros() as u64);
         locks.push(lock);
     }
+    drop(acquisition_deadline);
+    let held = HeldWorkspaceWorkItemsLocks::register(lock_paths);
     let result = operation(lock_wait_micros);
+    drop(held);
     drop(locks);
     result
+}
+
+/// Issue #5208: the longest a Work items lock acquisition waits when the
+/// caller set no operation deadline. The error names the observed holder.
+const WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+thread_local! {
+    static WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn workspace_work_items_lock_default_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE.with(std::cell::Cell::get) {
+        return wait;
+    }
+    WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT
+}
+
+thread_local! {
+    /// Work items lock files the current thread holds, innermost last.
+    static HELD_WORKSPACE_WORK_ITEMS_LOCKS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn workspace_work_items_lock_held_by_current_thread(lock_path: &Path) -> bool {
+    HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow().iter().any(|path| path == lock_path))
+}
+
+/// Records the locks for the duration of the operation, including unwinding.
+struct HeldWorkspaceWorkItemsLocks {
+    count: usize,
+}
+
+impl HeldWorkspaceWorkItemsLocks {
+    fn register(lock_paths: Vec<PathBuf>) -> Self {
+        let count = lock_paths.len();
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow_mut().extend(lock_paths));
+        Self { count }
+    }
+}
+
+impl Drop for HeldWorkspaceWorkItemsLocks {
+    fn drop(&mut self) {
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| {
+            let mut held = held.borrow_mut();
+            let keep = held.len().saturating_sub(self.count);
+            held.truncate(keep);
+        });
+    }
 }
 
 pub(crate) fn with_workspace_current_and_work_items_lock<T>(
@@ -5725,7 +5810,7 @@ fn current_canonical_work_item<'a>(
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
     for _ in 0..projection.work_items.len() {
-        if !current.discarded {
+        if !current.is_terminal() {
             break;
         }
         let successor_id = successor_work_id(&current.id);

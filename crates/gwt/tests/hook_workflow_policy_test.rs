@@ -1,9 +1,6 @@
 //! T-112 (SPEC #1935) — workflow-policy gating tests.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-};
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use gwt::cli::{
@@ -26,9 +23,8 @@ use gwt_core::{
 use serde_json::json;
 use tempfile::TempDir;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 fn root() -> PathBuf {
@@ -87,6 +83,11 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
         ),
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
         ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        (
+            "pr.close",
+            json!({"number": 42}),
+            GovernanceEffect::Reversible,
+        ),
         ("workspace.update", json!({}), GovernanceEffect::Reversible),
         (
             "issue.label",
