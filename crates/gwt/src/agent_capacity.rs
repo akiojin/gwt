@@ -442,18 +442,18 @@ fn project_capacity_at(
         diagnostics.push("snapshot_expired: wait for the next measurement".to_string());
     }
     if !disk_observed || snapshot.free_disk_bytes.is_none() {
-        diagnostics.push(format!(
-            "project_disk_measurement_unavailable: check volume/path access or use Manual; {}",
-            root.display()
-        ));
+        diagnostics.push(
+            "project_disk_measurement_unavailable: check volume/path access or use Manual"
+                .to_string(),
+        );
     }
     if target.is_none() {
-        diagnostics.push(format!(
-            "target measurement unavailable: wait for the scan; if missing/empty, build the project or use Manual; target {}",
-            root.join("target").display()
-        ));
+        diagnostics.push(
+            "target measurement unavailable: wait for the scan; if missing/empty, build the project or use Manual"
+                .to_string(),
+        );
     }
-    // Keep recovery and grouped inventory ahead of verbose machine-wide paths.
+    // Keep recovery advice and grouped inventory ahead of verbose paths.
     diagnostics.extend(
         snapshot
             .inventory
@@ -461,6 +461,9 @@ fn project_capacity_at(
             .iter()
             .map(|uncertainty| format!("inventory_uncertain: {}", uncertainty.reason)),
     );
+    if target.is_none() {
+        diagnostics.push(format!("target: {}", root.join("target").display()));
+    }
     diagnostics.extend(snapshot.diagnostics.iter().cloned());
     view.reason = capacity_reason_summary(view.reason, &diagnostics);
     view
@@ -1398,7 +1401,9 @@ mod tests {
     #[test]
     fn repeated_capacity_diagnostics_are_grouped_and_bounded() {
         let temp = tempfile::tempdir().unwrap();
-        let mut snapshot = snapshot(temp.path());
+        let root = temp.path().join("long-project-name-".repeat(5));
+        std::fs::create_dir(&root).unwrap();
+        let mut snapshot = snapshot(&root);
         snapshot.inventory.uncertainties = (0..37)
             .map(
                 |_| crate::session_inventory::SessionObservationUncertainty {
@@ -1408,7 +1413,7 @@ mod tests {
                 },
             )
             .collect();
-        let view = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
+        let view = project_capacity_at(&snapshot, &root, &BTreeSet::new(), 0, 101);
         assert!(view
             .reason
             .contains("inventory_uncertain: child_identity_missing ×37"));
@@ -1418,7 +1423,7 @@ mod tests {
             .collect();
         snapshot.free_disk_bytes = None;
         snapshot.targets.clear();
-        let view = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
+        let view = project_capacity_at(&snapshot, &root, &BTreeSet::new(), 0, 101);
         assert!(view.reason.chars().count() <= 512);
         assert!(view.reason.ends_with('…'));
         assert!(view.reason.contains("child_identity_missing ×37"));
