@@ -10078,6 +10078,12 @@ impl AppRuntime {
         if let Some(manifest) = gwt_core::update::load_pending_update_manifest()
             .filter(|manifest| manifest.auto_apply_deferred)
         {
+            if !self.project_contexts().iter().any(|context| {
+                self.project_auto_update_drain(context)
+                    .is_some_and(|(_, drain)| drain.version == manifest.version)
+            }) {
+                return Vec::new();
+            }
             return self.release_update_auto_apply_events(
                 &manifest.version,
                 UpdateAutoApplyRelease::Cancelled,

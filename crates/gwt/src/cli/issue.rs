@@ -1742,15 +1742,10 @@ fn run_monitor_launch_now<E: CliEnv>(
     // Issue #5062 AC-4: an update drain holds every new launch, this one
     // included, so name it and its release instead of answering as if the
     // Issue will start.
-    let admission_hold = prefs.update_drain.as_ref().map(|drain| {
-        serde_json::json!({
-            "reason": "update_drain",
-            "drain_reason": drain.reason,
-            "version": drain.version,
-            "since": drain.since,
-            "release": crate::UPDATE_DRAIN_RELEASE_OPERATION,
-        })
-    });
+    let (admission_hold, admission_error) = match monitor_launch_admission_hold(&prefs) {
+        Ok(hold) => (hold, None),
+        Err(error) => (None, Some(error.to_string())),
+    };
 
     out.push_str(
         &serde_json::json!({
@@ -1763,15 +1758,93 @@ fn run_monitor_launch_now<E: CliEnv>(
             "scan_error": delivery.scan_error,
             "github_backoff": github_backoff,
             "admission_hold": admission_hold,
+            "admission_error": admission_error,
+            // A scan acknowledgement is not a confirmed window admission.
+            // GUI-only fallback projects are checked at actual host dispatch.
+            "admission_confirmed": false,
         })
         .to_string(),
     );
     out.push('\n');
-    Ok(if delivery.scan_requested && admission_hold.is_none() {
-        0
-    } else {
-        1
-    })
+    Ok(
+        if delivery.scan_requested && admission_hold.is_none() && admission_error.is_none() {
+            0
+        } else {
+            1
+        },
+    )
+}
+
+/// Project prefs and live Monitor authorities provide known admission holds.
+/// GUI-only fallback has no durable host-wide authority projection; the GUI
+/// checks all its open projects before creating the actual window.
+fn monitor_launch_admission_hold(
+    prefs: &crate::IssueMonitorPrefs,
+) -> Result<Option<serde_json::Value>, SpecOpsError> {
+    let mut drain = prefs.update_drain.clone();
+    let mut project_state_path = None;
+    if drain.is_none() {
+        let entries = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(io_as_api_error(error)),
+        };
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(1),
+        );
+        for entry in entries.into_iter().flatten() {
+            let entry = entry.map_err(io_as_api_error)?;
+            if !entry.file_type().map_err(io_as_api_error)?.is_dir() {
+                continue;
+            }
+            let path = entry.path().join("project-state/issue-monitor.json");
+            let Some(candidate) = crate::load_issue_monitor_prefs(&path)
+                .map_err(io_as_api_error)?
+                .update_drain
+            else {
+                continue;
+            };
+            let crate::IssueMonitorAuthorityFenceState::Active(fence) =
+                crate::load_issue_monitor_authority_fence(&path).map_err(io_as_api_error)?
+            else {
+                continue;
+            };
+            let live = if fence.version == 2 {
+                match crate::issue_monitor::acquire_issue_monitor_daemon_lease(&path) {
+                    Ok(lease) => {
+                        drop(lease);
+                        false
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
+                    Err(error) => return Err(io_as_api_error(error)),
+                }
+            } else {
+                crate::process::is_process_alive(fence.pid)
+            };
+            if live {
+                drain = Some(candidate);
+                project_state_path = Some(path);
+                break;
+            }
+        }
+    }
+    Ok(drain.as_ref().map(|drain| {
+        serde_json::json!({
+            "reason": "update_drain",
+            "drain_reason": drain.reason,
+            "version": drain.version,
+            "since": drain.since,
+            "project_state_path": project_state_path,
+            "release_scope": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                "host"
+            } else if project_state_path.is_some() {
+                "drain_owner_project"
+            } else { "current_project" },
+            "release": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
+            } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
+        })
+    }))
 }
 
 /// The GitHub refusal windows still open on this machine (per resource), as
@@ -7887,7 +7960,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_now_reports_the_update_drain_that_holds_admission() {
+    fn issue_5062_launch_now_reports_the_update_drain_that_holds_admission() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -7926,7 +7999,67 @@ mod tests {
         assert_eq!(result["admission_hold"]["since"], "2026-10-05T17:00:24Z");
         assert_eq!(
             result["admission_hold"]["release"],
-            crate::UPDATE_DRAIN_RELEASE_OPERATION
+            "release.update.defer {\"version\":\"9.110.0\"}"
+        );
+    }
+
+    #[test]
+    fn issue_5062_launch_now_uses_live_host_authority_and_manual_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let other_repo = tmp.path().join("other-repo");
+        std::fs::create_dir_all(&other_repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&other_repo);
+        let (_, lease) = crate::establish_issue_monitor_authority_fence(
+            &path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            "2026-10-05T17:00:24Z",
+        );
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let prefs = crate::IssueMonitorPrefs::default();
+        let hold = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        assert_eq!(hold["version"], "9.110.0");
+        assert_eq!(
+            hold["release"],
+            "release.update.defer {\"version\":\"9.110.0\"}"
+        );
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        assert_eq!(
+            run_monitor_launch_now(&env, None, 5061, &mut out).unwrap(),
+            1
+        );
+        let response: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(response["admission_hold"]["version"], "9.110.0");
+        assert_eq!(response["admission_confirmed"], false);
+
+        monitor.clear_update_drain();
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Manual,
+            "9.110.0",
+            "2026-10-05T17:00:24Z",
+        );
+        let hold = monitor_launch_admission_hold(&monitor.prefs())
+            .unwrap()
+            .unwrap();
+        assert_eq!(hold["release"], crate::UPDATE_DRAIN_RELEASE_OPERATION);
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let host_manual = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        assert_eq!(host_manual["release_scope"], "drain_owner_project");
+        assert_eq!(host_manual["project_state_path"], serde_json::json!(path));
+        drop(lease);
+        assert!(
+            monitor_launch_admission_hold(&prefs).unwrap().is_none(),
+            "a stale same-PID fence cannot hold admission"
         );
     }
 

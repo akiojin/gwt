@@ -5362,6 +5362,14 @@ impl AppRuntime {
                 .insert(window_id.clone(), detail.clone());
             return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
         }
+        if preset.is_agent_terminal() {
+            if let Some(detail) = self.host_update_drain_launch_hold().unwrap_or_else(Some) {
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                self.window_details
+                    .insert(window_id.clone(), detail.clone());
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
+            }
+        }
         if !preset.requires_process() {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
             return self.status_events(window_id, WindowProcessStatus::Running, None);

@@ -168,31 +168,38 @@ pub fn persist_pending_update_manifest(manifest: &PendingUpdateManifest) -> Resu
 
 /// Test-friendly variant: write the manifest into an explicit directory. The
 /// production path uses [`persist_pending_update_manifest`] which targets
-/// [`pending_update_dir`].
+/// [`pending_update_dir`]. Staging workers wait for brief manifest mutations
+/// rather than reporting a completed download as failed.
 pub fn persist_pending_update_manifest_in(
     dir: &Path,
     manifest: &PendingUpdateManifest,
 ) -> Result<(), String> {
-    let _lock = pending_update_manifest_lock(dir)?;
+    let lock = open_pending_update_manifest_lock(dir)?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
     write_pending_update_manifest_in(dir, manifest)
 }
 
-/// Refuse a concurrent stage/defer/clear immediately instead of overwriting
-/// the version another process is publishing. Apply-start callers retain the
-/// returned guard through the authoritative manifest check and resume marker
-/// publication, then release it before cleanup acquires the lock again.
+/// Acquire without waiting for a concurrent manifest writer. Defer, cleanup,
+/// and apply-start callers fail closed when busy. Apply-start callers retain
+/// the guard through the authoritative check and resume marker publication,
+/// then release it before cleanup acquires the lock again.
 pub fn pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
+    let lock = open_pending_update_manifest_lock(dir)?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .map_err(|e| format!("Pending-update manifest is busy or cannot be locked: {e}"))?;
+    Ok(lock)
+}
+
+fn open_pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create pending-update dir: {e}"))?;
-    let lock = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(dir.join("manifest.lock"))
-        .map_err(|e| format!("Failed to open pending-update manifest lock: {e}"))?;
-    fs2::FileExt::try_lock_exclusive(&lock)
-        .map_err(|e| format!("Pending-update manifest is busy or cannot be locked: {e}"))?;
-    Ok(lock)
+        .map_err(|e| format!("Failed to open pending-update manifest lock: {e}"))
 }
 
 fn write_pending_update_manifest_in(
@@ -4547,7 +4554,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_manifest_mutations_refuse_a_concurrent_writer_without_changing_version() {
+    fn pending_manifest_staging_waits_for_writer_while_defer_and_clear_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let payload_path = dir.path().join("prepared-binary");
         fs::write(&payload_path, "prepared payload").unwrap();
@@ -4570,12 +4577,32 @@ mod tests {
         fs2::FileExt::lock_exclusive(&lock).unwrap();
         let mut replacement = manifest;
         replacement.version = "9.201.0".into();
-        assert!(persist_pending_update_manifest_in(dir.path(), &replacement).is_err());
         assert!(defer_pending_update_in(dir.path(), "9.200.0").is_err());
         assert!(clear_pending_update_manifest_in(dir.path()).is_err());
         assert_eq!(fs::read(dir.path().join("manifest.json")).unwrap(), before);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let staging_dir = dir.path().to_path_buf();
+        let staging = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx
+                .send(persist_pending_update_manifest_in(
+                    &staging_dir,
+                    &replacement,
+                ))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            finished_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
         drop(lock);
-        persist_pending_update_manifest_in(dir.path(), &replacement).unwrap();
+        finished_rx
+            .recv()
+            .unwrap()
+            .expect("staging resumes after the writer releases its lock");
+        staging.join().unwrap();
         assert_eq!(
             load_pending_update_manifest_in(dir.path()).unwrap().version,
             "9.201.0"

@@ -14324,8 +14324,7 @@ impl IssueMonitorState {
                             dispatch.issue_number == *issue_number
                                 && dispatch.pr_number == window.pr_number
                         }) {
-                            // Spawn grace begins after the request reaches the GUI.
-                            window.dispatched_at = now.to_string();
+                            // A queued request has not begun its spawn grace.
                             (true, None)
                         } else if rfc3339_elapsed_secs(&window.dispatched_at, now)
                             .is_none_or(|elapsed| elapsed < REVIEW_WINDOW_SPAWN_GRACE_SECS)
@@ -15840,12 +15839,33 @@ impl IssueMonitorState {
 
     /// Drain queued review-agent spawn requests for emission to the GUI.
     pub fn take_pending_review_dispatches(&mut self) -> Vec<AutonomousReviewDispatch> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.take_pending_review_dispatches_at(&now)
+    }
+
+    fn take_pending_review_dispatches_at(&mut self, now: &str) -> Vec<AutonomousReviewDispatch> {
         if self.update_drain().is_some() {
             return Vec::new();
         }
         let available = self.remaining_materialization_slots();
         let count = available.min(self.pending_review_dispatches.len());
-        self.pending_review_dispatches.drain(..count).collect()
+        let dispatches = self
+            .pending_review_dispatches
+            .drain(..count)
+            .collect::<Vec<_>>();
+        for dispatch in &dispatches {
+            if let Some(window) =
+                self.review_windows
+                    .get_mut(&dispatch.issue_number)
+                    .filter(|window| {
+                        window.pr_number == dispatch.pr_number && window.window_id.is_none()
+                    })
+            {
+                // Waiting for update drain or capacity does not spend spawn grace.
+                window.dispatched_at = now.to_string();
+            }
+        }
+        dispatches
     }
 
     fn unissued_launch_reservations(&self) -> BTreeSet<u64> {
@@ -41648,7 +41668,10 @@ mod tests {
         );
 
         monitor.clear_update_drain();
-        assert_eq!(monitor.take_pending_review_dispatches(), vec![dispatch]);
+        assert_eq!(
+            monitor.take_pending_review_dispatches_at("2026-09-07T04:10:00Z"),
+            vec![dispatch]
+        );
         monitor.record_window_snapshot(idle_snapshot(
             "2026-09-07T04:10:30Z",
             vec![idle_observation(
@@ -41660,6 +41683,44 @@ mod tests {
         ));
         assert_eq!(monitor.review_windows().len(), 1);
         assert_eq!(review_attempts_of(&monitor, 41), attempts);
+    }
+
+    #[test]
+    fn issue_5062_update_drain_without_snapshots_starts_review_grace_when_emitted() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(2);
+        let dispatch = review_dispatch_for(41, 410);
+        monitor.dispatch_review(dispatch.clone(), IDLE_NOW).unwrap();
+        let record = monitor.autonomous_record(41).unwrap().clone();
+        let windows = monitor.review_windows();
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.99.0", IDLE_NOW);
+        assert!(monitor
+            .take_pending_review_dispatches_at("2026-09-07T04:10:00Z")
+            .is_empty());
+        assert_eq!(monitor.review_windows(), windows);
+
+        monitor.clear_update_drain();
+        assert_eq!(
+            monitor.take_pending_review_dispatches_at("2026-09-07T04:10:00Z"),
+            vec![dispatch]
+        );
+        assert_eq!(monitor.autonomous_record(41), Some(&record));
+        let pane = idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false);
+        monitor.record_window_snapshot(idle_snapshot("2026-09-07T04:10:30Z", vec![pane.clone()]));
+        assert_eq!(monitor.review_windows().len(), 1);
+        assert_eq!(review_attempts_of(&monitor, 41), record.review_attempts);
+        assert_eq!(
+            monitor.review_windows()[0].dispatched_at,
+            "2026-09-07T04:10:00Z"
+        );
+
+        monitor.record_window_snapshot(idle_snapshot("2026-09-07T04:16:00Z", vec![pane]));
+        assert!(monitor.review_windows().is_empty());
+        assert_eq!(
+            review_attempts_of(&monitor, 41).map(|attempts| attempts.count),
+            Some(1),
+            "an emitted review still fails after its actual spawn grace expires"
+        );
     }
 
     #[test]
@@ -41779,7 +41840,12 @@ mod tests {
         monitor
             .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
             .expect("review dispatch is admitted");
-        assert_eq!(monitor.take_pending_review_dispatches().len(), 1);
+        assert_eq!(
+            monitor
+                .take_pending_review_dispatches_at("2026-09-07T04:00:00Z")
+                .len(),
+            1
+        );
         // Fresh canvas shortly after the dispatch: still within spawn grace.
         monitor.record_window_snapshot(idle_snapshot(
             "2026-09-07T04:01:00Z",
