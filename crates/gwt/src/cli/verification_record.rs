@@ -8148,7 +8148,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let package = dir.path().join("crates/gwt");
-        fs::create_dir_all(package.join("src")).unwrap();
+        fs::create_dir_all(package.join("src/bin")).unwrap();
         fs::write(
             dir.path().join("Cargo.toml"),
             "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
@@ -8156,9 +8156,12 @@ mod tests {
         .unwrap();
         fs::write(
             package.join("Cargo.toml"),
-            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
         )
         .unwrap();
+        fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
         fs::write(
             package.join("src/lib.rs"),
             "#[test] fn fails() { panic!() }\n",
@@ -8178,6 +8181,8 @@ mod tests {
         assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
         assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
+        assert!(!record.all_passed, "{transcript}");
         assert_eq!(record.skipped_after_failure, vec!["git --version"]);
     }
 
@@ -8294,29 +8299,41 @@ mod tests {
     #[test]
     fn external_signal_termination_is_counted_apart_from_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let (record, transcript) = run_verification(
-            dir.path(),
-            "sess-signal",
-            &[
-                r#"sh -c "kill -TERM $$""#.to_string(),
-                "false".to_string(),
-                "definitely-not-a-real-binary-xyz".to_string(),
-                "git --version".to_string(),
-            ],
-        )
-        .unwrap();
+        let commands = [
+            r#"sh -c "kill -TERM $$""#.to_string(),
+            "false".to_string(),
+            "definitely-not-a-real-binary-xyz".to_string(),
+            "git --version".to_string(),
+        ];
+        let (record, transcript) = run_verification(dir.path(), "sess-signal", &commands).unwrap();
 
         assert!(!record.all_passed, "an interrupted run must never pass");
+        assert_eq!(record.commands.len(), 1, "{transcript}");
+        assert_eq!(record.skipped_after_failure, commands[1..]);
         assert_eq!(record.commands[0].exit_code, -1);
         assert_eq!(record.commands[0].terminated_by_signal, Some(15));
-        assert_eq!(record.commands[1].terminated_by_signal, None);
-        assert_eq!(record.commands[2].exit_code, -1);
-        assert_eq!(record.commands[2].terminated_by_signal, None);
+        // Fail-fast stops this matrix; observe the other outcome types in
+        // independent runs without weakening their accounting assertions.
+        let mut results = record.commands.clone();
+        for command in &commands[1..] {
+            let independent_dir = tempfile::tempdir().unwrap();
+            let (independent, output) = run_verification(
+                independent_dir.path(),
+                "sess-single-outcome",
+                std::slice::from_ref(command),
+            )
+            .unwrap();
+            assert_eq!(independent.commands.len(), 1, "{output}");
+            results.extend(independent.commands.iter().cloned());
+        }
+        assert_eq!(results[1].terminated_by_signal, None);
+        assert_eq!(results[2].exit_code, -1);
+        assert_eq!(results[2].terminated_by_signal, None);
         assert!(
             transcript.contains("exit: -1 (terminated by external signal 15)"),
             "{transcript}"
         );
-        let counts = RunOutcomeCounts::of(&record.commands);
+        let counts = RunOutcomeCounts::of(&results);
         assert_eq!(
             (counts.passed, counts.failed, counts.interrupted),
             (1, 2, 1)
