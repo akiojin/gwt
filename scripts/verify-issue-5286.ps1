@@ -211,7 +211,7 @@ try {
   # ConPTY providers can outlive their host. Only recorded fixture PIDs whose
   # creation time matches the receipt are eligible for cleanup.
   foreach ($line in [IO.File]::ReadAllLines($providerLog)) {
-    $receipt = $line | ConvertFrom-Json
+    try { $receipt = $line | ConvertFrom-Json } catch { continue }
     if ($receipt.kind -ne 'launch') { continue }
     $providerProcess = Get-Process -Id $receipt.pid -ErrorAction SilentlyContinue
     if ($providerProcess) {
