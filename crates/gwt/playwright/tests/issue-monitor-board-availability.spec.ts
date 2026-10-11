@@ -22,32 +22,30 @@ test("Issue #5287 real backend journals Issue load and render causes in errors.l
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   const theme = info.project.name.includes("light") ? "light" : "dark";
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
-  await page.addInitScript(() => {
+  await page.addInitScript(theme => {
     const send = WebSocket.prototype.send;
     WebSocket.prototype.send = function (data) {
       if (typeof data === "string") {
         const event = JSON.parse(data);
-        if (event.kind === "load_knowledge_bridge") (window as any).__availabilityLoad = event;
+        // Fault this RPC before a completion can race the injected failure.
+        // Diagnostic events still reach the real backend and persistent ledger.
+        if (event.kind === "load_knowledge_bridge" && event.knowledge_kind === "issue") {
+          queueMicrotask(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            ...event, kind: "knowledge_error", message: `Issue #5287 ${theme} load acceptance cause`,
+          } })));
+          return;
+        }
         if (event.kind === "report_knowledge_error") ((window as any).__availabilityReports ??= []).push(event);
       }
       return send.call(this, data);
     };
-  });
+  }, theme);
   await gotoLiveGwt(page, base, { enableTestBridge: true });
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue", bounds: { x: 40, y: 40, width: 1200, height: 900 } });
   const window = page.locator('.workspace-window[data-preset="issue"]').last();
   await expect(window).toBeVisible();
   const id = await window.getAttribute("data-id");
-  await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages.some(
-    ({ payload }: any) => payload.kind === "knowledge_entries" && payload.id === id), id)).toBe(true);
-  await page.evaluate(({ id, theme }) => {
-    const load = (window as any).__availabilityLoad;
-    if (load.id !== id) throw new Error("Load request belongs to another window");
-    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
-      ...load, kind: "knowledge_error", message: `Issue #5287 ${theme} load acceptance cause`,
-    } }));
-  }, { id, theme });
   await expect(window.locator('.knowledge-list [role="alert"]')).toContainText(`Issue #5287 ${theme} load acceptance cause`);
   await page.evaluate(theme => {
     const original = Element.prototype.appendChild;
