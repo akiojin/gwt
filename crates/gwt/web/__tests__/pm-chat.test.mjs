@@ -141,3 +141,77 @@ test('Reports rejects file-drop input while Execution log keeps the attachment b
     globalThis.document = previous.document;
   }
 });
+
+// Exercise the real token/XHR path: the uploader override bypasses both.
+async function clipboardFixture(windowId, run) {
+  let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu']) {
+    source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
+  }
+  const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body><div class="workspace-window"><div class="terminal-root"></div></div></body></html>');
+  const previous = Object.fromEntries(['window', 'document', 'fetch', 'XMLHttpRequest', '__gwtAttachmentUploader'].map(key => [key, globalThis[key]]));
+  const sent = [], alerts = [];
+  let tokenRequests = 0;
+  globalThis.window = window;
+  globalThis.document = document;
+  window.__gwtAttachmentUploader = undefined;
+  window.alert = message => alerts.push(message);
+  globalThis.fetch = async () => {
+    tokenRequests += 1;
+    if (tokenRequests === 1) throw new Error('token connection interrupted');
+    return { ok: true, json: async () => ({ token: 'fresh-token' }) };
+  };
+  globalThis.XMLHttpRequest = class {
+    upload = {};
+    status = 200;
+    response = { upload_id: 'image-upload', mime_type: 'image/png', filename: 'clipboard-image.png', size: 3 };
+    open() {}
+    setRequestHeader() {}
+    send() { this.onload(); }
+  };
+  try {
+    const pane = document.querySelector('.workspace-window');
+    pane.dataset.id = windowId;
+    const bridge = createTerminalAttachments({ send: event => sent.push(event),
+      terminalMap: new Map(), windowMap: new Map(), workspaceWindowById: () => ({ preset: 'agent' }),
+      isAgentWindowPreset: preset => preset === 'agent', workspaceWindowElement: () => pane });
+    const terminalRoot = pane.querySelector('.terminal-root');
+    bridge.installTerminalImagePasteHandlers(windowId, terminalRoot, { focus() {} });
+    const paste = async () => {
+      const event = new window.Event('paste', { bubbles: true, cancelable: true });
+      const file = new File(['png'], 'clipboard-image.png', { type: 'image/png' });
+      event.clipboardData = { items: [{ kind: 'file', type: file.type, getAsFile: () => file }] };
+      terminalRoot.dispatchEvent(event);
+      await new Promise(resolve => setImmediate(resolve));
+    };
+    await run({ paste, sent, alerts, pane, tokenRequests: () => tokenRequests });
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+}
+
+test('PM and Agent clipboard paste retry a failed token request without reloading', async () => {
+  for (const windowId of ['pm', 'agent']) {
+    await clipboardFixture(windowId, async ({ paste, sent, tokenRequests }) => {
+      await paste();
+      assert.equal(sent.filter(event => event.kind === 'paste_image_uploaded').length, 0);
+      await paste();
+      assert.equal(tokenRequests(), 2, `${windowId}: failed token must be fetched again`);
+      assert.equal(sent.filter(event => event.kind === 'paste_image_uploaded').length, 1);
+      assert.equal(sent.at(-1).id, windowId);
+    });
+  }
+});
+
+test('clipboard failure shows and reports the concrete upload cause', async () => {
+  await clipboardFixture('pm', async ({ paste, sent, alerts, pane }) => {
+    await paste();
+    assert.match(alerts[0], /Could not upload pasted image.*token connection interrupted/);
+    assert.match(pane.querySelector('.attachment-progress').textContent, /token connection interrupted/);
+    assert.equal(sent[0].kind, 'attachment_upload_failed');
+    assert.equal(sent[0].id, 'pm');
+    assert.equal(sent[0].message, alerts[0]);
+    assert.match(sent[0].operation_id, /^attachment-/);
+  });
+});
