@@ -275,7 +275,7 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
 /// Inject Linux observations on any test host without changing its OS clock.
 #[cfg(test)]
 pub(crate) mod test_clock {
-    use std::cell::RefCell;
+    use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
     struct Observation {
         pid: u32,
@@ -287,7 +287,8 @@ pub(crate) mod test_clock {
         static OBSERVATION: RefCell<Option<Observation>> = const { RefCell::new(None) };
     }
 
-    pub(crate) struct ProcessClock(Option<Observation>);
+    // Drop must restore the observation on the thread that installed it.
+    pub(crate) struct ProcessClock(Option<Observation>, PhantomData<Rc<()>>);
 
     impl ProcessClock {
         pub(crate) fn new(pid: u32, start_ticks: u64, btime: u64) -> Self {
@@ -296,7 +297,7 @@ pub(crate) mod test_clock {
                 stat: format!("{pid} (gwt host) S {} {start_ticks}", ["0"; 18].join(" ")),
                 btime,
             };
-            Self(OBSERVATION.replace(Some(observation)))
+            Self(OBSERVATION.replace(Some(observation)), PhantomData)
         }
 
         pub(crate) fn set_btime(&self, btime: u64) {
