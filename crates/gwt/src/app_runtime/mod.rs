@@ -10624,6 +10624,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
@@ -10967,6 +10968,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
@@ -11380,6 +11382,10 @@ impl AppRuntime {
                     refresh,
                 },
             ),
+            FrontendEvent::ReportKnowledgeError { id, stage, message } => {
+                self.report_knowledge_error(&id, &stage, &message);
+                Vec::new()
+            }
             FrontendEvent::SearchKnowledgeBridge {
                 id,
                 knowledge_kind,

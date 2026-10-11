@@ -92,6 +92,59 @@ async function makeFixture(options = {}) {
   return { body, document, mod, sent, surface, load, windowMap };
 }
 
+test("Issue #5287: inbox-first startup renders every column despite GUI error and enriches late cache rows", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ enabled: true, state: "error", terminal_queue: [{ number: 2 }] });
+  surface.applyIssueMonitorInbox([1, 2, 3].map(number => ({
+    issue: { number, title: `Inbox issue ${number}`, state: "open", labels: ["bug"] },
+    state: number === 3 ? "launched" : "queued",
+  })));
+  for (const [number, phase] of [[1, "backlog"], [2, "queued"], [3, "active"]]) {
+    assert.equal(body.querySelectorAll(`[data-queue-column="${phase}"] [data-issue-number="${number}"]`).length, 1);
+  }
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [{ ...knowledgeEntry(2, "queued", 1), state: "closed", title: "Enriched cache issue" }],
+    refresh_enabled: true });
+  assert.equal(body.querySelectorAll(".knowledge-row").length, 3, "late cache must not remove inbox-only rows or duplicate identities");
+  assert.match(body.querySelector('[data-issue-number="2"]').textContent, /Enriched cache issue/);
+  assert.equal(body.querySelectorAll('[data-queue-column="queued"] [data-issue-number="2"]').length, 1,
+    "the current open inbox wins over stale cached closure");
+  surface.applyIssueMonitorInbox([]);
+  assert.equal(body.querySelectorAll(".knowledge-row").length, 1, "removed inbox-only rows must not become sticky cache entries");
+});
+
+test("Issue #5287: an initial load failure shows its cause instead of empty columns and reports a ledger diagnostic", async (t) => {
+  const { body, surface, load, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, message: "Issue cache could not be read" });
+  assert.match(body.querySelector('.knowledge-list [role="alert"]')?.textContent || "", /Issue cache could not be read/);
+  assert.ok(sent.some(event => event.kind === "report_knowledge_error" && event.id === "win-1" &&
+    event.stage === "load" && event.message === "Issue cache could not be read"));
+});
+
+test("Issue #5287: a failed Issue renderer displays and reports the cause, then recovers", async (t) => {
+  let failRow = false;
+  const { body, surface, load, sent } = await makeFixture({ createNode(...args) {
+    if (failRow && String(args[1]).split(" ").includes("knowledge-row")) {
+      failRow = false;
+      throw new Error("Issue card renderer failed");
+    }
+    return createNode(globalThis.document, ...args);
+  } });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  failRow = true;
+  assert.throws(() => surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [knowledgeEntry(1, "queued")], refresh_enabled: true }), /Issue card renderer failed/);
+  assert.match(body.querySelector('.knowledge-list [role="alert"]')?.textContent || "", /Issue card renderer failed/);
+  assert.ok(sent.some(event => event.kind === "report_knowledge_error" && event.stage === "render" &&
+    event.message === "Issue card renderer failed"));
+  surface.applyIssueMonitorStatus({ enabled: true, state: "idle" });
+  assert.equal(body.querySelectorAll('.knowledge-list [role="alert"]').length, 0);
+  assert.equal(body.querySelectorAll(".knowledge-row").length, 1);
+});
+
 test("a failed Issue window renderer does not leave another window on the previous inbox", async (t) => {
   let failRow = false;
   const fixture = await makeFixture({ createNode(...args) {
