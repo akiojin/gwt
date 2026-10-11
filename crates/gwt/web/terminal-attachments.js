@@ -318,6 +318,10 @@ export function createTerminalAttachments({
               throw new Error("attachment upload token missing");
             }
             return payload.token;
+          }).catch((error) => {
+            // A transient failure must not poison every later user paste/drop.
+            attachmentUploadTokenPromise = null;
+            throw error;
           });
         }
         return attachmentUploadTokenPromise;
@@ -344,7 +348,8 @@ export function createTerminalAttachments({
               const xhr = new XMLHttpRequest();
               xhr.open("POST", `/internal/attachments/upload?${params.toString()}`);
               xhr.setRequestHeader("x-gwt-upload-token", token);
-              xhr.responseType = "json";
+              // Keep failure bodies too: storage errors are plain-text responses.
+              xhr.responseType = "text";
               xhr.upload.onprogress = (event) => {
                 onProgress?.({
                   loaded: event.loaded || 0,
@@ -353,12 +358,18 @@ export function createTerminalAttachments({
               };
               xhr.onload = () => {
                 if (xhr.status < 200 || xhr.status >= 300) {
-                  reject(new Error(`upload failed: ${xhr.status}`));
+                  const detail = typeof xhr.response === "string" ? xhr.response : xhr.responseText;
+                  reject(new Error(`HTTP ${xhr.status}: ${detail || xhr.statusText || "attachment upload failed"}`));
                   return;
                 }
-                resolve(xhr.response || JSON.parse(xhr.responseText || "{}"));
+                try {
+                  resolve(typeof xhr.response === "object" && xhr.response
+                    ? xhr.response : JSON.parse(xhr.responseText || xhr.response || "{}"));
+                } catch (error) {
+                  reject(new Error(`Invalid attachment upload response (HTTP ${xhr.status}): ${error.message}`));
+                }
               };
-              xhr.onerror = () => reject(new Error("upload failed"));
+              xhr.onerror = () => reject(new Error("attachment upload network error (HTTP 0)"));
               xhr.onabort = () => reject(new Error("upload aborted"));
               signal?.addEventListener("abort", () => xhr.abort(), { once: true });
               xhr.send(file);
@@ -412,9 +423,12 @@ export function createTerminalAttachments({
             filename: uploaded.filename || file.name || filename || null,
             size: uploaded.size ?? file.size ?? 0,
           });
-        } catch (_error) {
-          progress.fail(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
-          showFileDropAlert(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
+        } catch (error) {
+          const message = `${IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE} ${error?.message || String(error)}`;
+          progress.fail(message);
+          send({ kind: "attachment_upload_failed", id: windowId,
+            operation_id: progress.operationId, message });
+          showFileDropAlert(message);
         }
       }
 

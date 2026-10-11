@@ -626,6 +626,12 @@ pub enum FrontendEvent {
         filename: Option<String>,
         size: u64,
     },
+    /// Browser-side upload failures use server-derived window/project scope.
+    AttachmentUploadFailed {
+        id: String,
+        operation_id: String,
+        message: String,
+    },
     AttachFiles {
         id: String,
         #[serde(default)]
