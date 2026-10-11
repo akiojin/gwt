@@ -1373,9 +1373,7 @@ if [ "$1" = "rev-parse" ] && [ "$2" = "--path-format=absolute" ]; then
   exit 0
 fi
 if [ "$1" = "remote" ] && [ "$2" = "get-url" ] && [ "$3" = "origin" ]; then
-  sleep 2
-  printf '%s\n' 'https://github.com/owner/repo.git'
-  exit 0
+  while :; do sleep 1; done
 fi
 exit 1
 "#,
@@ -1385,7 +1383,6 @@ exit 1
 
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let started = Instant::now();
 
     let events = runtime.local_issue_monitor_events_with_policy(
         &runtime.test_context(),
@@ -1396,11 +1393,9 @@ exit 1
         },
     );
 
-    assert!(
-        started.elapsed() < Duration::from_millis(1_500),
-        "cache-only control outlived its origin-probe deadline: {:?}",
-        started.elapsed()
-    );
+    // Issue #5299: the probe never completes on its own, so the deadline error
+    // proves the budget was enforced without timing prefs persistence or
+    // scheduler delays after the probe was stopped.
     let error = events
         .iter()
         .find_map(|event| match &event.event {
@@ -1408,7 +1403,10 @@ exit 1
             _ => None,
         })
         .expect("deadline error is operator-visible");
-    assert!(error.contains("deadline"), "unexpected error: {error}");
+    assert!(
+        error.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
