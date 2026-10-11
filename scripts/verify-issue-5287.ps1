@@ -15,7 +15,9 @@ foreach ($relative in @('.gwt/runtime', '.config', '.docker', '.codex', '.claude
         New-Item -ItemType Junction -Path (Join-Path $checkHome $relative) -Target $source | Out-Null
     }
 }
-$status = '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' | & $checkoutGwtd | ConvertFrom-Json
+$statusJson = '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' | & $checkoutGwtd
+if ($LASTEXITCODE -ne 0) { throw "gwtd issue.monitor.status failed with exit code $LASTEXITCODE." }
+$status = $statusJson | ConvertFrom-Json
 if (!$status.ok -or !$status.project_store.hash) { throw 'Cannot resolve the canonical project hash.' }
 $repoHash = $status.project_store.hash
 $statePath = Join-Path $checkHome ".gwt/projects/$repoHash/project-state"
@@ -32,8 +34,10 @@ function Assert-HookHealth($health) {
     }
 }
 $hookParams = @{expected_hook_bin=$hookBin;runtime_state_path=(Join-Path $checkHome '.gwt/missing-runtime-state.json')}
-$doctor = @{schema_version=1;operation='hook.doctor';params=($hookParams + @{repair=$true})} |
-    ConvertTo-Json -Depth 5 -Compress | & $checkoutGwtd | ConvertFrom-Json
+$doctorJson = @{schema_version=1;operation='hook.doctor';params=($hookParams + @{repair=$true})} |
+    ConvertTo-Json -Depth 5 -Compress | & $checkoutGwtd
+if ($LASTEXITCODE -ne 0) { throw "gwtd hook.doctor failed with exit code $LASTEXITCODE." }
+$doctor = $doctorJson | ConvertFrom-Json
 if (!$doctor.ok) { throw $doctor.error }
 Assert-HookHealth (($doctor.output | ConvertFrom-Json).health)
 $isolatedEnv = @{}
@@ -82,8 +86,10 @@ try {
     $anchorUrl.Scheme = 'ws'
     $anchorUrl.Path = '/ws'
     $anchorSocket.ConnectAsync($anchorUrl.Uri, [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
-    $audit = @{schema_version=1;operation='hook.health';params=$hookParams} |
-        ConvertTo-Json -Depth 5 -Compress | & $checkoutGwtd | ConvertFrom-Json
+    $auditJson = @{schema_version=1;operation='hook.health';params=$hookParams} |
+        ConvertTo-Json -Depth 5 -Compress | & $checkoutGwtd
+    if ($LASTEXITCODE -ne 0) { throw "gwtd hook.health failed with exit code $LASTEXITCODE." }
+    $audit = $auditJson | ConvertFrom-Json
     if (!$audit.ok) { throw $audit.error }
     Assert-HookHealth ($audit.output | ConvertFrom-Json)
     @{project=$repoRoot;repo_hash=$repoHash;pid=$ownedGui.Id;url=$checkUrl} | ConvertTo-Json |

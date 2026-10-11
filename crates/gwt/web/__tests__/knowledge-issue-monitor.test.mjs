@@ -99,10 +99,12 @@ test("Issue #5287: inbox-first startup renders every column despite GUI error an
   surface.applyIssueMonitorInbox([1, 2, 3].map(number => ({
     issue: { number, title: `Inbox issue ${number}`, state: "open", labels: ["bug"] },
     state: number === 3 ? "launched" : "queued",
+    exclusion_reason: number === 1 ? "Held for acceptance review" : null,
   })));
   for (const [number, phase] of [[1, "backlog"], [2, "queued"], [3, "active"]]) {
     assert.equal(body.querySelectorAll(`[data-queue-column="${phase}"] [data-issue-number="${number}"]`).length, 1);
   }
+  assert.match(body.querySelector('[data-issue-number="1"]').textContent, /Held for acceptance review/);
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
     request_id: load.request_id, entries: [{ ...knowledgeEntry(2, "queued", 1), state: "closed", title: "Enriched cache issue" }],
     refresh_enabled: true });
@@ -144,6 +146,30 @@ test("Issue #5287: a failed Issue renderer displays and reports the cause, then 
   assert.equal(body.querySelectorAll('.knowledge-list [role="alert"]').length, 0);
   assert.equal(body.querySelectorAll(".knowledge-row").length, 1);
 });
+
+for (const stage of ["load", "render"]) {
+  test(`Issue #5287: detail-only ${stage} failure stays visible and reaches diagnostics`, async (t) => {
+    const { body, surface, load, sent } = await makeFixture({
+      createKnowledgeMarkdownBody() { throw new Error("detail Markdown failed"); },
+    });
+    t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+    surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: load.request_id, entries: [knowledgeEntry(5287, "queued", 1)], refresh_enabled: true });
+    body.querySelector('[data-issue-number="5287"] .knowledge-row-select').click();
+    const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+    const event = { id: "win-1", knowledge_kind: "issue", request_id: request.request_id };
+    if (stage === "load") {
+      surface.applyKnowledgeReceiveEvent({ ...event, kind: "knowledge_error", message: "detail load failed" });
+    } else {
+      assert.throws(() => surface.applyKnowledgeReceiveEvent({ ...event, kind: "knowledge_detail",
+        detail: { number: 5287, title: "Detail", state: "open", labels: [],
+          sections: [{ title: "Description", body: "Markdown" }], related_works: [] } }), /detail Markdown failed/);
+    }
+    assert.match(body.querySelector('.knowledge-detail-pane [role="alert"]')?.textContent || "", /detail .* failed/);
+    assert.ok(sent.some(message => message.kind === "report_knowledge_error" && message.stage === stage
+      && message.message.includes("detail")));
+  });
+}
 
 test("a failed Issue window renderer does not leave another window on the previous inbox", async (t) => {
   let failRow = false;
