@@ -7,6 +7,7 @@ import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 test("Issue #5287 real backend journals Issue load and render causes in errors.list", async ({ page }, info) => {
   test.setTimeout(120_000);
+  test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "requires an isolated checkout gwt instance");
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
   const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
   expect(base, "requires the isolated checkout harness").not.toBe("");
