@@ -411,6 +411,13 @@ impl AppRuntime {
                 }
                 events
             }
+            Ok(None) if identity.delivery_id.is_some() && identity.handoff_id.is_none() => {
+                // The claim expired while this exact launch was materializing.
+                // Monitor already finalized it; close without another notification.
+                self.issue_monitor_launch_deliveries
+                    .remove(identity.delivery_id.as_ref().unwrap());
+                self.close_window_after_issue_monitor_finalize_events(&identity.window_id)
+            }
             Ok(None) => Vec::new(),
             Err((error, stage)) => self.issue_monitor_control_error_events(
                 Some(&identity.monitor_project_root),

@@ -30,6 +30,8 @@ pub enum ErrorKind {
     /// `tracing::warn` line so `errors.list` can tell the PM why Issues
     /// created on GitHub stopped arriving.
     CacheRefreshFailure,
+    /// Clipboard/file upload or staging failed without stopping the Agent.
+    AttachmentFailure,
     /// Issue #4666: sustained verification contention, for PM observation
     /// only. This does not interrupt the holder or fail its verification.
     VerificationCongestion,
