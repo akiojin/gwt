@@ -66,7 +66,7 @@ test("Issue #5287 real backend journals Issue load and render causes in errors.l
   await expect.poll(() => page.evaluate(() => ((window as any).__availabilityReports ?? [])
     .map((event: any) => event.stage))).toContain("render");
   const ledger = () => new Promise<any[]>((resolve, reject) => {
-    const child = spawn(join(marker.project, "target/debug/gwtd.exe"), [], {
+    const child = spawn(join(marker.project, "target/debug", process.platform === "win32" ? "gwtd.exe" : "gwtd"), [], {
       cwd: marker.project, windowsHide: true,
       env: { ...process.env, HOME: home, USERPROFILE: home, GWT_SESSION_ID: "", GWT_BIN_PATH: "" },
     });

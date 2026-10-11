@@ -700,9 +700,6 @@ export function createKnowledgeKanbanSurface({
         if (message) {
           surfaceErrorSequence += 1;
           state.errorSequence = surfaceErrorSequence;
-          if (state.kind === "issue") {
-            send({ kind: "report_knowledge_error", id: windowId, stage: "load", message });
-          }
           reportSurfaceError({ key: issueWindowErrorKey(windowId), title: "Issue window", message });
         } else {
           resolveSurfaceError(issueWindowErrorKey(windowId));
@@ -734,6 +731,9 @@ export function createKnowledgeKanbanSurface({
         label_excluded_issues: [],
         quota_hold: null,
       }});
+      // Receive paths publish the window whose data changed; the synchronous
+      // view pulls its current knowledge state without rendering in receive.
+      const issueWindowViewModel = createUiStateStore({ windowId: null });
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -2933,11 +2933,11 @@ export function createKnowledgeKanbanSurface({
             const labels = Array.isArray(issue.labels) ? issue.labels : [];
             entries.set(issue.number, { number: issue.number, title: issue.title,
               state: issue.state, labels, is_spec: labels.includes("gwt-spec"),
-              monitor_state: live.state, exclusion_reason: live.error_message,
+              monitor_state: live.state, exclusion_reason: live.exclusion_reason,
               meta: "", linked_branch_count: 0, related_work_count: 0, related_session_count: 0 });
           }
         }
-        return [...entries.values()].map(queueProjectedEntry);
+        return [...entries].map(([, entry]) => queueProjectedEntry(entry));
       }
 
       function queueProjectedEntry(entry) {
@@ -3871,6 +3871,14 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderKnowledgeDetailOnly(windowId, state) {
+        if (state.kind === "issue") {
+          issueWindowViewModel.update(() => ({ windowId, detailOnly: true }));
+          return;
+        }
+        renderKnowledgeDetailView(windowId, state);
+      }
+
+      function renderKnowledgeDetailView(windowId, state) {
         const element = windowMap.get(windowId);
         const detailPane = element?.querySelector(".knowledge-detail-pane");
         if (!detailPane) {
@@ -4432,29 +4440,7 @@ export function createKnowledgeKanbanSurface({
           knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
         );
         if (state.kind === "issue") {
-          try {
-            renderIssueKnowledgeBridge(windowId, element, state);
-            if (state.renderError) {
-              state.renderError = "";
-              resolveSurfaceError(`issue-window:${windowId}:render`);
-            }
-          } catch (error) {
-            const message = String(error?.message || error);
-            const list = element.querySelector(".knowledge-list");
-            if (list) {
-              const alert = document.createElement("div");
-              alert.className = "knowledge-empty";
-              alert.setAttribute("role", "alert");
-              alert.textContent = `Issue rendering failed: ${message}`;
-              list.replaceChildren(alert);
-            }
-            if (state.renderError !== message) {
-              state.renderError = message;
-              send({ kind: "report_knowledge_error", id: windowId, stage: "render", message });
-              reportSurfaceError({ key: `issue-window:${windowId}:render`, title: "Issue window", message });
-            }
-            throw error;
-          }
+          issueWindowViewModel.update(() => ({ windowId }));
           return;
         }
         const board = element.querySelector(".kanban-board");
@@ -5194,6 +5180,50 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
+      issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly }) => {
+        const element = windowMap.get(windowId);
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (!element || !state) return;
+        if ((state.error || "") !== (state.reportedLoadDiagnostic || "")) {
+          state.reportedLoadDiagnostic = state.error || "";
+          if (state.error) {
+            send({ kind: "report_knowledge_error", id: windowId, stage: "load", message: state.error });
+          }
+        }
+        try {
+          if (detailOnly) {
+            renderKnowledgeDetailView(windowId, state);
+            if (state.error) {
+              const detail = element.querySelector(".knowledge-detail-pane");
+              const alert = createNode("div", "knowledge-empty", `Issue load failed: ${state.error}`);
+              alert.setAttribute("role", "alert");
+              detail?.prepend(alert);
+            }
+          } else {
+            renderIssueKnowledgeBridge(windowId, element, state);
+          }
+          if (state.renderError) {
+            state.renderError = "";
+            resolveSurfaceError(`issue-window:${windowId}:render`);
+          }
+        } catch (error) {
+          const message = String(error?.message || error);
+          const list = element.querySelector(detailOnly ? ".knowledge-detail-pane" : ".knowledge-list");
+          if (list) {
+            const alert = document.createElement("div");
+            alert.className = "knowledge-empty";
+            alert.setAttribute("role", "alert");
+            alert.textContent = `Issue rendering failed: ${message}`;
+            list.replaceChildren(alert);
+          }
+          if (state.renderError !== message) {
+            state.renderError = message;
+            send({ kind: "report_knowledge_error", id: windowId, stage: "render", message });
+            reportSurfaceError({ key: `issue-window:${windowId}:render`, title: "Issue window", message });
+          }
+          throw error;
+        }
+      });
 
       return {
         issueMonitorModel,
