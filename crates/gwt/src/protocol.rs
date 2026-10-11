@@ -725,6 +725,12 @@ pub enum FrontendEvent {
         selected_number: Option<u64>,
         refresh: bool,
     },
+    /// Issue #5287: validated Issue-window failures enter the error ledger.
+    ReportKnowledgeError {
+        id: String,
+        stage: String,
+        message: String,
+    },
     SearchKnowledgeBridge {
         id: String,
         knowledge_kind: KnowledgeKind,

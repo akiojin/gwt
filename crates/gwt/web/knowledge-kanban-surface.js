@@ -700,6 +700,9 @@ export function createKnowledgeKanbanSurface({
         if (message) {
           surfaceErrorSequence += 1;
           state.errorSequence = surfaceErrorSequence;
+          if (state.kind === "issue") {
+            send({ kind: "report_knowledge_error", id: windowId, stage: "load", message });
+          }
           reportSurfaceError({ key: issueWindowErrorKey(windowId), title: "Issue window", message });
         } else {
           resolveSurfaceError(issueWindowErrorKey(windowId));
@@ -1719,6 +1722,9 @@ export function createKnowledgeKanbanSurface({
           resolveSurfaceError(issueWindowErrorKey(windowId));
           state.reportedError = "";
         }
+        if (state?.renderError) {
+          resolveSurfaceError(`issue-window:${windowId}:render`);
+        }
         if (state?.pendingSearchTimer !== null && state?.pendingSearchTimer !== undefined) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
@@ -2347,7 +2353,8 @@ export function createKnowledgeKanbanSurface({
               Array.isArray(rows)
                 ? rows.find((entry) => entry && entry.number === number)
                 : null;
-            const row = findRow(state.entries) || findRow(state.baseEntries) || null;
+            const row = findRow(state.entries) || findRow(state.baseEntries) ||
+              (state.kind === "issue" ? issueDetailEntry(state, number) : null);
             const authoritative = state.detail && state.detail.number === number;
             if (!authoritative) {
               state.detail = row
@@ -2914,12 +2921,28 @@ export function createKnowledgeKanbanSurface({
         // request is pending and becomes the authoritative semantic result
         // set on completion. Reapplying substring filtering here would hide
         // valid semantic matches whose wording differs from the query.
-        return (Array.isArray(state.entries) ? state.entries : []).map(queueProjectedEntry);
+        const entries = new Map((Array.isArray(state.entries) ? state.entries : [])
+          .map(entry => [entry.number, entry]));
+        // The inbox is already a complete row source. A separate knowledge
+        // load supplies details, but may still be pending when Monitor data
+        // arrives at startup. Keep semantic search's result set authoritative.
+        if (!state.query.trim()) {
+          for (const live of Object.values(issueMonitorModel.read().inboxByIssue)) {
+            const issue = live.issue;
+            if (entries.has(issue.number)) continue;
+            const labels = Array.isArray(issue.labels) ? issue.labels : [];
+            entries.set(issue.number, { number: issue.number, title: issue.title,
+              state: issue.state, labels, is_spec: labels.includes("gwt-spec"),
+              monitor_state: live.state, exclusion_reason: live.error_message,
+              meta: "", linked_branch_count: 0, related_work_count: 0, related_session_count: 0 });
+          }
+        }
+        return [...entries.values()].map(queueProjectedEntry);
       }
 
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
-        if (live) entry = { ...entry, monitor_state: live.state };
+        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state };
         if (!Array.isArray(issueMonitorModel.read().status.terminal_queue)) return entry;
         const index = issueMonitorModel.read().status.terminal_queue.findIndex(item => item.number === entry.number);
         const queued = index < 0 ? null : issueMonitorModel.read().status.terminal_queue[index];
@@ -3526,7 +3549,7 @@ export function createKnowledgeKanbanSurface({
           );
           if (found) return found;
         }
-        return null;
+        return filteredIssueEntries(state).find(entry => entry.number === number) || null;
       }
 
       function renderIssueDetailAcceptance(detail) {
@@ -4369,6 +4392,11 @@ export function createKnowledgeKanbanSurface({
           if (child !== other) child.remove();
         }
         const visibleEntries = filteredIssueEntries(state);
+        if (state.error) {
+          const error = createNode("div", "knowledge-empty", `Issue load failed: ${state.error}`);
+          error.setAttribute("role", "alert");
+          list.insertBefore(error, other);
+        }
         if (splitMode) {
           const pairs = visibleEntries
             .map((entry) => renderIssueSplitPair(windowId, state, entry))
@@ -4404,7 +4432,29 @@ export function createKnowledgeKanbanSurface({
           knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
         );
         if (state.kind === "issue") {
-          renderIssueKnowledgeBridge(windowId, element, state);
+          try {
+            renderIssueKnowledgeBridge(windowId, element, state);
+            if (state.renderError) {
+              state.renderError = "";
+              resolveSurfaceError(`issue-window:${windowId}:render`);
+            }
+          } catch (error) {
+            const message = String(error?.message || error);
+            const list = element.querySelector(".knowledge-list");
+            if (list) {
+              const alert = document.createElement("div");
+              alert.className = "knowledge-empty";
+              alert.setAttribute("role", "alert");
+              alert.textContent = `Issue rendering failed: ${message}`;
+              list.replaceChildren(alert);
+            }
+            if (state.renderError !== message) {
+              state.renderError = message;
+              send({ kind: "report_knowledge_error", id: windowId, stage: "render", message });
+              reportSurfaceError({ key: `issue-window:${windowId}:render`, title: "Issue window", message });
+            }
+            throw error;
+          }
           return;
         }
         const board = element.querySelector(".kanban-board");

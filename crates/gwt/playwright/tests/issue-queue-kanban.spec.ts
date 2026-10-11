@@ -18,7 +18,7 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
   if (!liveUrl) await installEmbeddedRoutes(page);
-  await installBackend(page, info.title.startsWith("four columns preserve"));
+  await installBackend(page, info.title.startsWith("four columns preserve"), info.title.startsWith("Issue #5287"));
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
@@ -39,6 +39,44 @@ async function confirm(page: Page, numbers: number[], extra = {}) {
 async function drag(page: Page, number: number, target: Locator) {
   await row(page, number).dragTo(target);
 }
+
+test("Issue #5287 inbox-first restart, GUI error, load failure and renderer recovery", async ({ page }) => {
+  const assertInbox = async () => {
+    await expect(column(page, "backlog").locator(".knowledge-row")).toHaveCount(2);
+    await expect(column(page, "queued").locator(".knowledge-row")).toHaveCount(2);
+    await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
+    await expect(row(page, 5)).toContainText("Running issue");
+  };
+  await assertInbox();
+  await page.reload();
+  await assertInbox();
+  await page.evaluate(() => (window as any).__queueLoadError());
+  await expect(page.locator('.knowledge-list [role="alert"]')).toContainText("Issue cache read failed");
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "report_knowledge_error").map((message: any) => message.stage))).toContain("load");
+  await page.evaluate(() => (window as any).__queueKnowledgeComplete());
+  await expect(page.locator('.knowledge-list [role="alert"]')).toHaveCount(0);
+  await expect(row(page, 3)).toContainText("Enriched queued issue");
+  await expect(page.locator(".knowledge-row")).toHaveCount(6);
+  await assertInbox();
+  await page.evaluate(() => {
+    const original = Element.prototype.appendChild;
+    Element.prototype.appendChild = function <T extends Node>(child: T): T {
+      if (child instanceof Element && child.classList.contains("knowledge-row")) {
+        Element.prototype.appendChild = original;
+        throw new Error("Issue card render failed");
+      }
+      return original.call(this, child) as T;
+    };
+    (window as any).__queueConfirm([3, 4]);
+  });
+  await expect(page.locator('.knowledge-list [role="alert"]')).toContainText("Issue card render failed");
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "report_knowledge_error").map((message: any) => message.stage))).toContain("render");
+  await confirm(page, [3, 4]);
+  await expect(page.locator('.knowledge-list [role="alert"]')).toHaveCount(0);
+  await assertInbox();
+});
 
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {
   await expect(page.locator("[data-queue-column]")).toHaveCount(4);
@@ -216,9 +254,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, observeSkipped: boolean) {
+async function installBackend(page: Page, observeSkipped: boolean, inboxFirst = false) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey,observeSkipped})=>{
+  await page.addInitScript(({projectKey,observeSkipped,inboxFirst})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -231,10 +269,16 @@ async function installBackend(page: Page, observeSkipped: boolean) {
       {number:4,title:"Auto-refilled issue",monitor_state:"queued",queue_position:2,queued_by:"auto-refill"},
       {number:5,title:"Running issue",monitor_state:"launched"},{number:6,title:"Completed issue",state:"closed"},
     ].map(entry=>({state:"open",labels:[],is_spec:false,linked_branch_count:0,related_work_refs:[],...entry}));
+    if (inboxFirst) Object.assign(status, {state:"error",last_error:"stale unbound Monitor pane"});
     class FixtureSocket extends EventTarget {
       static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3;
       readyState=0;
-      constructor(public readonly url:string) { super(); fixture.__queueConfirm=(numbers:number[],extra:any)=>{
+      constructor(public readonly url:string) { super();
+        fixture.__queueLoadError=()=>this.emit({kind:"knowledge_error",...fixture.__queueLoad,
+          message:"Issue cache read failed"});
+        fixture.__queueKnowledgeComplete=()=>this.emit({kind:"knowledge_entries",...fixture.__queueLoad,
+          entries:[{...entries[2],state:"closed",title:"Enriched queued issue"}],refresh_enabled:true});
+        fixture.__queueConfirm=(numbers:number[],extra:any)=>{
         Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
       }; fixture.__queueAddForeground=()=>{
@@ -253,12 +297,19 @@ async function installBackend(page: Page, observeSkipped: boolean) {
           workspace:{viewport:{x:0,y:0,zoom:1},windows:[{id:"tab-queue::issue-1",title:"Issues",preset:"issue",
             geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false}]} }],active_tab_id:"tab-queue",recent_projects:[]};
           this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace}); }
-        else if(message.kind==="list_issue_monitor") this.emit({kind:"issue_monitor_status",status});
-        else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) this.emit({kind:"knowledge_entries",id:message.id,knowledge_kind:"issue",request_id:message.request_id,entries,selected_number:null,refresh_enabled:true});
+        else if(message.kind==="list_issue_monitor") {
+          this.emit({kind:"issue_monitor_status",status});
+          if (inboxFirst) this.emit({kind:"issue_monitor_inbox",items:entries.map(issue=>({issue,
+            state:issue.number===5?"launched":issue.number===6?"released":"queued"}))});
+        }
+        else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) {
+          fixture.__queueLoad={id:message.id,knowledge_kind:"issue",request_id:message.request_id};
+          if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
+        }
         else if(message.kind==="select_knowledge_bridge_entry") this.emit({kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}});
       }
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey,observeSkipped});
+  },{projectKey,observeSkipped,inboxFirst});
 }

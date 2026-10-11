@@ -796,7 +796,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }
-        | FrontendEvent::AttachFiles { .. } => return None,
+        | FrontendEvent::AttachFiles { .. }
+        | FrontendEvent::ReportKnowledgeError { .. } => return None,
     };
     Some(log)
 }
