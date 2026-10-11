@@ -349,7 +349,9 @@ test("Issue #3620: manual excess is allowed and Use Auto waits for the backend e
   const warning = body.querySelector(".knowledge-monitor-capacity-warning");
   assert.equal(warning.hidden, false);
   assert.match(warning.textContent, /4 agents above recommendation.*CPU/i);
-  assert.match(warning.textContent, /Verification may not finish\. Timing-dependent test failures may block unrelated PRs\./);
+  assert.match(warning.textContent, /Reduce Max active if verification slows/);
+  assert.equal(warning.dataset.tone, "info");
+  assert.match(body.querySelector(".knowledge-monitor-capacity").textContent, /Verification may not finish\. Timing-dependent test failures may block unrelated PRs\./);
   body.querySelector('[data-action="monitor-capacity-auto"]').click();
   assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_max_active_agents", max_active_agents: null });
   assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
@@ -360,11 +362,11 @@ test("Issue #3620: manual excess is allowed and Use Auto waits for the backend e
   assert.equal(body.querySelector(".knowledge-monitor-capacity").hidden, true, "omitted capacity cannot retain stale measurements");
 });
 
-test("Issue #5227: grouped incomplete diagnostics stay compact and preserve Manual 9", async (t) => {
+test("Issue #5284: incomplete Manual capacity has a private compact summary and unique collapsed diagnostics", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const diskReason = "Disk measurement unavailable; check that the worktree volume is mounted and free at least 4 GiB.";
-  const reason = `inventory_uncertain: child_identity_missing ×37; ${diskReason}`;
+  const reason = `inventory_complete=false; own_pm=0; child_identity_missing ×37; target: /Users/example/target; ${diskReason}; ${diskReason}`;
   const status = capacityStatus({ max_active_agents: 9, max_active_agents_override: 9 });
   status.agent_capacity = { ...status.agent_capacity, measurement_complete: false, machine_budget: null,
     recommended_worker_limit: 0, reason, constraints: [
@@ -376,13 +378,21 @@ test("Issue #5227: grouped incomplete diagnostics stay compact and preserve Manu
   const warning = body.querySelector(".knowledge-monitor-capacity-warning");
   assert.ok(warning, "incomplete measurements have an inline warning");
   assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /measurement is incomplete.*Manual limit 9 is unchanged/);
-  assert.ok(warning.textContent.includes(diskReason), "the disk diagnostic explains how to recover");
-  assert.equal(warning.textContent.split("child_identity_missing").length - 1, 1);
-  assert.equal(warning.textContent.split("×37").length - 1, 1);
-  assert.ok([...warning.textContent].length <= 700, "the complete warning stays within 700 Unicode characters");
-  assert.equal(body.querySelector('[data-role="capacity-reason"]').textContent, reason);
-  assert.match(body.querySelector(".knowledge-monitor-capacity").textContent, /Machine budget: unknown[\s\S]*Disk: unknown/);
+  assert.match(warning.textContent, /measurement is incomplete.*manual limit 9.*No action needed/i);
+  assert.doesNotMatch(warning.textContent, /inventory_complete|own_pm|child_identity|\/Users\//);
+  assert.ok(warning.textContent.length <= 130, "default summary fits one or two lines");
+  assert.equal(warning.dataset.tone, "info");
+  const details = body.querySelector(".knowledge-monitor-capacity");
+  assert.equal(details.hasAttribute("open"), false);
+  assert.match(details.querySelector("summary").textContent, /^Details/);
+  assert.match(details.textContent, /Machine budget: unknown[\s\S]*Disk: unknown/);
+  assert.ok(details.textContent.includes("/Users/example/target"));
+  assert.equal(details.textContent.split(diskReason).length - 1, 1, "same reason in summary/constraints appears once");
+  assert.equal(details.textContent.split("child_identity_missing").length - 1, 1);
+  surface.applyIssueMonitorStatus({ ...status, max_active_agents_override: null, max_active_agents: 0 });
+  assert.equal(warning.dataset.tone, "warning");
+  assert.match(warning.textContent, /Wait for the next measurement or set Max active manually/);
+  assert.doesNotMatch(warning.textContent, /inventory_complete|\/Users\//);
 });
 
 test("Issue #3620: the Operator strip preserves a zero effective worker cap", async () => {

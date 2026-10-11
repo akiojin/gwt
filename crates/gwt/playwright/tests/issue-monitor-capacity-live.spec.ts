@@ -104,7 +104,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
             `Other projects: ${current.other_live_agents}`,
             `PM: ${current.own_pm_agents}`,
             `GUI CPU reserved: ${current.gui_cpu_millicores / 1000} cores`,
-            ...current.constraints.map((constraint: any) => constraint.reason),
+            ...current.constraints.flatMap((constraint: any) => constraint.reason.split(/[;\n]+/).map((part: string) => part.trim()).filter(Boolean)),
           ];
           return current.constraints.map((constraint: any) => constraint.resource).sort().join(",") === "cpu,disk,ram"
             && expected.every(value => text.includes(value));
@@ -131,7 +131,9 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           return !!current && text.includes(`${value - current.recommended_worker_limit} agents above recommendation`)
             && text.includes(current.limiting_constraint.toUpperCase());
         }, { id: windowId, value: manual })).toBe(true);
-        await expect(warning).toContainText("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
+        await expect(warning).toContainText("Reduce Max active if verification slows.");
+        await expect(warning).toHaveAttribute("data-tone", "info");
+        await expect(budget).toContainText("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         await expect(warning).toBeInViewport({ ratio: 1 });
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await testInfo.attach(`agent-capacity-warning-${testInfo.project.name}`, { body: await surface.screenshot(), contentType: "image/png" });
@@ -181,12 +183,12 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
               constraints: [{ resource: "disk", capacity: null, binding: true, reason: diskReason }],
             } });
             await expect(warning).toBeVisible();
-            await expect(warning).toContainText("Manual limit 9 is unchanged.");
-            await expect(warning).toContainText(reason);
+            await expect(warning).toContainText("Running with manual limit 9. No action needed.");
+            await expect(warning).not.toContainText(reason);
+            await expect(warning).toHaveAttribute("data-tone", "info");
             const text = await warning.textContent() ?? "";
-            expect([...text].length, "complete warning has at most 700 Unicode characters").toBeLessThanOrEqual(700);
-            expect(text.split("child_identity_missing")).toHaveLength(2);
-            expect(text.split("×37")).toHaveLength(2);
+            expect([...text].length, "compact default summary").toBeLessThanOrEqual(130);
+            expect(text).not.toContain("child_identity_missing");
             await expect(budget.locator('[data-role="capacity-reason"]')).toHaveText(reason);
             await expect(mode).toHaveText("Manual");
             await expect(input).toHaveValue("9");
@@ -214,6 +216,84 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await expectOverride(page, before.max_active_agents_override);
         if (created && !page.isClosed()) await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
+  });
+
+  test("Issue #5284: compact capacity summary, collapsed details and current errors", async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    await withLiveGwtBackendLock(BASE, testInfo, async () => {
+      await isolatedPreferences();
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await page.bringToFront();
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      const windows = page.locator('.workspace-window[data-preset="issue"]');
+      if (!(await windows.count())) await sendLiveGwtEvent(page, {
+        kind: "create_window", preset: "issue", bounds: { x: 50, y: 40, width: 1120, height: 850 },
+      });
+      const surface = windows.first();
+      await expect(surface).toBeVisible();
+      const saved = await latestStatus(page) ?? {};
+      // Rust stop-only tests cover the actual stop/state projection. Feed its
+      // wire result through the real checkout's incoming renderer here; no
+      // agents or production state are used by this presentation scenario.
+      const apply = async (status: any) => page.evaluate(value => {
+        // The existing page-scoped injection bridge also suppresses live
+        // monitor updates, including frames queued before this fixture.
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+          detail: { kind: "issue_monitor_status", status: value },
+        }));
+      }, status);
+      const reason = "inventory_complete=false; own_pm=0; target: /Users/example/target; disk measurement pending; disk measurement pending";
+      const status = { ...saved, enabled: true, state: "idle", last_error: null, agent_blackout: null,
+        max_active_agents: 5, max_active_agents_override: 5,
+        agent_capacity: { ...saved.agent_capacity, measurement_complete: false, reason,
+          recommended_worker_limit: 0, recommended_implementation_count: 0, recommended_total_count: 1,
+          machine_live_agents: 0, own_live_agents: 0, other_live_agents: 0, own_pm_agents: 0, gui_cpu_millicores: 0,
+          constraints: [{ resource: "disk", capacity: null, binding: true, reason: "disk measurement pending" }] } };
+      await apply(status);
+      const summary = surface.locator(".knowledge-monitor-capacity-warning");
+      const details = surface.locator(".knowledge-monitor-capacity");
+      const diagnostic = details.locator('[data-role="capacity-reason"]');
+      const pill = surface.locator(".knowledge-monitor-pill");
+      await expect(summary).toHaveText("Capacity measurement is incomplete. Running with manual limit 5. No action needed.");
+      await expect(summary).toHaveAttribute("data-tone", "info");
+      await expect(summary).not.toContainText(/inventory_complete|own_pm|\/Users\//);
+      await expect(diagnostic).toBeHidden();
+      await expect(details.locator("summary")).toContainText("Details");
+      await expect(pill).toHaveText("Running");
+      const metrics = await summary.evaluate(element => {
+        const style = getComputedStyle(element);
+        const root = getComputedStyle(document.documentElement);
+        const probe = document.createElement("span");
+        probe.style.color = root.getPropertyValue("--color-text-muted");
+        document.body.append(probe);
+        const infoColor = getComputedStyle(probe).color;
+        probe.remove();
+        return { lines: element.getBoundingClientRect().height / parseFloat(style.lineHeight), color: style.color, infoColor };
+      });
+      expect(metrics.lines).toBeLessThanOrEqual(2);
+      expect(metrics.color).toBe(metrics.infoColor);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
+      const summaryImage = testInfo.outputPath(`capacity-summary-${testInfo.project.name}.png`);
+      await page.screenshot({ path: summaryImage, animations: "disabled" });
+      await testInfo.attach(`capacity-summary-${testInfo.project.name}`, { path: summaryImage, contentType: "image/png" });
+      await details.locator("summary").click();
+      await expect(diagnostic).toBeVisible();
+      await expect(diagnostic).toContainText("/Users/example/target");
+      expect((await details.textContent() ?? "").split("disk measurement pending")).toHaveLength(2);
+      const detailsImage = testInfo.outputPath(`capacity-details-${testInfo.project.name}.png`);
+      await page.screenshot({ path: detailsImage, animations: "disabled" });
+      await testInfo.attach(`capacity-details-${testInfo.project.name}`, { path: detailsImage, contentType: "image/png" });
+      await apply({ ...status, state: "error", last_error: "GitHub scan failed" });
+      await expect(pill).toContainText("Error");
+      await apply(status);
+      await expect(pill).toHaveText("Running");
+      await apply({ ...status, max_active_agents: 0, max_active_agents_override: null });
+      await expect(summary).toHaveAttribute("data-tone", "warning");
+      await expect(summary).toContainText("Wait for the next measurement or set Max active manually.");
       expect(errors, "zero console/page errors").toEqual([]);
     });
   });
