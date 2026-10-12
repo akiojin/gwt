@@ -31753,6 +31753,9 @@ mod tests {
 
     #[test]
     fn live_snapshot_does_not_requeue_an_absent_legacy_completion() {
+        // An absent row triggers remote readback when the project has an origin.
+        // Keep this lifecycle fixture away from other tests' process-global fake gh.
+        let repo = tempfile::tempdir().expect("isolated project root");
         let prefs: IssueMonitorPrefs = serde_json::from_str(
             r#"{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":[42]}"#,
         )
@@ -31765,14 +31768,14 @@ mod tests {
             &mut monitor,
             &[cached],
             IssueMonitorCandidateSource::Cache,
-            Path::new("."),
+            repo.path(),
             "2026-08-15T00:00:01Z",
         );
         scan_queued_candidates_with_provenance(
             &mut monitor,
             &[],
             IssueMonitorCandidateSource::Live,
-            Path::new("."),
+            repo.path(),
             "2026-08-15T00:00:02Z",
         );
 
@@ -31891,6 +31894,9 @@ mod tests {
 
     #[test]
     fn unknown_live_evidence_preserves_completion_but_cannot_create_a_new_one() {
+        // The final scan removes absent rows and can trigger remote readback.
+        // This lifecycle fixture must not use another test's process-global fake gh.
+        let repo = tempfile::tempdir().expect("isolated project root");
         let complete_spec = spec_issue(
             42,
             IssueMonitorReadiness::ReadyWithCompletedTasks,
@@ -31913,7 +31919,7 @@ mod tests {
             &mut monitor,
             &[unknown_spec],
             IssueMonitorCandidateSource::Live,
-            Path::new("."),
+            repo.path(),
             "2026-08-15T00:00:01Z",
         );
         assert_eq!(monitor.prefs().merged_issues, vec![42]);
@@ -31942,7 +31948,7 @@ mod tests {
             &mut monitor,
             &[ordinary],
             IssueMonitorCandidateSource::Live,
-            Path::new("."),
+            repo.path(),
             "2026-08-15T00:00:04Z",
         );
         assert!(!monitor.prefs().merged_issues.contains(&44));
