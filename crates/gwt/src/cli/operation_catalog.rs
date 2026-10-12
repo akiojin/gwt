@@ -34,6 +34,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "actions.dispatch",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.job_logs",
         aliases: &["actions.job-logs"],
     },
@@ -834,6 +838,10 @@ mod tests {
     /// it.
     #[test]
     fn catalog_covers_every_dispatched_operation() {
+        assert!(
+            names().any(|name| name == "actions.dispatch"),
+            "Issue #4249 Phase 6 operation is callable"
+        );
         let source = include_str!("json_envelope.rs");
         let mut dispatched: std::collections::BTreeSet<String> = Default::default();
         let mut inside = false;
