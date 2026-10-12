@@ -13,6 +13,7 @@ import test from "node:test";
 import { parseHTML } from "linkedom";
 
 import { createFleetMinimap } from "../fleet-minimap.js";
+import { createUiStateStore } from "../ui-state-store.js";
 
 // createFleetMinimap reaches for the global `document` (document.createElement)
 // for the camera-frame and cell nodes, so each test installs a fresh linkedom
@@ -60,6 +61,74 @@ function memoryStorage(initial = {}) {
     removeItem: (key) => values.delete(key),
   };
 }
+
+test("Window List and Minimap subscribe to one committed catalog; the list gate stays local", async (t) => {
+  const { document, container } = setupDom();
+  document.body.insertAdjacentHTML("beforeend", '<button id="window-list-button"></button><div id="window-list-panel"></div>');
+  const source = readFileSync(new URL("../project-shell-surface.js", import.meta.url), "utf8")
+    .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
+  const { createProjectShellSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  const initial = { active_tab_id: "a", tabs: [{ id: "a", title: "Alpha", workspace: {
+    windows: [windowAt("a::one", 0, 0, 100, 80, { title: "Before" }), windowAt("a::two", 100, 0)],
+  } }] };
+  const model = createUiStateStore({ catalog: { appState: initial, focusedId: null, runtimeStates: {} },
+    listEntries: [], bounds: { x: 0, y: 0, width: 200, height: 120 } });
+  const getWindows = () => model.read().catalog.appState.tabs[0].workspace.windows;
+  const shell = createProjectShellSurface({
+    windowCatalogModel: model, getAppState: () => initial, activeProjectTab: () => initial.tabs[0],
+    send() {}, appendRenderKeyPart: (parts, value) => parts.push(String(value)),
+    runtimeStateForWindow: () => "running", windowDisplayTitle: w => w.title || w.id,
+    windowTitleTooltip: w => w.title || w.id, windowGeometryLabel: w => String(w.geometry.x),
+    windowRoleBadgeLabel: () => "", shouldShowRuntimeStatus: () => false,
+    addButton: document.createElement("button"), tileButton: document.createElement("button"),
+    stackButton: document.createElement("button"),
+  });
+  const { minimap } = makeMinimap(container, [], { windowCatalogModel: model, getWindows,
+    windowDisplayTitle: w => w.title || w.id });
+  t.after(() => { shell.dispose?.(); minimap.dispose?.(); model.dispose(); });
+  shell.updateActionAvailability(null);
+  shell.updateActionAvailability(initial.tabs[0]);
+  shell.toggleWindowList();
+  minimap.renderCells();
+  const panel = document.getElementById("window-list-panel");
+  assert.match(panel.textContent, /Before/);
+  model.update(state => ({ ...state, catalog: { ...state.catalog, appState: {
+    ...initial, tabs: [{ ...initial.tabs[0], workspace: { windows: getWindows().map(w => ({
+      ...w, title: w.id === "a::one" ? "After" : w.title,
+    })) } }],
+  } } }));
+  assert.match(panel.textContent, /After/, "List reads the committed catalog, not its old app getter");
+  assert.equal(container.querySelector('[data-window-id="a::one"]').title, "After");
+  model.update(state => ({ ...state, listEntries: [{ id: "a::one" }] }));
+  assert.equal(panel.querySelectorAll(".window-list-row").length, 1);
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 2, "list snapshot gate never filters Minimap");
+  shell.dispose();
+  minimap.dispose();
+  model.update(state => ({ ...state, catalog: { ...state.catalog, appState: { ...initial, tabs: [] } } }));
+  assert.equal(panel.querySelectorAll(".window-list-row").length, 1, "disposed List releases its subscription");
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 2, "disposed Minimap releases its subscription");
+});
+
+test("camera-only workspace echoes preserve the committed catalog reference", () => {
+  const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const publishSource = source.slice(source.indexOf("      function publishWindowCatalog()"),
+    source.indexOf("      // Existing shell callers"));
+  const publish = new Function("windowCatalogModel", "appState", "windowRuntimeStateMap", "focusedId",
+    `${publishSource}\nreturn publishWindowCatalog();`);
+  const appState = { active_tab_id: "a", tabs: [{ id: "a", title: "Alpha", workspace: {
+    windows: [windowAt("a::one", 0, 0)], viewport: { x: 0, y: 0, zoom: 1 },
+  } }] };
+  const model = createUiStateStore({ catalog: { appState: {}, runtimeStates: {}, focusedId: null, version: 0 } });
+  publish(model, appState, new Map(), null);
+  const committed = model.read().catalog;
+  appState.tabs[0].workspace.viewport.x = 200;
+  publish(model, appState, new Map(), null);
+  assert.equal(model.read().catalog, committed, "camera echo must not notify catalog subscribers");
+  appState.tabs[0].workspace.windows[0].title = "Changed";
+  publish(model, appState, new Map(), null);
+  assert.notEqual(model.read().catalog, committed, "window changes still notify both views");
+  assert.equal(model.read().catalog.version, committed.version + 1);
+});
 
 test("createFleetMinimap returns a no-op surface when there is no container", () => {
   const minimap = createFleetMinimap({ container: null });

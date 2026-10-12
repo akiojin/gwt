@@ -5865,6 +5865,8 @@ fn current_canonical_work_item<'a>(
         .work_items
         .iter()
         .find(|item| item.id == canonical_id)?;
+    let mut owner_anchor = current.owner.as_deref();
+    let mut authoritative = current;
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
     for _ in 0..projection.work_items.len() {
@@ -5879,18 +5881,26 @@ fn current_canonical_work_item<'a>(
         let Some(successor) = candidates.next() else {
             break;
         };
+        // Historical terminal rows may lack owner metadata. Keep the last
+        // known owner across that gap, and only publish a later Work once its
+        // owner agrees. An ownerless tail must not gain adoption authority.
+        let owner_matches = match (owner_anchor, successor.owner.as_deref()) {
+            (Some(anchor), Some(owner)) => {
+                anchor == owner
+                    || can_upgrade_work_owner(Some(anchor), Some(owner))
+                    || can_upgrade_work_owner(Some(owner), Some(anchor))
+            }
+            (Some(_), None) => successor.is_terminal(),
+            (None, None) => true,
+            (None, Some(_)) => false,
+        };
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
             || !successor.events.iter().any(|event| {
                 event.kind == WorkEventKind::Start
                     && event.related_work_item_id.as_deref() == Some(current.id.as_str())
             })
-            // Owner display normalization may arrive on either Work first;
-            // its arrival order must not change lineage. This read-only
-            // equivalence does not authorize a reverse owner mutation.
-            || !(current.owner == successor.owner
-                || can_upgrade_work_owner(current.owner.as_deref(), successor.owner.as_deref())
-                || can_upgrade_work_owner(successor.owner.as_deref(), current.owner.as_deref()))
+            || !owner_matches
             || successor.execution_containers.is_empty()
             || !successor.execution_containers.iter().all(|container| {
                 // Branch-backed Work identity spans hosts. Old paths may be
@@ -5900,14 +5910,20 @@ fn current_canonical_work_item<'a>(
                     project_root,
                     container.branch.as_deref(),
                     container.worktree_path.as_deref(),
-                ).as_deref() == Some(canonical_id)
+                )
+                .as_deref()
+                    == Some(canonical_id)
             })
         {
             break;
         }
         current = successor;
+        if successor.owner.is_some() || owner_anchor.is_none() {
+            authoritative = successor;
+            owner_anchor = successor.owner.as_deref();
+        }
     }
-    Some(current)
+    Some(authoritative)
 }
 
 /// #3065: find the Work item that owns a given execution container. The

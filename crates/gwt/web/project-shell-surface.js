@@ -72,6 +72,7 @@ export function createProjectShellSurface({
   send,
   createNode,
   getAppState,
+  windowCatalogModel,
   getProjectError,
   activeProjectTab,
   activeWorkspace,
@@ -119,7 +120,6 @@ export function createProjectShellSurface({
       const windowListPanel = document.getElementById("window-list-panel");
 
       let windowListOpen = false;
-      let windowListEntries = [];
       let renderedRecentProjectsKey = "";
       let renderedWindowListKey = "";
       let renderedProjectPickerKey = "";
@@ -138,7 +138,7 @@ export function createProjectShellSurface({
       }
 
       function windowListRenderKey() {
-        const appState = getAppState();
+        const { catalog: { appState }, listEntries: windowListEntries } = windowCatalogModel.read();
         // SPEC-3038 (2026-06-20): the popover is a cross-tab list; the render
         // key must change when any project tab's windows change, not only the
         // active tab's.
@@ -443,7 +443,7 @@ export function createProjectShellSurface({
         windowListButton.disabled = !hasActiveTab;
         if (!hasActiveTab) {
           windowListOpen = false;
-          windowListEntries = [];
+          windowCatalogModel.update(state => ({ ...state, listEntries: [] }));
           renderWindowList();
         }
       }
@@ -465,6 +465,8 @@ export function createProjectShellSurface({
       }
 
       function renderWindowList() {
+        const { catalog, listEntries: windowListEntries } = windowCatalogModel.read();
+        windowListPanel.dataset.catalogVersion = String(catalog.version);
         windowListPanel.hidden = !windowListOpen;
         windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
         if (!windowListOpen) {
@@ -480,7 +482,7 @@ export function createProjectShellSurface({
         // popover matches the cross-tab open-window badge. Multi-project
         // shells get per-project group headers; single-project shells stay
         // flat. The window set and order come from groupProjectWindowList.
-        const model = groupProjectWindowList(getAppState(), windowListEntries);
+        const model = groupProjectWindowList(catalog.appState, windowListEntries);
         windowListPanel.innerHTML = "";
         if (model.count === 0) {
           const empty = document.createElement("div");
@@ -568,7 +570,7 @@ export function createProjectShellSurface({
           return;
         }
         windowListOpen = !windowListOpen;
-        windowListEntries = [];
+        windowCatalogModel.update(state => ({ ...state, listEntries: [] }));
         renderedWindowListKey = "";
         renderWindowList();
         if (windowListOpen) {
@@ -686,13 +688,6 @@ export function createProjectShellSurface({
             renderMigrationModal();
           },
         });
-      }
-
-      // SPEC-3064 Phase 3 (E7): receive() body for window_list. The case arm
-      // stays in app.js as a thin delegate.
-      function applyWindowListEvent(event) {
-        windowListEntries = event.windows || [];
-        renderWindowList();
       }
 
       // SPEC-3064 Phase 3 (E7): receive() bodies for the clone-project /
@@ -944,7 +939,11 @@ export function createProjectShellSurface({
         });
       }
 
+      const unsubscribeCatalog = windowCatalogModel.subscribe(state => state.catalog, () => renderWindowList());
+      const unsubscribeList = windowCatalogModel.subscribe(state => state.listEntries, () => renderWindowList());
+
       return {
+        dispose() { unsubscribeCatalog(); unsubscribeList(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
         updateActionAvailability,
@@ -954,7 +953,6 @@ export function createProjectShellSurface({
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
-        applyWindowListEvent,
         applyCloneProjectReceiveEvent,
         applyPickerReceiveEvent,
         applyProjectOpenReceiveEvent,

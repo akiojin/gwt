@@ -152,6 +152,14 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             gwt_core::workspace_projection::WorkEventKind::Discard,
         ),
         (
+            "4777-missing-historical-owner",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
             "5257-idle-work-after-refused-adoption",
             gwt::cli::execution_state::ExecutionSettlement::Blocked {
                 reason: "adoption did not complete".to_string(),
@@ -263,12 +271,27 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                     .execution_containers
                     .clear();
             } else {
-                predecessor_id = start.work_item_id;
+                predecessor_id = start.work_item_id.clone();
                 history.apply_event(gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Discard,
                     &predecessor_id,
                     Utc::now(),
                 ));
+                if case == "4777-missing-historical-owner" {
+                    // v9.116.0: the terminal middle generation lost its owner,
+                    // while both the root and active latest Work retain it.
+                    history
+                        .work_items
+                        .iter_mut()
+                        .find(|work| work.id == predecessor_id)
+                        .unwrap()
+                        .owner = None;
+                    start.id = format!("{case}-latest-start");
+                    start.work_item_id =
+                        gwt_core::workspace_projection::successor_work_id(&predecessor_id);
+                    start.related_work_item_id = Some(predecessor_id.clone());
+                    history.apply_event(start);
+                }
             }
         }
         if case.contains("placeholder") {
@@ -323,6 +346,16 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             backfill.execution_container = work.execution_containers.first().cloned();
             history.apply_event(backfill);
         }
+        let terminal_history: Vec<_> = if case == "4777-missing-historical-owner" {
+            history
+                .work_items
+                .iter()
+                .filter(|work| work.is_terminal())
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &works_path,
             &history,
@@ -500,6 +533,16 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                     .find(|work| work.id == predecessor_id),
                 Some(&predecessor),
                 "{case}: preserve terminal Work and Session membership",
+            );
+        }
+        for historical in &terminal_history {
+            assert_eq!(
+                updated
+                    .work_items
+                    .iter()
+                    .find(|work| work.id == historical.id),
+                Some(historical),
+                "{case}: preserve every historical terminal generation",
             );
         }
         let mut verify_env = gwt::cli::TestEnv::new(fixture.worktree.clone());
