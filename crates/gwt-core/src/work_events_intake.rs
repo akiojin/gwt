@@ -81,7 +81,9 @@ fn is_close_kind(kind: WorkEventKind) -> bool {
 
 /// The first durable terminal close instant. Metadata and heartbeat events may
 /// advance `updated_at`, but must never move this cutoff.
-fn terminal_close_time(item: &crate::workspace_projection::WorkItem) -> Option<DateTime<Utc>> {
+pub(crate) fn terminal_close_time(
+    item: &crate::workspace_projection::WorkItem,
+) -> Option<DateTime<Utc>> {
     if !item.is_terminal() {
         return None;
     }
