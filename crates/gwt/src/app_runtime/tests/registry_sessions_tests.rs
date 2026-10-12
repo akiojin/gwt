@@ -276,7 +276,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
 
     works[0].linked_issue_numbers = vec![3885];
     works[1].linked_issue_numbers = vec![3885, 4556];
-    super::super::assign_and_merge_workspace_groups(&mut works, &root);
+    super::super::assign_and_merge_workspace_groups(&mut works, &root, &HashMap::new());
 
     assert_eq!(
         works.len(),
@@ -368,7 +368,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
     newer_pr.pr_state = Some("OPEN".to_string());
     let mut pr_precedence = vec![older_pr, newer_pr];
 
-    super::super::assign_and_merge_workspace_groups(&mut pr_precedence, &root);
+    super::super::assign_and_merge_workspace_groups(&mut pr_precedence, &root, &HashMap::new());
 
     assert_eq!(pr_precedence[0].pr_number, Some(200));
     assert_eq!(
@@ -464,7 +464,11 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
         row("w-branchless", None, None),
     ];
 
-    super::super::assign_and_merge_workspace_groups(&mut works, Path::new("/repo"));
+    super::super::assign_and_merge_workspace_groups(
+        &mut works,
+        Path::new("/repo"),
+        &HashMap::new(),
+    );
     super::super::mark_remote_only_active_works(&mut works, Some(&local));
 
     assert!(works[0].remote_only, "fetched-only branch is Remote");
@@ -479,7 +483,11 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
     );
 
     let mut unknown = vec![row("w-unknown", Some("work/unknown"), None)];
-    super::super::assign_and_merge_workspace_groups(&mut unknown, Path::new("/repo"));
+    super::super::assign_and_merge_workspace_groups(
+        &mut unknown,
+        Path::new("/repo"),
+        &HashMap::new(),
+    );
     super::super::mark_remote_only_active_works(&mut unknown, None);
 
     assert!(
@@ -536,7 +544,11 @@ fn workspace_group_representative_is_the_newest_row_by_instant_not_by_text() {
         row("work-session-session-1", "2026-09-30T01:36:56.831192+00:00"),
         row("work-offloop-a1b2c3", "2026-09-30T01:36:56Z"),
     ];
-    super::super::assign_and_merge_workspace_groups(&mut same_second, Path::new("/repo"));
+    super::super::assign_and_merge_workspace_groups(
+        &mut same_second,
+        Path::new("/repo"),
+        &HashMap::new(),
+    );
     assert_eq!(same_second.len(), 1);
     assert_eq!(same_second[0].id, "work-session-session-1");
 
@@ -544,7 +556,11 @@ fn workspace_group_representative_is_the_newest_row_by_instant_not_by_text() {
         row("work-session-session-1", "2026-09-30T01:36:56.831192+00:00"),
         row("work-offloop-a1b2c3", "2026-09-30T01:36:57Z"),
     ];
-    super::super::assign_and_merge_workspace_groups(&mut later_record, Path::new("/repo"));
+    super::super::assign_and_merge_workspace_groups(
+        &mut later_record,
+        Path::new("/repo"),
+        &HashMap::new(),
+    );
     assert_eq!(later_record.len(), 1);
     assert_eq!(later_record[0].id, "work-offloop-a1b2c3");
 }

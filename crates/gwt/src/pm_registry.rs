@@ -171,6 +171,9 @@ pub fn pm_agent_is_supported(agent_id: &str) -> bool {
 /// Project-scoped PM settings that survive deregistration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmSettings {
+    /// Issue #3812: pause only autonomous PM cycles; keep the conversation registered.
+    #[serde(default)]
+    pub paused: bool,
     /// Explicit project-relative policy files copied into gwt-owned PM guidance.
     /// Mere presence of a repository instruction file never opts it in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -260,6 +263,7 @@ impl PmLaunchProfile {
 impl Default for PmSettings {
     fn default() -> Self {
         Self {
+            paused: false,
             project_policy_files: Vec::new(),
             auto_start: true,
             launch_profile: None,
@@ -414,6 +418,15 @@ pub enum PmRegisterOutcome {
 
 pub fn pm_prefs_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm.json")
+}
+
+/// Fresh and restored PM conversations stay available while paused, without
+/// an automatic bootstrap prompt. Unreadable settings fail closed.
+pub fn pm_autonomous_bootstrap_allowed(worktree: &Path) -> bool {
+    pm_worktree_store_dir(worktree).is_none_or(|store| {
+        load_pm_prefs(&store.join("project-state/pm.json"))
+            .is_ok_and(|prefs| !prefs.settings.paused)
+    })
 }
 
 pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
@@ -4466,6 +4479,10 @@ pub struct PmLoopState {
     /// window, without touching the Stop-gate floor clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_at: Option<String>,
+    /// Identity of the current activation or scheduled delivery. Resume replaces
+    /// it so queued prompts and Stop hooks cannot revive a pre-pause cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wake_id: Option<String>,
 }
 
 /// `pm-loop.json` path derived from the PM worktree itself. The hook's cwd is
@@ -4819,6 +4836,47 @@ pub fn mutate_pm_prefs<T>(
     })
 }
 
+/// Pause only autonomous PM work. Resume re-arms the existing loop once;
+/// registration, auto-start and Issue Monitor state remain intact.
+pub fn set_pm_paused(repo_path: &Path, paused: bool) -> io::Result<PmPrefs> {
+    let path = pm_prefs_path_for_repo_path(repo_path);
+    with_pm_prefs_lock(&path, || {
+        let mut prefs = load_pm_prefs_unlocked(&path)?;
+        if prefs.settings.paused == paused {
+            return Ok(prefs);
+        }
+        if !paused {
+            let loop_path = pm_loop_state_path_for_repo_path(repo_path);
+            let last_user_prompt_at = load_pm_loop_state(&loop_path)?.last_user_prompt_at;
+            save_pm_loop_state(
+                &loop_path,
+                &PmLoopState {
+                    last_wake_id: Some(uuid::Uuid::new_v4().to_string()),
+                    last_user_prompt_at,
+                    ..PmLoopState::default()
+                },
+            )?;
+        }
+        prefs.settings.paused = paused;
+        save_pm_prefs_unlocked(&path, &prefs)?;
+        Ok(prefs)
+    })
+}
+
+/// Serialize physical autonomous prompt delivery with Pause's durable commit.
+/// A queued worker cannot inject a prompt after Pause has returned successfully.
+pub fn with_active_pm_loop<T>(
+    prefs_path: &Path,
+    deliver: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_pm_prefs_lock(prefs_path, || {
+        if load_pm_prefs_unlocked(prefs_path)?.settings.paused {
+            return Ok(None);
+        }
+        Ok(Some(deliver()))
+    })
+}
+
 /// FR-001 singleton gate: register `candidate` unless a live PM already
 /// exists. `is_live` judges the stored registration; a dead one is replaced
 /// (stale regeneration), a live one rejects the candidate without touching
@@ -5009,6 +5067,7 @@ pub struct PmStatusReport {
     pub schema_version: u32,
     pub registered: bool,
     pub auto_start: bool,
+    pub paused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration: Option<PmRegistration>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5166,6 +5225,7 @@ pub fn pm_status_report_for_caller(
         schema_version: 1,
         registered: registration.is_some(),
         auto_start: prefs.settings.auto_start,
+        paused: prefs.settings.paused,
         pm_bucket: u32::from(registration.is_some()),
         implementation_slots_consumed: 0,
         caller_is_registered_pm: caller_session.map(|caller| {
@@ -5879,6 +5939,34 @@ mod tests {
         let prefs: PmPrefs =
             serde_json::from_str("{\"settings\":{}}").expect("parse empty settings");
         assert!(prefs.settings.auto_start);
+    }
+
+    #[test]
+    fn paused_settings_survive_reload_and_preserve_registration_and_auto_start() {
+        let (_dir, path) = temp_prefs_path();
+        let mut value = serde_json::to_value(PmPrefs {
+            registration: Some(registration("paused-pm")),
+            ..PmPrefs::default()
+        })
+        .expect("prefs JSON");
+        value["settings"]["paused"] = serde_json::json!(true);
+        let prefs: PmPrefs = serde_json::from_value(value).expect("paused prefs");
+        save_pm_prefs(&path, &prefs).expect("persist paused prefs");
+        let loaded = load_pm_prefs(&path).expect("reload");
+        let report = serde_json::to_value(pm_status_report(&loaded, |_| true)).expect("status");
+        assert_eq!(
+            report["paused"], true,
+            "pause must survive the file roundtrip"
+        );
+        assert_eq!(report["registered"], true);
+        assert_eq!(report["auto_start"], true);
+        let (_, outcome) =
+            try_register_pm(&path, registration("other-pm"), |_| true).expect("singleton check");
+        assert!(matches!(outcome, PmRegisterOutcome::RejectedLive { .. }));
+        let legacy: PmPrefs = serde_json::from_str("{}").expect("legacy prefs");
+        let legacy =
+            serde_json::to_value(pm_status_report(&legacy, |_| true)).expect("legacy status");
+        assert_eq!(legacy["paused"], false);
     }
 
     #[test]

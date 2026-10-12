@@ -660,17 +660,25 @@ impl AppRuntime {
     }
 
     pub(crate) fn spawn_supported_agent_list(&self, client_id: ClientId) {
-        let cache = self.launch_wizard_cache.clone();
+        // Only maintenance changes the epoch; concurrent clients each need a reply.
+        let generation = self.agent_maintenance.catalog_generation;
+        let mut cache = self.launch_wizard_cache.clone();
+        let config_path = self.profile_config_path();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
-            // The first cache read may join detection; keep that wait off
-            // the GUI loop, just like the other Settings probes.
-            let event = BackendEvent::SupportedAgentList {
-                agents: cache.supported_agents(),
+            let event = match config_path {
+                Ok(path) => {
+                    cache.refresh_agent_options_for_profile(&path, &cwd);
+                    super::agent_maintenance::supported_agent_catalog(&cache, &path, &cwd)
+                }
+                Err(message) => BackendEvent::SystemSettingsError { message },
             };
-            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                client_id, event,
-            )]));
+            proxy.send(UserEvent::SupportedAgentCatalogReady {
+                client_id,
+                generation,
+                event,
+            });
         });
     }
 

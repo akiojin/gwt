@@ -165,10 +165,17 @@ Poll JSON operation `pr.view` to observe progress toward merge:
   (Step 1)** first. Use `pr.update_branch` or the PM handoff for base sync.
 - This poll is **bounded**. If required checks stay pending/queued with no
   progress for ~20 polls (~10 minutes) and nothing is failing, post JSON
-  operation `board.post` with `params.kind:"blocked"`, the PR number, the
-  pending check names, and a resume instruction, then stop instead of sleeping
-  indefinitely. For longer CI, arm a completion goal (Step 9) instead of
-  long-polling.
+  operation `board.post` with `params.kind:"status"` or `params.kind:"handoff"`,
+  the PR number, pending check names, and a resume instruction. In an autonomous
+  / Issue Monitor launch, declare `issue.monitor.wait` with the explicit owner
+  Issue number in `params.number`, `reason`, and `resume_condition` naming the
+  pending CI. Keep the execution Active and auto-merge enabled; resume bounded
+  checks when CI progresses and clear the wait with `params.clear:true`. Without
+  a Monitor owner, use the notification only. Do not emit
+  `params.kind:"blocked"` or NeedsHuman or call `execution.blocked` for this
+  temporary wait. Ready PR / required CI / auto-merge gates remain unchanged;
+  only `merged_at` proves delivery. For longer CI, a completion goal (Step 9)
+  can preserve monitoring across turns.
 
 ## Step 7: Re-run transient CI failures (narrowed for Deliver)
 
@@ -208,6 +215,8 @@ real code-induced hang or a flaky test must not be re-run into a silent merge.
 
 The same blocker surviving 3 consecutive drive iterations stops the loop:
 
+- CI pending alone never counts toward this guard. An autonomous launch does
+  not ask for a human decision merely because checks are still running.
 - "Same blocker" means the same CI check name, the same unresolved thread, or
   the same conflict failing 3 iterations in a row.
 - On the 3rd consecutive failure: report which blocker, what was attempted each
@@ -215,6 +224,8 @@ The same blocker surviving 3 consecutive drive iterations stops the loop:
   / **change approach**. Proceed only after an explicit decision.
 - Different blockers failing in different iterations do **not** trip the guard —
   that is normal progress.
+- A human decision, unsafe operation, or actual tool refusal still follows the
+  existing blocked escalation contract in `gwt-coordination`.
 
 ## Step 9: Arm a completion goal (optional, SPEC-3050)
 

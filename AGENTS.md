@@ -18,7 +18,7 @@
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
 - **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd` JSON operation `memory.add` でマシンローカルの work-notes memory（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`、SPEC-3214）に記録し、同種の作業を始める前に確認する。repo-local `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は読み取り fallback / legacy alias として扱う。
 - **Report gwt Friction to the PM:** gwt 自体の摩擦・機能ギャップは Board で PM に報告し、PM が `gwt-register-issue` で起票する。agent は自分で upstream に Issue を作らない（詳細な投稿手順は generated `gwt-coordination` SKILL.md が配信する）。
-- **PM 機能の修正は PM 自身が実装して着地させる:** PM が動作するために必要な機能の修正は、実装エージェントに委譲せず、**PM 自身が PM worktree で実装し、PR を出してマージする**。対象は PM guidance / PM skill、PM が呼ぶ `issue.monitor.*` / `pm.*` operation、PM が裁定に使う Board・escalation 面、および PM が作業を観測・順序付け・決着できなくなる欠陥。理由は順序にある — **動けない PM は、それを直すエージェントを steer できない**ため、委譲するとデッドロックする。それ以外は従来どおり実装エージェントが担当する。判断に迷う場合は「その修正なしで艦隊を steer できるか」で判定し、できないなら PM の担当とする。
+- **PM 面の修正も実装エージェントが担当する:** PM guidance / PM skill、PM が呼ぶ `issue.monitor.*` / `pm.*` operation、PM が裁定に使う Board・escalation 面、PM が作業を観測・順序付け・決着できなくなる欠陥の修正も、他の Issue と同じく Issue Monitor が起動する実装エージェントが担当する（ユーザー指示 2026-10-06）。実装エージェントは、修正対象が PM 面であることを理由に blocked を宣言しない。PM はこれらを PM worktree で実装しない。その修正なしでは艦隊を steer できない場合、PM はその Issue をキューの先頭に置き、それでも進まなければユーザーへエスカレーションする。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
@@ -63,7 +63,7 @@
 
 ### テストの範囲規律
 
-テストは**今回の変更の受け入れ**に仕えるものであり、それ以外の目的で増やさない。TDD（RED を先に作る）・カバレッジ 90% 維持・GUI 変更の headed E2E といった本リポジトリの必須ゲートはそのまま適用した上で、次を守る:
+テストは**今回の変更の受け入れ**に仕えるものであり、それ以外の目的で増やさない。TDD（RED を先に作る）・後述のスコープ付き CI カバレッジ基準・GUI 変更の headed E2E といった本リポジトリの必須ゲートはそのまま適用した上で、次を守る:
 
 1. まず変更に関連する既存テストを走らせる。既存テストで変更の正しさが証明できるなら新規テストは足さない。
 2. 新規テストは「既存テストが覆えない挙動変更」または「ユーザーの明示要求」がある場合に限る。
@@ -146,13 +146,26 @@
 - エラーが発生している状態で完了としないこと。必ずエラーが解消された時点で完了とする。
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
-- gwtプロジェクトでは、単体テスト・結合テスト・E2Eテストを含む全体のテストカバレッジを 90% 以上で維持すること。
+- カバレッジの判定・測定義務・報告は、下記「カバレッジの判定と報告」に従う。
 - **GUI / フロントエンドに影響する変更では、必ず Headed ブラウザ（実 Chromium）による E2E テストを実施すること。** headless・linkedom・unit テストのみの検証で完了としない。`browser-check` skill の隔離起動（checkout の `target/debug/gwt` + fresh HOME）を用い、dark / light 両テーマの表示確認と console / page error が無いことまで確認してから完了とする。
 - **完了報告前のセルフチェックリスト（必須）:**
   - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
+
+### カバレッジの判定と報告
+
+- 正本は `.github/workflows/coverage.yml`、呼び出し元の `lint.yml`、`scripts/check-coverage-threshold.mjs`。workspace の Rust テストを `--workspace --all-features` で計測し、**行カバレッジをスコープ別に判定する。workspace 全体に一律 90% を要求しない。**
+- CI の gate は次の 2 本。いずれも下記 outer shell を分母から除外する。
+  - `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"` — `gwt-core` と `gwt` の対象行が 90% 以上。
+  - `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"` — 残りの domain crates の対象行が 80% 以上。
+- 除外対象は `crates/gwt/src/` 配下の `main.rs`、`bin/gwtd.rs`、`app_runtime.rs`、`app_runtime/**/*.rs`、`docker_launch.rs`、`index_worker.rs`、`issue_cache.rs`、`launch_runtime.rs`、`native_app.rs`、`update_front_door.rs`、`cli/daemon/mod.rs`、`cli/index.rs`、`cli/index/**/*.rs`。これらの outer shell は専用の contract test 等で検証する。
+- **PR（base: develop / main）では `lint.yml` が `workflow_call` で coverage を実行する。** 対象は PR head SHA。develop push と `merge_group` でも呼び出し、日次（UTC 00:00）は develop、`workflow_dispatch` は選択した ref の SHA を計測する。手動実行も develop 固定ではない。lcov 生成・Codecov upload は日次／手動実行のみ。
+- **PR の着地には必須チェック `coverage / Rust Coverage` の成功が必要。ローカルで別途 workspace 全体 90% を証明する義務はない。** CI 対応を確認した `gwt-verify --mode pre-pr` では必須 CI に閾値判定を委ね、coverage のためだけに追加の full matrix を投入しない。ローカル計測は任意。定期レポートと競合する `coverage.yml` の手動 dispatch は担当 agent が行わず、必要なら PM が実施する。
+- **報告には対象 SHA・スコープ・除外の有無・covered lines / total lines・割合・適用閾値を併記する。** `gate: gwt-core + gwt、outer shell 除外後、900/1000 = 90.00%、閾値 90%` のように書く。workspace 全体の値は `workspace 全体（参考値、gate 判定ではない）` と明記し、outer shell を含む生の集計か除外後かも区別する。
+- `--scope` / `--scope-exclude` を両方省略した script の結果は outer shell 除外後の workspace 集計であり、指定閾値との比較は行うが **CI の 90% / 80% の gate 判定ではない**。その結果を「CI の 90% 未達」と報告しない。
+- **未測定・集計失敗・証跡不足は「未測定（理由）」または「集計失敗（理由）」として報告し、「未達」と報告しない。** 「未達」は対象 SHA の該当 gate スコープを正常に測定し、その閾値を下回った場合に限る。
 
 ### Ready PR Gate（Ready 運用）
 

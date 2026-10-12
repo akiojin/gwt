@@ -66,6 +66,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "board.sync",
+        aliases: &[],
+    },
+    Operation {
         name: "branch.prune_merged",
         aliases: &["branch.prune-merged"],
     },
@@ -504,6 +508,22 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.report.post",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.report.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.pause",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.resume",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.stop",
         aliases: &["pm.deregister"],
     },
@@ -596,6 +616,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "release.update.defer",
+        aliases: &[],
+    },
+    Operation {
         name: "search",
         aliases: &[],
     },
@@ -666,6 +690,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "workspace.projection_prune",
         aliases: &["workspace.projection-prune"],
+    },
+    Operation {
+        name: "workspace.receipt",
+        aliases: &[],
     },
     Operation {
         name: "workspace.store_consolidate",

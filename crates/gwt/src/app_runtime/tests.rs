@@ -1406,6 +1406,7 @@ fn sample_runtime_with_events(
         project_log_scopes: HashMap::new(),
         proxy,
         blocking_tasks,
+        agent_maintenance: Default::default(),
         sessions_dir,
         launch_wizard_cache,
 
@@ -1424,6 +1425,7 @@ fn sample_runtime_with_events(
         // Issue #3878: own the fallback commit budget instead of inheriting
         // the GUI-thread one; tests that assert that budget set it explicitly.
         issue_monitor_fallback_commit_timeout: super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        runtime_hook_agent_failures_in_flight: HashMap::new(),
         // Issue #3676 AC-2: tests default to fail-open so ambient developer /
         // CI credential state never decides a launch; auth-preflight tests
         // install a real or explicit probe themselves.
@@ -1448,6 +1450,8 @@ fn sample_runtime_with_events(
         issue_monitor_review_dispatch_windows: HashSet::new(),
         terminal_close_candidates: HashMap::new(),
         terminal_convergence_scan_in_flight: false,
+        update_drain_scan_in_flight: false,
+        update_drain_host_blockers: None,
         terminal_close_grace: Duration::from_secs(60),
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
@@ -1516,6 +1520,18 @@ fn sample_runtime_with_events(
 /// release path itself is generated from one shared list, so these stand in for
 /// every entry on it.
 fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
+    let address = runtime.window_lookup[window_id].clone();
+    let project_root = runtime
+        .tab(&address.tab_id)
+        .expect("seeded window tab")
+        .project_root
+        .clone();
+    let identity = runtime
+        .runtime_hook_agent_failure_identity(&project_root, window_id)
+        .expect("seeded failure identity");
+    runtime
+        .runtime_hook_agent_failures_in_flight
+        .insert(window_id.to_string(), identity);
     runtime
         .launch_error_terminal_details
         .insert(window_id.to_string(), "x".repeat(64 * 1024));
@@ -2723,7 +2739,7 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
     init_repo_with_initial_commit(&repo);
-    let repo = fs::canonicalize(repo).expect("canonical repo");
+    let repo = dunce::canonicalize(repo).expect("canonical repo");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
@@ -4935,9 +4951,29 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
     let repo = temp_root.join(format!("repo-{operation_id}"));
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    pending_fresh_execution_fixture_in_worktree(
+        temp_root,
+        operation_id,
+        owner_kind,
+        completed,
+        repo,
+        2359,
+    )
+}
+
+fn pending_fresh_execution_fixture_in_worktree(
+    temp_root: &Path,
+    operation_id: &str,
+    owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
+    completed: bool,
+    repo: PathBuf,
+    owner_number: u64,
+) -> PendingFreshExecutionFixture {
+    let branch = format!("work/issue-{owner_number}");
+    let entrypoint = format!("$gwt-execute #{owner_number}");
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: owner_kind,
-        number: 2359,
+        number: owner_number,
     };
     let predecessor_session_id = format!("blocked-{operation_id}");
     let candidate_session_id = format!("candidate-{operation_id}");
@@ -4946,7 +4982,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
         owner.kind,
         owner.number,
         &predecessor_session_id,
-        "$gwt-execute #2359",
+        &entrypoint,
         false,
     )
     .expect("materialize predecessor");
@@ -4987,7 +5023,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
         .to_string(),
         session_binding_id: format!("binding-{operation_id}"),
         initial_session_id: candidate_session_id.clone(),
-        entrypoint: "$gwt-execute #2359".to_string(),
+        entrypoint,
         requested_at: Utc::now(),
     };
     if completed {
@@ -5022,8 +5058,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
     let (spawner, _) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let window_id = combined_window_id("tab-1", "agent-1");
-    let mut candidate =
-        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    let mut candidate = gwt_agent::Session::new(&repo, &branch, gwt_agent::AgentId::Codex);
     candidate.id = candidate_session_id.clone();
     candidate.project_state_root = Some(repo.clone());
     candidate.linked_issue_number = Some(owner.number);
@@ -5052,7 +5087,7 @@ fn pending_fresh_execution_fixture_with_predecessor_status(
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     let mut active = sample_active_agent_session("tab-1", &window_id);
     active.session_id = candidate_session_id.clone();
-    active.branch_name = "work/issue-2359".to_string();
+    active.branch_name = branch;
     active.worktree_path = repo.clone();
     active.agent_project_root = repo.display().to_string();
     runtime
@@ -5394,6 +5429,42 @@ impl AppRuntime {
         events.extend(self.finish_queued_delivery_acks(&tasks));
         self.blocking_tasks = previous;
         events
+    }
+
+    pub(crate) fn update_drain_tick_events_and_drain_at(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        let previous = std::mem::replace(&mut self.blocking_tasks, spawner);
+        fn recording(proxy: &AppEventProxy) -> Arc<Mutex<Vec<UserEvent>>> {
+            match proxy {
+                AppEventProxy::Stub(events) => events.clone(),
+                AppEventProxy::Project { inner, .. } => recording(inner),
+                AppEventProxy::Real(_) => panic!("test drain must use a recording proxy"),
+            }
+        }
+        let recorded = recording(&self.proxy);
+        let mut outbound = self.update_drain_tick_events_at(now);
+        drain_queued_blocking_tasks(&tasks);
+        let completion = {
+            let mut events = recorded.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::UpdateDrainObserved { .. }
+                    )
+                })
+                .map(|index| into_recorded_project_payload(events.remove(index)))
+        };
+        if let Some(UserEvent::UpdateDrainObserved { now, observations }) = completion {
+            outbound.extend(self.update_drain_observed_events(now, observations));
+        }
+        drain_queued_blocking_tasks(&tasks);
+        self.blocking_tasks = previous;
+        outbound
     }
 
     /// Drive the same queued preparation and GUI completion used in production.
@@ -8816,8 +8887,7 @@ fn assert_pm_delivery_refused(
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let (repo, mut runtime, pm_window_id) = pm_wake_fixture(temp);
         insert_test_pane_runtime(&mut runtime, &pm_window_id);
-        let pm_pane = runtime.runtimes[&pm_window_id].pane.clone();
-        runtime.register_pty_writer(&pm_window_id, &pm_pane);
+        runtime.register_pty_writer(&pm_window_id, None);
         let target = if other_session {
             let target = "tab-1::other-window".to_string();
             let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
@@ -8828,8 +8898,7 @@ fn assert_pm_delivery_refused(
                 .unwrap()
                 .worktree_path = worktree;
             insert_test_pane_runtime(&mut runtime, &target);
-            let pane = runtime.runtimes[&target].pane.clone();
-            runtime.register_pty_writer(&target, &pane);
+            runtime.register_pty_writer(&target, None);
             target
         } else {
             pm_window_id
@@ -9037,6 +9106,8 @@ mod incarnation_claiming {
 
 // Runtime acceptance tests, grouped by behavior. Shared fixtures stay above.
 #[cfg(test)]
+mod agent_maintenance_tests;
+#[cfg(test)]
 mod board_tests;
 #[cfg(test)]
 mod continuation_authority_tests;
@@ -9102,3 +9173,51 @@ mod work_projection_tests;
 mod workspace_resume_tests;
 #[cfg(test)]
 mod workspace_watcher_tests;
+
+fn drain_runtime_hook_agent_failure(
+    runtime: &mut AppRuntime,
+    queued_tasks: &BlockingTestTaskQueue,
+    recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    drain_queued_blocking_tasks(queued_tasks);
+    let mut outbound = Vec::new();
+    loop {
+        let completion = {
+            let mut events = recorded_events.lock().expect("recorded events");
+            events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::RuntimeHookAgentFailurePrepared(_)
+                            | UserEvent::IssueMonitorDaemonStatus { .. }
+                            | UserEvent::IssueMonitorDaemonInbox { .. }
+                    )
+                })
+                .map(|index| events.remove(index))
+        };
+        let Some(completion) = completion else {
+            break;
+        };
+        match runtime.accept_project_completion(completion) {
+            Some(UserEvent::RuntimeHookAgentFailurePrepared(prepared)) => {
+                outbound.extend(runtime.handle_runtime_hook_agent_failure_prepared(*prepared));
+            }
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root,
+                status,
+            }) => {
+                outbound.extend(runtime.issue_monitor_daemon_status_events(&project_root, status));
+            }
+            Some(UserEvent::IssueMonitorDaemonInbox {
+                project_root,
+                items,
+            }) => {
+                outbound.extend(runtime.issue_monitor_daemon_inbox_events(&project_root, items));
+            }
+            None => {}
+            _ => unreachable!("matched RuntimeHook monitor completion"),
+        }
+    }
+    outbound
+}

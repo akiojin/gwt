@@ -251,6 +251,7 @@ fn format_errors_help() -> String {
         "  project_root                            Match project rows only; excludes host/unknown",
         "",
         "Notes:",
+        "  - Scope project selects the current project (default).",
         "  - Ledger files live at ~/.gwt/logs/errors/YYYY-MM-DD.jsonl.",
         "  - Live rows are also published on the daemon `errors` channel.",
         "",
@@ -1210,6 +1211,7 @@ mod tests {
         assert!(help.contains("errors.list"));
         assert!(help.contains("since"));
         assert!(help.contains("errors"));
+        assert!(help.contains("current project (default)"));
     }
 
     #[test]

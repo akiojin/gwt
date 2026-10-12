@@ -8,10 +8,77 @@ use crate::{
     IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState,
     IssueReadinessFailure, MonitorInboxState,
 };
-use gwt_github::client::{IssueClient, LabelAssignment};
+use gwt_github::client::{IssueClient, LabelAssignment, OwnerMutationResult};
+use gwt_github::issue_auto_claim::{renew_claim_mutation, ClaimRenewOutcome};
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
 pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+
+/// Only an exact current, live Active holder can extend an existing claim.
+pub fn live_claim_renewal_generations(
+    project_root: &Path,
+    monitor: &IssueMonitorState,
+    now: &str,
+) -> BTreeMap<u64, String> {
+    monitor
+        .claim_renewal_candidates(now)
+        .into_iter()
+        .filter_map(|identity| {
+            crate::cli::execution_state::live_active_owner_generation(
+                project_root,
+                identity.issue_number,
+            )
+            .map(|generation| (identity.issue_number, generation))
+        })
+        .collect()
+}
+
+pub fn execute_claim_renewal<C: IssueClient + ?Sized>(
+    project_root: &Path,
+    payload: &crate::IssueMonitorEffectPayload,
+    client: &C,
+    now: &str,
+) -> OwnerMutationResult<ClaimRenewOutcome> {
+    let crate::IssueMonitorEffectPayload::RenewClaim {
+        issue_number,
+        claim_id,
+        owner,
+        generation_id,
+        ttl_secs,
+    } = payload
+    else {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "effect is not a claim renewal".to_string(),
+            conflicting_claims: Vec::new(),
+        });
+    };
+    if crate::cli::execution_state::live_active_owner_generation(project_root, *issue_number)
+        .as_deref()
+        != Some(generation_id.as_str())
+    {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "the exact Active execution holder is no longer live".to_string(),
+            conflicting_claims: Vec::new(),
+        });
+    }
+    let expires_at = chrono::DateTime::parse_from_rfc3339(now)
+        .ok()
+        .and_then(|now| {
+            now.checked_add_signed(chrono::Duration::seconds(
+                (*ttl_secs).min(i64::MAX as u64) as i64
+            ))
+        })
+        .map(|expires| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| now.to_string());
+    renew_claim_mutation(
+        client,
+        IssueNumber(*issue_number),
+        claim_id,
+        owner,
+        now,
+        &expires_at,
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
@@ -257,7 +324,7 @@ pub fn issue_monitor_readback_budget() -> std::time::Duration {
 /// Whether the scan still has budget to start another per-candidate readback
 /// and leave the launch stage something to run on. An absent ambient deadline
 /// (direct callers, tests) imposes no limit of its own.
-fn readback_fan_out_has_budget() -> bool {
+pub(crate) fn readback_fan_out_has_budget() -> bool {
     gwt_core::operation_deadline::current().is_none_or(|deadline| {
         deadline.saturating_duration_since(std::time::Instant::now()) > ISSUE_MONITOR_LAUNCH_RESERVE
     })
@@ -319,11 +386,20 @@ pub fn read_execution_observations(
     project_root: &Path,
     issue_numbers: &[u64],
 ) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
+    read_execution_observations_from_inventory(project_root, issue_numbers, &inventory)
+}
+
+pub(crate) fn read_execution_observations_from_inventory(
+    project_root: &Path,
+    issue_numbers: &[u64],
+    inventory: &crate::session_inventory::SessionInventory,
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     use crate::cli::execution_state::{
         diagnose_owner, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
     };
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
     let worktrees = gwt_git::worktree::WorktreeManager::new(project_root)
         .list()
         .unwrap_or_default();
@@ -391,6 +467,27 @@ pub fn read_execution_observations(
                 Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
                 None => IssueMonitorExecutionSettlement::Unknown,
             };
+            // Reaper interruption is normally retryable, but retrying a window
+            // with no gate-admitted recovery only repeats the same loop.
+            // Preserve real settlements and process liveness; this diagnosis
+            // does not write the ECR or claim that unfinished work was delivered.
+            let recovery_exhausted = (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
+                || diagnosis.ecr_settled_by_host_reaper)
+                && worktree
+                    .zip(diagnosis.holder_session_id.as_deref())
+                    .is_some_and(|(worktree, session_id)| {
+                        crate::cli::hook::workflow_policy::identity_gate_closed_for_session(
+                            worktree, session_id,
+                        ) && crate::cli::execution_state::diagnose(worktree, Some(session_id))
+                            .recovery_hint
+                            .as_deref()
+                            == Some(crate::cli::execution_state::RECOVERY_HINT_RECOVERY_EXHAUSTED)
+                    });
+            let settlement = if recovery_exhausted {
+                IssueMonitorExecutionSettlement::RecoveryExhausted
+            } else {
+                settlement
+            };
             (
                 *issue_number,
                 crate::issue_monitor::IssueMonitorExecutionObservation {
@@ -402,15 +499,31 @@ pub fn read_execution_observations(
         .collect()
 }
 
-/// Issue #4084 AC-2/AC-3: classify the launched windows against the last
-/// canvas snapshot and release the ones no human has to judge.
-pub fn reconcile_issue_monitor_idle_windows(
+/// Refresh transient Session liveness for every unbound recovery path.
+pub fn refresh_issue_monitor_execution_observations(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
+    let settlements =
+        read_execution_observations(project_root, &monitor.execution_settlement_issue_numbers());
+    monitor.set_process_held_issues(
+        settlements
+            .iter()
+            .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
+            .collect(),
+    );
+    settlements
+}
+
+/// Recover stuck launches, then classify idle windows using the same live
+/// worktree Session observations (Issue #4862 AC-8).
+pub fn reconcile_issue_monitor_windows(
     monitor: &mut IssueMonitorState,
     project_root: &Path,
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
-    let settlements =
-        read_execution_observations(project_root, &monitor.execution_settlement_issue_numbers());
+    let settlements = refresh_issue_monitor_execution_observations(monitor, project_root);
+    monitor.recover_stuck_autonomous(now);
     let outcome = monitor.reconcile_idle_windows(&settlements, now);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
         tracing::info!(
@@ -496,15 +609,29 @@ pub fn issue_monitor_read_only_daemon_payloads(
     monitor: &IssueMonitorState,
 ) -> Vec<IssueMonitorDaemonPayload> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut status = monitor.status_view_at(&now);
+    if let Some(drain) = status.update_drain.as_mut() {
+        drain.blocking = monitor
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match &effect.payload {
+                crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                    Some(crate::update_drain::UpdateBlocker::PendingAcquireClaim {
+                        issue_number: *issue_number,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+    }
     vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
-            payload: serde_json::to_value(monitor.status_view_at(&now))
-                .expect("issue monitor status serializes"),
+            payload: serde_json::to_value(status).expect("issue monitor status serializes"),
         },
         IssueMonitorDaemonPayload {
             event: "inbox".to_string(),
-            payload: serde_json::to_value(monitor.inbox.clone())
+            payload: serde_json::to_value(monitor.inbox_view_at(&now))
                 .expect("issue monitor inbox serializes"),
         },
     ]
@@ -3785,11 +3912,8 @@ mod tests {
             observed_at: "2026-09-07T04:10:00Z".to_string(),
             windows: Vec::new(),
         });
-        let outcome = reconcile_issue_monitor_idle_windows(
-            &mut monitor,
-            worktree.path(),
-            "2026-09-07T04:10:00Z",
-        );
+        let outcome =
+            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:00Z");
         assert!(
             outcome.released.is_empty(),
             "the exact agent process is alive"
@@ -3881,11 +4005,8 @@ mod tests {
             Some(IssueMonitorExecutionSettlement::Interrupted),
             "the reaper blocked it on the holder's behalf; the work is unfinished"
         );
-        let outcome = reconcile_issue_monitor_idle_windows(
-            &mut monitor,
-            worktree.path(),
-            "2026-09-07T04:10:00Z",
-        );
+        let outcome =
+            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:00Z");
         assert_eq!(outcome.requeued, vec![42]);
         assert!(monitor
             .autonomous_record(42)
@@ -4248,6 +4369,10 @@ mod tests {
             std::fs::write(
                 &fake_gh,
                 "@echo off\r\n\
+                 if /I \"%~1 %~2\"==\"issue view\" (\r\n\
+                   type \"%~dp0gh-view-%~3.json\"\r\n\
+                   exit /b 0\r\n\
+                 )\r\n\
                  set \"page=1\"\r\n\
                  set \"suffix=json\"\r\n\
                  echo %* | findstr /C:\"page=2\" >nul\r\n\
@@ -4267,6 +4392,10 @@ mod tests {
             std::fs::write(
                 &fake_gh,
                 "#!/bin/sh\n\
+                 if [ \"$1 $2\" = \"issue view\" ]; then\n\
+                   cat \"$(dirname \"$0\")/gh-view-$3.json\"\n\
+                   exit $?\n\
+                 fi\n\
                  page=1\n\
                  suffix=json\n\
                  case \"$*\" in *page=2*) page=2 ;; esac\n\
@@ -4307,6 +4436,128 @@ mod tests {
             }),
             "missing population diagnostic: {rows:?}"
         );
+    }
+
+    #[test]
+    fn inbox_population_shrink_from_explicit_closed_issue_is_not_a_fault() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(7));
+        monitor.record_candidate(issue(8));
+        let mut closed = issue(8);
+        closed.state = IssueMonitorIssueState::Closed;
+        let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(7), closed],
+            IssueMonitorCandidateSource::Live,
+            temp.path(),
+            "2026-09-10T00:00:00Z",
+        );
+        assert!(monitor.inbox_item(8).is_none());
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+    }
+
+    fn shrink_probe_repo(dir: &Path, states: &[(u64, &str)]) -> PathBuf {
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+        }
+        for (number, state) in states {
+            std::fs::write(
+                dir.join(format!("gh-view-{number}.json")),
+                serde_json::json!({
+                    "number": number, "title": format!("Issue {number}"),
+                    "body": "Body", "labels": [{"name": "auto-improve"}],
+                    "state": state, "updatedAt": "2026-09-10T00:00:00Z", "comments": []
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        repo
+    }
+
+    #[test]
+    fn inbox_population_shrink_from_confirmed_closed_issue_is_not_a_fault() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[(8, "CLOSED")]);
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(7));
+        monitor.record_candidate(issue(8));
+        let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(7)],
+            IssueMonitorCandidateSource::Live,
+            &repo,
+            "2026-09-10T00:00:00Z",
+        );
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn inbox_population_shrink_with_open_issue_is_a_single_fault_across_replays() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8, 9]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[(8, "CLOSED"), (9, "OPEN")]);
+        let mut before = IssueMonitorState::new(IssueMonitorConfig::default());
+        for number in [7, 8, 9] {
+            before.record_candidate(issue(number));
+        }
+        let mut newcomer = issue(10);
+        newcomer.labels.push("gwt-queued".into());
+        for now in ["2026-09-10T00:00:00Z", "2026-09-10T00:00:10Z"] {
+            let mut monitor = before.clone();
+            let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                &[issue(7), newcomer.clone()],
+                IssueMonitorCandidateSource::Live,
+                &repo,
+                now,
+            );
+            assert_eq!(monitor.inbox.len(), 2);
+            assert_eq!(summary.errors.len(), 1);
+        }
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 1, "same reduction was recorded twice: {rows:?}");
+        assert_eq!(rows[0].kind, gwt_core::error_ledger::ErrorKind::DaemonFault);
+        assert!(rows[0].message.contains("removed issues: [9]"), "{rows:?}");
     }
 
     /// Issue #4087 AC-4: an Issue created on GitHub (never seen by gwtd) reaches

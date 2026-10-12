@@ -608,7 +608,11 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+    pub(crate) fn register_pty_writer(
+        &self,
+        id: &str,
+        session_snapshot: Option<&gwt_agent::Session>,
+    ) {
         let Some(project_key) = self
             .window_lookup
             .get(id)
@@ -618,40 +622,35 @@ impl AppRuntime {
             tracing::warn!(window_id = %id, "refusing PTY writer without project ownership");
             return;
         };
-        let Ok(pane_guard) = pane.lock() else {
-            tracing::warn!(
-                target: "gwt_input_trace",
-                stage = "registry_lock_poisoned",
-                window_id = %id,
-                "failed to register PTY writer: pane mutex poisoned"
-            );
+        let Some(runtime) = self.runtimes.get(id) else {
+            tracing::warn!(window_id = %id, "refusing PTY writer without an installed runtime");
             return;
         };
-        let pty = pane_guard.shared_pty();
-        drop(pane_guard);
-        let monitor_runtime = self.active_agent_sessions.get(id).and_then(|active| {
-            if gwt::cli::execution_state::session_launch_route(Some(&active.session_id))
-                != Some(gwt_agent::LaunchRoute::Autonomous)
-            {
-                return None;
-            }
-            let session = gwt_agent::Session::load(
-                &self
-                    .sessions_dir
-                    .join(format!("{}.toml", active.session_id)),
-            )
-            .ok()?;
-            Some(gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration {
-                window_id: id.to_string(),
-                session_id: active.session_id.clone(),
-                issue_number: session.linked_issue_number?,
-                worktree_path: active.worktree_path.clone(),
-                project_root: self.tab(&active.tab_id)?.project_root.clone(),
-                sessions_dir: self.sessions_dir.clone(),
-                incarnation: self.runtimes.get(id)?.incarnation,
-                review_dispatch: self.issue_monitor_review_dispatch_windows.contains(id),
-            })
-        });
+        let pty = Arc::clone(&runtime.pty);
+        let monitor_runtime = self
+            .active_agent_sessions
+            .get(id)
+            .zip(session_snapshot)
+            .and_then(|(active, session)| {
+                if session.id != active.session_id
+                    || !(session.launch_route == gwt_agent::LaunchRoute::Autonomous
+                        || session.launch_args.iter().any(|arg| {
+                            arg.contains(gwt::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE)
+                        }))
+                {
+                    return None;
+                }
+                Some(gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                    window_id: id.to_string(),
+                    session_id: active.session_id.clone(),
+                    issue_number: session.linked_issue_number?,
+                    worktree_path: active.worktree_path.clone(),
+                    project_root: self.tab(&active.tab_id)?.project_root.clone(),
+                    sessions_dir: self.sessions_dir.clone(),
+                    incarnation: runtime.incarnation,
+                    review_dispatch: self.issue_monitor_review_dispatch_windows.contains(id),
+                })
+            });
         match self.pty_writers.write() {
             Ok(mut guard) => {
                 let previous = guard.insert(
@@ -781,6 +780,39 @@ impl AppRuntime {
                     .map(|tab| tab.project_root.clone())
             })
         });
+        // Issue #5248: Stop may already have revoked every Monitor binding.
+        // Capture the complete canvas after removal, independently of the
+        // exact WindowClosed target. Whole-project teardown captures here
+        // before removal and remains on its existing reconciliation path.
+        let post_close_snapshot = (!self.tracked_window_exists(window_id))
+            .then(|| {
+                let tab_id =
+                    self.issue_monitor_tab_id_for_project_root(project_root.as_deref()?)?;
+                let now = chrono::Utc::now().to_rfc3339();
+                // Resolve survivor Session metadata off Tao along with transport.
+                let snapshot = self.issue_monitor_window_snapshot_with_session_metadata(
+                    &tab_id,
+                    &now,
+                    |_| (None, false),
+                )?;
+                let sessions = snapshot
+                    .windows
+                    .iter()
+                    .filter_map(|window| {
+                        let address = self.window_lookup.get(&window.window_id)?;
+                        let tab = self.tab(&address.tab_id)?;
+                        let session_id =
+                            tab.workspace.window(&address.raw_id)?.session_id.as_ref()?;
+                        Some((window.window_id.clone(), session_id.clone()))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>();
+                Some((
+                    snapshot,
+                    self.issue_monitor_project_tab_ids(&tab_id),
+                    sessions,
+                ))
+            })
+            .flatten();
         // The close ACK boundary is process-local only. The Launch Wizard
         // cache is the in-memory Session snapshot populated off-thread; all
         // durable Session reads and CAS persistence remain in the finalizer.
@@ -921,6 +953,25 @@ impl AppRuntime {
         let scheduler_window_id = window_id.clone();
         let task: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
             let started = Instant::now();
+            // Transport belongs off Tao, but before PTY reap or durable
+            // cleanup can delay it. Snapshot timestamps fence late delivery
+            // against a newer observation of a same-ID successor.
+            if let (Some(root), Some((mut snapshot, tabs, sessions))) =
+                (project_root.as_deref(), post_close_snapshot)
+            {
+                for window in &mut snapshot.windows {
+                    let Some(session) = sessions.get(&window.window_id).and_then(|id| {
+                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                    }) else {
+                        continue;
+                    };
+                    window.issue_number = window.issue_number.or(session.linked_issue_number);
+                    window.monitor_owned |=
+                        gwt::cli::execution_state::session_launch_route_from_session(&session)
+                            == gwt_agent::LaunchRoute::Autonomous;
+                }
+                super::publish_issue_monitor_window_snapshot(root, &snapshot, &tabs);
+            }
             let termination_classification = termination_receipt
                 .as_ref()
                 .map(|(session_id, incarnation, has_exit)| {

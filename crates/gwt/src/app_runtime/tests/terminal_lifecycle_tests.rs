@@ -732,6 +732,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
                     gwt::cli::verification_record::WorkEventSettlementBlocker::MissingUpstream,
                 ),
             ),
+            settlement_dirty_paths: Vec::new(),
             settlement_severity: "warning".to_string(),
             settlement_obligation_open: true,
             open_obligations: vec!["user_verification".to_string()],
@@ -2745,6 +2746,130 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
 // while the first launch is still materializing (window registered, agent
 // session not yet live) must focus the pending window, not spawn a duplicate.
 #[test]
+fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).expect("drain project");
+    fs::create_dir_all(&target_root).expect("target project");
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    let mut prefs = gwt::IssueMonitorPrefs {
+        update_drain: Some(gwt::IssueMonitorUpdateDrain {
+            version: "9.110.0".to_string(),
+            since: "2026-10-10T08:21:17Z".to_string(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            blocking: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed drain");
+    let tabs = vec![
+        sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab("target", "llmlb", target_root, ProjectKind::Git, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    let config = || {
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/issue-5062-test")
+            .build()
+    };
+    let result = runtime.spawn_agent_window("target", config(), canvas_bounds(), None);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("update_drain")),
+        "{result:?}"
+    );
+    assert!(runtime
+        .tab("target")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
+
+    prefs.update_drain = None;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("release drain");
+    runtime
+        .spawn_agent_window("target", config(), canvas_bounds(), None)
+        .expect("spawn after release");
+    assert_eq!(
+        runtime
+            .tab("target")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).unwrap();
+    fs::create_dir_all(&target_root).unwrap();
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&drain_root),
+        &gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.110.0".into(),
+                since: "2026-10-10T08:21:17Z".into(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tabs = vec![
+        sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "target",
+            "llmlb",
+            target_root,
+            ProjectKind::Git,
+            &[WindowPreset::Claude, WindowPreset::Codex],
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    // A pre-fix launch must stop before spawning a real installed provider.
+    let invalid_profile = temp.path().join("invalid-profile.toml");
+    fs::write(&invalid_profile, "[").unwrap();
+    runtime.profile_config_path = Some(invalid_profile);
+    let windows = runtime
+        .tab("target")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    for window in windows {
+        let events = runtime.start_window("target", &window.id, window.preset, window.geometry);
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                    if detail.contains("update_drain")
+            )),
+            "direct {:?} must explain the host hold",
+            window.preset
+        );
+    }
+    assert!(runtime.runtimes.is_empty());
+    assert!(runtime.active_agent_sessions.is_empty());
+}
+
+#[test]
 fn app_runtime_spawn_agent_window_dedupes_inflight_launch_for_same_work() {
     let _env_lock = env_test_lock()
         .lock()
@@ -3051,14 +3176,11 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
     assert!(!runtime.remote_terminal_previews.contains_key(&id));
 }
 
-#[cfg(unix)]
 #[test]
 fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
-    use std::{io::BufRead, os::unix::net::UnixListener};
-
-    use gwt_core::daemon::{
-        persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest,
-        IpcHandshakeResponse, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeSet,
     };
 
     let _env_lock = env_test_lock()
@@ -3124,142 +3246,64 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
         Some(WindowProcessStatus::Starting)
     );
 
-    let scope = RuntimeScope::from_project_root(&repo, RuntimeTarget::Host).expect("runtime scope");
-    let socket_path = temp.path().join("claim.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind fixture daemon");
-    listener
-        .set_nonblocking(true)
-        .expect("nonblocking listener");
-    let endpoint = DaemonEndpoint::new(
-        scope.clone(),
-        host_pid,
-        socket_path.display().to_string(),
-        "claim-token".to_string(),
-        "test-daemon".to_string(),
-    );
-    persist_endpoint(
-        &scope.endpoint_path(&gwt_core::paths::gwt_home()),
-        &endpoint,
-    )
-    .expect("persist fixture endpoint");
-    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-    let server = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("fixture daemon runtime");
-        let _runtime_guard = runtime.enter();
-        // Readiness notifications avoid spending the production IPC budget on fixture polling.
-        let listener =
-            tokio::net::UnixListener::from_std(listener).expect("register fixture daemon listener");
-        ready_tx.send(()).expect("fixture daemon is ready");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut received = Vec::new();
-        loop {
-            let (stream, _) = runtime
-                .block_on(async { tokio::time::timeout_at(deadline, listener.accept()).await })
-                .expect("fixture publish arrives before hang guard")
-                .expect("accept fixture publish");
-            let mut stream = stream.into_std().expect("fixture stream");
-            stream
-                .set_nonblocking(false)
-                .expect("blocking fixture stream");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("bound fixture reads");
-            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone stream"));
-            let mut line = String::new();
-            reader.read_line(&mut line).expect("read handshake");
-            let request: IpcHandshakeRequest =
-                serde_json::from_str(line.trim_end()).expect("parse handshake");
-            assert_eq!(request.scope, scope);
-            writeln!(
-                stream,
-                "{}",
-                serde_json::to_string(&IpcHandshakeResponse {
-                    protocol_version: DAEMON_PROTOCOL_VERSION,
-                    daemon_version: "test-daemon".to_string(),
-                    accepted: true,
-                    rejection_reason: None,
-                })
-                .expect("serialize handshake")
-            )
-            .expect("write handshake");
-            line.clear();
-            reader.read_line(&mut line).expect("read publish");
-            let ClientFrame::Publish { channel, payload } =
-                serde_json::from_str(line.trim_end()).expect("parse publish")
-            else {
-                panic!("expected control publish");
-            };
-            assert_eq!(
-                channel,
-                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
-            );
-            assert_eq!(payload["source_pid"].as_u64(), Some(u64::from(host_pid)));
-            let control = &payload["payload"];
-            let claim = control.get("claim_launch_delivery");
-            let accepted = if let Some(claim) = claim {
-                received.push("claim");
-                monitor.claim_launch_delivery(
-                    claim["issue_number"].as_u64().expect("issue number"),
-                    claim["delivery_id"].as_str().expect("delivery identity"),
-                    claim["materializer_id"]
-                        .as_str()
-                        .expect("materializer identity"),
-                    claim["materializer_pid"]
-                        .as_u64()
-                        .expect("materializer pid") as u32,
-                    claim["materializer_window_id"]
-                        .as_str()
-                        .expect("pane identity"),
-                    gwt::process::is_host_process_alive,
-                )
-            } else {
-                received.push("snapshot");
-                let snapshot: gwt::IssueMonitorWindowSnapshot =
-                    serde_json::from_value(control["window_snapshot"].clone())
-                        .expect("current canvas snapshot");
-                let tabs = serde_json::from_value(control["window_snapshot_project_tabs"].clone())
-                    .expect("canvas tab scope");
+    // This tests canvas/claim ordering and durable readback, not the IPC budget.
+    // Synchronous publishers keep those assertions independent of fsync and
+    // thread scheduling inside the production 200ms deadline.
+    let monitor = RefCell::new(monitor);
+    let received = RefCell::new(Vec::new());
+    let daemon_accepted = Cell::new(false);
+    let accepted = runtime
+        .claim_issue_monitor_launch_delivery_with_publishers(
+            &repo,
+            42,
+            "launch:effect-42",
+            window_id,
+            |snapshot, tabs| {
+                received.borrow_mut().push("snapshot");
                 assert_eq!(snapshot.windows[0].window_id, window_id);
                 assert!(snapshot.windows[0].monitor_owned);
-                assert_eq!(
-                    tabs,
-                    std::collections::BTreeSet::from(["tab-1".to_string()])
+                assert_eq!(tabs, &BTreeSet::from(["tab-1".to_string()]));
+                monitor.borrow_mut().record_window_snapshot_from_host(
+                    snapshot.clone(),
+                    host_pid,
+                    host_started_at,
+                    tabs.clone(),
                 );
-                monitor.record_window_snapshot_from_host(snapshot, host_pid, host_started_at, tabs);
-                true
-            };
-            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
-                .expect("commit daemon prefs");
-            writeln!(
-                stream,
-                "{}",
-                serde_json::to_string(&DaemonFrame::Ack).expect("serialize daemon ack")
-            )
-            .expect("write daemon ack");
-            if claim.is_some() {
-                return (received, accepted);
-            }
-        }
-    });
-
-    ready_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("fixture daemon starts before the claim");
-    let accepted =
-        runtime.claim_issue_monitor_launch_delivery(&repo, 42, "launch:effect-42", window_id);
-    let server_result = server.join();
-    let accepted = accepted.expect("daemon claim outcome");
-    let (received, daemon_accepted) = server_result.expect("fixture daemon joins");
+                Ok(())
+            },
+            |control| {
+                received.borrow_mut().push("claim");
+                let claim = &control["claim_launch_delivery"];
+                let mut monitor = monitor.borrow_mut();
+                daemon_accepted.set(
+                    monitor.claim_launch_delivery(
+                        claim["issue_number"].as_u64().expect("issue number"),
+                        claim["delivery_id"].as_str().expect("delivery identity"),
+                        claim["materializer_id"]
+                            .as_str()
+                            .expect("materializer identity"),
+                        claim["materializer_pid"]
+                            .as_u64()
+                            .expect("materializer pid") as u32,
+                        claim["materializer_window_id"]
+                            .as_str()
+                            .expect("pane identity"),
+                        gwt::process::is_host_process_alive,
+                    ),
+                );
+                gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+                    .expect("commit daemon prefs");
+                Ok(())
+            },
+        )
+        .expect("daemon claim outcome");
     assert_eq!(
-        received,
+        received.into_inner(),
         ["snapshot", "claim"],
         "the same fresh canvas must precede the claim"
     );
     assert!(
-        daemon_accepted,
+        daemon_accepted.get(),
         "the daemon must adopt the exact existing pane at max_active=1"
     );
     assert!(
