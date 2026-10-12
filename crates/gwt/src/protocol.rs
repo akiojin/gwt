@@ -626,6 +626,12 @@ pub enum FrontendEvent {
         filename: Option<String>,
         size: u64,
     },
+    /// Browser-side upload failures use server-derived window/project scope.
+    AttachmentUploadFailed {
+        id: String,
+        operation_id: String,
+        message: String,
+    },
     AttachFiles {
         id: String,
         #[serde(default)]
@@ -718,6 +724,12 @@ pub enum FrontendEvent {
         request_id: Option<u64>,
         selected_number: Option<u64>,
         refresh: bool,
+    },
+    /// Issue #5287: validated Issue-window failures enter the error ledger.
+    ReportKnowledgeError {
+        id: String,
+        stage: String,
+        message: String,
     },
     SearchKnowledgeBridge {
         id: String,

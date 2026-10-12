@@ -10610,6 +10610,7 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
+            | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
             | FrontendEvent::LoadFileTree { id, .. }
             | FrontendEvent::ListFileTreeWorktrees { id, .. }
@@ -10624,6 +10625,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
@@ -10953,6 +10955,7 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
+            | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
             | FrontendEvent::LoadFileTree { id, .. }
             | FrontendEvent::ListFileTreeWorktrees { id, .. }
@@ -10967,6 +10970,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
@@ -11277,6 +11281,11 @@ impl AppRuntime {
                     )
                 }
             }
+            FrontendEvent::AttachmentUploadFailed {
+                id,
+                operation_id,
+                message,
+            } => self.attachment_upload_failed_events(&id, &operation_id, &message),
             FrontendEvent::AttachFiles {
                 id,
                 operation_id,
@@ -11380,6 +11389,10 @@ impl AppRuntime {
                     refresh,
                 },
             ),
+            FrontendEvent::ReportKnowledgeError { id, stage, message } => {
+                self.report_knowledge_error(&id, &stage, &message);
+                Vec::new()
+            }
             FrontendEvent::SearchKnowledgeBridge {
                 id,
                 knowledge_kind,

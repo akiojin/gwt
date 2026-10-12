@@ -202,6 +202,10 @@ pub fn host_process_start_time(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
     }
+    #[cfg(test)]
+    if let Some(identity) = test_clock::start_identity(pid) {
+        return identity;
+    }
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -249,6 +253,10 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
     }
+    #[cfg(test)]
+    if let Some(epoch) = test_clock::start_epoch_secs(pid) {
+        return epoch;
+    }
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
     let mut system = System::new();
@@ -262,6 +270,68 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
         .process(pid)
         .map(sysinfo::Process::start_time)
         .filter(|started_at| *started_at > 0)
+}
+
+/// Inject Linux observations on any test host without changing its OS clock.
+#[cfg(test)]
+pub(crate) mod test_clock {
+    use std::cell::RefCell;
+
+    struct Observation {
+        pid: u32,
+        stat: String,
+        btime: u64,
+    }
+
+    thread_local! {
+        static OBSERVATION: RefCell<Option<Observation>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct ProcessClock(Option<Observation>);
+
+    impl ProcessClock {
+        pub(crate) fn new(pid: u32, start_ticks: u64, btime: u64) -> Self {
+            let observation = Observation {
+                pid,
+                stat: format!("{pid} (gwt host) S {} {start_ticks}", ["0"; 18].join(" ")),
+                btime,
+            };
+            Self(OBSERVATION.replace(Some(observation)))
+        }
+
+        pub(crate) fn set_btime(&self, btime: u64) {
+            OBSERVATION.with_borrow_mut(|observation| {
+                observation.as_mut().unwrap().btime = btime;
+            });
+        }
+    }
+
+    impl Drop for ProcessClock {
+        fn drop(&mut self) {
+            OBSERVATION.set(self.0.take());
+        }
+    }
+
+    pub(super) fn start_identity(pid: u32) -> Option<Option<u64>> {
+        OBSERVATION.with_borrow(|observation| {
+            observation
+                .as_ref()
+                .filter(|observation| observation.pid == pid)
+                .map(|observation| super::proc_stat_start_identity(&observation.stat))
+        })
+    }
+
+    pub(super) fn start_epoch_secs(pid: u32) -> Option<Option<u64>> {
+        OBSERVATION.with_borrow(|observation| {
+            observation
+                .as_ref()
+                .filter(|observation| observation.pid == pid)
+                .map(|observation| {
+                    super::proc_stat_start_identity(&observation.stat)
+                        .map(|ticks| observation.btime + ticks / 100)
+                })
+        })
+    }
 }
 
 /// Return whether a Unix process group still contains any process.

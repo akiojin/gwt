@@ -634,7 +634,10 @@ async fn attachment_upload_handler(
         if let Err(error) = tokio::fs::create_dir_all(parent).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to create upload directory: {error}"),
+                format!(
+                    "failed to create upload directory {}: {error}",
+                    parent.display()
+                ),
             )
                 .into_response();
         }
@@ -645,7 +648,7 @@ async fn attachment_upload_handler(
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to create upload file: {error}"),
+                format!("failed to create upload file {}: {error}", path.display()),
             )
                 .into_response();
         }
@@ -669,7 +672,7 @@ async fn attachment_upload_handler(
             let _ = tokio::fs::remove_file(&path).await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to write upload: {error}"),
+                format!("failed to write upload {}: {error}", path.display()),
             )
                 .into_response();
         }
@@ -678,7 +681,7 @@ async fn attachment_upload_handler(
         let _ = tokio::fs::remove_file(&path).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to flush upload: {error}"),
+            format!("failed to flush upload {}: {error}", path.display()),
         )
             .into_response();
     }

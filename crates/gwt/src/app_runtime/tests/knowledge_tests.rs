@@ -1,5 +1,62 @@
 use super::*;
 
+#[test]
+fn app_runtime_report_knowledge_error_journals_only_valid_issue_window_failures() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    let id = combined_window_id("tab-1", "issue-1");
+    for (target, stage, message) in [
+        (id.as_str(), "load", "cache read failed"),
+        (id.as_str(), "render", "card render failed"),
+        ("missing-window", "load", "untrusted missing window"),
+        (id.as_str(), "unknown", "untrusted stage"),
+    ] {
+        let event = serde_json::from_value(serde_json::json!({
+            "kind": "report_knowledge_error", "id": target, "stage": stage, "message": message,
+        }))
+        .expect("decode diagnostic event");
+        assert!(runtime
+            .handle_frontend_event("client-1".to_string(), event)
+            .is_empty());
+    }
+    assert!(gwt_core::error_ledger::list_since(None)
+        .expect("ledger before background work")
+        .is_empty());
+    assert_eq!(queued_tasks.lock().unwrap().len(), 2);
+    drain_queued_blocking_tasks(&queued_tasks);
+    let mut rows = gwt_core::error_ledger::list_since(None).expect("ledger");
+    rows.sort_by(|a, b| a.message.cmp(&b.message));
+    assert_eq!(rows.len(), 2);
+    for (row, (stage, cause)) in rows.iter().zip([
+        ("load", "cache read failed"),
+        ("render", "card render failed"),
+    ]) {
+        assert!(row.message.contains(stage));
+        assert!(row.message.contains(cause));
+        assert_eq!(row.target.window_id.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            row.target.project_root.as_deref(),
+            Some(repo.to_string_lossy().as_ref())
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn app_runtime_knowledge_search_transient_failure_stays_silent_with_retry_directive() {
