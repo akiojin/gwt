@@ -312,7 +312,7 @@ fn assert_canonical_runs_are_serialized(same_worktree: bool) {
         &arena.sibling
     };
     let (ok, output) = arena.run_in(contender, &verify_run(0));
-    assert!(!ok, "a concurrent canonical run must defer:\n{output}");
+    assert!(ok, "a concurrent canonical run must defer:\n{output}");
     assert!(output.contains("deferred"), "{output}");
     assert!(
         !output.contains("verify: PASS") && !output.contains("verify: FAIL"),
@@ -942,7 +942,7 @@ fn measure_two_worktree_continuation(reregister_plan: bool) -> serde_json::Value
     let (ok, deferred_output) = first.finish();
     let first_attempt_wall_ms = total.elapsed().as_millis();
     assert!(
-        !ok && deferred_output.contains("deferred"),
+        ok && deferred_output.contains("deferred"),
         "{deferred_output}"
     );
     assert!(

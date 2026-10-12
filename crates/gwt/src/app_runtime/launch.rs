@@ -36,6 +36,7 @@ pub(super) use gwt::session_launch::apply_resume_identity_to_session;
 use gwt::session_launch::{initialize_launch_session, persist_finalized_launch_session};
 use gwt_agent::resolve_host_runner_health_checked;
 
+use super::agent_maintenance;
 use super::continuation::{
     abort_prepared_execution_and_remove_exact_session,
     bind_durable_launch_recovery_session_identity, clear_durable_launch_recovery,
@@ -45,6 +46,7 @@ use super::continuation::{
     persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
     resolve_split_workspace_state_external_commit, DurableLaunchRecoveryKind,
 };
+
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
@@ -126,7 +128,12 @@ fn resolve_agent_resource_launch(
     };
     let max_active =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo_path))
-            .map_or(1, |prefs| prefs.max_active_agents);
+            .map_or(1, |prefs| {
+                let mut monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                monitor.refresh_agent_capacity(repo_path);
+                monitor.effective_max_active_agents()
+            });
     let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let resolved = gwt::agent_resource_policy::resolve_agent_resource_policy(
         &settings.agent.resource,
@@ -2131,6 +2138,11 @@ fn rollback_worker_genesis(
 }
 
 fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch {
+    // Keep the existing Work lock budget, including PM/Execution lock waits.
+    // Expired authority operations retain their exact reconciliation evidence.
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+    );
     let fresh_execution_had_pending = input.pending_fresh_execution.is_some();
     let token = input.result.as_ref().ok().and_then(|launch| {
         launch
@@ -2218,8 +2230,35 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
                 .fresh_execution
                 .as_ref()
                 .is_some_and(|(_, _, status)| *status != Some(false));
+        let monitor_startup_failure =
+            failure
+                .fresh_execution
+                .as_ref()
+                .is_some_and(|(pending, cleanup, status)| {
+                    *status == Some(false)
+                        && matches!(cleanup, Ok(true))
+                        && pending
+                            .launch_feedback_context
+                            .as_ref()
+                            .is_some_and(|context| {
+                                context
+                                    .issue_monitor_launch_binding_issue_number()
+                                    .is_some()
+                                    && context.issue_monitor_delivery_id.is_some()
+                                    && !context.issue_monitor_review_dispatch
+                                    && context.issue_monitor_autonomous_handoff.is_none()
+                            })
+                });
+        if monitor_startup_failure {
+            input.failure_input.retryable = false;
+            input.launch_feedback_context = failure
+                .fresh_execution
+                .as_ref()
+                .and_then(|(pending, _, _)| pending.launch_feedback_context.clone());
+        }
         if !preserved_authority
             && (answered_handoff
+                || monitor_startup_failure
                 || failure.continue_work.is_none() && failure.fresh_execution.is_none())
         {
             if let Some((active, _)) = failure_session.as_ref() {
@@ -2321,7 +2360,19 @@ fn rollback_worker_fresh_execution(
         }
         Err(error) => return Err(error.to_string()),
     }
-    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    if !pending
+        .launch_feedback_context
+        .as_ref()
+        .is_some_and(|context| {
+            context
+                .issue_monitor_launch_binding_issue_number()
+                .is_some()
+                && context.issue_monitor_delivery_id.is_some()
+                && context.issue_monitor_autonomous_handoff.is_none()
+        })
+    {
+        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    }
     Ok(true)
 }
 
@@ -2529,13 +2580,18 @@ fn prepare_agent_launch_inner(
         }
         return Err("launch window closed before PTY spawn".into());
     }
-    if let Err(error) = gwt_agent::update_session(&input.sessions_dir, &session_id, |session| {
-        session.restore_window_on_startup = true;
-        session.updated_at = chrono::Utc::now();
-        session.launch_origin = input.origin;
-        session.restore_source_session_id = input.auto_resume_source_session_id.clone();
-        Ok(())
-    }) {
+    if let Err(error) = gwt_agent::update_session_with_wait(
+        &input.sessions_dir,
+        &session_id,
+        std::time::Duration::from_secs(2),
+        |session| {
+            session.restore_window_on_startup = true;
+            session.updated_at = chrono::Utc::now();
+            session.launch_origin = input.origin;
+            session.restore_source_session_id = input.auto_resume_source_session_id.clone();
+            Ok(())
+        },
+    ) {
         tracing::warn!(%session_id, %error, "failed to persist launched Session window metadata");
     }
     if !input.is_continue_work && !is_fresh && genesis.is_none() {
@@ -3074,7 +3130,9 @@ pub(super) fn launch_config_from_persisted_session(
     // unconditionally, because a persisted `launch_args` that still records the
     // prompt is not consulted by the builder and would otherwise lose it too.
     let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
-    if pm_scratch.is_some() {
+    if pm_scratch.is_some()
+        && gwt::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
+    {
         builder = builder.extra_arg(super::pm::PM_BOOTSTRAP_PROMPT);
     }
 
@@ -3353,6 +3411,47 @@ impl LaunchWizardMemoryCache {
         self.agent_options = Self::spawn_agent_options_detection();
     }
 
+    /// Refresh after a Host installer in the same active-profile environment.
+    /// Called on the maintenance worker so every version probe stays off Tao.
+    pub(super) fn refresh_agent_options_for_profile(&mut self, config_path: &Path, cwd: &Path) {
+        // A completion can immediately refresh an open wizard. Resolve its
+        // ledger here as well, before that cache is handed back to Tao.
+        self.sessions();
+        let mut options: Vec<_> = self
+            .agent_options()
+            .into_iter()
+            .filter(|agent| agent.custom_agent.is_some())
+            .collect();
+        match gwt_agent::LaunchEnvironment::from_active_profile(
+            config_path,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        ) {
+            Ok(environment) => {
+                let (env, remove_env) = environment.into_parts();
+                let detected = gwt_agent::builtin_agent_descriptors()
+                    .iter()
+                    .filter_map(|descriptor| {
+                        gwt_agent::AgentDetector::detect_by_command_with_environment(
+                            descriptor.command,
+                            &env,
+                            &remove_env,
+                            Some(cwd),
+                        )
+                    })
+                    .collect();
+                options.extend(
+                    gwt::build_builtin_agent_options(detected)
+                        .into_iter()
+                        .filter(|agent| agent.available),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot refresh agents in the active Host profile")
+            }
+        }
+        self.agent_options = Arc::new(Mutex::new(AgentOptionsSlot::Ready(options)));
+    }
+
     pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
         let mut slot = self
             .agent_options
@@ -3387,6 +3486,14 @@ impl LaunchWizardMemoryCache {
                     id: descriptor.command.to_string(),
                     name: descriptor.display_name.to_string(),
                     installed: detected.is_some(),
+                    available_version: None,
+                    update_check_error: None,
+                    update_available: false,
+                    up_to_date: false,
+                    install_supported: !matches!(
+                        descriptor.distribution,
+                        gwt_agent::DistributionRoute::None
+                    ),
                     installed_version: detected
                         .and_then(|agent| agent.installed_version.as_deref())
                         .map(str::trim)
@@ -3910,7 +4017,6 @@ fn update_issue_branch_link_with_cache_dir(
         }
         Err(error) => return Err(format!("failed to read issue linkage store: {error}")),
     };
-
     match issue_number {
         Some(issue_number) => {
             store.branches.insert(branch_name.to_string(), issue_number);
@@ -4970,13 +5076,19 @@ impl AppRuntime {
                     ));
                 }
                 if let Some((pending, cleanup, status)) = failure.fresh_execution {
-                    events.extend(self.apply_prepared_fresh_execution_launch_failure(
-                        &window_id,
-                        &error.detail,
-                        &pending,
-                        cleanup,
-                        status,
-                    ));
+                    if failure
+                        .generic
+                        .as_ref()
+                        .is_none_or(|prepared| prepared.retryable)
+                    {
+                        events.extend(self.apply_prepared_fresh_execution_launch_failure(
+                            &window_id,
+                            &error.detail,
+                            &pending,
+                            cleanup,
+                            status,
+                        ));
+                    }
                 }
                 if let Some(generic) = failure.generic {
                     events.extend(self.launch_error_events_prepared(
@@ -5045,6 +5157,7 @@ impl AppRuntime {
             success.pane,
             Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
             success.initial_prompt_file,
+            success.session_snapshot.as_ref(),
         );
         if let Some(operation_id) = self
             .pending_continue_work
@@ -5057,7 +5170,17 @@ impl AppRuntime {
             self.sync_pm_session_cache(&root, registration.as_ref());
             status
         });
-        self.spawn_work_events_ingest(project_root.clone(), false);
+        self.spawn_work_events_ingest_for_project_key(
+            project_root.clone(),
+            pending
+                .context
+                .as_ref()
+                .expect("current project")
+                .project_key
+                .clone(),
+            false,
+            None,
+        );
         let _ = self.persist();
         self.launch_error_terminal_details.remove(&window_id);
         let mut events = self
@@ -5277,6 +5400,21 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.register_window(tab_id, raw_id);
         let window_id = combined_window_id(tab_id, raw_id);
+        if preset.is_agent_terminal() && self.agent_maintenance.busy {
+            let detail = agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string();
+            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+            self.window_details
+                .insert(window_id.clone(), detail.clone());
+            return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
+        }
+        if preset.is_agent_terminal() {
+            if let Some(detail) = self.host_update_drain_launch_hold().unwrap_or_else(Some) {
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                self.window_details
+                    .insert(window_id.clone(), detail.clone());
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
+            }
+        }
         if !preset.requires_process() {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
             return self.status_events(window_id, WindowProcessStatus::Running, None);
@@ -5488,6 +5626,7 @@ impl AppRuntime {
             pane,
             console_kind,
             launch.initial_prompt_file,
+            None,
         );
         Ok(())
     }
@@ -5499,6 +5638,7 @@ impl AppRuntime {
         pane: Pane,
         console_kind: Option<gwt_core::process_console::ProcessKind>,
         initial_prompt_file: Option<Arc<tempfile::TempPath>>,
+        session_snapshot: Option<&gwt_agent::Session>,
     ) {
         self.invalidate_launch_delivery_ack(id);
         let pane = Arc::new(Mutex::new(pane));
@@ -5525,7 +5665,7 @@ impl AppRuntime {
         // status event exposes the pane. The registry owns only a cloned Arc;
         // the process owner remains WindowRuntime.
         self.runtimes.insert(id.to_string(), runtime);
-        self.register_pty_writer(id, &pane);
+        self.register_pty_writer(id, session_snapshot);
         // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
         // the pre-PTY failure guard.
         self.restore_launch_windows.remove(id);
@@ -5776,12 +5916,33 @@ impl AppRuntime {
         }
     }
 
+    pub(super) fn host_update_drain_launch_hold(&self) -> Result<Option<String>, String> {
+        for context in self.project_contexts() {
+            let prefs = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+            )
+            .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
+            if let Some(drain) = prefs.update_drain {
+                return Ok(Some(format!(
+                    "Host update_drain for v{} in {} holds new agent launches; {}",
+                    drain.version,
+                    context.project_root.display(),
+                    gwt::UPDATE_DRAIN_RELEASE_OPERATION,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     fn spawn_agent_window_with_placement(
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
+        if self.agent_maintenance.busy {
+            return Err(agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string());
+        }
         let context = self
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
@@ -5859,6 +6020,14 @@ impl AppRuntime {
                 }
             }
         }
+        // Resident PM launches suppress execution control and remain available
+        // to steer the draining agents. Every implementation/review launch
+        // shares the host gate, even when its own project has no drain.
+        if !config.suppress_execution_control {
+            if let Some(hold) = self.host_update_drain_launch_hold()? {
+                return Err(hold);
+            }
+        }
         // Resolve every synchronously fallible launch dependency before adding
         // a window. A Continue work dispatch error must leave no untracked pane
         // for its caller to clean up after durably aborting the attempt.
@@ -5908,6 +6077,7 @@ impl AppRuntime {
             .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
             let mut monitor =
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            monitor.refresh_agent_capacity(&project_root_path);
             let now = chrono::Utc::now().to_rfc3339();
             if let Some(snapshot) = self.issue_monitor_window_snapshot_for_tab(tab_id, &now) {
                 let tabs = self.issue_monitor_project_tab_ids(tab_id);

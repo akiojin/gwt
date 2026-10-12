@@ -78,10 +78,25 @@ impl Fixture {
     }
 
     fn start_server(&self) -> Server {
+        self.start_server_with_owner(false)
+    }
+
+    fn start_server_with_owner(&self, intermediate_parent: bool) -> Server {
         let url_path = self.temp.path().join("browser-url.txt");
         let workspace = self.temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
-        let mut command = hidden_command(env!("CARGO_BIN_EXE_gwt"));
+        let mut command = if intermediate_parent {
+            let mut command = hidden_command("sh");
+            command.args([
+                "-c",
+                "\"$@\" & child=$!; wait \"$child\"",
+                "gwt-owner",
+                env!("CARGO_BIN_EXE_gwt"),
+            ]);
+            command
+        } else {
+            hidden_command(env!("CARGO_BIN_EXE_gwt"))
+        };
         self.isolate(&mut command);
         command
             .args(["--no-tray", "--no-open"])
@@ -172,14 +187,22 @@ struct Server {
 }
 
 impl Server {
-    fn wait_until_ready(mut child: Child, url_path: &Path) -> Self {
+    fn wait_until_ready(child: Child, url_path: &Path) -> Self {
+        Self::wait_until_ready_before(child, url_path, Instant::now() + STARTUP_TIMEOUT)
+    }
+
+    fn wait_until_ready_before(child: Child, url_path: &Path, deadline: Instant) -> Self {
+        // Establish ownership before any fallible readiness work.
+        let mut server = Self {
+            child,
+            url: String::new(),
+        };
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_millis(500))
             .build()
             .expect("client");
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
-            if let Some(status) = child.try_wait().expect("inspect child") {
+            if let Some(status) = server.child.try_wait().expect("inspect child") {
                 panic!("gwt exited before readiness ({status})");
             }
             if let Ok(url) = std::fs::read_to_string(url_path) {
@@ -190,13 +213,71 @@ impl Server {
                         .send()
                         .is_ok_and(|response| response.status().is_success())
                 {
-                    return Self { child, url };
+                    server.url = url;
+                    return server;
                 }
             }
             assert!(Instant::now() < deadline, "gwt did not become ready");
             std::thread::sleep(POLL_INTERVAL);
         }
     }
+}
+
+/// Only constructed from a PID spawned by this fixture, never a process search.
+struct OwnedPid(Option<u32>);
+
+impl Drop for OwnedPid {
+    fn drop(&mut self) {
+        // SAFETY: this PID belongs to the fixture's child (including after orphaning).
+        if let Some(pid) = self.0 {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+fn pid_exists(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes the owned process.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[test]
+fn readiness_failure_reaps_owned_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let child = hidden_command("sleep").arg("300").spawn().unwrap();
+    let pid = child.id();
+    let mut cleanup = OwnedPid(Some(pid));
+    let outcome = std::panic::catch_unwind(|| {
+        Server::wait_until_ready_before(child, &temp.path().join("missing-url"), Instant::now());
+    });
+    assert!(outcome.is_err());
+    assert!(!pid_exists(pid), "readiness panic leaked child {pid}");
+    cleanup.0 = None;
+}
+
+#[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "requires native event loop; run with xvfb-run -a"
+)]
+fn no_tray_exits_when_its_parent_is_killed() {
+    let fixture = Fixture::new();
+    let mut owner = fixture.start_server_with_owner(true);
+    let pid = fixture.lock_payload().0["pid"]
+        .as_u64()
+        .expect("owned gwt PID") as u32;
+    let mut cleanup = OwnedPid(Some(pid));
+    assert!(pid_exists(pid));
+    owner.child.kill().expect("kill fixture parent");
+    owner.child.wait().expect("reap fixture parent");
+    // Observe the actual process exit rather than assuming a scheduling interval.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while pid_exists(pid) && Instant::now() < deadline {
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    assert!(!pid_exists(pid), "no-tray child {pid} survived its parent");
+    cleanup.0 = None;
 }
 
 impl Drop for Server {
@@ -303,4 +384,10 @@ fn gwt_open_path_opens_the_project_then_launches_its_url() {
         .collect::<String>()
         .contains("422"));
     assert_eq!(fixture.opened_urls(3).len(), 2, "no launch after a failure");
+    let pid = server.child.id();
+    drop(server);
+    assert!(
+        !pid_exists(pid),
+        "integration fixture leaked owned gwt process {pid}"
+    );
 }

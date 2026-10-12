@@ -17,7 +17,7 @@ test.describe("Project Manager Settings", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
   test.setTimeout(60_000);
 
-  test("rail routing, validation, persistence, and theme remain live", async ({
+  test("rail routing, pause/resume, validation, persistence, and theme remain live", async ({
     page,
   }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
@@ -50,6 +50,12 @@ test.describe("Project Manager Settings", () => {
       const intervalError = panel.locator(
         '[data-role="pm-loop-interval-error"]',
       );
+      const pauseToggle = panel.locator('[data-role="pm-pause-toggle"]');
+      const autonomyStatus = panel.locator('[data-role="pm-autonomy-status"]');
+      const sharedPause = page.locator(
+        '#pm-settings-shared-test-mount [data-role="pm-pause-toggle"]',
+      );
+      const launcher = page.locator("#op-pm-entry");
 
       await expect(settingsWindow).toBeVisible();
       await expect(
@@ -59,6 +65,10 @@ test.describe("Project Manager Settings", () => {
       await expect(interval).toHaveValue("60");
       await expect(sharedMount).toHaveValue("60");
       const originalInterval = await interval.inputValue();
+      await expect(pauseToggle).toHaveAttribute("aria-pressed", "false");
+      const originalPmState = await launcher.getAttribute("data-pm-state");
+      const originalPmCount = await page.locator('.workspace-window[data-pm="true"]').count();
+      const originalMonitorEnabled = await monitorEnabled(page);
 
       try {
         await injectPmStatus(page, { available: false });
@@ -66,6 +76,8 @@ test.describe("Project Manager Settings", () => {
         await expect(interval).toBeDisabled();
         await expect(sharedMount).toHaveValue("60");
         await expect(sharedMount).toBeDisabled();
+        await expect(pauseToggle).toBeDisabled();
+        await expect(sharedPause).toBeDisabled();
 
         const refreshCursor = await messageCursor(page);
         // Issue #4538: a Project tab re-hydrates through its own scope
@@ -76,6 +88,8 @@ test.describe("Project Manager Settings", () => {
         await expect(interval).toBeEnabled();
         await expect(sharedMount).toHaveValue(originalInterval);
         await expect(sharedMount).toBeEnabled();
+        await expect(pauseToggle).toBeEnabled();
+        await expect(sharedPause).toBeEnabled();
 
         await interval.fill("9");
         await interval.press("Tab");
@@ -90,12 +104,27 @@ test.describe("Project Manager Settings", () => {
         await expect(intervalError).toBeHidden();
         await expect(interval).toHaveAttribute("aria-invalid", "false");
 
+        const pauseCursor = await messageCursor(page);
+        await pauseToggle.click();
+        await waitForPmPaused(page, pauseCursor, true);
+        await expect(pauseToggle).toHaveText("Resume");
+        await expect(sharedPause).toHaveText("Resume");
+        await expect(autonomyStatus).toHaveText("Autonomous loop paused");
+        await expect(launcher).toHaveAttribute("data-pm-paused", "true");
+        await expect(launcher).toHaveAttribute("data-pm-state", originalPmState!);
+        await expect(page.locator('.workspace-window[data-pm="true"]')).toHaveCount(originalPmCount);
+        expect(await monitorEnabled(page)).toBe(originalMonitorEnabled);
+
         await page.reload();
         await suppressStartupOverlays(page);
         await expectActiveProject(page);
         await openProjectManagerSettings(page);
         const reloadedInterval = pmInterval(page);
         await expect(reloadedInterval).toHaveValue("10");
+        await expect(pauseToggle).toHaveText("Resume");
+        await expect(pauseToggle).toHaveAttribute("aria-pressed", "true");
+        await expect(autonomyStatus).toHaveText("Autonomous loop paused");
+        await expect(launcher).toHaveAttribute("data-pm-paused", "true");
 
         const expectedTheme = testInfo.project.name.endsWith("light")
           ? "light"
@@ -116,6 +145,16 @@ test.describe("Project Manager Settings", () => {
           });
         }
 
+        const resumeCursor = await messageCursor(page);
+        await pauseToggle.click();
+        await waitForPmPaused(page, resumeCursor, false);
+        await expect(pauseToggle).toHaveText("Pause");
+        await expect(autonomyStatus).toHaveText("Autonomous loop active");
+        await expect(launcher).toHaveAttribute("data-pm-paused", "false");
+        await expect(launcher).toHaveAttribute("data-pm-state", originalPmState!);
+        await expect(page.locator('.workspace-window[data-pm="true"]')).toHaveCount(originalPmCount);
+        expect(await monitorEnabled(page)).toBe(originalMonitorEnabled);
+
         await reloadedInterval.scrollIntoViewIfNeeded();
         await expect(reloadedInterval).toBeVisible();
         await testInfo.attach(`pm-settings-${expectedTheme}-interval`, {
@@ -135,7 +174,13 @@ test.describe("Project Manager Settings", () => {
         expect(consoleErrors).toEqual([]);
         expect(pageErrors).toEqual([]);
       } finally {
-        await restoreInterval(page, originalInterval);
+        try {
+          const restoreCursor = await messageCursor(page);
+          await sendLiveGwtEvent(page, { kind: "set_pm_paused", paused: false });
+          await waitForPmPaused(page, restoreCursor, false);
+        } finally {
+          await restoreInterval(page, originalInterval);
+        }
       }
     });
   });
@@ -255,4 +300,29 @@ async function waitForPmInterval(
     { cursor, expected },
     { timeout: 10_000 },
   );
+}
+
+async function waitForPmPaused(
+  page: any,
+  cursor: number,
+  paused: boolean,
+): Promise<void> {
+  await page.waitForFunction(({ cursor, paused }) =>
+    (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+      entry.sequence > cursor
+      && entry.payload?.kind === "pm_status"
+      && entry.payload.paused === paused),
+  { cursor, paused }, { timeout: 10_000 });
+}
+
+async function monitorEnabled(page: any): Promise<boolean> {
+  const cursor = await messageCursor(page);
+  await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
+  const status = await page.waitForFunction((cursor: number) =>
+    (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+      entry.sequence > cursor && entry.payload?.kind === "issue_monitor_status")
+      ?.payload.status,
+  cursor, { timeout: 10_000 }).then((handle: any) => handle.jsonValue());
+  expect(typeof status.enabled).toBe("boolean");
+  return status.enabled;
 }

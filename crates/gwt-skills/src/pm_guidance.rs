@@ -61,18 +61,65 @@ into this generated skill supplements the PM contract.
   never modify the production working tree. Implementation is always
   performed by implementation agents that the Issue Monitor launches
   through its claim/slot path.
-- **Exception — PM's own operating capability.** When the change is to
-  what the PM itself needs in order to operate, you implement it
-  yourself in the PM worktree, open the PR, and land it. Do not hand it
-  to an implementation agent and wait. That covers the PM guidance and
-  the PM skill, the `issue.monitor.*` / `pm.*` operations the PM calls,
-  the Board and escalation surfaces the PM rules through, and any
-  defect that leaves the PM unable to observe, order, or settle work.
-  The reason is ordering: a PM that cannot operate cannot steer the
-  agent that would fix it, so delegating that class of work deadlocks.
-  Everything else stays with the implementation agents. When in doubt,
-  ask whether the fleet could still be steered without the fix; if not,
-  it is yours.
+- **PM-facing fixes are implementation work too.** Changes to what the
+  PM itself needs in order to operate (the PM guidance and the PM skill,
+  the `issue.monitor.*` / `pm.*` operations the PM calls, the Board and
+  escalation surfaces the PM rules through, and defects that leave the
+  PM unable to observe, order, or settle work) are implemented by the
+  implementation agents the Issue Monitor launches, like any other
+  Issue (user instruction, 2026-10-06). Do not implement them in the PM
+  worktree. An implementation agent must not declare itself blocked
+  because the target is PM-facing. When the fleet cannot be steered
+  without such a fix, put that Issue at the head of the queue, and
+  escalate to the user if it still does not move.
+
+## Decide instead of asking
+
+- The measure of the PM is how little the user has to intervene, but
+  never at the cost of quality. Weigh options on quality first
+  (correctness, depth of verification, acceptance criteria met, gates
+  kept); among options of equal quality, choose the one that needs no
+  user action. Never skip tests, drop acceptance criteria, loosen a gate,
+  or ship a workaround to avoid asking; when quality cannot be kept
+  without the user, that is a question to ask.
+- Resolve what the PM can resolve. Do not hand a decision to the user
+  when an operation, a ruling, or a recorded standing instruction
+  already settles it. Release timing, ownership rulings, hold and queue
+  changes, retries, fresh launches, and Issue registration or splitting
+  are PM decisions: make them, act, and report the outcome.
+- Ask the user only for:
+  - a large specification change (a SPEC's goal or scope, or
+    user-visible behaviour, changes substantially);
+  - an irreversible or breaking change (deleting data, branches, or
+    Issues; rewriting history; force-pushing; an incompatible change);
+  - an action only the user can perform (a GUI-only setting, account
+    or permission changes, billing, repository settings such as the
+    merge queue);
+  - two user instructions that genuinely conflict and both still apply.
+    When one is newer and clearly supersedes the other, follow the newer
+    one without asking.
+- When you do ask, ask once: state the question, your recommendation
+  and why, and a copy-paste answer, so one reply settles it.
+- While a question is pending, proceed with the recommended option when
+  it is reversible, and say so; never park the fleet on an unanswered
+  question.
+- When the user leaves a decision to you ("任せる" or equivalent),
+  record that this class of decision is delegated and do not ask it
+  again.
+
+## Reporting to the user
+
+- Keep every user-facing message short enough to take in at a glance:
+  lead with the outcome, then at most a few bullets, one line each.
+- Report only milestones, decisions taken, failures, and the questions
+  above. An unchanged cycle produces no message or a single line.
+- Name work by Issue number and title, never by pane or window ID. Omit
+  internal identifiers, raw diagnostics, and process narration unless
+  the user asks for them.
+- Post every user-facing digest, decision, and blocker to the Reports
+  surface with `pm.report.post` (`kind`: `progress` / `decision` /
+  `blocker`, `body` in the user's language), in addition to the
+  conversation. Keep the body to the same at-a-glance format.
 
 ## Request intake via sub-agents
 
@@ -166,6 +213,11 @@ You own the backlog for its whole life, not just at creation.
   `issue.spec.edit` for design-required Issues, then fill `plan` and
   `tasks` sections to readiness before queueing them. Decide between
   the two with the rule in "Plain Issue or design-required" below.
+- `issue.spec.create` takes `params.title` and `params.body`. A body
+  with `<!-- artifact:NAME BEGIN -->` / `<!-- artifact:NAME END -->`
+  marker pairs is split into those sections; a plain markdown body
+  without markers is stored whole as the `spec` section. The output names every written section with its
+  byte count — check that the `spec` section is there before queueing.
 - Update Issues as understanding changes: correct a scope that drifted,
   add acceptance criteria the conversation revealed, record a decision
   and why it was made. Implementation agents work from the body's
@@ -1544,6 +1596,10 @@ mod tests {
             "single conversational window",
             "No intermediate confirmation questions",
             "except for the intake questions explicitly allowed below",
+            // Issue #5306 AC-1: PM-facing work follows the Monitor path too.
+            "PM-facing fixes are implementation work too",
+            "Do not implement them in the PM worktree",
+            "An implementation agent must not declare itself blocked because the target is PM-facing",
             // FR-004: registration template.
             "acceptance",
             "`- [ ]` checkboxes",
@@ -1815,6 +1871,32 @@ mod tests {
         assert!(body.contains("`gwt-search`"), "重複確認の導線が要る");
         assert!(body.contains("before registering anything new"));
         assert!(body.contains("Keep the backlog honest"));
+    }
+
+    #[test]
+    fn contract_puts_quality_first_when_minimizing_user_intervention() {
+        let (_, decision) = SKILL_BODY_EN
+            .split_once("## Decide instead of asking")
+            .expect("decision policy section");
+        let first_paragraph = decision
+            .trim_start()
+            .strip_prefix("- ")
+            .expect("decision policy is the first paragraph")
+            .split("\n- ")
+            .next()
+            .expect("decision policy paragraph");
+        assert_eq!(
+            unwrapped(first_paragraph),
+            "The measure of the PM is how little the user has to intervene, but never at the cost of quality. Weigh options on quality first (correctness, depth of verification, acceptance criteria met, gates kept); among options of equal quality, choose the one that needs no user action. Never skip tests, drop acceptance criteria, loosen a gate, or ship a workaround to avoid asking; when quality cannot be kept without the user, that is a question to ask."
+        );
+    }
+
+    #[test]
+    fn contract_posts_user_reports_to_the_reports_surface() {
+        let reporting = section("## Reporting to the user");
+        assert!(reporting.contains(
+            "Post every user-facing digest, decision, and blocker to the Reports surface with `pm.report.post` (`kind`: `progress` / `decision` / `blocker`, `body` in the user's language), in addition to the conversation. Keep the body to the same at-a-glance format."
+        ));
     }
 
     /// A PM that registers every defect it trips over keeps the backlog

@@ -154,6 +154,18 @@ gwt は次の組み込みエージェントに対応しています。Launch Age
 インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
 カスタムエージェントとして引き続き利用できます。
 
+**Settings > Supported Agents** では、全対応エージェントの導入状態と
+インストール済みバージョンを確認し、未導入の CLI をインストールできます。
+npm の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
+最新バージョンの取得に対応していないエージェントにはその理由を表示し、
+更新は手動で行います。
+
+エージェントの自動更新は既定で無効です。有効にすると、次回の gwt 起動時に
+インストール済みの npm エージェントを確認し、新しいバージョンが分かるものだけを
+更新します。PM を含む稼働中のエージェント窓や起動待ちがない場合に限り適用します。
+手動のインストール・更新でも、先に稼働中のエージェントを閉じてください。
+未導入のエージェントを自動でインストールすることはありません。
+
 | エージェント | CLI コマンド |
 | --- | --- |
 | Claude Code | `claude` |
@@ -215,8 +227,11 @@ gwt open ~/src/my-repo              # そのプロジェクトを (必要なら�
 ephemeral port を選ぶ `--port 0` を含め、保存済みの暗黙ポートを変更しません。
 同一 LAN や VPN-extended LAN の別端末からブラウザ UI に接続したい場合は
 `--bind 0.0.0.0` を指定してください。運用者が選んだ既知のポートを使う場合は
-`--port` を併用できます。`--no-tray` / `--no-open` は SPEC #2920 Phase 4 の
-他作業が完了するまで受け取るだけで no-op の状態です。
+`--port` を併用できます。`--no-tray` はトレイを登録しない一時サーバーを起動します。
+起動元の親プロセスが終了するか、最後のブラウザセッションが閉じて5秒経つと終了します
+（この猶予中は再読み込み・再接続できます）。ブラウザが一度も接続していない場合は
+親プロセスの寿命に従います。`--no-open` はブラウザの自動起動を明示的に抑止します。
+フラグなしの起動も、既定でブラウザを自動では開きません。
 
 `gwt open` は Linux の GNOME 3.26+ など system tray を持たない環境向けの
 fallback です。tray アイコンが見えない場合でも `gwt browser URL: ...` が
@@ -278,6 +293,11 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+`workspace.update` の応答を失った場合は、表示された `operation_id` を同じ Session の
+`workspace.receipt`（`params: {"operation_id":"<UUID>"}`）に渡して確認できます。
+この読み取り専用照会は Host へ接続せず、更新も再送しません。`applied` は永続化の完了、
+`unconfirmed` は旧 Host を含め証拠がまだ確認できない状態であり、更新の失敗を意味しません。
 
 `board.show` は、選択された workspace / session から見える最新20件を時系列順で
 返します。`params.limit` に非負整数（例: `15`、`0` は空）を指定して件数を変更できます。
@@ -395,6 +415,20 @@ Auto-refill は**既定で OFF**です。有効にすると、条件を満たす
 読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
 **Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
 列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+
+**Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
+GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
+ない登録済みプロジェクトは配分を消費しません。**Machine budget** には制約になった資源を
+表示し、Monitor の実装・レビュー上限と PM を含む総数を区別します。必要な実測値が
+得られない間、Auto は新規起動を待機させます。実行中のエージェントは継続します。
+大きな `target` ディレクトリの初回実測には数分かかる場合があります。
+更新中に前回の実測値が期限切れになった場合も、新規起動は待機します。
+正の数値を入力すると **Manual** の上書きを保存し、**Use Auto** で推奨値への追従に戻せます。
+既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
+検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
+自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+`{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
+`max_active_agents_override`、共有実測値の `agent_capacity` を返します。
 
 **Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
 ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
@@ -599,6 +633,10 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 担うため、多重起動の防止機構はそのまま維持されます。
 
 - プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
+- PM 設定の **Pause / Resume** で自律ループを一時停止・再開できます。停止状態は
+  再起動後も維持され、PM との会話、Issue Monitor、稼働中の agent は継続します。
+  Resume は最新の状態を再確認します。JSON operations `pm.pause` / `pm.resume`
+  でも操作でき、`pm.status` は登録状態と別に `paused` を返します。
 - PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
   クラッシュループを防ぐバックオフが働きます。
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
@@ -687,11 +725,14 @@ gwt は明示された値（`true` / `false` を問わず）を尊重し、変�
 config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
 error ledger（`errors.list`）に記録されます。
 
-`errors.list` は既定で project スコープのエラーを返し、`project_root` で
-プロジェクトを絞り込めます。起動時の共通設定などマシン全体のエラーは
+`errors.list` は既定で現在のプロジェクトのエラーだけを返し、同じプロジェクトの
+別 worktree の記録も含みます。`project_root` で記録済みの root を明示して
+絞り込めます。起動時の共通設定などマシン全体のエラーは
 `scope: "host"`、帰属不明の記録は `scope: "unknown"`、全スコープは
 `scope: "all"` を明示して取得します。`project_root` を指定した場合は
 host・unknown 行を含めず、所属プロジェクトを推測で補いません。
+破損した台帳行は、ファイル名と行番号を持つ `ledger_corruption` の host 診断として
+返します。timestamp は破損を検出した時刻で、元の行は変更しません。
 
 0.153.0 より前の Codex CLI は `[features]` 配下の table を読めません。
 `[features.context_management]` が 1 つあるだけで config 全体が読めなくなり
@@ -750,6 +791,36 @@ bare リポジトリを作り直し、各 worktree を新レイアウトに再�
 ストリーミング (Validate -> Backup -> Bareify -> Worktrees -> Submodules ->
 Tracking -> Cleanup -> Done) され、成功時はアプリを再起動せずに新しいブランチ
 worktree にプロジェクトタブが切り替わります。
+
+## GitHub Discussions でローカル Board の節目を共有する
+
+別マシンと `decision` / `blocked` / `handoff` を共有するには、Board provider を
+**Local** のままにして `.gwt/work/board.toml` に接続先を追加します。
+
+```toml
+provider = "local"
+
+[github_discussion]
+owner = "your-org"
+repo = "your-repo"
+number = 123
+```
+
+各マシンで同じ既存 Discussion を指定し、GitHub Discussions を有効にして、読み書き権限を
+持つ `gh` 認証を用意してください。Board の読み書き時に、最大1分に1回バックグラウンド同期を
+起動します。明示的な同期と直近の結果の確認は、
+`{"schema_version":1,"operation":"board.sync","params":{}}` を `gwtd` の標準入力へ送ります。
+`status` / `claim` はローカルに留まり、共有種別は設定で変更できません。
+受信した投稿は既存 Board のフィードに表示されます。
+GitHub が返す投稿者の所属が `OWNER` / `MEMBER` / `COLLABORATOR` のコメントだけを
+取り込み、それ以外や不明な所属は取り込みません。受信投稿は escalation を開閉できるため、
+所有者・組織メンバー・collaborator をローカルの調整相手として信頼できるリポジトリを指定してください。
+
+同期は best-effort で、ローカルの現在の表示範囲（最大500件）を送信します。
+長期障害中に表示範囲から外れた未送信投稿は遡って配送しません。レート制限・認証失効・
+ネットワーク障害でもローカル Board は利用でき、`board.sync` で診断を確認できます。
+失敗時は5分後に共有 GitHub budget を尊重して再試行します。停止中の相手は次回同期で保存済み
+コメントを受信します。共有を停止するには `[github_discussion]` を削除してください。
 
 ## Board プロバイダ (Local / Slack / Teams)
 
@@ -914,6 +985,15 @@ Teams でチャンネル → **チャンネルへのリンクを取得**し、�
 gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
+
+PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
+**Copy** ボタン付きで表示します。閲覧専用で、ターミナル操作には **Execution log** を
+使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存し、
+再起動後も保持します。自動失効・件数制限はなく、空でない本文は 1 件 64 KiB までです。
+
+登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker`）と
+`body` で投稿し、`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
+使用します。投稿成功は保存と読み戻しの確認を意味し、失敗時は明示的なエラーを返します。
 
 常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
 hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には

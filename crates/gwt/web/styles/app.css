@@ -2256,6 +2256,60 @@ body {
   margin-left: auto;
 }
 
+/* Issue #5284: linked status only; diagnostics live in notifications. */
+.knowledge-notification-badge {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.knowledge-monitor-capacity-badge[data-tone="warning"] {
+  color: var(--color-state-needs-input);
+  border-color: var(--color-state-needs-input);
+}
+
+.knowledge-monitor-capacity-badge[data-tone="info"] {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
+.knowledge-notification-badge[hidden] {
+  display: none;
+}
+
+.knowledge-monitor-pill:not(:disabled) {
+  cursor: pointer;
+}
+
+.knowledge-monitor-pill:disabled {
+  opacity: 1;
+}
+
+.knowledge-notification-badge:focus-visible,
+.notification-center__item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.notification-center__details {
+  grid-column: 2 / -1;
+  min-width: 0;
+  font-size: var(--type-sm);
+}
+
+.notification-center__details > summary {
+  cursor: pointer;
+}
+
+.notification-center__details-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-top: var(--space-2);
+}
+
+
 .issue-new-body {
   display: grid;
   gap: var(--space-3);
@@ -4130,6 +4184,10 @@ body {
 }
 .notification-center-backdrop {
   z-index: var(--z-rail);
+}
+.notification-center-drawer[hidden],
+.notification-center-backdrop[hidden] {
+  display: none;
 }
 .notification-center__actions {
   display: flex;

@@ -1,12 +1,57 @@
-// Provider-neutral conversation view. The caller owns polling and the terminal.
-export function createPmChat({ document, root, windowId, sessionId, send, onLogVisibility }) {
+import { createUiStateStore } from './ui-state-store.js';
+import { markdownContent, renderUiContent } from './ui-content.js';
+
+// Explicit PM reports and raw terminal packets share one immutable window version.
+// The terminal runtime retains responsibility for buffering and snapshot ordering.
+export function createPmWindowModel() {
+  const model = createUiStateStore({ windows: {}, changedWindowId: null });
+  function emptyWindow(windowId, sessionId = null) {
+    return { windowId, sessionId, revision: 0, terminal: null,
+      reports: [], error: null, loaded: false };
+  }
+  function bindPmWindowState(windowId, sessionId) {
+    model.update(state => {
+      const previous = state.windows[windowId];
+      if (previous && previous.sessionId === sessionId) return state;
+      const next = previous?.sessionId == null ? { ...emptyWindow(windowId, sessionId), terminal: previous?.terminal || null }
+        : emptyWindow(windowId, sessionId);
+      return { windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
+    });
+  }
+  function applyPmWindowReceiveEvent(event) {
+    model.update(state => {
+      const previous = state.windows[event.id];
+      let next = previous || emptyWindow(event.id);
+      if (event.kind === 'pm_reports') {
+        if (!previous || event.session_id !== previous.sessionId) return state;
+        // The durable ledger only appends. Ignore older concurrent reads.
+        if (!event.error && (event.reports || []).length < previous.reports.length) return state;
+        next = { ...next, error: event.error || null, loaded: true,
+          reports: event.error ? previous.reports : (event.reports || []) };
+      } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
+        next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
+      } else return state;
+      return { windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
+    });
+  }
+  function removePmWindowState(windowId) {
+    model.update(state => {
+      const { [windowId]: removed, ...windows } = state.windows;
+      return removed ? { windows, changedWindowId: windowId } : state;
+    });
+  }
+  function readPmWindowState() { return model.read(); }
+  function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
+  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+}
+
+// Read-only report view. The caller owns polling and the unchanged terminal.
+export function createPmChat({ document, root, sessionId, onLogVisibility,
+  copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
-  let pending = false;
   let disposed = false;
   let logs = false;
-  let availability = 'waiting';
   let digest = '';
-  let conversation = null;
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -17,105 +62,68 @@ export function createPmChat({ document, root, windowId, sessionId, send, onLogV
   const toolbar = element('div', 'pm-chat__toolbar');
   toolbar.setAttribute('role', 'group');
   toolbar.setAttribute('aria-label', 'PM view');
-  const chatButton = element('button', '', 'Chat');
+  const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
-  chatButton.type = logButton.type = 'button';
-  toolbar.append(chatButton, logButton);
+  reportsButton.type = logButton.type = 'button';
+  toolbar.append(reportsButton, logButton);
   const body = element('div', 'pm-chat__body');
   const notice = element('p', 'pm-chat__notice');
   notice.setAttribute('role', 'status');
   const transcript = element('div', 'pm-chat__transcript');
   transcript.setAttribute('role', 'log');
-  transcript.setAttribute('aria-label', 'PM conversation');
-  const form = element('form', 'pm-chat__input');
-  const input = element('textarea', '');
-  input.setAttribute('aria-label', 'Message PM');
-  input.placeholder = 'Message PM';
-  input.rows = 3;
-  const submit = element('button', '', 'Send');
-  submit.type = 'submit';
-  const error = element('p', 'pm-chat__error');
-  error.setAttribute('role', 'alert');
-  error.hidden = true;
-  form.append(input, submit, error);
-  body.append(notice, transcript, form);
+  transcript.setAttribute('aria-label', 'PM reports');
+  body.append(notice, transcript);
   root.append(toolbar, body);
 
-  function controls() {
-    input.disabled = pending || !session || availability !== 'ready';
-    submit.disabled = input.disabled;
-  }
   function showLogs(value) {
     logs = value;
-    root.hidden = availability === 'unsupported';
     body.hidden = logs;
     root.classList.toggle('pm-chat--logs', logs);
-    chatButton.setAttribute('aria-pressed', String(!logs));
+    reportsButton.setAttribute('aria-pressed', String(!logs));
     logButton.setAttribute('aria-pressed', String(logs));
-    onLogVisibility(logs || availability === 'unsupported');
+    onLogVisibility(logs);
   }
-  const showChat = () => showLogs(false);
+  const showReports = () => showLogs(false);
   const showLog = () => showLogs(true);
-  function showError(message) {
-    error.textContent = message;
-    error.hidden = !message;
-  }
-  function handleSendResult(event) {
-    if (disposed || !pending || (event.window_id && event.window_id !== windowId)) return;
-    pending = false;
-    if (event.ok) {
-      input.value = '';
-      showError('');
-    } else {
-      showError(event.error || 'Message could not be sent. Try again.');
-    }
-    controls();
-  }
-  function sendInput(event) {
-    event.preventDefault();
-    if (disposed || input.disabled || !input.value.trim()) return;
-    pending = true;
-    showError('');
-    controls();
-    try {
-      const result = send({ kind: 'pane_send_input', session_id: session, text: input.value });
-      if (result === 'unavailable' || result === false) {
-        handleSendResult({ ok: false, error: 'Connection unavailable. Your message has not been sent.' });
-      }
-    } catch (cause) {
-      handleSendResult({ ok: false, error: cause.message || 'Message could not be sent.' });
-    }
-  }
-  function update(snapshot) {
-    if (disposed) return;
-    const previousAvailability = availability;
-    availability = snapshot.availability;
-    const messages = (snapshot.messages || []).filter(message =>
-      (message.role === 'user' || message.role === 'assistant') && typeof message.text === 'string' && message.text.trim());
-    const nextDigest = JSON.stringify(messages.map(({ id, role, text }) => [id, role, text]));
-    const changedConversation = conversation !== snapshot.conversation_id;
-    // A failed or pending read is not evidence that existing history vanished.
-    const retainHistory = (availability === 'waiting' || availability === 'unavailable')
-      && (!snapshot.conversation_id || !changedConversation);
-    if (!retainHistory && (changedConversation || digest !== nextDigest)) {
+  function update(state) {
+    if (disposed || !state) return;
+    setSession(state.sessionId);
+    root.dataset.stateVersion = String(state.revision);
+    const reports = state.reports;
+    const nextDigest = JSON.stringify(reports);
+    if (digest !== nextDigest) {
       const atBottom = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop <= 32;
       const previousScroll = transcript.scrollTop;
-      const nodes = messages.map(message => {
-        const row = element('article', `pm-chat__message pm-chat__message--${message.role}`);
-        row.append(element('div', 'pm-chat__author', message.role === 'user' ? 'You' : 'PM'), element('p', 'pm-chat__text', message.text));
+      const nodes = reports.map(report => {
+        const row = element('article', 'pm-chat__message');
+        const header = element('div', 'pm-chat__author');
+        const time = element('time', '', new Date(report.created_at).toLocaleString());
+        time.setAttribute('datetime', report.created_at);
+        const copy = element('button', '', 'Copy');
+        copy.type = 'button';
+        copy.setAttribute('aria-label', 'Copy report');
+        copy.addEventListener('click', async () => {
+          try {
+            await copyText(report.body);
+            if (!disposed) copy.textContent = 'Copied';
+          } catch {
+            if (!disposed) {
+              notice.textContent = 'Could not copy. Select the report text and copy.';
+              notice.hidden = false;
+            }
+          }
+        });
+        header.append(element('span', '', report.kind), time, copy);
+        row.append(header, renderUiContent(document, markdownContent(report), 'pm-chat__text'));
         return row;
       });
       transcript.replaceChildren(...nodes);
-      transcript.scrollTop = changedConversation || atBottom ? transcript.scrollHeight : previousScroll;
+      transcript.scrollTop = atBottom ? transcript.scrollHeight : previousScroll;
       digest = nextDigest;
-      conversation = snapshot.conversation_id;
     }
-    notice.textContent = availability === 'waiting' ? 'Waiting for PM conversation…'
-      : availability === 'unavailable' ? (snapshot.detail || 'PM conversation unavailable. Open the execution log for details.')
-      : snapshot.detail || (messages.length ? '' : 'No conversation messages yet.');
+    notice.textContent = state.error || (!state.loaded ? 'Loading PM reports…'
+      : reports.length ? '' : 'No PM reports yet. Use the execution log to interact with PM.');
     notice.hidden = !notice.textContent;
-    if (previousAvailability !== availability) showLogs(logs);
-    controls();
   }
   function setSession(nextSession) {
     if (disposed || session === nextSession) return;
@@ -123,25 +131,18 @@ export function createPmChat({ document, root, windowId, sessionId, send, onLogV
     transcript.replaceChildren();
     transcript.scrollTop = 0;
     digest = '';
-    conversation = null;
-    pending = false;
-    input.value = '';
-    showError('');
-    update({ availability: 'waiting', conversation_id: null, messages: [] });
     showLogs(false);
   }
   function dispose() {
     disposed = true;
-    chatButton.removeEventListener('click', showChat);
+    reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
-    form.removeEventListener('submit', sendInput);
     root.replaceChildren();
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }
-  chatButton.addEventListener('click', showChat);
+  reportsButton.addEventListener('click', showReports);
   logButton.addEventListener('click', showLog);
-  form.addEventListener('submit', sendInput);
-  update({ availability: 'waiting', conversation_id: null, messages: [] });
+  update({ sessionId, revision: 0, reports: [], loaded: false });
   showLogs(false);
-  return { update, setSession, handleSendResult, dispose };
+  return { update, setSession, dispose };
 }

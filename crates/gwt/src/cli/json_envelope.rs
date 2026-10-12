@@ -101,7 +101,28 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     // operation on this thread left behind before this one runs.
     super::operation_warnings::take();
     let mut pr_checks_data = None;
+    let mut verification_response = None;
     let outcome = match parsed.command {
+        CliCommand::Verify(command) => {
+            let mut output = String::new();
+            super::verification_record::run_with_response(
+                env,
+                command,
+                &mut output,
+                &mut verification_response,
+            )
+            .map(|exit_code| super::governance::GovernedCommandOutput {
+                exit_code,
+                output,
+                refusal: None,
+            })
+            .map_err(|error| {
+                Box::new(super::governance::GovernedCommandFailure {
+                    error,
+                    refusal: None,
+                })
+            })
+        }
         CliCommand::Pr(PrCommand::Checks { number }) => env
             .fetch_pr_checks(number)
             .map(|report| {
@@ -140,6 +161,12 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             });
             if let Some(data) = pr_checks_data {
                 payload["data"] = data;
+            }
+            if let Some(response) = verification_response {
+                payload["status"] = response.status.into();
+                payload["data"] = response.data;
+            } else if operation == "verify.run" && code != 0 {
+                attach_verification_error(&mut payload, &output);
             }
             if let Some(refusal) = refusal.as_ref() {
                 payload["refusal"] = serde_json::to_value(refusal)
@@ -180,13 +207,24 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         // could not distinguish "the operation failed at stage X" from "the
         // process never answered". The stderr line stays for humans.
         Err(failure) => {
-            let message = failure.error.to_string();
+            let message = match (&failure.error, operation.as_str()) {
+                (
+                    gwt_github::SpecOpsError::Api(gwt_github::client::ApiError::Unexpected(cause)),
+                    "verify.run",
+                ) => {
+                    format!("verification operation failed: {cause}")
+                }
+                _ => failure.error.to_string(),
+            };
             let mut payload = serde_json::json!({
                 "ok": false,
                 "operation": operation,
                 "exit_code": 1,
                 "error": message,
             });
+            if operation == "verify.run" {
+                attach_verification_error(&mut payload, &message);
+            }
             if let Some(refusal) = failure.refusal.as_ref() {
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
@@ -211,6 +249,14 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+fn attach_verification_error(payload: &mut Value, cause: &str) {
+    payload["status"] = "error".into();
+    payload["data"] = serde_json::json!({
+        "cause": cause,
+        "recovery": "Inspect verify.status and verify.lease.status, repair the reported cause, then retry the identical full verify.run matrix; re-register verify.plan if its inputs changed.",
+    });
 }
 
 /// Exit code for an operation whose response never reached the caller.
@@ -403,6 +449,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?))
         }
         "workspace.update" => workspace_update(params)?,
+        "workspace.receipt" => CliCommand::Workspace(WorkspaceCommand::Receipt {
+            operation_id: required_string(params, "operation_id")?,
+        }),
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
@@ -457,6 +506,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
+        "board.sync" => {
+            reject_unknown_params(params, &[], "board.sync")?;
+            CliCommand::Board(BoardCommand::Sync)
+        }
         "board.config.show" | "board.config-show" => {
             CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
         }
@@ -759,6 +812,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
+            let max_active_auto = match optional_string(params, "max_active_mode")?.as_deref() {
+                None => false,
+                Some("manual") if max_active.is_some() => false,
+                Some("auto") if max_active.is_none() => true,
+                Some(_) => return Err(CliParseError::InvalidJson(
+                    "max_active_mode must be auto (without max_active) or manual (with max_active)"
+                        .to_string(),
+                )),
+            };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
             let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
@@ -769,6 +831,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
+                && !max_active_auto
                 && auto_close_merged_issues.is_none()
                 && auto_apply_updates.is_none()
                 && launch_agent.is_none()
@@ -792,6 +855,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                max_active_auto,
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
@@ -906,6 +970,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 base_branch: optional_string(params, "base_branch")?,
                 scan_commits: optional_u64(params, "scan_commits")?,
                 ensure_release_pr: optional_bool(params, "ensure_release_pr")?.unwrap_or(false),
+            })
+        }
+        "release.update.defer" => {
+            reject_unknown_params(params, &["version"], "release.update.defer")?;
+            CliCommand::Release(super::release::ReleaseCommand::UpdateDefer {
+                version: required_string(params, "version")?,
             })
         }
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
@@ -1384,8 +1454,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.report.post" => {
+            let kind = required_string(params, "kind")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
+                project_root: optional_string(params, "project_root")?,
+                kind: serde_json::from_value(Value::String(kind)).map_err(|_| {
+                    CliParseError::InvalidValue {
+                        flag: "kind",
+                        reason: "expected one of: progress, decision, blocker",
+                    }
+                })?,
+                body: required_string(params, "body")?,
+            })
+        }
+        "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
+            project_root: optional_string(params, "project_root")?,
+        }),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
+        }),
+        "pm.pause" | "pm.resume" => CliCommand::Pm(crate::cli::pm::PmCommand::SetPaused {
+            project_root: optional_string(params, "project_root")?,
+            paused: envelope.operation == "pm.pause",
         }),
         "pm.stop" | "pm.deregister" => CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
             project_root: optional_string(params, "project_root")?,
@@ -3101,6 +3191,128 @@ mod tests {
     }
 
     #[test]
+    fn verify_run_deferral_is_success_with_structured_recovery() {
+        use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        use std::time::Duration;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _config_home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-5085");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let coordinator = crate::cli::verification_lease::open_coordinator().unwrap();
+        let key = TargetKey::verification("fixture-5085", "holder");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::ZERO)
+            .unwrap()
+        else {
+            panic!("fixture must own its target");
+        };
+        let _lease = guard.acquire_heavy(Duration::ZERO).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git --version"], "max_wait_secs": 0}),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["exit_code"], 0);
+        assert_eq!(payload["status"], "deferred");
+        assert_eq!(payload["data"]["next_turn_reserved"], true);
+        assert_eq!(payload["data"]["budget_secs"], 0);
+        assert!(payload["data"]["waited_secs"].is_u64());
+        assert_eq!(payload["data"]["queue_position"], 1);
+        assert!(!payload.to_string().contains("unexpected server response"));
+        assert!(crate::cli::verification_record::load(&repo)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn verify_run_test_failure_and_execution_failure_are_distinct() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _config_home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-5085-fail");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.disk_budget_bytes = Some(0);
+            settings.build_artifact_gc.below_bytes = 0;
+            settings.build_artifact_gc.below_percent = 0;
+            Ok(())
+        })
+        .unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo);
+        for (command, status) in [
+            ("git rev-parse --verify refs/heads/missing", "failed"),
+            ("gwt-missing-5085-executable", "error"),
+        ] {
+            env.stdout.clear();
+            env.stdin = envelope(
+                "verify.run",
+                json!({"commands": [command], "max_wait_secs": 0}),
+            );
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+            let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["exit_code"], 1);
+            assert_eq!(payload["status"], status, "{payload}");
+            if status == "error" {
+                assert!(payload["data"]["cause"].as_str().unwrap().contains(command));
+                assert!(payload["data"]["recovery"]
+                    .as_str()
+                    .unwrap()
+                    .contains("verify.run"));
+            }
+        }
+    }
+
+    #[test]
+    fn verify_run_operation_error_has_actionable_diagnostic() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(repo.path().to_path_buf());
+        env.stdin = envelope("verify.run", json!({"commands": ["git --version"]}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["status"], "error");
+        assert!(payload["data"]["cause"]
+            .as_str()
+            .unwrap()
+            .contains("requires GWT_SESSION_ID"));
+        assert!(payload["data"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("verify.run"));
+        assert!(!payload.to_string().contains("unexpected server response"));
+    }
+
+    #[test]
     fn verify_run_persists_deferred_user_verification() {
         use crate::cli::verification_record;
         use gwt_core::test_support::ScopedEnvVar;
@@ -4202,6 +4414,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: Some(7),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4216,6 +4429,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4233,6 +4447,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: Some(false),
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4251,6 +4466,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: Some(true),
                 launch_agent: None,
@@ -4258,6 +4474,28 @@ mod tests {
             }),
             "Issue #3906 AC-1: the auto-apply override is settable on its own"
         );
+    }
+
+    #[test]
+    fn agent_capacity_config_envelope_accepts_explicit_auto() {
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "auto"}),
+        );
+        let _ = ok(
+            "issue.monitor.config.set",
+            json!({"max_active_mode": "manual", "max_active": 4, "enabled": false}),
+        );
+        for params in [
+            json!({"max_active_mode": "invalid", "max_active": 4}),
+            json!({"max_active_mode": "auto", "max_active": 4}),
+            json!({"max_active_mode": "manual", "enabled": false}),
+        ] {
+            assert!(matches!(
+                err("issue.monitor.config.set", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
     }
 
     /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
@@ -4272,6 +4510,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -4286,6 +4525,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
@@ -4311,6 +4551,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -4795,6 +5036,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -4990,6 +5232,16 @@ mod tests {
             ),
             CliCommand::Board(_)
         ));
+    }
+
+    #[test]
+    fn board_sync_is_available_without_enabling_external_io() {
+        let command = ok("board.sync", json!({}));
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(&mut env, command).unwrap();
+        assert_eq!(code, 0);
+        assert!(output.contains("disabled"), "{output}");
     }
 
     #[test]
@@ -5352,6 +5604,105 @@ mod tests {
 
     // SPEC-3431: PM agent diagnostics parse variants.
     #[test]
+    fn pm_report_operations_parse_and_expose_read_only_listing() {
+        let command = ok(
+            "pm.report.post",
+            json!({"kind": "decision", "body": "# Decision", "project_root": "/tmp/project"}),
+        );
+        assert!(matches!(command, CliCommand::Pm(_)));
+        assert!(matches!(ok("pm.report.list", json!({})), CliCommand::Pm(_)));
+        assert!(matches!(
+            ok("pm.report.list", json!({"project_root": "/tmp/project"})),
+            CliCommand::Pm(_)
+        ));
+        assert!(matches!(
+            err("pm.report.post", json!({"kind":"other", "body":"text"})),
+            CliParseError::InvalidValue { flag: "kind", .. }
+        ));
+        assert!(matches!(
+            err("pm.report.post", json!({"kind":"progress"})),
+            CliParseError::MissingFlag("body")
+        ));
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pm.report.list"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pm.report.post"
+            )
+        );
+        for operation in ["pm.report.post", "pm.report.list"] {
+            assert!(crate::cli::pm::capabilities_report()
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_report_post_requires_pm_authority_except_for_direct_cli() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let post = || match ok(
+            "pm.report.post",
+            json!({"kind":"progress", "body":"Persisted progress"}),
+        ) {
+            CliCommand::Pm(command) => command,
+            other => panic!("unexpected report command: {other:?}"),
+        };
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let mut output = String::new();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            0
+        );
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["ok"], true);
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
+        output.clear();
+        let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
+        assert!(error.to_string().contains("registered PM"), "{error}");
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "registered-pm".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..crate::pm_registry::PmPrefs::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            0
+        );
+        let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
+            panic!("expected PM list")
+        };
+        output.clear();
+        crate::cli::pm::run(&mut env, list, &mut output).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["reports"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn pm_status_variants() {
         assert!(matches!(
             ok("pm.status", json!({})),
@@ -5363,6 +5714,93 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn pm_pause_and_resume_are_mutating_json_operations() {
+        for operation in ["pm.pause", "pm.resume"] {
+            assert!(matches!(ok(operation, json!({})), CliCommand::Pm(_)));
+            assert!(matches!(
+                ok(operation, json!({"project_root": "/tmp/project"})),
+                CliCommand::Pm(_)
+            ));
+            assert!(
+                !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(operation)
+            );
+        }
+    }
+
+    #[test]
+    fn pm_pause_resume_preserve_registration_and_rearm_only_on_transition() {
+        use crate::pm_registry;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let original: pm_registry::PmPrefs = serde_json::from_value(json!({
+            "settings": {"auto_start": true},
+            "registration": {"session_id":"resident", "agent_id":"codex", "worktree_path":repo}
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&path, &original).unwrap();
+        let loop_path = pm_registry::pm_loop_state_path_for_repo_path(&repo);
+        let clock = pm_registry::PmLoopState {
+            last_wake_at: Some("2026-10-10T00:00:00Z".into()),
+            last_user_prompt_at: Some("2026-10-10T00:01:00Z".into()),
+            ..Default::default()
+        };
+        pm_registry::save_pm_loop_state(&loop_path, &clock).unwrap();
+        for operation in ["pm.pause", "pm.pause", "pm.resume", "pm.resume", "pm.pause"] {
+            let (_, out) = crate::cli::run_collect(&mut env, ok(operation, json!({}))).unwrap();
+            let report: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(report["paused"], operation == "pm.pause");
+            assert_eq!(report["registered"], true);
+            assert_eq!(report["auto_start"], true);
+            assert_eq!(
+                pm_registry::load_pm_prefs(&path).unwrap().registration,
+                original.registration
+            );
+            if operation == "pm.resume" {
+                assert!(pm_registry::load_pm_loop_state(&loop_path)
+                    .unwrap()
+                    .last_wake_at
+                    .is_none());
+                assert_eq!(
+                    pm_registry::load_pm_loop_state(&loop_path)
+                        .unwrap()
+                        .last_user_prompt_at,
+                    clock.last_user_prompt_at,
+                    "Resume must preserve the active user conversation gate"
+                );
+            }
+        }
+        crate::cli::run_collect(&mut env, ok("pm.resume", json!({}))).unwrap();
+        pm_registry::save_pm_loop_state(&loop_path, &clock).unwrap();
+        crate::cli::run_collect(&mut env, ok("pm.resume", json!({}))).unwrap();
+        assert_eq!(
+            pm_registry::load_pm_loop_state(&loop_path).unwrap(),
+            clock,
+            "repeated Resume must not re-arm an already active loop"
+        );
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "unrelated-agent");
+        assert!(
+            crate::cli::run_collect(&mut env, ok("pm.pause", json!({}))).is_err(),
+            "an unrelated Agent must not control the PM"
+        );
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        let (_, out) = crate::cli::run_collect(&mut env, ok("pm.pause", json!({}))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["paused"],
+            true,
+            "the registered PM remains authorized"
+        );
     }
 
     // Issue #4249 FR-003: the PM self-description is a read-only diagnostic.
@@ -5786,6 +6224,113 @@ mod tests {
         ));
         assert!(matches!(
             err("release.status", json!({"ensure": true})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    /// Issue #5062 AC-3: deferring a staged release is a host-wide, durable,
+    /// version-scoped mutation that preserves its manual-apply payload.
+    #[test]
+    fn release_update_defer_envelope_preserves_payload_and_rejects_other_versions() {
+        use gwt_core::update::{self, PendingUpdateManifest, PreparedPayload};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let payload_path = home.path().join("prepared-binary");
+        std::fs::write(&payload_path, "prepared payload").unwrap();
+        let manifest = PendingUpdateManifest {
+            version: "9.200.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: PreparedPayload::PortableBinary {
+                path: payload_path.clone(),
+            },
+            downloaded_at: "2026-10-01T00:00:00Z".into(),
+            auto_apply_deferred: false,
+        };
+        // Seed the format used before the explicit defer control existed.
+        let mut legacy = serde_json::to_value(&manifest).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_apply_deferred");
+        std::fs::create_dir_all(update::pending_update_dir()).unwrap();
+        std::fs::write(
+            update::pending_update_manifest_path(),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let mut env = TestEnv::new(home.path().to_path_buf());
+        let call = |env: &mut TestEnv, version: &str| {
+            let parsed = parse(&envelope(
+                "release.update.defer",
+                json!({"version":version}),
+            ))
+            .expect("the explicit defer operation must be available");
+            super::run_collect_governed(env, parsed.command)
+        };
+        let output = call(&mut env, "9.200.0").unwrap().output;
+        let response: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(response["pending_update_version"], "9.200.0");
+        assert_eq!(response["auto_apply_deferred"], true);
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(update::pending_update_manifest_path()).unwrap())
+                .unwrap();
+        assert_eq!(saved["auto_apply_deferred"], true);
+        assert_eq!(saved["version"], "9.200.0");
+        assert_eq!(saved["asset_url"], manifest.asset_url);
+        assert_eq!(saved["downloaded_at"], manifest.downloaded_at);
+        assert_eq!(
+            saved["payload"],
+            serde_json::to_value(&manifest.payload).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&payload_path).unwrap(),
+            "prepared payload"
+        );
+
+        call(&mut env, "9.200.0").expect("same-version retry is idempotent");
+        let before = std::fs::read(update::pending_update_manifest_path()).unwrap();
+        update::persist_update_resume_marker(&update::UpdateResumeMarker {
+            from_version: "9.199.0".into(),
+            to_version: "9.200.0".into(),
+            started_at: "2026-10-01T00:10:00Z".into(),
+            restart_args: Vec::new(),
+            projects: Vec::new(),
+            attempt: 1,
+        })
+        .unwrap();
+        assert!(
+            call(&mut env, "9.200.0").is_err(),
+            "a committed apply cannot be deferred"
+        );
+        assert_eq!(
+            std::fs::read(update::pending_update_manifest_path()).unwrap(),
+            before
+        );
+        update::clear_update_resume_marker().unwrap();
+        assert!(call(&mut env, "9.201.0").is_err());
+        assert_eq!(
+            std::fs::read(update::pending_update_manifest_path()).unwrap(),
+            before
+        );
+        std::fs::remove_file(payload_path).unwrap();
+        assert!(call(&mut env, "9.200.0").is_err());
+        assert_eq!(
+            std::fs::read(update::pending_update_manifest_path()).unwrap(),
+            before
+        );
+        update::clear_pending_update_manifest().unwrap();
+        assert!(call(&mut env, "9.200.0").is_err());
+
+        assert!(matches!(
+            err("release.update.defer", json!({})),
+            CliParseError::MissingFlag("version")
+        ));
+        assert!(matches!(
+            err(
+                "release.update.defer",
+                json!({"version":"9.200.0", "force":true})
+            ),
             CliParseError::InvalidJson(_)
         ));
     }
@@ -6620,17 +7165,26 @@ mod tests {
         }))
         .unwrap();
         gwt_core::error_ledger::record(host).unwrap();
-        for (params, expected) in [
-            (json!({}), 2),
-            (json!({"scope":"project"}), 2),
-            (json!({"scope":"host"}), 1),
-            (json!({"scope":"unknown"}), 1),
-            (json!({"scope":"all"}), 4),
-            (json!({"project_root":"/project-a","scope":"all"}), 1),
-            (json!({"project_root":"/project-a","scope":"host"}), 1),
-            (json!({"project_root":"/missing"}), 0),
+        for (caller_root, params, expected) in [
+            ("/project-a", json!({}), 1),
+            ("/project-b", json!({}), 1),
+            ("/project-a", json!({"scope":"project"}), 1),
+            ("/project-a", json!({"scope":"host"}), 1),
+            ("/project-a", json!({"scope":"unknown"}), 1),
+            ("/project-a", json!({"scope":"all"}), 4),
+            (
+                "/project-b",
+                json!({"project_root":"/project-a","scope":"all"}),
+                1,
+            ),
+            (
+                "/project-b",
+                json!({"project_root":"/project-a","scope":"host"}),
+                1,
+            ),
+            ("/project-a", json!({"project_root":"/missing"}), 0),
         ] {
-            let mut env = TestEnv::new(dir.path().to_path_buf());
+            let mut env = TestEnv::new(caller_root.into());
             let (_, output) =
                 crate::cli::run_collect(&mut env, ok("errors.list", params.clone())).unwrap();
             let payload: Value = serde_json::from_str(&output).unwrap();
@@ -6648,8 +7202,14 @@ mod tests {
                     assert_eq!(row["scope"], expected_scope, "{params}");
                 }
             }
-            if params.get("project_root").is_some() && expected > 0 {
-                assert_eq!(payload["errors"][0]["target"]["project_root"], "/project-a");
+            if expected_scope == "project" && expected > 0 {
+                assert_eq!(
+                    payload["errors"][0]["target"]["project_root"],
+                    params
+                        .get("project_root")
+                        .and_then(Value::as_str)
+                        .unwrap_or(caller_root)
+                );
             }
         }
         assert!(matches!(

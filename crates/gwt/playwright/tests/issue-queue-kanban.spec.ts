@@ -19,6 +19,7 @@ test.beforeEach(async ({ page }, info) => {
     info.project.name.includes("light") ? "light" : "dark");
   if (!liveUrl) await installEmbeddedRoutes(page);
   await installBackend(page, {
+    inboxFirst: info.title.startsWith("Issue #5287"),
     includeAgent: info.title.startsWith("T-7a:"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
@@ -42,6 +43,84 @@ async function confirm(page: Page, numbers: number[], extra = {}) {
 async function drag(page: Page, number: number, target: Locator) {
   await row(page, number).dragTo(target);
 }
+
+test("pending SessionStart diagnosis clears when late readiness arrives", async ({page}) => {
+  const diagnosis = "SessionStart readiness pending: hooks.json missing; check hook discovery and works.lock contention";
+  await page.evaluate(diagnosis => (window as any).__queueInbox([
+    {issue:{number:5},state:"launching",error_message:diagnosis}]), diagnosis);
+  await expect(row(page,5)).toContainText(diagnosis);
+  await expect(column(page,"active").locator('[data-issue-number="5"]')).toBeVisible();
+  const pendingScreenshot = test.info().outputPath("readiness-pending.png");
+  await page.screenshot({path:pendingScreenshot});
+  await test.info().attach("readiness-pending", {path:pendingScreenshot,contentType:"image/png"});
+  await page.evaluate(() => (window as any).__queueInbox([{issue:{number:5},state:"launched"}]));
+  await expect(row(page,5)).not.toContainText("SessionStart readiness pending:");
+  await expect(column(page,"active").locator('[data-issue-number="5"]')).toBeVisible();
+});
+
+test("Issue #5287 inbox-first restart, GUI error, load failure and renderer recovery", async ({ page }) => {
+  const assertInbox = async () => {
+    await expect(column(page, "backlog").locator(".knowledge-row")).toHaveCount(2);
+    await expect(column(page, "queued").locator(".knowledge-row")).toHaveCount(2);
+    await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
+    await expect(row(page, 5)).toContainText("Running issue");
+  };
+  await assertInbox();
+  await page.reload();
+  await assertInbox();
+  await page.evaluate(() => (window as any).__queueLoadError());
+  const loadBadge = page.getByRole("button", { name: "Issue load failed · Details", exact: true }).first();
+  const loadNotice = page.locator('[data-error-key="issue-window:tab-queue::issue-1:load"]');
+  await expect(loadBadge).toBeVisible();
+  await expect(page.locator(".knowledge-list")).not.toContainText("Issue cache read failed");
+  await loadBadge.click();
+  await expect(loadNotice).toBeFocused();
+  await expect(loadNotice).toContainText("Issue cache read failed");
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "report_knowledge_error").map((message: any) => message.stage))).toContain("load");
+  await page.evaluate(() => (window as any).__queueKnowledgeComplete());
+  await expect(loadBadge).toHaveCount(0);
+  await expect(loadNotice).toHaveAttribute("data-resolved", "true");
+  await expect(row(page, 3)).toContainText("Enriched queued issue");
+  await expect(page.locator(".knowledge-row")).toHaveCount(6);
+  await assertInbox();
+  await page.evaluate(() => {
+    const original = Element.prototype.appendChild;
+    Element.prototype.appendChild = function <T extends Node>(child: T): T {
+      if (child instanceof Element && child.classList.contains("knowledge-row")) {
+        Element.prototype.appendChild = original;
+        throw new Error("Issue card render failed");
+      }
+      return original.call(this, child) as T;
+    };
+    (window as any).__queueConfirm([3, 4]);
+  });
+  const renderBadge = page.getByRole("button", { name: "Issue rendering failed · Details", exact: true });
+  const renderNotice = page.locator('[data-error-key="issue-window:tab-queue::issue-1:render"]');
+  await expect(renderBadge).toBeVisible();
+  await expect(page.locator(".knowledge-list")).not.toContainText("Issue card render failed");
+  await renderBadge.click();
+  await expect(renderNotice).toBeFocused();
+  await expect(renderNotice).toContainText("Issue card render failed");
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "report_knowledge_error").map((message: any) => message.stage))).toContain("render");
+  await confirm(page, [3, 4]);
+  await expect(renderBadge).toHaveCount(0);
+  await expect(renderNotice).toHaveAttribute("data-resolved", "true");
+  await assertInbox();
+});
+
+test("Issue #4862 a live delivered slice stays Active while its window binding is recovered", async ({ page }) => {
+  await page.evaluate(() => (window as any).__queueInbox([{
+    issue: {number: 5, title: "Running issue"}, state: "launched",
+    completion_reason: "delivered_by_pr_5019", launched_window_id: null,
+  }]));
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "backlog").locator('[data-issue-number="5"]')).toHaveCount(0);
+  await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
+});
 
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {
   await expect(page.locator("[data-queue-column]")).toHaveCount(4);
@@ -166,10 +245,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   ]) {
     const target = page.locator(selector);
     await target.focus();
+    await expect(target).toBeFocused();
     await expect(popup).toBeVisible();
     await expect(popup).toHaveText(await target.getAttribute("aria-description") as string);
   }
   const select = row(page, 4).locator(".knowledge-row-select");
+  await expect(page.locator('.knowledge-monitor-pill')).toHaveCSS("cursor", "default");
   await select.focus();
   await expect(popup).toContainText("Auto-refill added this issue");
   expect(await controlMessages()).toEqual(before);
@@ -347,9 +428,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, { includeAgent = false, observeSkipped = false } = {}) {
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey, includeAgent, observeSkipped})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -362,10 +443,16 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       {number:4,title:"Auto-refilled issue",monitor_state:"queued",queue_position:2,queued_by:"auto-refill"},
       {number:5,title:"Running issue",monitor_state:"launched"},{number:6,title:"Completed issue",state:"closed"},
     ].map(entry=>({state:"open",labels:[],is_spec:false,linked_branch_count:0,related_work_refs:[],...entry}));
+    if (inboxFirst) Object.assign(status, {state:"error",last_error:"stale unbound Monitor pane"});
     class FixtureSocket extends EventTarget {
       static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3;
       readyState=0;
-      constructor(public readonly url:string) { super(); fixture.__queueConfirm=(numbers:number[],extra:any)=>{
+      constructor(public readonly url:string) { super();
+        fixture.__queueLoadError=()=>this.emit({kind:"knowledge_error",...fixture.__queueLoad,
+          message:"Issue cache read failed"});
+        fixture.__queueKnowledgeComplete=()=>this.emit({kind:"knowledge_entries",...fixture.__queueLoad,
+          entries:[{...entries[2],state:"closed",title:"Enriched queued issue"}],refresh_enabled:true});
+        fixture.__queueConfirm=(numbers:number[],extra:any)=>{
         Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
       }; fixture.__queueAddForeground=()=>{
@@ -389,8 +476,15 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
               geometry:{x:80,y:80,width:900,height:600},z_index:2,status:"running",persist:true,minimized:false,maximized:false,
               placement:{kind:"issue_preview",issue_window_id:"tab-queue::issue-1",issue_number:5}}] : [])]} }],active_tab_id:"tab-queue",recent_projects:[]};
           this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace}); }
-        else if(message.kind==="list_issue_monitor") this.emit({kind:"issue_monitor_status",status});
-        else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) this.emit({kind:"knowledge_entries",id:message.id,knowledge_kind:"issue",request_id:message.request_id,entries,selected_number:null,refresh_enabled:true});
+        else if(message.kind==="list_issue_monitor") {
+          this.emit({kind:"issue_monitor_status",status});
+          if (inboxFirst) this.emit({kind:"issue_monitor_inbox",items:entries.map(issue=>({issue,
+            state:issue.number===5?"launched":issue.number===6?"released":"queued"}))});
+        }
+        else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) {
+          fixture.__queueLoad={id:message.id,knowledge_kind:"issue",request_id:message.request_id};
+          if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
+        }
         else if(message.kind==="select_knowledge_bridge_entry") {
           fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
           this.emit(fixture.__queueLastDetail);
@@ -399,5 +493,5 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey, includeAgent, observeSkipped});
+  },{projectKey, includeAgent, observeSkipped, inboxFirst});
 }

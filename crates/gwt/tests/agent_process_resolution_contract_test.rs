@@ -518,5 +518,11 @@ fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
             step.contains("\n        shell: bash\n"),
             "Windows multi-command step `{step_name}` must stop at the first failed test command"
         );
+        if step_name == "Run Issue Monitor scheduled driver contracts" {
+            assert!(
+                step.lines().any(|line| line.trim() == "node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1"),
+                "Windows CI must exercise the non-Unix initial Auto-capacity admission regression"
+            );
+        }
     }
 }

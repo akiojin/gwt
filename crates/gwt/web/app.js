@@ -1,5 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { markdownContent, renderUiContent } from "/ui-content.js";
+import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -174,7 +175,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
-      import { createPmChat } from "/pm-chat.js";
+      import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -1330,7 +1331,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
-        requestVisiblePmConversations();
+        requestVisiblePmReports();
+        requestSupportedAgentRefresh();
       }
 
       function handleSocketMessage(event) {
@@ -1403,11 +1405,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function handleSocketClose() {
-        for (const [windowId, view] of pmChatViews) {
-          view.pendingSessions.length = 0;
-          view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
-          view.controller.update({ availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." });
-        }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
@@ -3466,8 +3463,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
       // the backend marked `is_pm`; null while no PM pane exists.
       let pmWindowId = null;
+      const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
 
       function updatePmLauncher(workspace) {
+        pmLauncherModel.update(state => ({ ...state, workspace }));
+      }
+
+      pmLauncherModel.subscribe(state => state, ({ workspace, paused }) => {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
         pmWindowId = pmWindow?.id ?? null;
@@ -3482,6 +3484,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               ? "stopped"
               : "running";
           railEntry.dataset.pmState = state;
+          railEntry.dataset.pmPaused = String(paused);
           // Issue #4777: the hover text says what the PM is, not only its name.
           const role = "your point of contact, not one of the agents";
           railEntry.title =
@@ -3490,6 +3493,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               : state === "stopped"
                 ? `Project Manager (stopped): ${role}. Click to resume`
                 : `Project Manager: ${role}. Click to start`;
+          if (paused) railEntry.title += ". Autonomous loop paused";
         }
 
         const floating = document.getElementById("canvas-pm-launcher");
@@ -3498,7 +3502,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           // reachable on screen, so a visible PM never gets a duplicate CTA.
           floating.hidden = Boolean(pmWindow) && isWindowWithinViewport(pmWindow);
         }
-      }
+      });
 
       // True when the window's rectangle intersects the visible canvas area.
       function isWindowWithinViewport(windowData) {
@@ -4856,6 +4860,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // the center is constructed after this factory.
         reportSurfaceError: (error) => notificationCenter.recordError(error),
         resolveSurfaceError: (key) => notificationCenter.resolveError(key),
+        reportSurfaceNotice: (notice) => notificationCenter.recordSurfaceNotice(notice),
+        openSurfaceNotice: (key) => notificationCenter.open(key),
       });
       issueMonitorModel.subscribe(model => model.status, status =>
         window.__operatorShell?.applyIssueMonitorStatus?.(status));
@@ -5379,10 +5385,24 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       const pmChatViews = new Map();
+      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const renderedTerminalPackets = new Map();
+      subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
+        if (!state) return;
+        const packet = state.terminal;
+        if (packet && renderedTerminalPackets.get(state.windowId) !== packet) {
+          if (packet.kind === "terminal_snapshot") frontendUnits.terminalHost.replaceTerminalSnapshot(state.windowId, packet.dataBase64);
+          else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
+          renderedTerminalPackets.set(state.windowId, packet);
+        }
+        const view = pmChatViews.get(state.windowId);
+        if (view) view.logHost.dataset.stateVersion = String(state.revision);
+      });
 
       function disposePmChat(windowId) {
         const view = pmChatViews.get(windowId);
         if (!view) return;
+        view.unsubscribe();
         view.controller.dispose();
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
@@ -5402,8 +5422,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (view) {
           if (view.sessionId !== windowData.session_id) {
             view.sessionId = windowData.session_id;
-            view.controller.setSession(windowData.session_id);
-            requestVisiblePmConversations();
+            bindPmWindowState(windowData.id, windowData.session_id);
+            requestVisiblePmReports();
           }
           return;
         }
@@ -5418,17 +5438,12 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (overlay) logHost.append(overlay);
         body.classList.add("pm-conversation-body");
         body.append(root, logHost);
-        view = { root, body, logHost, sessionId: windowData.session_id, pendingSessions: [] };
+        view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          send: (message) => {
-            const result = send(message);
-            if (result === "sent") view.pendingSessions.push(view.sessionId);
-            return result;
-          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmConversations();
+            if (!visible) requestVisiblePmReports();
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -5436,19 +5451,24 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           },
         });
         pmChatViews.set(windowData.id, view);
-        requestVisiblePmConversations();
+        bindPmWindowState(windowData.id, windowData.session_id);
+        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
+          view.controller.update(state);
+          if (state) view.logHost.dataset.stateVersion = String(state.revision);
+        });
+        requestVisiblePmReports();
       }
 
-      function requestVisiblePmConversations() {
+      function requestVisiblePmReports() {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            send({ kind: "load_pm_conversation", id: windowData.id });
+            send({ kind: "load_pm_reports", id: windowData.id });
           }
         }
       }
-      window.setInterval(requestVisiblePmConversations, 5000);
+      window.setInterval(requestVisiblePmReports, 5000);
 
       function mountWindowBody(windowData, element) {
         disposePmChat(windowData.id);
@@ -5651,6 +5671,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         applyCustomAgentDeleted,
         applyCustomAgentError,
         applySupportedAgentList,
+        applySupportedAgentMaintenance,
+        requestSupportedAgentRefresh,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -6065,6 +6087,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
                   const element = windowMap.get(windowId);
                   if (!element) return;
                   disposePmChat(windowId);
+                  removePmWindowState(windowId);
+                  renderedTerminalPackets.delete(windowId);
                   const runtime = terminalMap.get(windowId);
                   if (runtime && runtime.activationFrame !== null) {
                     cancelAnimationFrame(runtime.activationFrame);
@@ -6423,30 +6447,14 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
-          case "pm_conversation": {
-            const view = pmChatViews.get(event.id);
-            if (view && event.session_id === view.sessionId) view.controller.update(event.snapshot);
-            break;
-          }
-          case "pane_send_result": {
-            let view = pmChatViews.get(event.window_id);
-            // A pane removed before submit has no window ID in its rejection.
-            // Only an unambiguous failure may unlock a pending PM draft.
-            if (!event.window_id && event.ok === false) {
-              const pending = (activeWorkspace()?.windows || [])
-                .map(windowData => pmChatViews.get(windowData.id))
-                .filter(candidate => candidate?.pendingSessions.length);
-              if (pending.length === 1) view = pending[0];
-            }
-            if (view && view.pendingSessions.length) {
-              const sentSession = view.pendingSessions.shift();
-              if (sentSession === view.sessionId) view.controller.handleSendResult(event);
-            }
+          case "pm_reports": {
+            applyPmWindowReceiveEvent(event);
             break;
           }
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);
+            pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
@@ -6484,10 +6492,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           }
           case "terminal_output":
-            frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_snapshot":
-            frontendUnits.terminalHost.replaceTerminalSnapshot(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
             frontendUnits.terminalHost.applyStatus(
@@ -6767,6 +6775,9 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           case "supported_agent_list":
             applySupportedAgentList(event);
+            break;
+          case "supported_agent_maintenance":
+            applySupportedAgentMaintenance(event);
             break;
           // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends WebSocket
           // events. `agent_backend_list` is a snapshot reply per

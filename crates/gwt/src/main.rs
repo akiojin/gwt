@@ -81,9 +81,9 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
     AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, ContinueWorkReadinessWatch,
-    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
-    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
+    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, PreparedRuntimeHookAgentFailure,
+    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget,
+    ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 #[cfg(test)]
@@ -569,6 +569,7 @@ struct EventLoopDispatchTimer {
     label: DispatchLabel,
     started: std::time::Instant,
     startup_queued: bool,
+    runtime_hook_stages: Option<(u64, u64, usize)>,
 }
 
 impl EventLoopDispatchTimer {
@@ -577,6 +578,7 @@ impl EventLoopDispatchTimer {
             label: event_loop_dispatch_label(event),
             started: std::time::Instant::now(),
             startup_queued: false,
+            runtime_hook_stages: None,
         }
     }
 }
@@ -593,6 +595,22 @@ impl Drop for EventLoopDispatchTimer {
         // Issue #4520 AC-2: a startup dispatch past 100 ms reaches perf.startup.
         gwt::perf::startup::event_loop_stall(label, elapsed.as_secs_f64() * 1_000.0);
         let elapsed_ms = elapsed.as_millis() as u64;
+        if let Some((handler_return_ms, fanout_ms, outbound_count)) =
+            self.runtime_hook_stages.filter(|_| elapsed_ms >= 100)
+        {
+            // The outer timer also includes the watchdog guard's teardown.
+            // Profile after capturing elapsed, leaving the budget unchanged.
+            tracing::debug!(
+                target: "gwt.frontend.timing",
+                marker = "issue_4411_runtime_hook_envelope_profile",
+                dispatch_ms = elapsed_ms,
+                handler_return_ms,
+                fanout_ms,
+                outbound_count,
+                unattributed_ms = elapsed_ms.saturating_sub(handler_return_ms + fanout_ms),
+                "RuntimeHook handler and client fan-out profile"
+            );
+        }
         if let Some(message) = gui_event_loop_stall_warning(label, elapsed_ms) {
             tracing::warn!(
                 target: "gwt.frontend.timing",
@@ -809,12 +827,37 @@ fn spawn_update_apply_resolution(
 }
 
 fn admit_prepared_update(
-    app: &AppRuntime,
+    app: &mut AppRuntime,
     manifest: &gwt_core::update::PendingUpdateManifest,
     admission: &mut update_front_door::UpdateApplyAdmission,
+    client_id: &str,
 ) -> (bool, Vec<OutboundEvent>) {
     if !admission.begin_commit() {
         return (false, Vec::new());
+    }
+    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID {
+        let release = match gwt_core::update::load_pending_update_manifest() {
+            Some(current) if current.version == manifest.version => current
+                .auto_apply_deferred
+                .then_some(app_runtime::UpdateAutoApplyRelease::Cancelled),
+            _ => Some(app_runtime::UpdateAutoApplyRelease::PayloadMissing),
+        };
+        if let Some(release) = release {
+            admission.failed();
+            return (
+                false,
+                app.release_update_auto_apply_events(&manifest.version, release),
+            );
+        }
+    }
+    if app.agent_maintenance.busy {
+        admission.failed();
+        let message = "gwt update is waiting for agent maintenance to finish. Retry after maintenance completes.";
+        app.record_update_apply_observation(&manifest.version, "pending_waiting", message);
+        return (
+            false,
+            vec![OutboundEvent::global_update_notice("info", message)],
+        );
     }
     if let Some(gwt_core::update::UpdateState::Available { latest, .. }) = &app.pending_update {
         if gwt_core::update::pending_version_is_newer(latest, &manifest.version) {
@@ -835,6 +878,7 @@ fn admit_prepared_update(
             );
         }
     }
+    app.agent_maintenance.app_update_committing = true;
     (true, Vec::new())
 }
 
@@ -1750,6 +1794,8 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::UpdateBoardOauthPort { .. }
             | FrontendEvent::ListCustomAgents
             | FrontendEvent::ListSupportedAgents
+            | FrontendEvent::MaintainSupportedAgent { .. }
+            | FrontendEvent::SetAgentAutoUpdate { .. }
             | FrontendEvent::ListCustomAgentPresets
             | FrontendEvent::AddCustomAgentFromPreset { .. }
             | FrontendEvent::UpdateCustomAgent { .. }
@@ -1788,10 +1834,21 @@ fn browser_project_input_allowed(
 )]
 #[derive(Debug, Clone)]
 enum UserEvent {
+    SupportedAgentCatalogReady {
+        client_id: ClientId,
+        generation: u64,
+        event: BackendEvent,
+    },
+    SupportedAgentMaintenanceComplete(
+        Box<app_runtime::agent_maintenance::AgentMaintenanceCompletion>,
+    ),
     IssueMonitorLaunchDeliveryAcknowledged(
         Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
     ),
     DrainAppEvents,
+    TransientBrowserEnded {
+        generation: u64,
+    },
     StartupReady,
     StartupStopped,
     ProjectIndexRefreshRequested {
@@ -1878,8 +1935,11 @@ enum UserEvent {
     RuntimeApprovalResolutionCancelled {
         id: String,
     },
-    /// Issue #3702: the fast-path just submitted or cleared a composer that
-    /// had unsent keystrokes. Deliver one coalesced PM wake if one was held.
+    /// Issue #3932: deliver or retry retained Agent idle edges without a tick.
+    PmAgentIdleWake {
+        context: app_runtime::ProjectContext,
+    },
+    /// Issue #3702: the fast-path submitted or cleared a composing PM pane.
     FlushPendingPmWake {
         id: String,
     },
@@ -1983,6 +2043,7 @@ enum UserEvent {
         project_root: PathBuf,
     },
     ActiveWorkProjectionPrepared(Box<ActiveWorkProjectionPrepared>),
+    RuntimeHookAgentFailurePrepared(Box<PreparedRuntimeHookAgentFailure>),
     ProjectDispatch {
         context: app_runtime::ProjectContext,
         events: Vec<OutboundEvent>,
@@ -2038,6 +2099,9 @@ enum UserEvent {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     },
+    IssueMonitorCapacityChanged {
+        project_root: PathBuf,
+    },
     IssueMonitorDaemonStatus {
         project_root: PathBuf,
         status: Box<gwt::IssueMonitorStatusView>,
@@ -2051,6 +2115,8 @@ enum UserEvent {
     /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
     /// tick — drives local scans and the PM periodic wake.
     IssueMonitorScheduledTick,
+    /// Existing claims have deadlines independent of candidate scans.
+    IssueMonitorClaimRenewalTick,
     /// Issue #3633: keep a runtime daemon alive for every enabled project.
     ///
     /// Separate from the scan tick because the two cadences answer different
@@ -2068,6 +2134,10 @@ enum UserEvent {
     TerminalConvergenceObserved {
         grace: std::time::Duration,
         observations: Vec<app_runtime::terminal_convergence::TerminalWindowObservation>,
+    },
+    UpdateDrainObserved {
+        now: chrono::DateTime<chrono::Utc>,
+        observations: Vec<app_runtime::UpdateDrainObservation>,
     },
     IssueMonitorScheduledScanComplete {
         project_root: PathBuf,
@@ -2179,6 +2249,13 @@ enum UserEvent {
         window_id: String,
         session_id: String,
         snapshot: gwt::pm_conversation::PmConversationSnapshot,
+    },
+    PmReportsLoaded {
+        client_id: ClientId,
+        window_id: String,
+        session_id: String,
+        reports: Vec<gwt::protocol::PmReportView>,
+        error: Option<String>,
     },
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -3097,6 +3174,8 @@ mod tests {
         let wire = serde_json::to_value(&events[0].event).expect("toast wire");
         assert_eq!(wire["notification_transition"], "needs_human");
         let status = gwt::IssueMonitorStatusView {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
@@ -3123,6 +3202,7 @@ mod tests {
             agent_blackout: None,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
             provider_quota_holds: Vec::new(),
@@ -3458,6 +3538,10 @@ mod tests {
                 Ok(Self(Box::new(handler)))
             }
             fn watch(&mut self, path: &Path, _mode: notify::RecursiveMode) -> notify::Result<()> {
+                // The error callback gates the worker until all ten raw
+                // notifications are queued, regardless of thread scheduling.
+                self.0
+                    .handle_event(Err(notify::Error::generic("burst barrier")));
                 for _ in 0..10 {
                     self.0
                         .handle_event(Ok(notify::Event::new(notify::EventKind::Modify(
@@ -3478,23 +3562,32 @@ mod tests {
         let _home = ScopedGwtHome::set(temp.path());
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).unwrap();
-        let projection =
+        let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&root);
         gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
         let path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&root);
         let (tx, rx) = std::sync::mpsc::channel();
-        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = reloads.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let watched_root = root.clone();
+        let watched_home = temp.path().to_path_buf();
         let mut debouncer = notify_debouncer_mini::new_debouncer_opt::<_, BurstWatcher>(
-            super::workspace_projection_debounce_config(),
+            // recv_timeout consumes queued events before checking its timeout.
+            // Zero makes every path expire on the first tick after that queue
+            // drains, so AnyContinuous cannot split this burst into callbacks.
+            // The production watcher's 250ms configuration stays unchanged.
+            super::workspace_projection_debounce_config().with_timeout(Duration::ZERO),
             move |result: notify_debouncer_mini::DebounceEventResult| {
-                let paths = result
-                    .unwrap()
+                let Ok(events) = result else {
+                    release_rx.recv().expect("release the queued burst");
+                    return;
+                };
+                let _home = ScopedGwtHome::set(&watched_home);
+                let paths = events
                     .into_iter()
                     .map(|event| event.path)
                     .collect::<Vec<_>>();
-                if let Some(event) = super::workspace_projection_watch_event(&root, &paths) {
-                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(event) = super::workspace_projection_watch_event(&watched_root, &paths)
+                {
                     tx.send(event).unwrap();
                 }
             },
@@ -3504,15 +3597,26 @@ mod tests {
             .watcher()
             .watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive)
             .unwrap();
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(10)).unwrap(),
-            UserEvent::WorkspaceProjectionLoaded { .. }
-        ));
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
-        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        projection.title = "final state after ten notifications".to_string();
+        gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
+        release_tx.send(()).unwrap();
+
+        let mut reloads = vec![rx.recv().expect("reload the queued burst")];
+        drop(debouncer);
+        // Shutdown drops the callback's sender. Drain until disconnect to
+        // count every reload instead of assuming a second of silence is final.
+        reloads.extend(rx);
+        assert_eq!(reloads.len(), 1);
+        match &reloads[0] {
+            UserEvent::WorkspaceProjectionLoaded {
+                project_root,
+                projection: Some(actual),
+            } => {
+                assert_eq!(project_root, &root);
+                assert_eq!(actual.as_ref(), &projection);
+            }
+            other => panic!("expected the final workspace snapshot, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4503,6 +4607,7 @@ mod tests {
             project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
+            agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
 
@@ -4514,6 +4619,7 @@ mod tests {
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+            runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
             issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
@@ -4539,6 +4645,8 @@ mod tests {
             active_agent_sessions: HashMap::new(),
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
+            update_drain_scan_in_flight: false,
+            update_drain_host_blockers: None,
             terminal_close_grace: std::time::Duration::from_secs(60),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
@@ -5080,6 +5188,7 @@ mod tests {
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: Utc::now().to_rfc3339(),
+            auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
         let mut state = gwt_core::update::UpdateState::Available {
@@ -5119,7 +5228,7 @@ mod tests {
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
         assert!(admission.begin_resolution());
-        assert!(!super::admit_prepared_update(&runtime, &manifest, &mut admission).0);
+        assert!(!super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual").0);
         assert!(gwt_core::update::load_pending_update_manifest().is_none());
         assert!(!old_dir.exists());
         assert!(
@@ -5128,17 +5237,136 @@ mod tests {
         );
         let mut current_manifest = manifest.clone();
         current_manifest.version = "9.108.0".into();
-        assert!(super::admit_prepared_update(&runtime, &current_manifest, &mut admission).0);
+        assert!(
+            super::admit_prepared_update(&mut runtime, &current_manifest, &mut admission, "manual")
+                .0
+        );
         // Duplicate results after commitment must not reopen admission or
         // delete files which an already-started helper may still be using.
         fs::create_dir_all(&old_dir).unwrap();
         fs::write(old_dir.join("gwt"), "helper-owned payload").unwrap();
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
-        let (admitted, events) = super::admit_prepared_update(&runtime, &manifest, &mut admission);
+        let (admitted, events) =
+            super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual");
         assert!(!admitted && events.is_empty());
         assert!(gwt_core::update::load_pending_update_manifest().is_some());
         assert!(old_dir.exists());
         assert!(!admission.begin_resolution());
+    }
+
+    #[test]
+    fn issue_5062_deferred_update_blocks_queued_automatic_commit_but_allows_manual() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let payload_path = temp.path().join("prepared-binary");
+        fs::write(&payload_path, "prepared payload").unwrap();
+        let mut saved = serde_json::json!({
+            "version": "99.0.0",
+            "asset_url": "https://example.invalid/update",
+            "payload": {"PortableBinary": {"path": payload_path}},
+            "downloaded_at": "2026-10-01T00:00:00Z",
+            "auto_apply_deferred": false,
+        });
+        let queued_manifest = serde_json::from_value(saved.clone()).unwrap();
+        // An automatic event already in the queue must re-read a defer that
+        // arrived after its manifest snapshot was captured.
+        saved["auto_apply_deferred"] = serde_json::json!(true);
+        fs::create_dir_all(gwt_core::update::pending_update_dir()).unwrap();
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        fs::write(gwt_core::update::pending_update_manifest_path(), &bytes).unwrap();
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
+        assert!(admission.begin_resolution());
+        assert!(
+            !super::admit_prepared_update(
+                &mut runtime,
+                &queued_manifest,
+                &mut admission,
+                crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+            )
+            .0
+        );
+        assert!(!runtime.agent_maintenance.app_update_committing);
+        assert_eq!(
+            fs::read(gwt_core::update::pending_update_manifest_path()).unwrap(),
+            bytes
+        );
+        assert!(
+            admission.begin_resolution(),
+            "manual apply remains retryable"
+        );
+        assert!(
+            super::admit_prepared_update(&mut runtime, &queued_manifest, &mut admission, "manual",)
+                .0
+        );
+    }
+
+    #[test]
+    fn agent_maintenance_interlock_refuses_prepared_app_update_and_keeps_it_retryable() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let (spawner, _tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let request = serde_json::from_str(
+            r#"{"kind":"maintain_supported_agent","agent_id":"codex","action":"update"}"#,
+        )
+        .unwrap();
+        runtime.handle_frontend_event("settings".into(), request);
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "99.0.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary {
+                path: temp.path().join("prepared"),
+            },
+            downloaded_at: Utc::now().to_rfc3339(),
+            auto_apply_deferred: false,
+        };
+        let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
+        assert!(admission.begin_resolution());
+        let (admitted, _) =
+            super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual");
+        assert!(
+            !admitted,
+            "self-update must not interrupt the agent installer"
+        );
+        assert!(
+            admission.begin_resolution(),
+            "the staged update remains retryable"
+        );
+    }
+
+    #[test]
+    fn agent_maintenance_interlock_refuses_installer_after_app_update_commit() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "99.0.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary {
+                path: temp.path().join("prepared"),
+            },
+            downloaded_at: Utc::now().to_rfc3339(),
+            auto_apply_deferred: false,
+        };
+        let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
+        assert!(admission.begin_resolution());
+        assert!(super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual").0);
+        let request = serde_json::from_str(
+            r#"{"kind":"maintain_supported_agent","agent_id":"codex","action":"install"}"#,
+        )
+        .unwrap();
+        let events = runtime.handle_frontend_event("settings".into(), request);
+        assert!(events
+            .iter()
+            .any(|event| serde_json::to_value(&event.event).unwrap()["success"] == false));
+        assert!(
+            tasks.lock().unwrap().is_empty(),
+            "no installer can start before QuitApp is dispatched"
+        );
     }
 
     #[test]
@@ -10038,16 +10266,15 @@ fn main() -> std::io::Result<()> {
     // pane can spawn, and record the value the process actually ended up with.
     log_startup_fd_limit(gwt_core::fd_limit::raise_soft_fd_limit());
 
-    // SPEC #2920 Phase 4 partial — restore `--bind`/`--port` on the GUI
-    // (tray-resident) route so VPN-reachable hosts can run
-    // `gwt --bind 0.0.0.0 --port <n>` without falling back to SSH local
-    // port forwarding. `--no-tray`/`--no-open` are accepted today but
-    // still no-op; the full Tray route takeover lands in the rest of
-    // Phase 4. Parse errors render the canonical usage hint and exit 2.
+    // Parse the tray/transient route before bootstrap and capture the launch
+    // owner now: a parent lost during bootstrap must not become a resident.
     let tray_args = match gwt::cli::tray::parse_tray_argv(&argv) {
         Ok(parsed) => parsed,
         Err(err) => fatal_startup_exit(&mut log_handles, &err.to_string(), 2),
     };
+    let transient_parent = tray_args
+        .no_tray
+        .then(gwt::cli::tray::lifetime::ParentProcess::capture);
 
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
     // update manifest (via the post-click modal's Later flow, or because the
@@ -10222,6 +10449,26 @@ fn main() -> std::io::Result<()> {
             tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
         }
     }
+    {
+        let tick_proxy = proxy.clone();
+        let interval = std::time::Duration::from_secs(
+            gwt::IssueMonitorConfig::default().claim_heartbeat_interval_secs(),
+        );
+        if let Err(error) = std::thread::Builder::new()
+            .name("issue-monitor-claim-renewal-tick".to_string())
+            .spawn(move || loop {
+                if tick_proxy
+                    .send_event(UserEvent::IssueMonitorClaimRenewalTick)
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(interval);
+            })
+        {
+            tracing::error!(%error, "failed to start Issue Monitor claim renewal tick thread");
+        }
+    }
     // Issue #3633: the GUI is the subject that keeps a runtime daemon alive.
     // Nothing in production used to start one, so the daemon-only control
     // lane (`scan_now`, `daemon.subscribe`) was permanently unavailable.
@@ -10358,6 +10605,37 @@ fn main() -> std::io::Result<()> {
     #[cfg(windows)]
     verification_cap_relief::spawn(pty_writers.clone());
     let monitor_projects = Arc::new(RwLock::new(BTreeMap::new()));
+    // Capacity observation belongs to the host, independently of browser clients.
+    // Only open projects supply target candidates; registered projects consume
+    // nothing unless the machine census finds a live PTY.
+    let capacity_projects = Arc::new(RwLock::new(Vec::<PathBuf>::new()));
+    let capacity_roots = capacity_projects.clone();
+    let capacity_proxy = proxy.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("gwt-agent-capacity".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let roots = capacity_roots
+                .read()
+                .map(|projects| projects.clone())
+                .unwrap_or_default();
+            for root in roots {
+                if let Err(error) = gwt::agent_capacity::refresh_machine_capacity(&root) {
+                    tracing::warn!(%error, project_root = %root.display(), "agent capacity observation failed");
+                }
+                // Failed observations must also publish expiry instead of leaving
+                // an old positive Auto limit on a stopped Monitor.
+                if capacity_proxy
+                    .send_event(UserEvent::IssueMonitorCapacityChanged { project_root: root })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+    {
+        tracing::warn!(%error, "agent capacity sampler unavailable; Auto admission remains closed");
+    }
     let monitor_writers = pty_writers.clone();
     gwt::monitor_duplicate_runtime::spawn(monitor_projects.clone(), move || {
         let writers = monitor_writers.read().ok()?;
@@ -10443,7 +10721,10 @@ fn main() -> std::io::Result<()> {
     let tray_error_icon = load_tray_icon_rgba_for_state(true)
         .and_then(|(rgba, w, h)| tray_icon::Icon::from_rgba(rgba, w, h).ok());
     let mut tray_has_error = false;
-    let tray_icon_handle = tray_normal_icon.clone()
+    let tray_icon_handle = if tray_args.no_tray {
+        None
+    } else {
+        tray_normal_icon.clone()
         .and_then(|icon| {
             TrayIconBuilder::new()
                 .with_tooltip(format!("{APP_NAME} — open the browser UI"))
@@ -10458,7 +10739,8 @@ fn main() -> std::io::Result<()> {
                 "tray icon initialisation failed; running in fallback mode (use `gwt open` to launch the browser)"
             );
             None
-        });
+        })
+    };
 
     if tray_icon_handle.is_some() {
         gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::TrayReady);
@@ -10506,6 +10788,32 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    if let Some(parent) = transient_parent {
+        let transient_clients = clients.clone();
+        let transient_proxy = proxy.clone();
+        drop(runtime.handle().spawn(async move {
+            let mut browser = gwt::cli::tray::lifetime::BrowserLifetime::default();
+            loop {
+                if !parent.is_alive() {
+                    tracing::info!(target: "gwt_tray", "transient parent ended; shutting down");
+                    let _ = transient_proxy.send_event(UserEvent::QuitApp {
+                        reason: GuiShutdownReason::QuitApp,
+                    });
+                    break;
+                }
+                let (generation, connected) = transient_clients.browser_session_state();
+                if browser.ended(generation, connected, std::time::Instant::now())
+                    && transient_proxy
+                        .send_event(UserEvent::TransientBrowserEnded { generation })
+                        .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(gwt::cli::tray::lifetime::POLL_INTERVAL).await;
+            }
+        }));
+    }
+
     // SPEC #2920: there is no headless route anymore — the
     // tray-resident process is the only front door. The bounded
     // shutdown backstop is still useful when graceful cleanup stalls,
@@ -10523,6 +10831,7 @@ fn main() -> std::io::Result<()> {
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
 
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
+    let transient_dispatch_clients = clients.clone();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let event = match event {
@@ -10535,6 +10844,11 @@ fn main() -> std::io::Result<()> {
         let mut dispatch_timer = EventLoopDispatchTimer::start(&event);
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
         let event = match event {
+            Event::UserEvent(UserEvent::TransientBrowserEnded { generation }) => {
+                let (current, connected) = transient_dispatch_clients.browser_session_state();
+                if connected || current != generation { return; }
+                Event::UserEvent(UserEvent::QuitApp { reason: GuiShutdownReason::QuitApp })
+            }
             Event::UserEvent(UserEvent::MenuEvent(ref menu))
                 if gwt::cli::tray::menu::MenuAction::from_id(menu.id.as_ref())
                     == Some(gwt::cli::tray::menu::MenuAction::Quit) =>
@@ -10595,6 +10909,9 @@ fn main() -> std::io::Result<()> {
                     ready.set_agent_capability_issuer(server.agent_capability_issuer());
                     ready.set_server_url(browser_url.clone());
                     ready.set_usage_refresh(usage_refresh.clone());
+                    if let Ok(mut roots) = capacity_projects.write() {
+                        *roots = ready.project_contexts().into_iter().map(|context| context.project_root).collect();
+                    }
                     if let Ok(mut projects) = monitor_projects.write() {
                         for context in ready.project_contexts() {
                             projects.insert(context.project_root, ready.sessions_dir.clone());
@@ -10893,6 +11210,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionCancelled { id }) => {
                 app.cancel_runtime_approval_resolution(&id);
             }
+            Event::UserEvent(UserEvent::PmAgentIdleWake { context }) => {
+                app.pm_agent_idle_wake_events(&context);
+            }
             Event::UserEvent(UserEvent::FlushPendingPmWake { id }) => {
                 app.flush_pending_pm_wake(&id);
             }
@@ -11050,6 +11370,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkspaceStateLoadFailed { project_root, error }) => {
                 clients.dispatch(app.handle_workspace_state_load_failed(&project_root, error));
             }
+            Event::UserEvent(UserEvent::RuntimeHookAgentFailurePrepared(prepared)) => {
+                clients.dispatch(app.handle_runtime_hook_agent_failure_prepared(*prepared));
+            }
             Event::UserEvent(UserEvent::WorkspaceProjectionPatchPrepared(prepared)) => {
                 if let Some(dispatch) = app.apply_workspace_projection_patch(*prepared) {
                     clients.dispatch_prepared_active_work(
@@ -11130,8 +11453,17 @@ fn main() -> std::io::Result<()> {
                 ));
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
+                let handler_started = std::time::Instant::now();
                 let events = app.handle_runtime_hook_event(event);
+                let handler_return_ms = handler_started.elapsed().as_millis() as u64;
+                let outbound_count = events.len();
+                let fanout_started = std::time::Instant::now();
                 clients.dispatch(events);
+                dispatch_timer.runtime_hook_stages = Some((
+                    handler_return_ms,
+                    fanout_started.elapsed().as_millis() as u64,
+                    outbound_count,
+                ));
             }
             Event::UserEvent(UserEvent::DaemonRuntimeHook(event)) => {
                 let events = app.handle_daemon_runtime_hook_event(event);
@@ -11160,6 +11492,10 @@ fn main() -> std::io::Result<()> {
                 let events = app.issue_monitor_scheduled_tick_events();
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorClaimRenewalTick) => {
+                let events = app.issue_monitor_claim_renewal_tick_events();
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {
                 app.ensure_runtime_daemons_for_enabled_projects();
             }
@@ -11176,6 +11512,9 @@ fn main() -> std::io::Result<()> {
             }) => {
                 let events = app.terminal_convergence_observed_events(grace, observations);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::UpdateDrainObserved { now, observations }) => {
+                clients.dispatch(app.update_drain_observed_events(now, observations));
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
                 project_root,
@@ -11212,6 +11551,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorCapacityChanged { project_root }) => {
+                clients.dispatch(app.issue_monitor_capacity_changed_events(&project_root));
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
                 project_root,
@@ -11314,7 +11656,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ProjectIndexRefreshRequested { project_key, project_root }) => {
                 if let Some(state) = app.project_states.get(&project_key) {
                     state.project_index_bootstrap.invalidate_full_status(&project_root);
-                    state.project_index_bootstrap.spawn(proxy.clone().for_project(state.context.clone()), project_root);
+                    state.project_index_bootstrap.refresh_after_completion(proxy.clone().for_project(state.context.clone()), project_root);
                 }
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {
@@ -11398,8 +11740,21 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, reports, error }) => {
+                clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, reports, error));
+            }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::SupportedAgentCatalogReady {
+                client_id,
+                generation,
+                event,
+            }) => {
+                clients.dispatch(app.handle_supported_agent_catalog_ready(client_id, generation, event));
+            }
+            Event::UserEvent(UserEvent::SupportedAgentMaintenanceComplete(completion)) => {
+                clients.dispatch(app.handle_supported_agent_maintenance_complete(*completion));
             }
             Event::UserEvent(UserEvent::AgentBackendConnectionProbeComplete {
                 client_id,
@@ -11520,6 +11875,7 @@ fn main() -> std::io::Result<()> {
                                 asset_url: prepared.asset_url.clone(),
                                 payload: prepared.payload.clone(),
                                 downloaded_at: chrono::Utc::now().to_rfc3339(),
+                                auto_apply_deferred: false,
                             };
                             if let Err(message) =
                                 gwt_core::update::persist_pending_update_manifest(&manifest)
@@ -11599,6 +11955,13 @@ fn main() -> std::io::Result<()> {
                     &[("version", &version)],
                 );
                 match gwt_core::update::load_pending_update_manifest() {
+                    Some(manifest) if manifest.version == version && manifest.auto_apply_deferred => {
+                        update_apply_admission.failed();
+                        clients.dispatch(app.release_update_auto_apply_events(
+                            &version,
+                            app_runtime::UpdateAutoApplyRelease::Cancelled,
+                        ));
+                    }
                     Some(manifest) if manifest.version == version => {
                         if !record_update_dispatch_result(
                             proxy.send_event(UserEvent::ApplyUpdateGraceful {
@@ -11646,7 +12009,7 @@ fn main() -> std::io::Result<()> {
                 manifest,
                 client_id,
             }) => {
-                let (admitted, events) = admit_prepared_update(app, &manifest, &mut update_apply_admission);
+                let (admitted, events) = admit_prepared_update(app, &manifest, &mut update_apply_admission, &client_id);
                 clients.dispatch(events);
                 if !admitted {
                     return;
@@ -11667,7 +12030,11 @@ fn main() -> std::io::Result<()> {
                     projects: app.update_resume_projects(),
                     attempt: 1,
                 };
-                match update_front_door::stage_graceful_update_apply(manifest, &marker) {
+                match update_front_door::stage_graceful_update_apply(
+                    manifest,
+                    &marker,
+                    client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+                ) {
                     Ok(version) => {
                         gwt_core::update::log_update_event(
                             "graceful_apply_committed",
@@ -11682,6 +12049,7 @@ fn main() -> std::io::Result<()> {
                     }
                     Err(message) => {
                         update_apply_admission.failed();
+                        app.agent_maintenance.app_update_committing = false;
                         app.record_update_apply_observation(
                             &marker.to_version,
                             "pending_failed",
@@ -11818,6 +12186,9 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::MainEventsCleared => {
+                if let Ok(mut roots) = capacity_projects.write() {
+                    *roots = app.project_contexts().into_iter().map(|context| context.project_root).collect();
+                }
                 // Publish project membership even before a Monitor PTY exists.
                 // The worker retains it and needs no GUI round trip per census.
                 if let Ok(mut projects) = monitor_projects.write() {
