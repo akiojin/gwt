@@ -2223,6 +2223,7 @@ Extra context.
                     crate::index_search::IndexSearchUnavailable {
                         reason: "spawn".to_string(),
                         retry_after_ms: 5_000,
+                        holder: None,
                     },
                 ),
                 Some("SEARCH_UNAVAILABLE"),
@@ -3355,6 +3356,7 @@ exit 1\n",
                 crate::index_search::IndexSearchUnavailable {
                     reason: "run project index search: spawn failed".to_string(),
                     retry_after_ms: 5_000,
+                    holder: None,
                 },
             ),
         );

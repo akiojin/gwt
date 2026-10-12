@@ -2746,6 +2746,130 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
 // while the first launch is still materializing (window registered, agent
 // session not yet live) must focus the pending window, not spawn a duplicate.
 #[test]
+fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).expect("drain project");
+    fs::create_dir_all(&target_root).expect("target project");
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    let mut prefs = gwt::IssueMonitorPrefs {
+        update_drain: Some(gwt::IssueMonitorUpdateDrain {
+            version: "9.110.0".to_string(),
+            since: "2026-10-10T08:21:17Z".to_string(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            blocking: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed drain");
+    let tabs = vec![
+        sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab("target", "llmlb", target_root, ProjectKind::Git, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    let config = || {
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/issue-5062-test")
+            .build()
+    };
+    let result = runtime.spawn_agent_window("target", config(), canvas_bounds(), None);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("update_drain")),
+        "{result:?}"
+    );
+    assert!(runtime
+        .tab("target")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
+
+    prefs.update_drain = None;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("release drain");
+    runtime
+        .spawn_agent_window("target", config(), canvas_bounds(), None)
+        .expect("spawn after release");
+    assert_eq!(
+        runtime
+            .tab("target")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).unwrap();
+    fs::create_dir_all(&target_root).unwrap();
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&drain_root),
+        &gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.110.0".into(),
+                since: "2026-10-10T08:21:17Z".into(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tabs = vec![
+        sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "target",
+            "llmlb",
+            target_root,
+            ProjectKind::Git,
+            &[WindowPreset::Claude, WindowPreset::Codex],
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    // A pre-fix launch must stop before spawning a real installed provider.
+    let invalid_profile = temp.path().join("invalid-profile.toml");
+    fs::write(&invalid_profile, "[").unwrap();
+    runtime.profile_config_path = Some(invalid_profile);
+    let windows = runtime
+        .tab("target")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    for window in windows {
+        let events = runtime.start_window("target", &window.id, window.preset, window.geometry);
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                    if detail.contains("update_drain")
+            )),
+            "direct {:?} must explain the host hold",
+            window.preset
+        );
+    }
+    assert!(runtime.runtimes.is_empty());
+    assert!(runtime.active_agent_sessions.is_empty());
+}
+
+#[test]
 fn app_runtime_spawn_agent_window_dedupes_inflight_launch_for_same_work() {
     let _env_lock = env_test_lock()
         .lock()

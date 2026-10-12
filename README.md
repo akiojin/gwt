@@ -784,11 +784,15 @@ gwt respects any explicit value (`true` or `false`) and does not change it. A
 config that cannot be parsed or written never blocks startup; the path and
 cause are recorded in the error ledger (`errors.list`).
 
-`errors.list` returns project-scoped errors by default. Set `project_root` to
-filter by project. Use `scope: "host"` for machine-wide errors such as startup
+`errors.list` returns only the current project's errors by default, including
+its other worktrees. Set `project_root` to filter by an explicit recorded root.
+Use `scope: "host"` for machine-wide errors such as startup
 configuration failures, `scope: "unknown"` for unattributed records, or
 `scope: "all"` to inspect every scope. A `project_root` filter always excludes
 host and unknown records; gwt never guesses their project.
+Damaged ledger rows appear as `ledger_corruption` host diagnostics with the
+ledger filename and line number. Their timestamp is when corruption is observed;
+the original rows remain intact.
 
 Codex CLIs before 0.153.0 cannot load a table under `[features]`: a single
 `[features.context_management]` table makes the whole config unreadable
@@ -845,6 +849,38 @@ Choose **Migrate** to run the migration now. Progress is streamed phase by
 phase (Validate -> Backup -> Bareify -> Worktrees -> Submodules -> Tracking ->
 Cleanup -> Done). On success the project tab reloads onto the new branch
 worktree without restarting the app.
+
+## Share local Board milestones through GitHub Discussions
+
+To share `decision`, `blocked`, and `handoff` posts across machines, keep the
+**Local** Board provider and add a binding to `.gwt/work/board.toml`:
+
+```toml
+provider = "local"
+
+[github_discussion]
+owner = "your-org"
+repo = "your-repo"
+number = 123
+```
+
+Use the same existing Discussion on each machine, with GitHub Discussions enabled
+and `gh` authenticated for read/write access. Board reads and posts schedule
+background synchronization at most once a minute. To synchronize explicitly and
+inspect the latest result, send `{"schema_version":1,"operation":"board.sync","params":{}}`
+to `gwtd` on stdin. `status` and `claim` stay local; the shared kinds cannot be
+changed through configuration. Imported posts appear in the existing Board feed.
+Only comments whose GitHub author association is `OWNER`, `MEMBER`, or
+`COLLABORATOR` are imported; other or unknown associations are ignored. Choose a
+repository whose owner, organization members, and collaborators you trust with
+local coordination, since imported posts can open and resolve escalations.
+
+Synchronization is best effort: it sends the current local window of up to 500
+posts, so older unsent posts that leave that window during a long outage are not
+backfilled. Rate limits, expired authentication, and network errors leave the
+local Board usable and are reported by `board.sync`; failures retry after five
+minutes, subject to the shared GitHub budget. An offline peer receives saved
+comments when it next synchronizes. Remove `[github_discussion]` to disable sharing.
 
 ## Board providers (Local / Slack / Teams)
 

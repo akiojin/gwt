@@ -280,6 +280,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             autonomous_mode: false,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             autonomous_issues: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),

@@ -1001,6 +1001,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 continue;
                             };
                             if let Some(control) = decode_issue_monitor_control_in_repo(payload, Some(&scope.project_root)) {
+                                let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
                                     completion.reject(IssueMonitorControlQueueError::Closed);
@@ -1035,7 +1036,11 @@ fn spawn_issue_monitor_worker_with_lease(
                                     );
                                     control_open = false;
                                 }
-                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                if review_deferred {
+                                    publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                                } else {
+                                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                }
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
                                 // Preserve committed scan intent while the
@@ -1080,6 +1085,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         break;
                     };
                     revision = next_revision;
+                    let review_deferred = matches!(&accepted.control, IssueMonitorControl::ReviewDispatchDeferred(_));
                     match try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
@@ -1153,7 +1159,11 @@ fn spawn_issue_monitor_worker_with_lease(
                             control_open = false;
                         }
                     }
-                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                    if review_deferred {
+                        publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                    } else {
+                        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                    }
                 }
                 _ = wait_for_issue_monitor_deadline(scan_watchdog_deadline) => {
                     if expire_issue_monitor_scan_at_watchdog(
@@ -1178,6 +1188,10 @@ fn spawn_issue_monitor_worker_with_lease(
                     in_flight_scan = None;
                     match scan_result {
                         Ok(Ok(scanned_monitor)) => {
+                            crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                                &mut monitor,
+                                &scope.project_root,
+                            );
                             if accept_completed_issue_monitor_scan(
                                 &prefs_path,
                                 &mut monitor,
@@ -1215,7 +1229,9 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // journal before the coalesced retry.
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
-                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                                // Preserve deliveries until a fresh scan commits. In particular,
+                                // a host-drain deferral must not immediately emit itself again.
+                                publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
                                 scan_requested = true;
                                 tokio::task::yield_now().await;
                             }
@@ -1397,7 +1413,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     {
                         // Deadline recovery cannot depend on a remote scan
                         // completing: it must also run while that lane is stuck.
-                        if expire_daemon_windowless_launches(&prefs_path, &mut monitor) {
+                        if expire_daemon_windowless_launches(&prefs_path, &mut monitor, &scope.project_root) {
                             let Some(next_revision) = revision.checked_add(1) else {
                                 tracing::error!("issue monitor revision exhausted; stopping worker");
                                 break;
@@ -1911,6 +1927,8 @@ enum IssueMonitorControl {
     /// SPEC #3200 T-046/FR-024: arm/disarm the unattended autonomous mode kill
     /// switch. Disarming stops new autonomous candidates on the next scan.
     AutonomousMode(bool),
+    /// A host-wide update drain postponed an unstarted review window.
+    ReviewDispatchDeferred(crate::AutonomousReviewDispatch),
     /// SPEC #3200 FR-015: a review agent reported its verdict for a reviewed SHA.
     ReviewVerdict {
         issue_number: u64,
@@ -2040,6 +2058,7 @@ enum IssueMonitorControl {
         message: String,
         delivery_id: Option<String>,
         materializer_id: Option<String>,
+        retryable: bool,
         failure: Option<crate::IssueMonitorFailure>,
     },
     AgentFailed {
@@ -2510,6 +2529,7 @@ fn try_apply_typed_issue_monitor_failure(
             delivery_id,
             materializer_id,
             failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict { holder_window_id }),
+            ..
         } => {
             let (Some(delivery_id), Some(materializer_id)) =
                 (delivery_id.as_deref(), materializer_id.as_deref())
@@ -2699,6 +2719,10 @@ fn apply_routine_issue_monitor_control(
             );
             false
         }
+        IssueMonitorControl::ReviewDispatchDeferred(dispatch) => {
+            monitor.requeue_review_dispatch_for_update_drain(&dispatch);
+            false
+        }
         IssueMonitorControl::ReviewVerdict {
             issue_number,
             reviewed_sha,
@@ -2778,6 +2802,7 @@ fn apply_routine_issue_monitor_control(
             message,
             delivery_id,
             materializer_id,
+            retryable,
             failure,
         } => match failure {
             Some(crate::IssueMonitorFailure::ResumeWriterConflict { holder_window_id }) => {
@@ -2804,6 +2829,7 @@ fn apply_routine_issue_monitor_control(
                 message,
                 delivery_id.as_deref(),
                 materializer_id.as_deref(),
+                retryable,
                 now,
             ),
         },
@@ -3248,6 +3274,21 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
     decode_issue_monitor_control_in_repo(payload, None)
 }
 
+#[cfg(test)]
+#[test]
+fn issue_5062_host_drain_can_requeue_a_review_delivery_through_control() {
+    let payload = serde_json::json!({
+        "event": "control", "source_pid": u32::MAX,
+        "payload": { "review_dispatch_deferred": {
+            "issue_number": 5062, "pr_number": 42, "reviewed_sha": "abc123",
+            "required_criteria": [], "diff": "", "linked_issue_kind": "issue",
+        } },
+    });
+    assert!(
+        matches!(decode_issue_monitor_control(payload), Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch)) if dispatch.issue_number == 5062 && dispatch.pr_number == 42)
+    );
+}
+
 fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
@@ -3534,6 +3575,17 @@ fn decode_issue_monitor_control_in_repo(
                     at,
                 });
             }
+            if let Some(dispatch) = payload.get("review_dispatch_deferred") {
+                let dispatch: crate::AutonomousReviewDispatch =
+                    serde_json::from_value(dispatch.clone()).ok()?;
+                if dispatch.issue_number == 0
+                    || dispatch.pr_number == 0
+                    || dispatch.reviewed_sha.trim().is_empty()
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch));
+            }
             if let Some(review_verdict) = payload.get("review_verdict") {
                 let issue_number = review_verdict.get("issue_number")?.as_u64()?;
                 let reviewed_sha = review_verdict
@@ -3633,6 +3685,10 @@ fn decode_issue_monitor_control_in_repo(
                     message,
                     delivery_id,
                     materializer_id,
+                    retryable: match launch_failed.get("retryable") {
+                        None => true,
+                        Some(value) => value.as_bool()?,
+                    },
                     failure,
                 });
             }
@@ -3998,7 +4054,12 @@ fn persist_daemon_issue_monitor_state(
 fn expire_daemon_windowless_launches(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
+    project_root: &Path,
 ) -> bool {
+    crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+        monitor,
+        project_root,
+    );
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
@@ -4100,6 +4161,7 @@ fn commit_issue_monitor_scan_if_current(
     // machine observation. Preserve refreshed capacity even when its numeric
     // cap did not change (and therefore did not fence the scan by revision).
     scanned.set_agent_capacity(monitor.status_view().agent_capacity);
+    scanned.set_process_held_issues(monitor.process_held_issues().clone());
     let proposed_effects = scanned.pending_effects().to_vec();
     let proposed_launch_session_strategies = scanned.prefs().queued_launch_session_strategies;
     let recovery_baseline = monitor.prefs();
@@ -5387,12 +5449,9 @@ fn scan_issue_monitor_once_blocking(
             "resuming autonomous issues whose question was answered"
         );
     }
-    monitor.recover_stuck_autonomous(&now);
-    // Issue #4084 AC-2/AC-3/AC-4: classify the idle windows the GUI last
-    // observed and release the ones no human has to judge, before this scan
-    // decides what it may launch. `stuck_unknown` stays on the steering path
-    // `recover_stuck_autonomous` above owns.
-    crate::issue_monitor_worker::reconcile_issue_monitor_idle_windows(
+    // Recover stuck launches and classify idle windows before admission,
+    // sharing the live worktree observations across both decisions (#4862).
+    crate::issue_monitor_worker::reconcile_issue_monitor_windows(
         &mut monitor,
         &scope.project_root,
         &now,
@@ -8876,6 +8935,7 @@ exit 0
                 &prefs_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
+                    retryable: true,
                     issue_number: 42,
                     message: "review launch failed".to_string(),
                     delivery_id: None,
@@ -8919,6 +8979,7 @@ exit 0
                 &prefs_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
+                    retryable: true,
                     issue_number: 42,
                     message: "fresh manual launch failed before materialization".to_string(),
                     delivery_id: None,
@@ -8981,6 +9042,7 @@ exit 0
             // Deliberately different from wall time, without sleeping.
             processed_at: "2000-01-01T00:00:00Z".to_string(),
             control: IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 42,
                 message: "review launch failed".to_string(),
                 delivery_id: None,
@@ -9038,6 +9100,7 @@ exit 0
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
         let stale_before_control = monitor.clone();
         let accepted = super::AcceptedIssueMonitorControl::new(IssueMonitorControl::LaunchFailed {
+            retryable: true,
             issue_number: 42,
             message: "review launch failed".to_string(),
             delivery_id: None,
@@ -10171,6 +10234,91 @@ exit 0
     }
 
     #[test]
+    fn nonretryable_startup_failure_consumes_only_its_exact_delivery() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42], "test", "2026-07-28T00:00:00Z");
+        monitor.record_candidate(crate::IssueMonitorIssue {
+            number: 42,
+            title: "fresh launch".into(),
+            labels: vec!["bug".into()],
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z"
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-42",
+            |_| false
+        ));
+        let payload = |delivery_id: &str, materializer_id: &str| {
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "launch_failed": { "issue_number": 42, "message": "fresh startup failed",
+                        "delivery_id": delivery_id, "materializer_id": materializer_id, "retryable": false }
+                }),
+                std::process::id() + 1,
+            )
+        };
+        let before = monitor.prefs();
+        assert!(!apply_issue_monitor_control(
+            &mut monitor,
+            decode_issue_monitor_control(payload("launch:effect-42", "other-gui")).unwrap()
+        ));
+        assert_eq!(monitor.prefs(), before);
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            decode_issue_monitor_control(payload("launch:effect-42", "gui-a")).unwrap()
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            crate::MonitorInboxState::LaunchFailed
+        );
+        assert_eq!(monitor.attempt_count(42), 0);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "operator retry", "2026-07-28T00:01:00Z"),
+            crate::IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-new",
+            "host/session",
+            "effect-new",
+            "2026-07-28T00:01:00Z"
+        ));
+        let successor = monitor.prefs();
+        assert!(!apply_issue_monitor_control(
+            &mut monitor,
+            decode_issue_monitor_control(payload("launch:effect-42", "gui-a")).unwrap()
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "old startup failure cannot revoke a successor"
+        );
+    }
+
+    #[test]
     fn issue_monitor_launched_control_marks_active_item_launched() {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
@@ -10430,6 +10578,7 @@ exit 0
             source: None,
         };
         let launch_failure = IssueMonitorControl::LaunchFailed {
+            retryable: true,
             issue_number: 42,
             message: "directory prompt cannot exist before a pane".to_string(),
             delivery_id: None,
@@ -10502,6 +10651,7 @@ exit 0
                     "matching LaunchFailed",
                     monitor,
                     IssueMonitorControl::LaunchFailed {
+                        retryable: true,
                         issue_number: 42,
                         message: "active writer".to_string(),
                         delivery_id: Some("launch:effect-match".to_string()),
@@ -10572,6 +10722,7 @@ exit 0
                     "mismatched LaunchFailed materializer",
                     monitor,
                     IssueMonitorControl::LaunchFailed {
+                        retryable: true,
                         issue_number: 42,
                         message: "active writer".to_string(),
                         delivery_id: Some("launch:effect-live".to_string()),
@@ -12235,6 +12386,7 @@ exit 0
             &prefs_path,
             &mut monitor,
             IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 43,
                 message: failure.clone(),
                 delivery_id: None,
@@ -17387,6 +17539,7 @@ exit 1
             ..Default::default()
         };
         canonical.set_agent_capacity(latest.clone());
+        canonical.set_process_held_issues(std::collections::BTreeSet::from([42]));
         let epoch = canonical.effect_authority_epoch();
 
         assert!(super::commit_issue_monitor_scan_if_current(
@@ -17396,6 +17549,10 @@ exit 1
             epoch,
         ));
         assert_eq!(canonical.status_view().agent_capacity, latest);
+        assert_eq!(
+            canonical.process_held_issues(),
+            &std::collections::BTreeSet::from([42])
+        );
         assert_eq!(canonical.effective_max_active_agents(), 3);
         let persisted = std::fs::read_to_string(&prefs_path).expect("read prefs");
         assert!(!persisted.contains("latest machine measurement"));
@@ -19164,6 +19321,7 @@ exit 1
             &prefs_path,
             &mut monitor,
             super::IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 42,
                 message: "non-owner launch failure".to_string(),
                 delivery_id: Some("launch:effect-42".to_string()),
@@ -20271,6 +20429,7 @@ exit 1
                 &writer_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
+                    retryable: true,
                     issue_number: 43,
                     message: writer_failure,
                     delivery_id: None,
@@ -21798,6 +21957,7 @@ exit 1
             &failure_wins_path,
             &mut failed,
             IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 43,
                 message: "fresh failure".to_string(),
                 delivery_id: None,
@@ -21973,6 +22133,7 @@ exit 1
                         prefs,
                     ),
                     IssueMonitorControl::LaunchFailed {
+                        retryable: true,
                         issue_number: 42,
                         message: "active writer".to_string(),
                         delivery_id: Some("launch:effect-max".to_string()),

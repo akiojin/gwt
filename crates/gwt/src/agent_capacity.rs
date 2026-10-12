@@ -1406,18 +1406,26 @@ mod tests {
         let mut snapshot = snapshot(&root);
         snapshot.inventory.uncertainties = (0..37)
             .map(
-                |_| crate::session_inventory::SessionObservationUncertainty {
-                    runtime_path: PathBuf::new(),
-                    session_id: None,
+                |index| crate::session_inventory::SessionObservationUncertainty {
+                    runtime_path: root.join(format!("runtime/{index}/session.json")),
+                    session_id: Some(format!("session-{index}")),
                     reason: "child_identity_missing".to_string(),
                 },
             )
             .collect();
+        // Exercise the shared snapshot boundary, not only an in-memory list
+        // with identical empty identities (#5284 / #5227 recurrence).
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let mut snapshot: MachineCapacitySnapshot = serde_json::from_slice(&bytes).unwrap();
         let view = project_capacity_at(&snapshot, &root, &BTreeSet::new(), 0, 101);
         assert!(view
             .reason
             .contains("inventory_uncertain: child_identity_missing ×37"));
         assert_eq!(view.reason.matches("child_identity_missing").count(), 1);
+        let wire = serde_json::to_value(&view).unwrap();
+        let reason = wire["reason"].as_str().unwrap();
+        assert_eq!(reason.matches("inventory_uncertain:").count(), 1);
+        assert!(reason.contains("child_identity_missing ×37"));
         snapshot.diagnostics = (0..40)
             .map(|index| format!("cause-{index}: {}", "測".repeat(80)))
             .collect();

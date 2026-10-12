@@ -2230,8 +2230,35 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
                 .fresh_execution
                 .as_ref()
                 .is_some_and(|(_, _, status)| *status != Some(false));
+        let monitor_startup_failure =
+            failure
+                .fresh_execution
+                .as_ref()
+                .is_some_and(|(pending, cleanup, status)| {
+                    *status == Some(false)
+                        && matches!(cleanup, Ok(true))
+                        && pending
+                            .launch_feedback_context
+                            .as_ref()
+                            .is_some_and(|context| {
+                                context
+                                    .issue_monitor_launch_binding_issue_number()
+                                    .is_some()
+                                    && context.issue_monitor_delivery_id.is_some()
+                                    && !context.issue_monitor_review_dispatch
+                                    && context.issue_monitor_autonomous_handoff.is_none()
+                            })
+                });
+        if monitor_startup_failure {
+            input.failure_input.retryable = false;
+            input.launch_feedback_context = failure
+                .fresh_execution
+                .as_ref()
+                .and_then(|(pending, _, _)| pending.launch_feedback_context.clone());
+        }
         if !preserved_authority
             && (answered_handoff
+                || monitor_startup_failure
                 || failure.continue_work.is_none() && failure.fresh_execution.is_none())
         {
             if let Some((active, _)) = failure_session.as_ref() {
@@ -2333,7 +2360,19 @@ fn rollback_worker_fresh_execution(
         }
         Err(error) => return Err(error.to_string()),
     }
-    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    if !pending
+        .launch_feedback_context
+        .as_ref()
+        .is_some_and(|context| {
+            context
+                .issue_monitor_launch_binding_issue_number()
+                .is_some()
+                && context.issue_monitor_delivery_id.is_some()
+                && context.issue_monitor_autonomous_handoff.is_none()
+        })
+    {
+        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    }
     Ok(true)
 }
 
@@ -5037,13 +5076,19 @@ impl AppRuntime {
                     ));
                 }
                 if let Some((pending, cleanup, status)) = failure.fresh_execution {
-                    events.extend(self.apply_prepared_fresh_execution_launch_failure(
-                        &window_id,
-                        &error.detail,
-                        &pending,
-                        cleanup,
-                        status,
-                    ));
+                    if failure
+                        .generic
+                        .as_ref()
+                        .is_none_or(|prepared| prepared.retryable)
+                    {
+                        events.extend(self.apply_prepared_fresh_execution_launch_failure(
+                            &window_id,
+                            &error.detail,
+                            &pending,
+                            cleanup,
+                            status,
+                        ));
+                    }
                 }
                 if let Some(generic) = failure.generic {
                     events.extend(self.launch_error_events_prepared(
@@ -5361,6 +5406,14 @@ impl AppRuntime {
             self.window_details
                 .insert(window_id.clone(), detail.clone());
             return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
+        }
+        if preset.is_agent_terminal() {
+            if let Some(detail) = self.host_update_drain_launch_hold().unwrap_or_else(Some) {
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                self.window_details
+                    .insert(window_id.clone(), detail.clone());
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
+            }
         }
         if !preset.requires_process() {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
@@ -5863,6 +5916,24 @@ impl AppRuntime {
         }
     }
 
+    pub(super) fn host_update_drain_launch_hold(&self) -> Result<Option<String>, String> {
+        for context in self.project_contexts() {
+            let prefs = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+            )
+            .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
+            if let Some(drain) = prefs.update_drain {
+                return Ok(Some(format!(
+                    "Host update_drain for v{} in {} holds new agent launches; {}",
+                    drain.version,
+                    context.project_root.display(),
+                    gwt::UPDATE_DRAIN_RELEASE_OPERATION,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     fn spawn_agent_window_with_placement(
         &mut self,
         tab_id: &str,
@@ -5947,6 +6018,14 @@ impl AppRuntime {
                         Some(placement.bounds()),
                     ));
                 }
+            }
+        }
+        // Resident PM launches suppress execution control and remain available
+        // to steer the draining agents. Every implementation/review launch
+        // shares the host gate, even when its own project has no drain.
+        if !config.suppress_execution_control {
+            if let Some(hold) = self.host_update_drain_launch_hold()? {
+                return Err(hold);
             }
         }
         // Resolve every synchronously fallible launch dependency before adding

@@ -386,11 +386,20 @@ pub fn read_execution_observations(
     project_root: &Path,
     issue_numbers: &[u64],
 ) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
+    read_execution_observations_from_inventory(project_root, issue_numbers, &inventory)
+}
+
+pub(crate) fn read_execution_observations_from_inventory(
+    project_root: &Path,
+    issue_numbers: &[u64],
+    inventory: &crate::session_inventory::SessionInventory,
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     use crate::cli::execution_state::{
         diagnose_owner, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
     };
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
     let worktrees = gwt_git::worktree::WorktreeManager::new(project_root)
         .list()
         .unwrap_or_default();
@@ -490,15 +499,31 @@ pub fn read_execution_observations(
         .collect()
 }
 
-/// Issue #4084 AC-2/AC-3: classify the launched windows against the last
-/// canvas snapshot and release the ones no human has to judge.
-pub fn reconcile_issue_monitor_idle_windows(
+/// Refresh transient Session liveness for every unbound recovery path.
+pub fn refresh_issue_monitor_execution_observations(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
+    let settlements =
+        read_execution_observations(project_root, &monitor.execution_settlement_issue_numbers());
+    monitor.set_process_held_issues(
+        settlements
+            .iter()
+            .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
+            .collect(),
+    );
+    settlements
+}
+
+/// Recover stuck launches, then classify idle windows using the same live
+/// worktree Session observations (Issue #4862 AC-8).
+pub fn reconcile_issue_monitor_windows(
     monitor: &mut IssueMonitorState,
     project_root: &Path,
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
-    let settlements =
-        read_execution_observations(project_root, &monitor.execution_settlement_issue_numbers());
+    let settlements = refresh_issue_monitor_execution_observations(monitor, project_root);
+    monitor.recover_stuck_autonomous(now);
     let outcome = monitor.reconcile_idle_windows(&settlements, now);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
         tracing::info!(
@@ -584,15 +609,29 @@ pub fn issue_monitor_read_only_daemon_payloads(
     monitor: &IssueMonitorState,
 ) -> Vec<IssueMonitorDaemonPayload> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut status = monitor.status_view_at(&now);
+    if let Some(drain) = status.update_drain.as_mut() {
+        drain.blocking = monitor
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match &effect.payload {
+                crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                    Some(crate::update_drain::UpdateBlocker::PendingAcquireClaim {
+                        issue_number: *issue_number,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+    }
     vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
-            payload: serde_json::to_value(monitor.status_view_at(&now))
-                .expect("issue monitor status serializes"),
+            payload: serde_json::to_value(status).expect("issue monitor status serializes"),
         },
         IssueMonitorDaemonPayload {
             event: "inbox".to_string(),
-            payload: serde_json::to_value(monitor.inbox.clone())
+            payload: serde_json::to_value(monitor.inbox_view_at(&now))
                 .expect("issue monitor inbox serializes"),
         },
     ]
@@ -3873,11 +3912,8 @@ mod tests {
             observed_at: "2026-09-07T04:10:00Z".to_string(),
             windows: Vec::new(),
         });
-        let outcome = reconcile_issue_monitor_idle_windows(
-            &mut monitor,
-            worktree.path(),
-            "2026-09-07T04:10:00Z",
-        );
+        let outcome =
+            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:00Z");
         assert!(
             outcome.released.is_empty(),
             "the exact agent process is alive"
@@ -3969,11 +4005,8 @@ mod tests {
             Some(IssueMonitorExecutionSettlement::Interrupted),
             "the reaper blocked it on the holder's behalf; the work is unfinished"
         );
-        let outcome = reconcile_issue_monitor_idle_windows(
-            &mut monitor,
-            worktree.path(),
-            "2026-09-07T04:10:00Z",
-        );
+        let outcome =
+            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:00Z");
         assert_eq!(outcome.requeued, vec![42]);
         assert!(monitor
             .autonomous_record(42)

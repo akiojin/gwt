@@ -1,6 +1,68 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.116.0] - 2026-10-12
+
+### Bug Fixes
+
+- **index:** Refresh 完了の再投入を止め有限量で安全に再開する
+- **index:** SEARCH_UNAVAILABLE の復旧案内を理由別にし GitHub 検索の代替経路を示す
+- **board:** Restrict discussion imports to trusted repository authors
+- **errors:** エラー台帳の同時追記とプロジェクト分離を修正
+- **monitor:** Release deferred updates and hold host launches
+- **monitor:** Close update drain admission and recovery gaps
+- **gui:** 容量警告を要約し意図的停止を障害表示から除外
+- **update:** 継承FDによるmanifestロック残留を解消
+- **gui:** Recover clipboard image uploads and report failures
+- **monitor:** Close late windows after launch delivery expires
+- **gui:** Keep issue backlog available before cache load
+- **gui:** Restore pull-render contract for issue refresh
+- **launch:** Serialize fresh readiness finalization
+- **monitor:** 生存 Session のある未バインド実行を再キューしない
+- **gui:** 容量要約を2行以内に収め診断の回帰を補強
+- **gui:** Issue の診断を通知センターへ集約
+- **gui:** 診断更新を静かに保ち通知集約のE2Eを整合
+- **execution:** Resume fresh launches across terminal Work history
+
+### Documentation
+
+- **pm:** Align fix ownership and quality-first reporting policy
+
+### Features
+
+- **board:** Mirror milestones through GitHub Discussions
+
+### Miscellaneous Tasks
+
+- **work:** Record index delivery acceptance audit
+- **work:** Record index availability delivery audit
+- **work:** Record board sharing PR delivery
+- **work:** #4114 の配信記録を保存
+- **work:** PR #5305 の配信記録を保存
+- **work:** #5098 のPR関連付け記録を配送
+- **work:** #5098 の重複起動履歴を配送
+- **work:** Issue #5299 のPR情報を記録
+- **work:** #4940のPR記帳を保存
+- **work:** #4940の追加Session記帳を保存
+- **work:** Record PR #5309 delivery metadata
+- **work:** PR #5311 の配信記録を保存
+- **work:** Record issue 5288 PR delivery
+
+### Testing
+
+- **index:** Rest 後の再取得を注入時計で検証する
+- **index:** Report Windows deadline cleanup evidence
+- **index:** Avoid racing automatic search submission
+- **index:** 負荷下でも backstop テストが reap 証跡を得られる予算にする
+- **index:** Align quota deadline fixture with queue census
+- **execution:** 時刻変化下の起動fenceと終端処理の排他を固定
+- **gui:** Support isolated pane close verification on Windows
+- **runtime:** Origin probe のdeadline検証を決定化
+- **gui:** Skip live issue diagnostics without isolated backend
+- **gui:** Inject issue load faults at request boundary
+- **gui:** 通知集約に既存のIssue表示契約を合わせる
+- **execution:** Keep nested authority probes light
+
 ## [9.115.0] - 2026-10-10
 
 ### Bug Fixes
