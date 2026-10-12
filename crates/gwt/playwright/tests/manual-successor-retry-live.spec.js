@@ -124,7 +124,7 @@ async function startFixture(info) {
   function rpc(operation, params = {}, sessionEnv = {}) {
     const run = spawnSync(gwtd, [], { cwd: project, env: { ...env, ...sessionEnv }, encoding: 'utf8', timeout: 30000, windowsHide: true,
       input: JSON.stringify({ schema_version: 1, operation, params }) });
-    if (run.status !== 0) throw new Error(`Isolated ${operation} failed: ${run.stdout} ${run.stderr}`);
+    if (run.status !== 0) throw new Error(`Isolated ${operation} failed (exit=${run.status}, signal=${run.signal}, error=${run.error?.code}): ${run.stdout} ${run.stderr}`);
     const envelope = JSON.parse(run.stdout);
     if (!envelope.ok) throw new Error(`Isolated ${operation} refused: ${run.stdout}`);
     return envelope;
@@ -348,7 +348,8 @@ test.describe('Manual successor retry (isolated checkout)', () => {
         purpose: 'Manual successor retry fixture', issue: OWNER, current_focus: 'Successor Work verification',
       });
       await fixture.sessionRpc(second.session_id, 'workspace.update', { current_focus: 'Validating successor execution authority' });
-      const commands = ['git status --porcelain'];
+      // Probe verify authority without requesting a nested Heavy host slot.
+      const commands = ['git diff --check'];
       await fixture.sessionRpc(second.session_id, 'verify.plan', { commands });
       await fixture.sessionRpc(second.session_id, 'verify.run', { commands });
       const verified = fixture.inspect();

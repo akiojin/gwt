@@ -508,7 +508,7 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             gwt::cli::CliCommand::Verify(gwt::cli::verification_record::VerifyCommand::Plan {
                 // This throwaway Git project has no Rust manifest. Exercise
                 // canonical verify.run authority with a real portable command.
-                commands: vec!["git status --porcelain".to_string()],
+                commands: vec!["git diff --check".to_string()],
                 derive: false,
             }),
         )
