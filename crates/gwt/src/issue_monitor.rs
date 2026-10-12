@@ -4597,6 +4597,9 @@ pub struct IssueMonitorState {
     /// Machine observations are refreshed separately and never stored in prefs.
     #[serde(skip)]
     agent_capacity: AgentCapacity,
+    /// Live worktree Sessions (including uncertain inventory); never persisted.
+    #[serde(skip)]
+    process_held_issues: BTreeSet<u64>,
     pub gui_connected: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
     legacy_git_launch_failure_migration_version: u32,
@@ -6959,6 +6962,7 @@ impl IssueMonitorState {
             label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
+            process_held_issues: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
             terminal_queue_retirements: BTreeMap::new(),
@@ -8539,8 +8543,17 @@ impl IssueMonitorState {
                 let window_id = self.launched_windows.get(&issue_number).cloned();
                 if window_id.is_none()
                     && (self.bind_observed_live_pane_to_unbound_launch(issue_number, now)
-                        || self.has_observed_monitor_runtime(issue_number))
+                        || self.has_observed_monitor_runtime(issue_number)
+                        || self.process_held_issues.contains(&issue_number))
                 {
+                    // Issue #4862 AC-4/8: a delivered slice can be requeued
+                    // while its Session still works without a canvas binding.
+                    // Keep its card Active and do not spend a retry attempt.
+                    if let Some(item) = self.inbox.iter_mut().find(|item| {
+                        item.issue.number == issue_number && item.state == MonitorInboxState::Queued
+                    }) {
+                        item.state = MonitorInboxState::Launched;
+                    }
                     return None;
                 }
                 let outcome = if let Some(window_id) = window_id {
@@ -9655,6 +9668,14 @@ impl IssueMonitorState {
     pub fn set_agent_capacity(&mut self, capacity: AgentCapacity) {
         self.agent_capacity = capacity;
         self.apply_agent_capacity_limit();
+    }
+
+    pub(crate) fn set_process_held_issues(&mut self, issues: BTreeSet<u64>) {
+        self.process_held_issues = issues;
+    }
+
+    pub(crate) fn process_held_issues(&self) -> &BTreeSet<u64> {
+        &self.process_held_issues
     }
 
     pub fn refresh_agent_capacity(&mut self, project_root: &Path) {
@@ -11552,6 +11573,9 @@ impl IssueMonitorState {
             .collect();
         let mut expired = Vec::new();
         for issue_number in unbound {
+            if self.process_held_issues.contains(&issue_number) {
+                continue;
+            }
             if let Some(diagnostic) = self.windowless_launch_stall_at(issue_number, now) {
                 if let Some(delivery) = self
                     .pending_launch_deliveries
@@ -11702,6 +11726,7 @@ impl IssueMonitorState {
                     || delivery.workspace_durable_window_id.is_some()
             })
             || self.launched_windows.contains_key(&issue_number)
+            || self.process_held_issues.contains(&issue_number)
             || self.has_monitor_runtime_census(issue_number)
             || self.observed_live_issue_pane(issue_number, now).is_some()
         {
@@ -35563,6 +35588,78 @@ mod tests {
     }
 
     #[test]
+    fn issue_4862_requeued_delivered_slice_with_live_session_does_not_spend_a_stuck_attempt() {
+        let now = "2026-06-29T01:00:00Z";
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.launched_windows.remove(&42);
+        monitor.set_inbox_state(42, MonitorInboxState::Queued);
+        monitor
+            .launching_claimed_at
+            .insert(42, "2026-06-29T00:00:00Z".to_string());
+        monitor.record_merged_deliveries(&BTreeMap::from([(
+            "work/issue-42".to_string(),
+            merged_delivery(5019, "delivered", "2026-06-29T00:30:00Z"),
+        )]));
+        let worktree = tempfile::tempdir().unwrap();
+        let inventory = crate::session_inventory::SessionInventory {
+            sessions: vec![crate::session_inventory::SessionObservation {
+                session_id: "still-working".to_string(),
+                issue_number: Some(42),
+                execution_binding_missing: false,
+                agent_id: "codex".to_string(),
+                worktree_path: worktree.path().to_path_buf(),
+                worktree_exists: true,
+                host_pid: 1,
+                child_pid: 2,
+                child_started_at: 1,
+                started_at: "2026-06-29T00:00:00Z".to_string(),
+                launch_origin: gwt_agent::SessionLaunchOrigin::Launch,
+                restore_source_session_id: None,
+            }],
+            ..Default::default()
+        };
+        let observations = crate::issue_monitor_worker::read_execution_observations_from_inventory(
+            worktree.path(),
+            &[42],
+            &inventory,
+        );
+        assert!(observations[&42].process_held);
+        let row = &monitor.agent_status_at(now).inbox[0];
+        assert_eq!(row.state, MonitorInboxState::Queued);
+        assert_eq!(
+            row.completion_reason.as_deref(),
+            Some("delivered_by_pr_5019")
+        );
+        assert_eq!(monitor.stuck_autonomous_issues(now), vec![42]);
+        let before = monitor.prefs();
+        monitor.set_process_held_issues(
+            observations
+                .iter()
+                .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
+                .collect(),
+        );
+
+        assert!(monitor.expire_stale_unbound_launches(now).is_empty());
+        assert!(monitor.recover_stuck_autonomous(now).is_empty());
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "a live Session vetoes lost-window retry"
+        );
+        assert_eq!(
+            monitor.agent_status_at(now).inbox[0].state,
+            MonitorInboxState::Launched
+        );
+        assert_eq!(monitor.agent_status_at(now).inbox[0].error_message, None);
+        monitor.rebase_daemon_driver_prefs(&before);
+        assert!(monitor.expire_stale_unbound_launches(now).is_empty());
+        assert_eq!(monitor.prefs(), before);
+        assert!(monitor.windowless_launch_stall_at(42, now).is_none());
+        monitor.set_process_held_issues(BTreeSet::new());
+        assert_eq!(monitor.expire_stale_unbound_launches(now), vec![42]);
+    }
+
+    #[test]
     fn issue_5066_stuck_recovery_rebinds_a_restored_live_pane_without_relaunching() {
         for status in [WindowState::Running, WindowState::Idle] {
             let mut original = stuck_monitor(42, "2026-06-29T00:00:00Z");
@@ -35581,6 +35678,14 @@ mod tests {
                 .is_empty());
             assert_eq!(
                 monitor.launched_window_id(42).as_deref(),
+                Some("tab-1::restored-agent")
+            );
+            assert_eq!(
+                monitor
+                    .inbox_item(42)
+                    .unwrap()
+                    .launched_window_id
+                    .as_deref(),
                 Some("tab-1::restored-agent")
             );
             assert_eq!(
