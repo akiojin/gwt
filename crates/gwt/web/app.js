@@ -491,10 +491,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       });
       let viewportRasterTimer = null;
       let viewportDomApplied = false;
-      // SPEC-2008 camera-focus / FR-094: the Fleet Minimap is instantiated once
-      // the DOM container resolves (see the boot block). applyViewport /
-      // recomputeOperatorTelemetry call it through the optional chain so the
-      // early `applyViewport()` paths run safely before it exists.
+      // The Fleet Minimap mounts once and subscribes to the catalog and camera.
       let fleetMinimap = null;
       // SPEC-3064 Phase 3 (E5): the wizard state (launchWizard /
       // launchWizardOpenError / launchWizardOpening / branch draft /
@@ -505,8 +502,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
-      // SPEC-3064 Phase 3 (E7): windowListOpen / windowListEntries moved to
-      // /project-shell-surface.js.
+      // Window List visibility stays in the shell; its snapshot gate lives in
+      // the shared catalog model below.
       // SPEC-2008 camera-focus: titlebarClickState (the double-click maximize
       // detector) was removed; a titlebar click now always frames the window.
       let appState = {
@@ -515,6 +512,59 @@ import { createUiStateStore } from "/ui-state-store.js";
         active_tab_id: null,
         recent_projects: [],
       };
+      const windowCatalogModel = createUiStateStore({
+        catalog: { appState, runtimeStates: {}, focusedId: null, version: 0 },
+        listEntries: [],
+        bounds: { x: 0, y: 0, width: 1, height: 1 },
+      });
+
+      function publishWindowCatalog() {
+        // Camera echoes and other chrome updates do not invalidate the window
+        // catalog. Keep its reference stable unless a catalog consumer changed.
+        const catalogAppState = {
+          active_tab_id: appState.active_tab_id,
+          tabs: (appState.tabs || []).map(tab => ({ ...tab,
+            workspace: { windows: tab.workspace?.windows || [] },
+          })),
+        };
+        const runtimeStates = Object.fromEntries(windowRuntimeStateMap);
+        windowCatalogModel.update(state => {
+          if (state.catalog.focusedId === focusedId
+              && JSON.stringify(state.catalog.appState) === JSON.stringify(catalogAppState)
+              && JSON.stringify(state.catalog.runtimeStates) === JSON.stringify(runtimeStates)) return state;
+          return { ...state, catalog: {
+            appState: catalogAppState, runtimeStates, focusedId,
+            version: state.catalog.version + 1,
+          } };
+        });
+      }
+
+      // Existing shell callers request a catalog commit; they cannot repaint
+      // just the List while leaving another catalog subscriber stale.
+      function renderWindowList() {
+        publishWindowCatalog();
+      }
+
+      function catalogRuntimeStateForWindow(windowData) {
+        const states = windowCatalogModel.read().catalog.runtimeStates;
+        const sourceState = Object.hasOwn(states, windowData.id) ? states[windowData.id] : windowData.status;
+        return normalizeWindowRuntimeState(sourceState, windowData.preset);
+      }
+
+      function publishWindowCatalogRuntime(windowId, status) {
+        windowCatalogModel.update(state => state.catalog.runtimeStates[windowId] === status ? state : ({
+          ...state, catalog: { ...state.catalog,
+            runtimeStates: { ...state.catalog.runtimeStates, [windowId]: status },
+            version: state.catalog.version + 1,
+          },
+        }));
+      }
+
+      function publishWindowCatalogFocus() {
+        windowCatalogModel.update(state => state.catalog.focusedId === focusedId ? state : ({
+          ...state, catalog: { ...state.catalog, focusedId, version: state.catalog.version + 1 },
+        }));
+      }
       let hubCatalog = null;
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /issue-render-sync.js) so a failed sync
@@ -2126,7 +2176,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // SPEC-2008 camera-focus / FR-094: every viewport change re-centres the
         // Fleet Minimap radar — the camera stays fixed at the minimap centre and
         // the world (cells) slides under it, mirroring the canvas stage.
-        fleetMinimap?.update();
+        windowCatalogModel.update(state => ({ ...state, bounds: visibleBounds() }));
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -3387,7 +3437,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           geometry,
         );
         applyLocalGeometryToModel(windowId, geometry);
-        fleetMinimap?.renderCells();
+        publishWindowCatalog();
         const runtime = terminalMap.get(windowId);
         sendGeometry(
           windowId,
@@ -3535,11 +3585,6 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
-        // SPEC-2008 camera-focus / FR-094: rebuild the Fleet Minimap cells from
-        // the live window set (geometry / agent color / telemetry). Runs on the
-        // same cadence as the canvas empty-state + rail badges, before the
-        // operator-shell-degraded early return so the minimap stays live.
-        fleetMinimap?.renderCells();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
         // open-window count across all project tabs, matching the cross-tab
@@ -3718,6 +3763,7 @@ import { createUiStateStore } from "/ui-state-store.js";
               windowRuntimeStateSinceMap.set(windowId, Date.now());
             }
             windowRuntimeStateMap.set(windowId, status);
+            publishWindowCatalogRuntime(windowId, status);
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -3763,7 +3809,6 @@ import { createUiStateStore } from "/ui-state-store.js";
             renderedRuntimeStatusKeys.set(windowId, nextRuntimeStatusKey);
             const element = windowMap.get(windowId);
             if (!element) {
-              renderWindowList();
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -3824,7 +3869,6 @@ import { createUiStateStore } from "/ui-state-store.js";
                 stopSpinnerAnimation(overlay);
               }
             }
-            renderWindowList();
 
           },
         );
@@ -3899,6 +3943,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         const previousFocusedId = focusedId;
         focusedId = windowId;
+        publishWindowCatalogFocus();
         if (previousFocusedId && previousFocusedId !== windowId) {
           const previousElement = windowMap.get(previousFocusedId);
           previousElement?.classList.remove("focused");
@@ -5252,12 +5297,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         closeCloneProjectModal,
         updateActionAvailability,
         requestWindowList,
-        renderWindowList,
         toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
-        applyWindowListEvent,
         applyCloneProjectReceiveEvent,
         applyPickerReceiveEvent,
         applyProjectOpenReceiveEvent,
@@ -5266,18 +5309,20 @@ import { createUiStateStore } from "/ui-state-store.js";
         handleMigrationModalEscape,
         handleWindowListEscape,
         installProjectShellChrome,
+        dispose: disposeProjectShellSurface,
       } = createProjectShellSurface({
         send,
         createNode,
         // appState / projectError are reassigned in app.js, so the surface
         // reads them through accessors.
         getAppState: () => appState,
+        windowCatalogModel,
         getProjectError: () => projectError,
         activeProjectTab,
         activeWorkspace,
         windowMap,
         appendRenderKeyPart,
-        runtimeStateForWindow,
+        runtimeStateForWindow: catalogRuntimeStateForWindow,
         windowDisplayTitle,
         windowTitleTooltip,
         windowRoleBadgeLabel,
@@ -6174,6 +6219,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             splitSurfaces?.sync();
             if (agentsHost) agentsSurface.sync(workspace.windows || []);
             cleanupTextPreviews();
+            publishWindowCatalog();
           },
         );
       }
@@ -6432,10 +6478,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
-          // SPEC-3064 Phase 3 (E7): window list entries and rendering live
-          // in the project shell surface.
+          // The backend snapshot gates only the List; both views read the catalog.
           case "window_list":
-            applyWindowListEvent(event);
+            windowCatalogModel.update(state => ({ ...state, listEntries: event.windows || [] }));
             break;
           case "provider_usage":
             applyProviderUsageUi({
@@ -7424,9 +7469,13 @@ import { createUiStateStore } from "/ui-state-store.js";
       // semantic state. Cell click flies the camera (frameWindow).
       fleetMinimap = createFleetMinimap({
         container: document.getElementById("fleet-minimap"),
-        getWindows: () => activeWorkspace().windows || [],
-        getVisibleBounds: visibleBounds,
-        getFocusedId: () => focusedId,
+        windowCatalogModel,
+        getWindows: () => {
+          const state = windowCatalogModel.read().catalog.appState;
+          return state.tabs.find(tab => tab.id === state.active_tab_id)?.workspace?.windows || [];
+        },
+        getVisibleBounds: () => windowCatalogModel.read().bounds,
+        getFocusedId: () => windowCatalogModel.read().catalog.focusedId,
         frameWindow,
         windowDisplayTitle,
         // FR-045 (anshin): the cell tooltip/aria-label surfaces each agent's
@@ -7444,11 +7493,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         // render a neutral cell with no telemetry dot.
         cellTelemetryState: (windowData) =>
           shouldShowRuntimeStatus(windowData)
-            ? mapAgentTelemetryState(runtimeStateForWindow(windowData))
+            ? mapAgentTelemetryState(catalogRuntimeStateForWindow(windowData))
             : "",
       });
-      // First paint from whatever windows already exist at boot.
-      fleetMinimap.renderCells();
+      window.addEventListener("unload", () => {
+        disposeProjectShellSurface();
+        fleetMinimap.dispose();
+        windowCatalogModel.dispose();
+      }, { once: true });
 
       window.addEventListener(
         "keydown",
