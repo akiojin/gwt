@@ -1057,14 +1057,9 @@ mod poll_state_tests {
             )
         };
         let before = std::fs::read(gwt_core::update::pending_update_manifest_path()).unwrap();
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(gwt_core::update::pending_update_dir().join("manifest.lock"))
-            .unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock =
+            gwt_core::update::pending_update_manifest_lock(&gwt_core::update::pending_update_dir())
+                .unwrap();
         commit(&mut ops).expect_err("apply must not race a manifest writer");
         assert_eq!(ops.portable_spawn_count, 0);
         assert!(gwt_core::update::load_update_resume_marker().is_none());
