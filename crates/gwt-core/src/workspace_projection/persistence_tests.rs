@@ -13191,6 +13191,40 @@ fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() 
     assert_eq!(projection.work_items[0].id, predecessor_id);
     assert!(projection.work_items[0].discarded);
     assert_eq!(projection.work_items[0].owner.as_deref(), Some("SPEC-4074"));
+    // Issue #5288 / #4249: legacy automatic repair removed the terminal
+    // predecessor's container. Its stable branch ID and Start lineage still
+    // identify the successor; historical path loss must not resurrect it.
+    projection
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == predecessor_id)
+        .unwrap()
+        .execution_containers
+        .clear();
+    // The successor's explicit Start link remains authority after routine
+    // heartbeat compaction, rather than returning to its terminal predecessor.
+    for index in 0..MAX_INLINE_WORK_EVENTS + 1 {
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Update,
+            &successor_id,
+            now + chrono::Duration::seconds(index as i64 + 6),
+        ));
+    }
+    projection.compact_inline_events();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("works.json");
+    save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    let heartbeat = WorkEvent::new(
+        WorkEventKind::Update,
+        &successor_id,
+        now + chrono::Duration::seconds(100),
+    );
+    crate::work_events_intake::ingest_work_events_content(
+        &path,
+        &serde_json::to_string(&heartbeat).unwrap(),
+    )
+    .unwrap();
+    let projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
 
     let current = find_work_item_for_container(
         &projection,
@@ -13243,11 +13277,8 @@ fn find_work_item_for_container_rejects_invalid_successor_authority() {
         match invalid {
             "owner" => successor.owner = Some("Issue #4313".to_string()),
             "container" => {
-                successor
-                    .execution_container
-                    .as_mut()
-                    .unwrap()
-                    .worktree_path = Some(PathBuf::from("/wt/other"));
+                successor.execution_container.as_mut().unwrap().branch =
+                    Some("work/other".to_string());
             }
             "link" => successor.related_work_item_id = Some("work-unrelated".to_string()),
             _ => unreachable!(),

@@ -7259,6 +7259,41 @@ impl AppRuntime {
             cleanup_fresh_execution_launch_candidate(&pending, &self.sessions_dir, status);
         match cleanup {
             Ok(true) => {
+                if pane == LaunchPaneDisposition::Teardown {
+                    if let Some(context) =
+                        pending.launch_feedback_context.as_ref().filter(|context| {
+                            context
+                                .issue_monitor_launch_binding_issue_number()
+                                .is_some()
+                                && context.issue_monitor_delivery_id.is_some()
+                                && !context.issue_monitor_review_dispatch
+                                && context.issue_monitor_autonomous_handoff.is_none()
+                        })
+                    {
+                        self.stop_window_runtime_without_session_projection(window_id);
+                        let (mut events, committed) = self.issue_monitor_launch_failed_delivery_committed_events_with_retryability(
+                            context.issue_monitor_project_root.as_deref().or(Some(&pending.project_root)),
+                            context.issue_monitor_launch_binding_issue_number().expect("filtered Monitor owner"),
+                            detail,
+                            context.issue_monitor_delivery_id.as_deref(),
+                            context.issue_monitor_session_mode.unwrap_or(gwt_agent::SessionMode::Normal),
+                            false,
+                        );
+                        if committed {
+                            self.launch_wizard_cache
+                                .forget_session(&pending.binding.session_id);
+                            self.pending_fresh_execution_launches.remove(window_id);
+                            let _ = clear_durable_launch_recovery(
+                                &self.sessions_dir,
+                                &pending.binding.session_id,
+                            );
+                            events.extend(
+                                self.close_window_after_issue_monitor_finalize_events(window_id),
+                            );
+                        }
+                        return events;
+                    }
+                }
                 self.launch_wizard_cache
                     .forget_session(&pending.binding.session_id);
                 let events = match pane {
@@ -7719,10 +7754,17 @@ impl AppRuntime {
                             })
                         });
                     if cleaned {
-                        if let Err(error) = clear_durable_launch_recovery(
-                            &sessions_dir, &pending.binding.session_id,
-                        ) {
-                            tracing::warn!(%error, "aborted fresh launch receipt cleanup remains pending");
+                        let monitor_startup_failure = pending.launch_feedback_context.as_ref().is_some_and(|context| {
+                            context.issue_monitor_launch_binding_issue_number().is_some()
+                                && context.issue_monitor_delivery_id.is_some()
+                                && context.issue_monitor_autonomous_handoff.is_none()
+                        });
+                        if !monitor_startup_failure {
+                            if let Err(error) = clear_durable_launch_recovery(
+                                &sessions_dir, &pending.binding.session_id,
+                            ) {
+                                tracing::warn!(%error, "aborted fresh launch receipt cleanup remains pending");
+                            }
                         }
                         FreshExecutionFinalizationOutcome::RolledBack(detail)
                     } else {
@@ -7844,6 +7886,22 @@ impl AppRuntime {
                 }
             }
             FreshExecutionFinalizationOutcome::RolledBack(detail) => {
+                if pending
+                    .launch_feedback_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context
+                            .issue_monitor_launch_binding_issue_number()
+                            .is_some()
+                            && context.issue_monitor_delivery_id.is_some()
+                            && context.issue_monitor_autonomous_handoff.is_none()
+                    })
+                {
+                    return (
+                        false,
+                        self.fresh_execution_launch_failed_events(window_id, &detail),
+                    );
+                }
                 self.launch_wizard_cache
                     .forget_session(&pending.binding.session_id);
                 // The worker already removed this exact candidate. Let the

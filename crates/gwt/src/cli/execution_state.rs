@@ -16976,7 +16976,7 @@ pub(crate) fn adopt_for_authenticated_host(
     use crate::{AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode};
     let mut out = String::new();
     let mut refusal = None;
-    let code = run_adopt_with_publisher(
+    let result = run_adopt_with_publisher(
         worktree,
         &session.id,
         session,
@@ -16984,23 +16984,34 @@ pub(crate) fn adopt_for_authenticated_host(
         &mut out,
         Some(publisher),
         &mut refusal,
-    )
-    // Issue #4443 AC-10: the underlying refusal already names the repair route
-    // (`execution.repair`, `verify.plan` ...). Replacing it with a fixed
-    // sentence left the agent with a bare `code=internal` and no way forward.
-    .map_err(|error| {
-        AgentWorkspaceUpdateError::new(
-            AgentWorkspaceUpdateErrorCode::Internal,
-            format!("Host adoption did not complete: {error}"),
-        )
-    })?;
-    if code != 0 {
-        return Err(AgentWorkspaceUpdateError::new(
+    );
+    let mut error = match result {
+        Ok(0) => return Ok(()),
+        Ok(_) => AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::TransactionConflict,
             out.trim(),
-        ));
+        ),
+        Err(error) => {
+            let code = if refusal.as_ref().is_some_and(|refusal| {
+                refusal.governance.cause
+                    == Some(crate::cli::governance::GovernanceCause::TransientGovernance)
+                    && refusal.governance.retryable == Some(true)
+            }) {
+                AgentWorkspaceUpdateErrorCode::TransactionConflict
+            } else {
+                AgentWorkspaceUpdateErrorCode::Internal
+            };
+            AgentWorkspaceUpdateError::new(code, format!("Host adoption did not complete: {error}"))
+        }
+    };
+    // Issue #5288 AC-4: the bridge withholds free-form Host messages. Carry
+    // the refusal's safe reason and exact recovery instead of losing them or
+    // guessing repair operations from a generic store-health message.
+    if let Some(refusal) = refusal {
+        error.diagnostic_reason = Some(refusal.reason_code);
+        error.recovery_operations = refusal.recovery_action.into_iter().collect();
     }
-    Ok(())
+    Err(error)
 }
 
 /// Called only after Host continuation has authenticated the exact Session,
@@ -17256,6 +17267,7 @@ fn run_adopt_locked(
                 Some(session_id),
             )
             .map_err(|err| {
+                *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
                 SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error(
                         "authenticating adopted execution authority",
@@ -17327,6 +17339,7 @@ fn run_adopt_locked(
         Some(session_id),
     )
     .map_err(|err| {
+        *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
         SpecOpsError::from(ApiError::Unexpected(
             crate::cli::trusted_store::store_health_error(
                 "authenticating adopted execution authority",

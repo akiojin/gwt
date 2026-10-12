@@ -45,6 +45,30 @@ fn main() {
     }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
     let session = std::env::var("GWT_SESSION_ID").unwrap();
+    // Private fixture input: never include bridge credentials in test artifacts.
+    let rpc_env: serde_json::Map<String, serde_json::Value> = [
+        "GWT_SESSION_ID",
+        "GWT_SESSION_RUNTIME_PATH",
+        "GWT_HOOK_FORWARD_URL",
+        "GWT_HOOK_FORWARD_TOKEN",
+        "GWT_BIN_PATH",
+    ]
+    .into_iter()
+    .map(|key| (key.into(), std::env::var(key).unwrap().into()))
+    .collect();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut rpc_input = options
+        .open(home.join(format!("rpc-env-{session}.json")))
+        .unwrap();
+    rpc_input
+        .write_all(serde_json::to_string(&rpc_env).unwrap().as_bytes())
+        .unwrap();
     let mut log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
