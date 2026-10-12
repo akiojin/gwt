@@ -5850,7 +5850,7 @@ pub fn current_work_id(
 ) -> Option<String> {
     let canonical_id = canonical_work_id(project_root, branch, worktree_path)?;
     Some(
-        current_canonical_work_item(projection, &canonical_id)
+        current_canonical_work_item(projection, project_root, &canonical_id)
             .map(|item| item.id.clone())
             .unwrap_or(canonical_id),
     )
@@ -5858,6 +5858,7 @@ pub fn current_work_id(
 
 fn current_canonical_work_item<'a>(
     projection: &'a WorkItemsProjection,
+    project_root: &Path,
     canonical_id: &str,
 ) -> Option<&'a WorkItem> {
     let mut current = projection
@@ -5892,24 +5893,14 @@ fn current_canonical_work_item<'a>(
                 || can_upgrade_work_owner(successor.owner.as_deref(), current.owner.as_deref()))
             || successor.execution_containers.is_empty()
             || !successor.execution_containers.iter().all(|container| {
-                current.execution_containers.iter().any(|predecessor| {
-                    container
-                        .branch
-                        .as_deref()
-                        .map(canonical_work_branch_identity)
-                        == predecessor
-                            .branch
-                            .as_deref()
-                            .map(canonical_work_branch_identity)
-                        && container
-                            .worktree_path
-                            .as_deref()
-                            .map(canonical_worktree_identity)
-                            == predecessor
-                                .worktree_path
-                                .as_deref()
-                                .map(canonical_worktree_identity)
-                })
+                // Branch-backed Work identity spans hosts. Old paths may be
+                // foreign or absent; the Start link and canonical identity
+                // establish lineage, not a historical host's checkout path.
+                canonical_work_id(
+                    project_root,
+                    container.branch.as_deref(),
+                    container.worktree_path.as_deref(),
+                ).as_deref() == Some(canonical_id)
             })
         {
             break;
@@ -5936,7 +5927,7 @@ pub fn find_work_item_for_container<'a>(
     let canonical_id = canonical_work_id(project_root, branch, worktree_path);
     if let Some(current) = canonical_id
         .as_deref()
-        .and_then(|id| current_canonical_work_item(projection, id))
+        .and_then(|id| current_canonical_work_item(projection, project_root, id))
     {
         return Some(current);
     }
@@ -5963,6 +5954,7 @@ pub fn find_work_item_for_container<'a>(
     // uses the branch ID. Resolve that same lifetime after the legacy match.
     current_canonical_work_item(
         projection,
+        project_root,
         &workspace_group_key_for_item(project_root, matched),
     )
     .or(Some(matched))

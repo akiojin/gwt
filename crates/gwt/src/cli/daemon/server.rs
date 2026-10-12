@@ -2058,6 +2058,7 @@ enum IssueMonitorControl {
         message: String,
         delivery_id: Option<String>,
         materializer_id: Option<String>,
+        retryable: bool,
         failure: Option<crate::IssueMonitorFailure>,
     },
     AgentFailed {
@@ -2528,6 +2529,7 @@ fn try_apply_typed_issue_monitor_failure(
             delivery_id,
             materializer_id,
             failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict { holder_window_id }),
+            ..
         } => {
             let (Some(delivery_id), Some(materializer_id)) =
                 (delivery_id.as_deref(), materializer_id.as_deref())
@@ -2800,6 +2802,7 @@ fn apply_routine_issue_monitor_control(
             message,
             delivery_id,
             materializer_id,
+            retryable,
             failure,
         } => match failure {
             Some(crate::IssueMonitorFailure::ResumeWriterConflict { holder_window_id }) => {
@@ -2826,6 +2829,7 @@ fn apply_routine_issue_monitor_control(
                 message,
                 delivery_id.as_deref(),
                 materializer_id.as_deref(),
+                retryable,
                 now,
             ),
         },
@@ -3681,6 +3685,10 @@ fn decode_issue_monitor_control_in_repo(
                     message,
                     delivery_id,
                     materializer_id,
+                    retryable: match launch_failed.get("retryable") {
+                        None => true,
+                        Some(value) => value.as_bool()?,
+                    },
                     failure,
                 });
             }
@@ -8927,6 +8935,7 @@ exit 0
                 &prefs_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
+                    retryable: true,
                     issue_number: 42,
                     message: "review launch failed".to_string(),
                     delivery_id: None,
@@ -8970,6 +8979,7 @@ exit 0
                 &prefs_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
+                    retryable: true,
                     issue_number: 42,
                     message: "fresh manual launch failed before materialization".to_string(),
                     delivery_id: None,
@@ -9032,6 +9042,7 @@ exit 0
             // Deliberately different from wall time, without sleeping.
             processed_at: "2000-01-01T00:00:00Z".to_string(),
             control: IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 42,
                 message: "review launch failed".to_string(),
                 delivery_id: None,
@@ -9089,6 +9100,7 @@ exit 0
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
         let stale_before_control = monitor.clone();
         let accepted = super::AcceptedIssueMonitorControl::new(IssueMonitorControl::LaunchFailed {
+            retryable: true,
             issue_number: 42,
             message: "review launch failed".to_string(),
             delivery_id: None,
@@ -10222,6 +10234,91 @@ exit 0
     }
 
     #[test]
+    fn nonretryable_startup_failure_consumes_only_its_exact_delivery() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42], "test", "2026-07-28T00:00:00Z");
+        monitor.record_candidate(crate::IssueMonitorIssue {
+            number: 42,
+            title: "fresh launch".into(),
+            labels: vec!["bug".into()],
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z"
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-42",
+            |_| false
+        ));
+        let payload = |delivery_id: &str, materializer_id: &str| {
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "launch_failed": { "issue_number": 42, "message": "fresh startup failed",
+                        "delivery_id": delivery_id, "materializer_id": materializer_id, "retryable": false }
+                }),
+                std::process::id() + 1,
+            )
+        };
+        let before = monitor.prefs();
+        assert!(!apply_issue_monitor_control(
+            &mut monitor,
+            decode_issue_monitor_control(payload("launch:effect-42", "other-gui")).unwrap()
+        ));
+        assert_eq!(monitor.prefs(), before);
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            decode_issue_monitor_control(payload("launch:effect-42", "gui-a")).unwrap()
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            crate::MonitorInboxState::LaunchFailed
+        );
+        assert_eq!(monitor.attempt_count(42), 0);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "operator retry", "2026-07-28T00:01:00Z"),
+            crate::IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-new",
+            "host/session",
+            "effect-new",
+            "2026-07-28T00:01:00Z"
+        ));
+        let successor = monitor.prefs();
+        assert!(!apply_issue_monitor_control(
+            &mut monitor,
+            decode_issue_monitor_control(payload("launch:effect-42", "gui-a")).unwrap()
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "old startup failure cannot revoke a successor"
+        );
+    }
+
+    #[test]
     fn issue_monitor_launched_control_marks_active_item_launched() {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
@@ -10481,6 +10578,7 @@ exit 0
             source: None,
         };
         let launch_failure = IssueMonitorControl::LaunchFailed {
+            retryable: true,
             issue_number: 42,
             message: "directory prompt cannot exist before a pane".to_string(),
             delivery_id: None,
@@ -10553,6 +10651,7 @@ exit 0
                     "matching LaunchFailed",
                     monitor,
                     IssueMonitorControl::LaunchFailed {
+                        retryable: true,
                         issue_number: 42,
                         message: "active writer".to_string(),
                         delivery_id: Some("launch:effect-match".to_string()),
@@ -10623,6 +10722,7 @@ exit 0
                     "mismatched LaunchFailed materializer",
                     monitor,
                     IssueMonitorControl::LaunchFailed {
+                        retryable: true,
                         issue_number: 42,
                         message: "active writer".to_string(),
                         delivery_id: Some("launch:effect-live".to_string()),
@@ -12286,6 +12386,7 @@ exit 0
             &prefs_path,
             &mut monitor,
             IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 43,
                 message: failure.clone(),
                 delivery_id: None,
@@ -19220,6 +19321,7 @@ exit 1
             &prefs_path,
             &mut monitor,
             super::IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 42,
                 message: "non-owner launch failure".to_string(),
                 delivery_id: Some("launch:effect-42".to_string()),
@@ -20327,6 +20429,7 @@ exit 1
                 &writer_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
+                    retryable: true,
                     issue_number: 43,
                     message: writer_failure,
                     delivery_id: None,
@@ -21854,6 +21957,7 @@ exit 1
             &failure_wins_path,
             &mut failed,
             IssueMonitorControl::LaunchFailed {
+                retryable: true,
                 issue_number: 43,
                 message: "fresh failure".to_string(),
                 delivery_id: None,
@@ -22029,6 +22133,7 @@ exit 1
                         prefs,
                     ),
                     IssueMonitorControl::LaunchFailed {
+                        retryable: true,
                         issue_number: 42,
                         message: "active writer".to_string(),
                         delivery_id: Some("launch:effect-max".to_string()),

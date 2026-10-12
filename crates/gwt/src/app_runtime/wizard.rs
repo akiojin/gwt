@@ -3109,14 +3109,65 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed {
                     message,
                     session_mode,
+                    retryable,
+                    fresh_execution,
                 }) => {
-                    return self.issue_monitor_launch_failed_delivery_events_with_mode(
-                        Some(project_root),
-                        issue_number,
-                        &message,
-                        Some(delivery_id),
-                        session_mode,
-                    );
+                    let (mut events, committed) = self
+                        .issue_monitor_launch_failed_delivery_committed_events_with_retryability(
+                            Some(project_root),
+                            issue_number,
+                            &message,
+                            Some(delivery_id),
+                            session_mode,
+                            retryable,
+                        );
+                    if committed && !retryable {
+                        if let Some((window_id, identity, generation)) = fresh_execution {
+                            let exact_window = self
+                                .window_lifecycle_generations
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .get(&window_id)
+                                .copied()
+                                == Some(generation);
+                            let exact_pending = self.pending_fresh_execution_launches.get(&window_id).is_some_and(|pending| {
+                                pending.session_identity == *identity
+                                    && super::continuation::pending_fresh_execution_activation_status(pending) == Some(false)
+                                    && pending.launch_feedback_context.as_ref().is_some_and(|feedback| {
+                                        feedback.issue_monitor_launch_binding_issue_number() == Some(issue_number)
+                                            && feedback.issue_monitor_delivery_id.as_deref() == Some(delivery_id)
+                                    })
+                            });
+                            let exact_session =
+                                self.active_agent_sessions.get(&window_id).map_or_else(
+                                    || !self.runtimes.contains_key(&window_id),
+                                    |active| {
+                                        active.session_id == identity.session_id
+                                            && active.worktree_path == identity.worktree_path
+                                            && active.branch_name == identity.branch
+                                    },
+                                );
+                            if exact_window && exact_pending && exact_session {
+                                events.extend(self.fresh_execution_launch_failed_events_with_pane(
+                                    &window_id,
+                                    &message,
+                                    super::launch::LaunchPaneDisposition::Retain,
+                                ));
+                                if !self
+                                    .pending_fresh_execution_launches
+                                    .contains_key(&window_id)
+                                {
+                                    self.active_agent_sessions.remove(&window_id);
+                                    events.extend(
+                                        self.close_window_after_issue_monitor_finalize_events(
+                                            &window_id,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    return events;
                 }
                 None => {}
             }
