@@ -356,6 +356,12 @@ export function createNotificationCenter({
     const existing = key ? liveSurfaceRow(key) : null;
     const level = HISTORY_LEVELS.includes(notice.level) ? notice.level : "info";
     const kind = incrementOccurrence ? "error" : "surface-notice";
+    // Live diagnostics refresh acknowledged rows without calling for triage again.
+    const needsAttention = incrementOccurrence || !existing
+      || existing.item.dataset.resolved === "true"
+      || existing.item.dataset.level !== level
+      || existing.item.querySelector(".notification-center__title")?.firstChild?.textContent !== (notice.title || "Notification")
+      || (existing.item.querySelector(".notification-center__message")?.textContent || "") !== (notice.message == null ? "" : String(notice.message));
     let item;
     if (existing) {
       if (incrementOccurrence) existing.count += 1;
@@ -412,7 +418,7 @@ export function createNotificationCenter({
       details?.remove();
     }
     if (existing) {
-      if (!isOpen) unread.add(item);
+      if (!isOpen && needsAttention) unread.add(item);
       notifyUnread();
     }
     return item;

@@ -366,6 +366,18 @@ test("surface status updates reuse one row with the latest severity and closed p
   assert.equal(center.unreadCount(), 1);
   assert.equal(center.unreadHasError(), false);
 
+  center.open();
+  center.close();
+  center.recordSurfaceNotice({
+    key: "capacity", title: "Manual capacity", level: "info", message: "No action needed.", details: "new live measurements",
+  });
+  assert.equal(details.querySelector(".notification-center__details-content").textContent, "new live measurements");
+  assert.equal(center.unreadCount(), 0, "diagnostic-only updates keep an acknowledged condition read");
+  center.recordSurfaceNotice({
+    key: "capacity", title: "Manual capacity", level: "info", message: "Use a lower Manual limit.", details: "new live measurements",
+  });
+  assert.equal(center.unreadCount(), 1, "changed guidance becomes unread again");
+
   assert.equal(center.recordError({ key: "capacity", title: "Measurement failed", message: "Permission denied" }), row);
   assert.equal(row.dataset.severity, "critical");
   assert.equal(row.querySelector(".notification-center__severity").getAttribute("aria-label"), "Critical");

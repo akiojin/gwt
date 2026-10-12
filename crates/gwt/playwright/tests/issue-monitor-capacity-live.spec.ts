@@ -314,6 +314,12 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await expect(notice.locator(".notification-center__count")).toHaveCount(0);
       await page.getByRole("button", { name: "Close notifications", exact: true }).click();
       await expect(summary).toBeFocused();
+      const bell = page.getByRole("button", { name: "Notifications", exact: true });
+      await expect(bell).toHaveAttribute("data-unread", "0");
+      await apply({ ...status, max_active_agents: 6, max_active_agents_override: 6,
+        agent_capacity: { ...status.agent_capacity, machine_live_agents: 9 } });
+      await expect(diagnostic).toContainText("Machine live: 9");
+      await expect(bell).toHaveAttribute("data-unread", "0");
       await apply({ ...status, state: "error", last_error: "GitHub scan failed" });
       await expect(pill).toHaveText("⚠ Error");
       await expect(surface).not.toContainText("GitHub scan failed");
