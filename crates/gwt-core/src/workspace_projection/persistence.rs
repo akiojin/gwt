@@ -3936,33 +3936,40 @@ pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkIte
     ensure_supported_workspace_layout(path)?;
     match fs::read(path) {
         Ok(bytes) => {
-            #[cfg(debug_assertions)]
-            mark_playwright_work_items_decode_started(path);
-            let mut items: WorkItemsProjection = serde_json::from_slice(&bytes)
-                .map_err(|error| WorkspaceStateLoadError::json(path, error))?;
-            for item in &mut items.work_items {
-                if item.title == "Workspace" {
-                    item.title = "Work".to_string();
-                } else if item.title.starts_with("Workspace ") {
-                    let suffix = &item.title["Workspace ".len()..];
-                    item.title = format!("Work {suffix}");
-                } else if item.title.ends_with(" workspace") {
-                    let prefix = &item.title[..item.title.len() - " workspace".len()];
-                    item.title = format!("{prefix} work");
-                }
-            }
-            items.refresh_derived_progress_summaries();
-            apply_workspace_container_detachments(path, &mut items)?;
-            // Issue #4508: bound the resident projection before any caller can
-            // hold on to it. Derived summaries are refreshed first so a legacy
-            // file's complete history still decides them once, and the
-            // authoritative snapshot compaction freezes carries that result.
-            items.compact_inline_events();
-            Ok(Some(items))
+            decode_workspace_work_items(path, &bytes, &load_container_detachments(path)?).map(Some)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(WorkspaceStateLoadError::io(path, error).into()),
     }
+}
+
+fn decode_workspace_work_items(
+    path: &Path,
+    bytes: &[u8],
+    detachments: &ContainerDetachments,
+) -> Result<WorkItemsProjection> {
+    #[cfg(test)]
+    run_before_work_items_decode();
+    #[cfg(debug_assertions)]
+    mark_playwright_work_items_decode_started(path);
+    let mut items: WorkItemsProjection = serde_json::from_slice(bytes)
+        .map_err(|error| WorkspaceStateLoadError::json(path, error))?;
+    for item in &mut items.work_items {
+        if item.title == "Workspace" {
+            item.title = "Work".to_string();
+        } else if item.title.starts_with("Workspace ") {
+            let suffix = &item.title["Workspace ".len()..];
+            item.title = format!("Work {suffix}");
+        } else if item.title.ends_with(" workspace") {
+            let prefix = &item.title[..item.title.len() - " workspace".len()];
+            item.title = format!("{prefix} work");
+        }
+    }
+    items.refresh_derived_progress_summaries();
+    remove_detached_containers(&mut items, detachments);
+    // Issue #4508: derive summaries before compaction freezes the replay base.
+    items.compact_inline_events();
+    Ok(items)
 }
 
 #[cfg(debug_assertions)]
@@ -4016,34 +4023,61 @@ fn load_or_synthesize_workspace_work_items_profiled(
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    with_workspace_current_and_work_items_lock_profiled(
-        &current_path,
-        &work_items_path,
-        |lock_wait_micros| {
-            let parse_started = Instant::now();
-
-            let projection = load_or_synthesize_workspace_work_items_from_paths(
-                &work_items_path,
-                &current_path,
-                &journal_path,
-                repo_path,
-            )?;
-            // Bind the cache signature to the exact projection read while the
-            // project lock is still held. A writer may publish a new file as
-            // soon as this closure returns, so metadata must not be re-read by
-            // the later cache-store step.
-            let signature = work_items_file_signature(&work_items_path);
-            Ok((
-                projection,
-                WorkItemsLoadProfile {
-                    cache_hit: false,
-                    lock_wait_micros,
-                    parse_micros: parse_started.elapsed().as_micros() as u64,
-                },
-                signature,
-            ))
+    let started = Instant::now();
+    let (snapshot, lock_wait_micros, signature) =
+        with_workspace_current_and_work_items_lock_profiled(
+            &current_path,
+            &work_items_path,
+            |lock_wait_micros| {
+                let snapshot = match fs::read(&work_items_path) {
+                    Ok(bytes) => WorkItemsReadSnapshot::Persisted {
+                        bytes,
+                        detachments: load_container_detachments(&work_items_path)?,
+                    },
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        WorkItemsReadSnapshot::Synthesized(
+                            load_or_synthesize_workspace_work_items_from_paths(
+                                &work_items_path,
+                                &current_path,
+                                &journal_path,
+                                repo_path,
+                            )?,
+                        )
+                    }
+                    Err(error) => {
+                        return Err(WorkspaceStateLoadError::io(&work_items_path, error).into())
+                    }
+                };
+                // Bind both Works and repair state to the immutable snapshot while
+                // locked. Decode/derive/compact after release so GUI reads do not
+                // hold up workspace.ensure (#5313).
+                let signature = work_items_file_signature(&work_items_path);
+                Ok((snapshot, lock_wait_micros, signature))
+            },
+        )?;
+    let projection = match snapshot {
+        WorkItemsReadSnapshot::Persisted { bytes, detachments } => {
+            decode_workspace_work_items(&work_items_path, &bytes, &detachments)?
+        }
+        WorkItemsReadSnapshot::Synthesized(projection) => projection,
+    };
+    Ok((
+        projection,
+        WorkItemsLoadProfile {
+            cache_hit: false,
+            lock_wait_micros,
+            parse_micros: (started.elapsed().as_micros() as u64).saturating_sub(lock_wait_micros),
         },
-    )
+        signature,
+    ))
+}
+
+enum WorkItemsReadSnapshot {
+    Persisted {
+        bytes: Vec<u8>,
+        detachments: ContainerDetachments,
+    },
+    Synthesized(WorkItemsProjection),
 }
 
 pub fn load_or_synthesize_workspace_work_items_from_paths(
@@ -4084,8 +4118,20 @@ pub struct WorkItemsCache {
 
 #[cfg(test)]
 thread_local! {
+    static BEFORE_WORK_ITEMS_DECODE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     static AFTER_PROFILED_WORK_ITEMS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_before_work_items_decode() {
+    BEFORE_WORK_ITEMS_DECODE.with(|slot| {
+        let operation = slot.borrow_mut().take();
+        if let Some(operation) = operation {
+            operation();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -5819,6 +5865,8 @@ fn current_canonical_work_item<'a>(
         .work_items
         .iter()
         .find(|item| item.id == canonical_id)?;
+    let mut owner_anchor = current.owner.as_deref();
+    let mut authoritative = current;
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
     for _ in 0..projection.work_items.len() {
@@ -5833,18 +5881,26 @@ fn current_canonical_work_item<'a>(
         let Some(successor) = candidates.next() else {
             break;
         };
+        // Historical terminal rows may lack owner metadata. Keep the last
+        // known owner across that gap, and only publish a later Work once its
+        // owner agrees. An ownerless tail must not gain adoption authority.
+        let owner_matches = match (owner_anchor, successor.owner.as_deref()) {
+            (Some(anchor), Some(owner)) => {
+                anchor == owner
+                    || can_upgrade_work_owner(Some(anchor), Some(owner))
+                    || can_upgrade_work_owner(Some(owner), Some(anchor))
+            }
+            (Some(_), None) => successor.is_terminal(),
+            (None, None) => true,
+            (None, Some(_)) => false,
+        };
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
             || !successor.events.iter().any(|event| {
                 event.kind == WorkEventKind::Start
                     && event.related_work_item_id.as_deref() == Some(current.id.as_str())
             })
-            // Owner display normalization may arrive on either Work first;
-            // its arrival order must not change lineage. This read-only
-            // equivalence does not authorize a reverse owner mutation.
-            || !(current.owner == successor.owner
-                || can_upgrade_work_owner(current.owner.as_deref(), successor.owner.as_deref())
-                || can_upgrade_work_owner(successor.owner.as_deref(), current.owner.as_deref()))
+            || !owner_matches
             || successor.execution_containers.is_empty()
             || !successor.execution_containers.iter().all(|container| {
                 // Branch-backed Work identity spans hosts. Old paths may be
@@ -5854,14 +5910,20 @@ fn current_canonical_work_item<'a>(
                     project_root,
                     container.branch.as_deref(),
                     container.worktree_path.as_deref(),
-                ).as_deref() == Some(canonical_id)
+                )
+                .as_deref()
+                    == Some(canonical_id)
             })
         {
             break;
         }
         current = successor;
+        if successor.owner.is_some() || owner_anchor.is_none() {
+            authoritative = successor;
+            owner_anchor = successor.owner.as_deref();
+        }
     }
-    Some(current)
+    Some(authoritative)
 }
 
 /// #3065: find the Work item that owns a given execution container. The
@@ -6782,9 +6844,45 @@ fn recover_unprojected_workspace_work_events_locked(
         .iter()
         .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
         .collect::<HashSet<_>>();
+    let compacted_through = projection
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            item.events_compacted_through()
+                .map(|through| (item.id.as_str(), through))
+        })
+        .collect::<HashMap<_, _>>();
+    let terminal_close_times = projection
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            crate::work_events_intake::terminal_close_time(item)
+                .map(|closed_at| (item.id.as_str(), closed_at))
+        })
+        .collect::<HashMap<_, _>>();
     let mut durable_events = Vec::new();
     for event in events {
         if seen_event_ids.contains(&event.id) {
+            continue;
+        }
+        // Intake already rejects unknown IDs at or before a terminal cutoff.
+        // Apply the same rule here before refolding all retained history.
+        if terminal_close_times
+            .get(event.work_item_id.as_str())
+            .is_some_and(|closed_at| event.updated_at <= *closed_at)
+        {
+            continue;
+        }
+        // A missing inline ID can mean compaction, not an interrupted writer.
+        // Match intake's watermark contract; an unprojected terminal close
+        // still owns lifecycle truth even when stamped before that boundary.
+        if !matches!(
+            event.kind,
+            WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+        ) && compacted_through
+            .get(event.work_item_id.as_str())
+            .is_some_and(|through| event.updated_at <= *through)
+        {
             continue;
         }
         durable_events.push(event);
