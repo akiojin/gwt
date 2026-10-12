@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.116.1] - 2026-10-12
+
+### Bug Fixes
+
+- **workspace:** Reduce Work projection lock contention
+- **deps:** Replace deprecated YAML parser with maintained fork
+
 ## [9.116.0] - 2026-10-12
 
 ### Bug Fixes
