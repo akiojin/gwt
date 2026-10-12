@@ -1188,6 +1188,10 @@ fn spawn_issue_monitor_worker_with_lease(
                     in_flight_scan = None;
                     match scan_result {
                         Ok(Ok(scanned_monitor)) => {
+                            crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                                &mut monitor,
+                                &scope.project_root,
+                            );
                             if accept_completed_issue_monitor_scan(
                                 &prefs_path,
                                 &mut monitor,
@@ -1409,7 +1413,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     {
                         // Deadline recovery cannot depend on a remote scan
                         // completing: it must also run while that lane is stuck.
-                        if expire_daemon_windowless_launches(&prefs_path, &mut monitor) {
+                        if expire_daemon_windowless_launches(&prefs_path, &mut monitor, &scope.project_root) {
                             let Some(next_revision) = revision.checked_add(1) else {
                                 tracing::error!("issue monitor revision exhausted; stopping worker");
                                 break;
@@ -4042,7 +4046,12 @@ fn persist_daemon_issue_monitor_state(
 fn expire_daemon_windowless_launches(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
+    project_root: &Path,
 ) -> bool {
+    crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+        monitor,
+        project_root,
+    );
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
@@ -4144,6 +4153,7 @@ fn commit_issue_monitor_scan_if_current(
     // machine observation. Preserve refreshed capacity even when its numeric
     // cap did not change (and therefore did not fence the scan by revision).
     scanned.set_agent_capacity(monitor.status_view().agent_capacity);
+    scanned.set_process_held_issues(monitor.process_held_issues().clone());
     let proposed_effects = scanned.pending_effects().to_vec();
     let proposed_launch_session_strategies = scanned.prefs().queued_launch_session_strategies;
     let recovery_baseline = monitor.prefs();
@@ -5431,12 +5441,9 @@ fn scan_issue_monitor_once_blocking(
             "resuming autonomous issues whose question was answered"
         );
     }
-    monitor.recover_stuck_autonomous(&now);
-    // Issue #4084 AC-2/AC-3/AC-4: classify the idle windows the GUI last
-    // observed and release the ones no human has to judge, before this scan
-    // decides what it may launch. `stuck_unknown` stays on the steering path
-    // `recover_stuck_autonomous` above owns.
-    crate::issue_monitor_worker::reconcile_issue_monitor_idle_windows(
+    // Recover stuck launches and classify idle windows before admission,
+    // sharing the live worktree observations across both decisions (#4862).
+    crate::issue_monitor_worker::reconcile_issue_monitor_windows(
         &mut monitor,
         &scope.project_root,
         &now,
@@ -17431,6 +17438,7 @@ exit 1
             ..Default::default()
         };
         canonical.set_agent_capacity(latest.clone());
+        canonical.set_process_held_issues(std::collections::BTreeSet::from([42]));
         let epoch = canonical.effect_authority_epoch();
 
         assert!(super::commit_issue_monitor_scan_if_current(
@@ -17440,6 +17448,10 @@ exit 1
             epoch,
         ));
         assert_eq!(canonical.status_view().agent_capacity, latest);
+        assert_eq!(
+            canonical.process_held_issues(),
+            &std::collections::BTreeSet::from([42])
+        );
         assert_eq!(canonical.effective_max_active_agents(), 3);
         let persisted = std::fs::read_to_string(&prefs_path).expect("read prefs");
         assert!(!persisted.contains("latest machine measurement"));

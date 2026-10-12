@@ -78,6 +78,16 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   await assertInbox();
 });
 
+test("Issue #4862 a live delivered slice stays Active while its window binding is recovered", async ({ page }) => {
+  await page.evaluate(() => (window as any).__queueInbox([{
+    issue: {number: 5, title: "Running issue"}, state: "launched",
+    completion_reason: "delivered_by_pr_5019", launched_window_id: null,
+  }]));
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "backlog").locator('[data-issue-number="5"]')).toHaveCount(0);
+  await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
+});
+
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {
   await expect(page.locator("[data-queue-column]")).toHaveCount(4);
   await expect(column(page,"backlog")).toContainText("First backlog issue");
