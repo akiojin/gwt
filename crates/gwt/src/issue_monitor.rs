@@ -31894,6 +31894,9 @@ mod tests {
 
     #[test]
     fn unknown_live_evidence_preserves_completion_but_cannot_create_a_new_one() {
+        // The final scan removes absent rows and can trigger remote readback.
+        // This lifecycle fixture must not use another test's process-global fake gh.
+        let repo = tempfile::tempdir().expect("isolated project root");
         let complete_spec = spec_issue(
             42,
             IssueMonitorReadiness::ReadyWithCompletedTasks,
@@ -31916,7 +31919,7 @@ mod tests {
             &mut monitor,
             &[unknown_spec],
             IssueMonitorCandidateSource::Live,
-            Path::new("."),
+            repo.path(),
             "2026-08-15T00:00:01Z",
         );
         assert_eq!(monitor.prefs().merged_issues, vec![42]);
@@ -31945,7 +31948,7 @@ mod tests {
             &mut monitor,
             &[ordinary],
             IssueMonitorCandidateSource::Live,
-            Path::new("."),
+            repo.path(),
             "2026-08-15T00:00:04Z",
         );
         assert!(!monitor.prefs().merged_issues.contains(&44));
