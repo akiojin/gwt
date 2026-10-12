@@ -22,13 +22,18 @@ URL_FILE="$CHECK_HOME/url"
 LOG_FILE="$CHECK_HOME/startup.log"
 mkdir -p "$CHECK_HOME/.gwt"
 if [ -d "$HOME/.gwt/runtime" ]; then
-  ln -s "$HOME/.gwt/runtime" "$CHECK_HOME/.gwt/runtime"
-fi
-for CHECK_INPUT in .codex .claude .config .docker .ssh .gitconfig .git-credentials .npmrc .bunfig.toml; do
-  if [ -e "$HOME/$CHECK_INPUT" ]; then
-    ln -s "$HOME/$CHECK_INPUT" "$CHECK_HOME/$CHECK_INPUT"
+  if command -v cygpath >/dev/null 2>&1; then
+    # MSYS ln can copy directories; a junction keeps this cache input linked.
+    CHECK_RUNTIME_SOURCE="$(cygpath -w "$HOME/.gwt/runtime")" \
+      CHECK_RUNTIME_LINK="$(cygpath -w "$CHECK_HOME/.gwt/runtime")" \
+      powershell.exe -NoProfile -Command \
+      'New-Item -ItemType Junction -Path $env:CHECK_RUNTIME_LINK -Target $env:CHECK_RUNTIME_SOURCE -ErrorAction Stop | Out-Null'
+  else
+    ln -s "$HOME/.gwt/runtime" "$CHECK_HOME/.gwt/runtime"
   fi
-done
+fi
+# This shell-only check needs the runtime input above; GitHub authentication
+# is forwarded below. Provider and SSH credential trees are unnecessary.
 jq -n --arg root "$REPO_ROOT" \
   '{tabs:[{id:"issue-5248",title:"Issue 5248",project_root:$root,kind:"git"}],recent_projects:[]}' \
   > "$CHECK_HOME/.gwt/session.json"
@@ -72,20 +77,22 @@ fi
 CHECK_HOOK_BIN="${CHECK_HOOK_BIN:-gwtd}"
 # browser-check-hook-authority-end
 
-# The managed surfaces are credential/config symlinks, so audit their stable
-# fallback with the real HOME, as required by browser-check.
+# Audit the managed hook fallback with the real HOME, as required by browser-check.
 ALLOW_MISSING_LOGICAL_FALLBACK=false
 if [ "$CHECK_HOOK_BIN" = gwtd ] && ! command -v gwtd >/dev/null 2>&1; then
   ALLOW_MISSING_LOGICAL_FALLBACK=true
 fi
 assert_hook_health() {
-  if ! jq -e --argjson allow_missing_logical "$ALLOW_MISSING_LOGICAL_FALLBACK" '
+  local health_json
+  health_json="$(cat)"
+  if ! printf '%s' "$health_json" | jq -e --argjson allow_missing_logical "$ALLOW_MISSING_LOGICAL_FALLBACK" '
     [.issues[] | select(
       ($allow_missing_logical and startswith("managed hook binary missing: ") and endswith(" uses gwtd"))
       or (startswith("managed hook failure: ") and test(" state=fail-open( |$)")) | not)] as $blocking
     | .status != "inactive" and ($blocking | length == 0)
   ' >/dev/null; then
     echo 'browser-check hook convergence failed' >&2
+    printf '%s' "$health_json" | jq '{status, issues}' >&2
     return 1
   fi
 }
