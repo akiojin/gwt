@@ -71,8 +71,9 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       });
       const mode = surface.locator('[data-role="monitor-capacity-mode"]');
       const input = surface.getByRole("spinbutton", { name: "Max active agents", exact: true });
-      const budget = surface.locator(".knowledge-monitor-capacity");
-      const warning = surface.locator(".knowledge-monitor-capacity-warning");
+      const notice = page.locator('.notification-center__item[data-error-key="issue-monitor:capacity"]');
+      const budget = notice.locator(".notification-center__details");
+      const warning = surface.locator(".knowledge-monitor-capacity-badge");
       // Initial target measurement advances in bounded background ticks; this
       // checkout took 419s cold. Keep UI action deadlines separate at 75s.
       await expect.poll(() => latestStatus(page), { timeout: 600_000 })
@@ -87,6 +88,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         const automatic = await latestStatus(page);
         const capacity = automatic.agent_capacity;
         await expect(input).toHaveValue(String(automatic.max_active_agents));
+        await warning.click();
         await budget.locator("summary").click();
         // Measurements remain live during the journey; compare the rendered
         // projection with the latest backend event in one browser observation.
@@ -94,7 +96,9 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           const status = ((window as any).__gwtPlaywrightMessages ?? [])
             .filter(({ payload }: any) => payload.kind === "issue_monitor_status").at(-1)?.payload.status;
           const current = status?.agent_capacity;
-          const text = document.querySelector(`.workspace-window[data-id="${id}"] .knowledge-monitor-capacity`)?.textContent ?? "";
+          // Healthy details are an explicitly requested snapshot, not a passive notification.
+          (document.querySelector(`.workspace-window[data-id="${id}"] .knowledge-monitor-capacity-badge`) as HTMLButtonElement)?.click();
+          const text = document.querySelector('.notification-center__item[data-error-key="issue-monitor:capacity"]')?.textContent ?? "";
           if (!current) return false;
           const expected = [
             `${current.recommended_worker_limit} monitor workers`,
@@ -109,6 +113,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           return current.constraints.map((constraint: any) => constraint.resource).sort().join(",") === "cpu,disk,ram"
             && expected.every(value => text.includes(value));
         }, windowId)).toBe(true);
+        await page.getByRole("button", { name: "Close notifications", exact: true }).click();
 
         // GUI CPU usage can change during the journey. Stay above the physical
         // CPU ceiling so the warning remains required for every fresh sample.
@@ -127,11 +132,10 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           const status = ((window as any).__gwtPlaywrightMessages ?? [])
             .filter(({ payload }: any) => payload.kind === "issue_monitor_status").at(-1)?.payload.status;
           const current = status?.agent_capacity;
-          const text = document.querySelector(`.workspace-window[data-id="${id}"] .knowledge-monitor-capacity-warning`)?.textContent ?? "";
-          return !!current && text.includes(`${value - current.recommended_worker_limit} agents above recommendation`)
-            && text.includes(current.limiting_constraint.toUpperCase());
+          const text = document.querySelector('.notification-center__item[data-error-key="issue-monitor:capacity"] .notification-center__message')?.textContent ?? "";
+          return !!current && text.includes(`${value - current.recommended_worker_limit} over recommended`);
         }, { id: windowId, value: manual })).toBe(true);
-        await expect(warning).toContainText("Reduce Max active if verification slows.");
+        await expect(notice).toContainText("Lower Max active if slow.");
         await expect(warning).toHaveAttribute("data-tone", "info");
         await expect(budget).toContainText("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         await expect(warning).toBeInViewport({ ratio: 1 });
@@ -183,13 +187,13 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
               constraints: [{ resource: "disk", capacity: null, binding: true, reason: diskReason }],
             } });
             await expect(warning).toBeVisible();
-            await expect(warning).toContainText("Running with manual limit 9. No action needed.");
+            await expect(notice).toContainText("Manual limit 9; no action needed.");
             await expect(warning).not.toContainText(reason);
             await expect(warning).toHaveAttribute("data-tone", "info");
             const text = await warning.textContent() ?? "";
             expect([...text].length, "compact default summary").toBeLessThanOrEqual(130);
             expect(text).not.toContain("child_identity_missing");
-            await expect(budget.locator('[data-role="capacity-reason"]')).toHaveText(reason);
+            await expect(budget).toContainText(reason);
             await expect(mode).toHaveText("Manual");
             await expect(input).toHaveValue("9");
             await expect(warning).toBeInViewport({ ratio: 1 });
@@ -204,7 +208,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         const restored = await expectOverride(page, null);
         await expect(mode).toHaveText("Auto");
         await expect(input).toHaveValue(String(restored.max_active_agents));
-        await expect(warning).toBeHidden();
+        await expect(warning).toHaveText(/Capacity \d+ · Details/);
         await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
           .toMatchObject({ max_active_agents_mode: "auto", max_active_agents: 1 });
         await gotoLiveGwt(page, BASE, { enableTestBridge: true });
@@ -246,7 +250,8 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           detail: { kind: "issue_monitor_status", status: value },
         }));
       }, status);
-      const reason = "inventory_complete=false; own_pm=0; target: /Users/example/target; disk measurement pending; disk measurement pending";
+      const repeated = Array(37).fill("inventory_uncertain: child_identity_missing").join("; ");
+      const reason = `inventory_complete=false; own_pm=0; target: /Users/example/target; disk measurement pending; disk measurement pending; ${repeated}`;
       const status = { ...saved, enabled: true, state: "idle", last_error: null, agent_blackout: null,
         max_active_agents: 5, max_active_agents_override: 5,
         agent_capacity: { ...saved.agent_capacity, measurement_complete: false, reason,
@@ -254,46 +259,100 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           machine_live_agents: 0, own_live_agents: 0, other_live_agents: 0, own_pm_agents: 0, gui_cpu_millicores: 0,
           constraints: [{ resource: "disk", capacity: null, binding: true, reason: "disk measurement pending" }] } };
       await apply(status);
-      const summary = surface.locator(".knowledge-monitor-capacity-warning");
-      const details = surface.locator(".knowledge-monitor-capacity");
-      const diagnostic = details.locator('[data-role="capacity-reason"]');
+      const summary = surface.locator(".knowledge-monitor-capacity-badge");
+      const drawer = page.locator(".notification-center-drawer");
+      const notice = page.locator('.notification-center__item[data-error-key="issue-monitor:capacity"]');
+      const details = notice.locator(".notification-center__details");
+      const diagnostic = details.locator(".notification-center__details-content");
       const pill = surface.locator(".knowledge-monitor-pill");
-      await expect(summary).toHaveText("Capacity measurement is incomplete. Running with manual limit 5. No action needed.");
+      await expect(summary).toHaveText("Capacity pending · Details");
       await expect(summary).toHaveAttribute("data-tone", "info");
-      await expect(summary).not.toContainText(/inventory_complete|own_pm|\/Users\//);
-      await expect(diagnostic).toBeHidden();
-      await expect(details.locator("summary")).toContainText("Details");
+      await expect(surface).not.toContainText(/inventory_complete|own_pm|\/Users\//);
+      await expect(surface.locator(".knowledge-monitor-capacity-warning, .knowledge-monitor-capacity")).toHaveCount(0);
+      await expect(notice).toHaveCount(1);
+      await expect(drawer).toBeHidden();
       await expect(pill).toHaveText("Running");
       const metrics = await summary.evaluate(element => {
         const style = getComputedStyle(element);
-        const root = getComputedStyle(document.documentElement);
         const probe = document.createElement("span");
-        probe.style.color = root.getPropertyValue("--color-text-muted");
+        probe.style.color = getComputedStyle(document.documentElement).getPropertyValue("--color-text-muted");
         document.body.append(probe);
         const infoColor = getComputedStyle(probe).color;
         probe.remove();
-        return { lines: element.getBoundingClientRect().height / parseFloat(style.lineHeight), color: style.color, infoColor };
+        return { color: style.color, infoColor };
       });
-      expect(metrics.lines).toBeLessThanOrEqual(2);
       expect(metrics.color).toBe(metrics.infoColor);
+      const assertSingleLine = async () => {
+        await summary.evaluate(element => { (element as HTMLElement).style.maxWidth = "220px"; });
+        expect(await summary.evaluate(element => getComputedStyle(element).whiteSpace)).toBe("nowrap");
+        expect(await summary.evaluate(element => element.scrollHeight <= element.clientHeight)).toBe(true);
+      };
+      await assertSingleLine();
       await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
       const summaryImage = testInfo.outputPath(`capacity-summary-${testInfo.project.name}.png`);
       await page.screenshot({ path: summaryImage, animations: "disabled" });
       await testInfo.attach(`capacity-summary-${testInfo.project.name}`, { path: summaryImage, contentType: "image/png" });
+      await summary.focus();
+      await summary.press("Enter");
+      await expect(drawer).toBeVisible();
+      await expect(notice).toBeFocused();
+      await expect(notice.locator(".notification-center__message")).toHaveText("Capacity pending. Manual limit 5; no action needed.");
+      await expect(diagnostic).toBeHidden();
       await details.locator("summary").click();
       await expect(diagnostic).toBeVisible();
       await expect(diagnostic).toContainText("/Users/example/target");
-      expect((await details.textContent() ?? "").split("disk measurement pending")).toHaveLength(2);
+      expect((await diagnostic.textContent() ?? "").split("disk measurement pending")).toHaveLength(2);
+      expect((await diagnostic.textContent() ?? "").split("child_identity_missing")).toHaveLength(2);
       const detailsImage = testInfo.outputPath(`capacity-details-${testInfo.project.name}.png`);
       await page.screenshot({ path: detailsImage, animations: "disabled" });
       await testInfo.attach(`capacity-details-${testInfo.project.name}`, { path: detailsImage, contentType: "image/png" });
+      const retained = await notice.elementHandle();
+      await apply({ ...status, max_active_agents: 6, max_active_agents_override: 6 });
+      await expect(notice).toHaveCount(1);
+      expect(await retained!.evaluate(element => element.isConnected)).toBe(true);
+      await expect(notice.locator(".notification-center__message")).toContainText("Manual limit 6");
+      await expect(notice.locator(".notification-center__count")).toHaveCount(0);
+      await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+      await expect(summary).toBeFocused();
+      const bell = page.getByRole("button", { name: "Notifications", exact: true });
+      await expect(bell).toHaveAttribute("data-unread", "0");
+      await apply({ ...status, max_active_agents: 6, max_active_agents_override: 6,
+        agent_capacity: { ...status.agent_capacity, machine_live_agents: 9 } });
+      await expect(diagnostic).toContainText("Machine live: 9");
+      await expect(bell).toHaveAttribute("data-unread", "0");
       await apply({ ...status, state: "error", last_error: "GitHub scan failed" });
-      await expect(pill).toContainText("Error");
+      await expect(pill).toHaveText("⚠ Error");
+      await expect(surface).not.toContainText("GitHub scan failed");
+      await pill.click();
+      const currentError = page.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
+      await expect(currentError).toBeFocused();
+      await expect(currentError).toContainText("GitHub scan failed");
+      await page.getByRole("button", { name: "Close notifications", exact: true }).click();
       await apply(status);
       await expect(pill).toHaveText("Running");
+      await expect(currentError).toHaveAttribute("data-resolved", "true");
+      await apply({ ...status, agent_capacity: { ...status.agent_capacity,
+        measurement_complete: true, recommended_worker_limit: 1, limiting_constraint: "cpu,ram,disk" } });
+      await expect(summary).toHaveText("Over recommended · Details");
+      await expect(notice.locator(".notification-center__message")).toHaveText("4 over recommended. Lower Max active if slow.");
+      await assertSingleLine();
       await apply({ ...status, max_active_agents: 0, max_active_agents_override: null });
       await expect(summary).toHaveAttribute("data-tone", "warning");
-      await expect(summary).toContainText("Wait for the next measurement or set Max active manually.");
+      await expect(notice).toHaveAttribute("data-level", "warn");
+      await expect(notice.locator(".notification-center__message")).toContainText("Wait or set Max active manually.");
+      await assertSingleLine();
+      const narrowImage = testInfo.outputPath(`capacity-narrow-${testInfo.project.name}.png`);
+      await page.screenshot({ path: narrowImage, animations: "disabled" });
+      await testInfo.attach(`capacity-narrow-${testInfo.project.name}`, { path: narrowImage, contentType: "image/png" });
+      // A current status badge remains useful after the operator clears history.
+      await summary.click();
+      await page.getByRole("button", { name: "Clear all", exact: true }).click();
+      await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+      await summary.click();
+      await expect(notice).toHaveCount(1);
+      await expect(notice).toBeFocused();
+      await expect(diagnostic).toBeHidden();
+      await page.getByRole("button", { name: "Close notifications", exact: true }).click();
       expect(errors, "zero console/page errors").toEqual([]);
     });
   });

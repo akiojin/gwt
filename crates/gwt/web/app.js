@@ -4860,6 +4860,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         // the center is constructed after this factory.
         reportSurfaceError: (error) => notificationCenter.recordError(error),
         resolveSurfaceError: (key) => notificationCenter.resolveError(key),
+        reportSurfaceNotice: (notice) => notificationCenter.recordSurfaceNotice(notice),
+        openSurfaceNotice: (key) => notificationCenter.open(key),
       });
       issueMonitorModel.subscribe(model => model.status, status =>
         window.__operatorShell?.applyIssueMonitorStatus?.(status));

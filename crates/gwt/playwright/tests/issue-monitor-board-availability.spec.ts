@@ -46,7 +46,15 @@ test("Issue #5287 real backend journals Issue load and render causes in errors.l
   const window = page.locator('.workspace-window[data-preset="issue"]').last();
   await expect(window).toBeVisible();
   const id = await window.getAttribute("data-id");
-  await expect(window.locator('.knowledge-list [role="alert"]')).toContainText(`Issue #5287 ${theme} load acceptance cause`);
+  await sendLiveGwtEvent(page, { kind: "focus_window", id });
+  await expect(window).toHaveClass(/focused/);
+  const loadBadge = window.getByRole("button", { name: "Issue load failed · Details", exact: true }).first();
+  await loadBadge.focus();
+  await loadBadge.press("Enter");
+  const loadNotice = page.locator(`[data-error-key="issue-window:${id}:load"]`);
+  await expect(loadNotice).toBeFocused();
+  await expect(loadNotice).toContainText(`Issue #5287 ${theme} load acceptance cause`);
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await page.evaluate(theme => {
     const original = Element.prototype.appendChild;
     Element.prototype.appendChild = function <T extends Node>(child: T): T {

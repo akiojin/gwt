@@ -65,11 +65,19 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   await page.reload();
   await assertInbox();
   await page.evaluate(() => (window as any).__queueLoadError());
-  await expect(page.locator('.knowledge-list [role="alert"]')).toContainText("Issue cache read failed");
+  const loadBadge = page.getByRole("button", { name: "Issue load failed · Details", exact: true }).first();
+  const loadNotice = page.locator('[data-error-key="issue-window:tab-queue::issue-1:load"]');
+  await expect(loadBadge).toBeVisible();
+  await expect(page.locator(".knowledge-list")).not.toContainText("Issue cache read failed");
+  await loadBadge.click();
+  await expect(loadNotice).toBeFocused();
+  await expect(loadNotice).toContainText("Issue cache read failed");
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
     .filter((message: any) => message.kind === "report_knowledge_error").map((message: any) => message.stage))).toContain("load");
   await page.evaluate(() => (window as any).__queueKnowledgeComplete());
-  await expect(page.locator('.knowledge-list [role="alert"]')).toHaveCount(0);
+  await expect(loadBadge).toHaveCount(0);
+  await expect(loadNotice).toHaveAttribute("data-resolved", "true");
   await expect(row(page, 3)).toContainText("Enriched queued issue");
   await expect(page.locator(".knowledge-row")).toHaveCount(6);
   await assertInbox();
@@ -84,11 +92,19 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
     };
     (window as any).__queueConfirm([3, 4]);
   });
-  await expect(page.locator('.knowledge-list [role="alert"]')).toContainText("Issue card render failed");
+  const renderBadge = page.getByRole("button", { name: "Issue rendering failed · Details", exact: true });
+  const renderNotice = page.locator('[data-error-key="issue-window:tab-queue::issue-1:render"]');
+  await expect(renderBadge).toBeVisible();
+  await expect(page.locator(".knowledge-list")).not.toContainText("Issue card render failed");
+  await renderBadge.click();
+  await expect(renderNotice).toBeFocused();
+  await expect(renderNotice).toContainText("Issue card render failed");
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
     .filter((message: any) => message.kind === "report_knowledge_error").map((message: any) => message.stage))).toContain("render");
   await confirm(page, [3, 4]);
-  await expect(page.locator('.knowledge-list [role="alert"]')).toHaveCount(0);
+  await expect(renderBadge).toHaveCount(0);
+  await expect(renderNotice).toHaveAttribute("data-resolved", "true");
   await assertInbox();
 });
 
