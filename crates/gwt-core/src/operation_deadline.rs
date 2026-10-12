@@ -11,6 +11,7 @@ use std::{
 use fs2::FileExt;
 
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const WORKSPACE_WORK_ITEMS_HOLD_THRESHOLD_MS: u64 = 5_000;
 
 thread_local! {
     static CURRENT_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -293,6 +294,15 @@ fn open_named_lock_holder(path: &Path) -> io::Result<File> {
 }
 
 fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io::Error {
+    named_lock_error_at(holder_path, operation, error, chrono::Utc::now())
+}
+
+fn named_lock_error_at(
+    holder_path: &Path,
+    operation: &str,
+    error: io::Error,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> io::Error {
     // Bound diagnostic IO, and do not require valid metadata from old writers.
     // Issue #4975 AC-1: four distinct outcomes used to collapse into the same
     // `pid=unknown`, so a reader could not tell "another process holds this and
@@ -325,15 +335,50 @@ fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io
         .as_ref()
         .map(|holder| holder.acquired_at.as_str())
         .unwrap_or("unknown");
+    // Holder metadata remains observational. An invalid or future timestamp
+    // cannot prove a hold duration; only the Work lock has this short budget.
+    let elapsed_ms = chrono::DateTime::parse_from_rfc3339(acquired_at)
+        .ok()
+        .and_then(|acquired_at| {
+            u64::try_from(
+                observed_at
+                    .signed_duration_since(acquired_at)
+                    .num_milliseconds(),
+            )
+            .ok()
+        });
+    let hold_threshold_ms = (holder_operation
+        == crate::workspace_projection::WORKSPACE_WORK_ITEMS_LOCK_OPERATION)
+        .then_some(WORKSPACE_WORK_ITEMS_HOLD_THRESHOLD_MS);
+    let hold_threshold_exceeded = hold_threshold_ms
+        .zip(elapsed_ms)
+        .map(|(threshold, elapsed)| elapsed > threshold);
     tracing::warn!(
         operation, observed_holder_pid = %pid,
         observed_holder_operation = holder_operation,
         observed_holder_acquired_at = acquired_at,
+        observed_holder_elapsed_ms = elapsed_ms,
+        observed_holder_hold_threshold_ms = hold_threshold_ms,
+        observed_holder_hold_threshold_exceeded = hold_threshold_exceeded,
         holder_unknown_reason, %error,
         "named file lock acquisition failed or contended; holder metadata is observational"
     );
+    let hold_threshold_exceeded = hold_threshold_exceeded.map_or_else(
+        || {
+            if hold_threshold_ms.is_some() {
+                "unknown"
+            } else {
+                "n/a"
+            }
+            .to_string()
+        },
+        |value| value.to_string(),
+    );
+    let elapsed_ms = elapsed_ms.map_or_else(|| "unknown".to_string(), |value| value.to_string());
+    let hold_threshold_ms =
+        hold_threshold_ms.map_or_else(|| "n/a".to_string(), |value| value.to_string());
     io::Error::new(error.kind(), format!(
-        "{error}; operation={operation}; observed holder pid={pid}, operation={holder_operation}, acquired_at={acquired_at}, holder_unknown_reason={holder_unknown_reason} (metadata may be stale)"
+        "{error}; operation={operation}; observed holder pid={pid}, operation={holder_operation}, acquired_at={acquired_at}, elapsed_ms={elapsed_ms}, hold_threshold_ms={hold_threshold_ms}, hold_threshold_exceeded={hold_threshold_exceeded}, holder_unknown_reason={holder_unknown_reason} (metadata may be stale)"
     ))
 }
 
@@ -405,6 +450,82 @@ fn deadline_error(operation: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_file_lock_reports_elapsed_hold_time_and_workspace_threshold() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let holder_path = directory.path().join("lock.holder.json");
+        let observed_at = chrono::DateTime::parse_from_rfc3339("2026-10-12T00:00:06Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (holder_operation, acquired_at, elapsed, threshold, exceeded) in [
+            (
+                "workspace work items",
+                "2026-10-12T00:00:00Z",
+                "6000",
+                "5000",
+                "true",
+            ),
+            (
+                "workspace work items",
+                "2026-10-12T00:00:02Z",
+                "4000",
+                "5000",
+                "false",
+            ),
+            ("verify.run", "2026-10-12T00:00:00Z", "6000", "n/a", "n/a"),
+            (
+                "workspace work items",
+                "invalid",
+                "unknown",
+                "5000",
+                "unknown",
+            ),
+        ] {
+            std::fs::write(
+                &holder_path,
+                serde_json::to_vec(&ObservedLockHolder {
+                    pid: 5313,
+                    operation: holder_operation.to_string(),
+                    acquired_at: acquired_at.to_string(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let error = named_lock_error_at(
+                &holder_path,
+                "workspace.ensure",
+                io::Error::new(io::ErrorKind::WouldBlock, "busy"),
+                observed_at,
+            );
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            let message = error.to_string();
+            for expected in [
+                "pid=5313".to_string(),
+                format!("operation={holder_operation}"),
+                format!("acquired_at={acquired_at}"),
+                "holder_unknown_reason=identified".to_string(),
+                format!("elapsed_ms={elapsed}"),
+                format!("hold_threshold_ms={threshold}"),
+                format!("hold_threshold_exceeded={exceeded}"),
+                "metadata may be stale".to_string(),
+            ] {
+                assert!(message.contains(&expected), "missing {expected}: {message}");
+            }
+        }
+        std::fs::remove_file(&holder_path).unwrap();
+        let error = named_lock_error_at(
+            &holder_path,
+            "workspace.ensure",
+            io::Error::new(io::ErrorKind::WouldBlock, "busy"),
+            observed_at,
+        );
+        assert!(error.to_string().contains("elapsed_ms=unknown"), "{error}");
+        assert!(
+            error.to_string().contains("hold_threshold_ms=n/a"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn named_file_lock_reports_observed_holder_on_cross_thread_contention() {
