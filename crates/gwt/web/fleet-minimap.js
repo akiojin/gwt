@@ -51,6 +51,7 @@ function finiteOr(value, fallback) {
 
 export function createFleetMinimap({
   container,
+  windowCatalogModel,
   getWindows,
   getVisibleBounds,
   getFocusedId,
@@ -74,6 +75,7 @@ export function createFleetMinimap({
       update() {},
       updateCameraFrame() {},
       setZoom() {},
+      dispose() {},
     };
   }
 
@@ -390,8 +392,14 @@ export function createFleetMinimap({
     { passive: false },
   );
 
-  // `updateCameraFrame` kept as an alias for existing callers (applyViewport).
-  return { renderCells, update, updateCameraFrame: update, setZoom };
+  const unsubscribeCatalog = windowCatalogModel?.subscribe(state => state.catalog, catalog => {
+    renderCells();
+    container.dataset.catalogVersion = String(catalog.version);
+  });
+  const unsubscribeBounds = windowCatalogModel?.subscribe(state => state.bounds, () => update());
+  // `updateCameraFrame` kept as an alias for standalone renderer consumers.
+  return { renderCells, update, updateCameraFrame: update, setZoom,
+    dispose() { unsubscribeCatalog?.(); unsubscribeBounds?.(); } };
 }
 
 function browserStorage() {

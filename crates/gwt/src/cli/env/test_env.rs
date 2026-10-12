@@ -85,6 +85,7 @@ pub struct TestEnv {
     pub rerun_call_log: Vec<crate::cli::ActionsRerunTarget>,
     /// Issue #3515: when set, `rerun_actions` refuses with this message.
     pub rerun_rejection: Option<String>,
+    pub dispatch_call_log: Vec<crate::cli::ActionsDispatchCall>,
     pub cancel_call_log: Vec<u64>,
     pub cancel_rejection: Option<String>,
     pub queued_actions: Option<String>,
@@ -143,6 +144,7 @@ impl TestEnv {
             job_log_call_log: Vec::new(),
             rerun_call_log: Vec::new(),
             rerun_rejection: None,
+            dispatch_call_log: Vec::new(),
             cancel_call_log: Vec::new(),
             cancel_rejection: None,
             queued_actions: None,
@@ -535,6 +537,12 @@ impl CliEnv for TestEnv {
         }
         Ok(format!("rerun requested for {target:?}"))
     }
+
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
+        self.dispatch_call_log.push(call);
+        Ok("workflow dispatch requested".into())
+    }
+
     fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
         self.cancel_call_log.push(run_id);
         if let Some(message) = self.cancel_rejection.clone() {

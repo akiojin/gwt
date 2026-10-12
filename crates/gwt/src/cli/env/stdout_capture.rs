@@ -195,6 +195,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.rerun_actions(target)
     }
 
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
+        self.inner.dispatch_actions(call)
+    }
+
     fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
         self.inner.cancel_actions(run_id)
     }

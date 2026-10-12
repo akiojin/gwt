@@ -1,6 +1,34 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.117.0] - 2026-10-12
+
+### Bug Fixes
+
+- **actions:** Locate workflows from checkout root
+- **work:** Resolve successors across missing historical owners
+
+### Features
+
+- **actions:** Add allowlisted workflow dispatch
+
+### Miscellaneous Tasks
+
+- **work:** Record workflow dispatch PR
+- **work:** Record catalog slice PR linkage
+- **work:** Record issue 5254 pr metadata
+
+### Refactor
+
+- **web:** Share window catalog across list and minimap
+
+## [9.116.1] - 2026-10-12
+
+### Bug Fixes
+
+- **workspace:** Reduce Work projection lock contention
+- **deps:** Replace deprecated YAML parser with maintained fork
+
 ## [9.116.0] - 2026-10-12
 
 ### Bug Fixes
