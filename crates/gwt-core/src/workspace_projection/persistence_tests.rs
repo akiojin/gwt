@@ -13388,6 +13388,82 @@ fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() 
 }
 
 #[test]
+fn current_work_preserves_owner_authority_across_missing_historical_owner() {
+    let project_root = Path::new("/repo");
+    let worktree = Path::new("/wt/issue-4777");
+    let branch = Some("work/issue-4777");
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let root_id = canonical_work_id(project_root, branch, Some(worktree)).unwrap();
+    let middle_id = successor_work_id(&root_id);
+    let latest_id = successor_work_id(&middle_id);
+
+    for (middle_owner, latest_owner) in [
+        (None, Some("SPEC-4777")),
+        (None, Some("SPEC-4313")),
+        (None, None),
+        (Some("SPEC-4777"), Some("SPEC #4777")),
+    ] {
+        let mut projection = WorkItemsProjection::empty(now);
+        let mut start = sample_work_event(&root_id, now);
+        start.owner = Some("Issue #4777".to_string());
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: branch.map(str::to_string),
+            worktree_path: Some(worktree.to_path_buf()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        projection.apply_event(start.clone());
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, &root_id, now));
+        let mut middle = start.clone();
+        middle.id = "ownerless-middle-start".to_string();
+        middle.work_item_id = middle_id.clone();
+        middle.related_work_item_id = Some(root_id.clone());
+        middle.owner = middle_owner.map(str::to_string);
+        projection.apply_event(middle);
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, &middle_id, now));
+        let mut latest = start;
+        latest.id = "latest-start".to_string();
+        latest.work_item_id = latest_id.clone();
+        latest.related_work_item_id = Some(middle_id.clone());
+        latest.owner = latest_owner.map(str::to_string);
+        projection.apply_event(latest);
+        let before = projection.clone();
+        let expected_id = if matches!(latest_owner, Some("SPEC-4777" | "SPEC #4777")) {
+            &latest_id
+        } else {
+            // A historical gap cannot authorize a foreign or ownerless tail.
+            &root_id
+        };
+
+        assert_eq!(
+            current_work_id(&projection, project_root, branch, Some(worktree)).as_ref(),
+            Some(expected_id),
+            "latest owner {latest_owner:?}",
+        );
+        assert_eq!(
+            &find_work_item_for_container(&projection, project_root, branch, Some(worktree))
+                .unwrap()
+                .id,
+            expected_id,
+            "latest owner {latest_owner:?}",
+        );
+        assert_eq!(
+            projection, before,
+            "resolution must preserve historical Work"
+        );
+        if latest_owner.is_none() {
+            projection.apply_event(WorkEvent::new(WorkEventKind::Discard, &latest_id, now));
+            assert_eq!(
+                current_work_id(&projection, project_root, branch, Some(worktree)).as_ref(),
+                Some(&root_id),
+                "an ownerless terminal tail must not become authoritative",
+            );
+        }
+    }
+}
+
+#[test]
 fn find_work_item_for_container_rejects_invalid_successor_authority() {
     let project_root = Path::new("/repo");
     let worktree = Path::new("/wt/issue-4074");
