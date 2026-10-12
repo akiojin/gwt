@@ -226,7 +226,7 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
   const exclusion = String(entry?.exclusion_reason || "").trim();
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
-  const reason = exclusion || attentionReason;
+  const reason = entry?.readiness_diagnosis || exclusion || attentionReason;
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -2959,6 +2959,9 @@ export function createKnowledgeKanbanSurface({
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
         if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state };
+        const diagnosis = live?.error_message;
+        entry = { ...entry, readiness_diagnosis: typeof diagnosis === "string" &&
+          diagnosis.startsWith("SessionStart readiness pending:") ? diagnosis : null };
         if (!Array.isArray(issueMonitorModel.read().status.terminal_queue)) return entry;
         const index = issueMonitorModel.read().status.terminal_queue.findIndex(item => item.number === entry.number);
         const queued = index < 0 ? null : issueMonitorModel.read().status.terminal_queue[index];

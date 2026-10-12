@@ -223,6 +223,7 @@ fn prepare_fresh_execution_launch_session_start(
     sessions_dir: &Path,
     live_session_ids: &HashSet<String>,
     window_is_current: impl Fn() -> bool,
+    admission: &mut Option<gwt_core::operation_deadline::NamedFileLock>,
 ) -> Result<bool, String> {
     if !window_is_current() {
         return Err("fresh launch window changed before activation".to_string());
@@ -274,6 +275,27 @@ fn prepare_fresh_execution_launch_session_start(
     }
 
     invoke_fresh_execution_pre_work_commit_hook();
+    // Issue #4940: the canonical Work transaction has one Prepared slot.
+    // Serialize fresh finalizers before taking any owner/Session lease, across
+    // staging, activation and publication. Work recovery remains nonblocking.
+    let admission_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&pending.project_root)
+            .with_file_name("fresh-launch-admission.lock");
+    std::fs::create_dir_all(admission_path.parent().expect("canonical Work directory"))
+        .map_err(|error| format!("fresh launch admission directory failed: {error}"))?;
+    let acquisition_deadline = gwt_core::operation_deadline::current().is_none().then(|| {
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+        )
+    });
+    *admission = Some(
+        gwt_core::operation_deadline::NamedFileLock::acquire_quiet(
+            &admission_path,
+            "fresh launch admission",
+        )
+        .map_err(|error| format!("fresh launch admission failed: {error}"))?,
+    );
+    drop(acquisition_deadline);
     let already_activated = pending_fresh_execution_activation_status(pending) == Some(true);
     let transaction_committed = if already_activated {
         resolve_activated_fresh_execution_commit(
@@ -7344,7 +7366,7 @@ impl AppRuntime {
                     operation_id = %operation_id,
                     "handed an unready but live launch pane to the user"
                 );
-                self.record_readiness_handoff(window_id, &detail);
+                let detail = self.record_readiness_handoff(window_id, &detail);
                 self.readiness_handoff_events(window_id, detail)
             }
             ReadinessDeadlineDecision::Abort { detail, pane } => {
@@ -7378,25 +7400,59 @@ impl AppRuntime {
     /// Issue #5194 AC-2: a handoff leaves the launch without execution
     /// authority, so it is recorded where the PM looks (`errors.list`) together
     /// with the hook configuration the agent should have discovered.
-    fn record_readiness_handoff(&self, window_id: &str, detail: &str) {
+    fn record_readiness_handoff(&self, window_id: &str, detail: &str) -> String {
         let session = self.active_agent_sessions.get(window_id);
+        let owner_root = self
+            .pending_fresh_execution_launches
+            .get(window_id)
+            .map(|pending| (pending.owner, &pending.project_root))
+            .or_else(|| {
+                self.pending_continue_work
+                    .get(window_id)
+                    .map(|pending| (pending.owner, &pending.project_root))
+            });
         let diagnosis = session.and_then(|session| {
             super::readiness_hook_config_diagnosis(&session.agent_id, &session.worktree_path)
         });
-        let message = match diagnosis {
+        let detail = match diagnosis {
             Some(diagnosis) => format!("{detail} {diagnosis}"),
             None => detail.to_string(),
         };
+        // Observe the actual OS lock without waiting or trusting stale holder metadata.
+        let work_lock_contended = owner_root.is_some_and(|(_, project_root)| {
+            let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root)
+                .with_extension("lock");
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .ok()
+                .is_some_and(|file| {
+                    FileExt::try_lock_exclusive(&file)
+                        .is_err_and(|error| gwt_core::operation_deadline::is_lock_contended(&error))
+                })
+        });
+        let work_diagnosis = if work_lock_contended {
+            "works.lock contention observed: yes; SessionStart may be waiting for Work intake"
+        } else {
+            "works.lock contention observed: no; other SessionStart delays remain undetermined"
+        };
+        let message = format!(
+            "{} {detail} {work_diagnosis}",
+            gwt::issue_monitor::SESSION_START_READINESS_PENDING_PREFIX
+        );
+        let issue = owner_root.map(|(owner, _)| owner.number);
         gwt::error_report::report_error_and_publish(
             gwt_core::error_ledger::ErrorKind::LaunchFailure,
-            message,
+            message.clone(),
             gwt_core::error_ledger::ErrorTarget {
                 window_id: Some(window_id.to_string()),
                 session_id: session.map(|session| session.session_id.clone()),
-                project_root: session.map(|session| session.agent_project_root.clone()),
-                issue: None,
+                project_root: owner_root.map(|(_, root)| root.display().to_string()),
+                issue,
             },
         );
+        message
     }
 
     /// Issue #3482: publish the handoff so the pane says why it is still
@@ -7614,6 +7670,9 @@ impl AppRuntime {
             },
         );
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            // Keep admission through rollback too: dropping it immediately on
+            // preparation failure would expose its Prepared marker to the next launch.
+            let mut admission = None;
             let result = prepare_fresh_execution_launch_session_start(
                 &pending,
                 active_session.as_ref(),
@@ -7625,6 +7684,7 @@ impl AppRuntime {
                 || window_generations.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .get(&window).copied() == window_generation,
+                &mut admission,
             );
             let outcome = match result {
                 Ok(true)

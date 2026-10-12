@@ -1,5 +1,347 @@
 use super::*;
 
+/// AC-6: one restarted Host must finalize all fresh launches behind the same
+/// startup intake lock, including owners with persisted Blocked history.
+#[test]
+fn restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+    let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let runtime_root = temp.path().join(".gwt");
+    let mut launches = Vec::new();
+    let mut tabs = Vec::new();
+    for index in 0..6 {
+        let owner_number = 4940 + index;
+        let branch = format!("work/issue-{owner_number}");
+        let worktree = temp.path().join(format!("worktree-{index}"));
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let operation_id = format!("restart-six-{index}");
+        let fixture = pending_fresh_execution_fixture_in_worktree(
+            temp.path(),
+            &operation_id,
+            gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            index % 2 != 0,
+            worktree.clone(),
+            owner_number,
+        );
+        let pending = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id].clone();
+        let mut predecessor =
+            gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
+        predecessor.id = format!("blocked-{operation_id}");
+        predecessor.project_state_root = Some(worktree.clone());
+        predecessor.linked_issue_number = Some(owner_number);
+        predecessor.status = gwt_agent::AgentStatus::Stopped;
+        predecessor
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                session_id: predecessor.id.clone(),
+                identity: fixture.predecessor_binding.clone(),
+                ..fixture.binding.clone()
+            }))
+            .unwrap();
+        predecessor.save(&fixture.runtime.sessions_dir).unwrap();
+        let predecessor_path = fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", predecessor.id));
+        let predecessor_bytes = fs::read(&predecessor_path).unwrap();
+        let predecessor_generation =
+            gwt::cli::execution_state::load_generation_ledger(&worktree, fixture.owner)
+                .unwrap()
+                .unwrap()
+                .generations[0]
+                .clone();
+        let tab_id = format!("tab-{index}");
+        let window_id = combined_window_id(&tab_id, "agent-1");
+        let mut active = fixture.runtime.active_agent_sessions[&fixture.window_id].clone();
+        active.tab_id = tab_id.clone();
+        active.window_id = window_id.clone();
+        tabs.push(sample_project_tab_with_window_at(
+            &tab_id,
+            "agent-1",
+            worktree,
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ));
+        launches.push((
+            window_id,
+            pending,
+            active,
+            predecessor_path,
+            predecessor_bytes,
+            predecessor_generation,
+        ));
+        // No old process-local runtime or capability registry survives.
+        drop(fixture);
+    }
+
+    let (mut runtime, _) = sample_runtime_with_events(&runtime_root, tabs, Some("tab-0"));
+    let (spawner, queue) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let tokio = TokioRuntime::new().unwrap();
+    let mut server = crate::embedded_server::EmbeddedServer::start(
+        &tokio,
+        runtime.proxy.clone(),
+        crate::embedded_server::ClientHub::default(),
+        Arc::clone(&runtime.pty_writers),
+        AttachmentUploadStore::in_system_temp(),
+    )
+    .unwrap();
+    let issuer = server.agent_capability_issuer();
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let works_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    let mut targets = Vec::new();
+    for (window_id, pending, active, ..) in &launches {
+        assert_eq!(
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&pending.worktree_path),
+            works_path,
+            "all six linked worktrees must share the real canonical works.lock",
+        );
+        let candidate = gwt_agent::Session::load(
+            &runtime
+                .sessions_dir
+                .join(format!("{}.toml", pending.binding.session_id)),
+        )
+        .unwrap();
+        assert_eq!(
+            gwt_agent::SessionExecutionIdentity::from_session(&candidate)
+                .unwrap()
+                .unwrap(),
+            pending.session_identity,
+        );
+        let target = issuer
+            .issue_prepared(
+                &pending.project_root,
+                &pending.binding.session_id,
+                pending.binding.clone(),
+            )
+            .unwrap();
+        runtime
+            .agent_capability_tokens
+            .insert(window_id.clone(), target.token.clone());
+        runtime
+            .active_agent_sessions
+            .insert(window_id.clone(), active.clone());
+        runtime
+            .pending_fresh_execution_launches
+            .insert(window_id.clone(), pending.clone());
+        targets.push(target);
+    }
+    for (window_id, pending, ..) in &launches {
+        assert!(runtime
+            .finalize_fresh_execution_launch_session_start(
+                window_id,
+                Some(&pending.readiness_nonce),
+            )
+            .is_empty());
+    }
+    let tasks = std::mem::take(&mut *queue.lock().unwrap());
+    assert_eq!(
+        tasks.len(),
+        6,
+        "six distinct launches must queue six real finalizers"
+    );
+    fs::create_dir_all(works_path.parent().unwrap()).unwrap();
+    let lock_path = works_path.with_extension("lock");
+    let holder = gwt_core::operation_deadline::NamedFileLock::acquire_quiet(
+        &lock_path,
+        "startup Work intake",
+    )
+    .unwrap();
+    let (contended, contention) = mpsc::channel();
+    let (finished, completions) = mpsc::channel();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let dispatch =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(CaptureTracingLayer {
+            events: captured.clone(),
+        }));
+    let workers = tasks
+        .into_iter()
+        .map(|task| {
+            let lock_path = lock_path.clone();
+            let home = temp.path().to_path_buf();
+            let contended = contended.clone();
+            let finished = finished.clone();
+            let dispatch = dispatch.clone();
+            thread::spawn(move || {
+                let _home = ScopedGwtHome::set(home);
+                set_fresh_execution_pre_work_commit_hook_for_test(Box::new(move || {
+                    let lock = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(lock_path)
+                        .unwrap();
+                    let error = lock
+                        .try_lock_exclusive()
+                        .expect_err("startup intake still holds works.lock");
+                    assert!(
+                        gwt_core::operation_deadline::is_lock_contended(&error),
+                        "{error}"
+                    );
+                    contended.send(()).unwrap();
+                }));
+                tracing::dispatcher::with_default(&dispatch, task);
+                finished.send(()).unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(contended);
+    drop(finished);
+    for _ in 0..6 {
+        contention
+            .recv_timeout(Duration::from_secs(30))
+            .expect("each authenticated finalizer must reach the contended Work transaction");
+    }
+    assert!(
+        matches!(completions.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "no finalizer may complete while startup intake owns works.lock"
+    );
+    drop(holder);
+    for _ in 0..6 {
+        completions
+            .recv_timeout(Duration::from_secs(30))
+            .expect("all finalizers must progress after startup intake releases works.lock");
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let mut finalization_outcomes = Vec::new();
+    for _ in 0..6 {
+        let completion = take_fresh_execution_finalization(&runtime);
+        let diagnostic = format!("{completion:?}");
+        finalization_outcomes.push((
+            completion.window_id.clone(),
+            diagnostic.rsplit_once("outcome: ").unwrap().1.to_string(),
+        ));
+        runtime.handle_fresh_execution_finalized(completion);
+    }
+    assert!(
+        runtime.pending_fresh_execution_launches.is_empty(),
+        "remaining launches: {:?}; finalization outcomes: {finalization_outcomes:?}; worker diagnostics: {:?}",
+        runtime.pending_fresh_execution_launches.keys().collect::<Vec<_>>(),
+        captured.lock().unwrap(),
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    for ((_, pending, _, predecessor_path, predecessor_bytes, predecessor_generation), target) in
+        launches.iter().zip(&targets)
+    {
+        assert!(issuer.active_token_is_current(&target.token, &pending.binding));
+        let ledger = gwt::cli::execution_state::load_generation_ledger(
+            &pending.worktree_path,
+            pending.owner,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ledger.generations.len(), 2);
+        assert_eq!(&ledger.generations[0], predecessor_generation);
+        assert_eq!(fs::read(predecessor_path).unwrap(), *predecessor_bytes);
+        let response = client
+            .post(
+                reqwest::Url::parse(&target.url)
+                    .unwrap()
+                    .join("/internal/workspace-update")
+                    .unwrap(),
+            )
+            .bearer_auth(&target.token)
+            .json(&gwt::AgentWorkspaceUpdateRequest {
+                schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: pending.binding.session_id.clone(),
+                observation: gwt::observe_agent_runtime(&pending.worktree_path).unwrap(),
+                intent: gwt::AgentWorkspaceUpdateIntent {
+                    current_focus: Some("six-session restart acceptance".to_string()),
+                    ..Default::default()
+                },
+            })
+            .send()
+            .unwrap();
+        let status = response.status();
+        let body = response.text().unwrap();
+        assert!(
+            status.is_success(),
+            "{} workspace.update: {status}: {body}",
+            pending.binding.session_id
+        );
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            &pending.binding.session_id,
+        );
+        let _url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            &target.url,
+        );
+        let _token = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            &target.token,
+        );
+        let _runtime = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::runtime_state_path(&runtime.sessions_dir, &pending.binding.session_id),
+        );
+        let mut env = gwt::cli::TestEnv::new(pending.worktree_path.clone());
+        let code = gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Build(gwt::cli::SkillStateAction::Start {
+                spec: pending.owner.number,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            code,
+            0,
+            "build.start: {}",
+            String::from_utf8_lossy(&env.stdout)
+        );
+        assert!(
+            gwt_core::skill_state::load(&pending.worktree_path, "build-spec")
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        let code = gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Verify(gwt::cli::verification_record::VerifyCommand::Plan {
+                commands: vec!["git status --porcelain".to_string()],
+                derive: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            code,
+            0,
+            "verify.plan: {}",
+            String::from_utf8_lossy(&env.stdout)
+        );
+        assert_eq!(
+            gwt::cli::verification_record::load_plan(&pending.worktree_path)
+                .unwrap()
+                .unwrap()
+                .session_id,
+            pending.binding.session_id
+        );
+    }
+    server.shutdown();
+}
+
 #[test]
 fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
     let _env_guard = env_test_lock()
