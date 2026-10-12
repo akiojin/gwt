@@ -65,6 +65,9 @@ async function makeFixture(options = {}) {
   const windowData = { id: "win-1", preset: "issue" };
   const windowMap = new Map([[windowData.id, body]]);
   const sent = [];
+  const notices = [];
+  const opened = [];
+  const reports = [];
   const surface = mod.createKnowledgeKanbanSurface({
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
@@ -84,12 +87,15 @@ async function makeFixture(options = {}) {
     openIssueLaunchWizard() {},
     visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
+    reportSurfaceNotice: notice => notices.push(notice),
+    reportSurfaceError: error => reports.push(error),
+    openSurfaceNotice: key => { opened.push(key); return true; },
     ...options,
   });
   surface.mountKnowledgeWindow(windowData, body);
   const load = sent.find((message) => message.kind === "load_knowledge_bridge");
   assert.ok(load, "Issue surface requests its cache-backed rows");
-  return { body, document, mod, sent, surface, load, windowMap };
+  return { body, document, mod, sent, surface, load, windowMap, notices, opened, reports };
 }
 
 test("Issue #5287: inbox-first startup renders every column despite GUI error and enriches late cache rows", async (t) => {
@@ -117,11 +123,29 @@ test("Issue #5287: inbox-first startup renders every column despite GUI error an
 });
 
 test("Issue #5287: an initial load failure shows its cause instead of empty columns and reports a ledger diagnostic", async (t) => {
-  const { body, surface, load, sent } = await makeFixture();
+  let missing = false;
+  const opened = [];
+  const { body, surface, load, sent, reports } = await makeFixture({ openSurfaceNotice(key) {
+    opened.push(key);
+    const found = !missing;
+    missing = false;
+    return found;
+  } });
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
     request_id: load.request_id, message: "Issue cache could not be read" });
-  assert.match(body.querySelector('.knowledge-list [role="alert"]')?.textContent || "", /Issue cache could not be read/);
+  const badge = body.querySelector('.knowledge-list .knowledge-notification-badge');
+  assert.match(badge?.textContent || "", /Issue load failed.*Details/);
+  assert.doesNotMatch(body.textContent, /Issue cache could not be read/);
+  assert.equal(reports.at(-1).message, "Issue cache could not be read");
+  badge.click();
+  assert.equal(opened.at(-1), "issue-window:win-1:load");
+  const reportCount = reports.length;
+  missing = true; // The operator cleared or dismissed the existing row.
+  badge.click();
+  assert.equal(reports.length, reportCount + 1);
+  assert.equal(reports.at(-1).message, "Issue cache could not be read");
+  assert.deepEqual(opened, Array(3).fill("issue-window:win-1:load"));
   assert.ok(sent.some(event => event.kind === "report_knowledge_error" && event.id === "win-1" &&
     event.stage === "load" && event.message === "Issue cache could not be read"));
 });
@@ -139,7 +163,8 @@ test("Issue #5287: a failed Issue renderer displays and reports the cause, then 
   failRow = true;
   assert.throws(() => surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
     request_id: load.request_id, entries: [knowledgeEntry(1, "queued")], refresh_enabled: true }), /Issue card renderer failed/);
-  assert.match(body.querySelector('.knowledge-list [role="alert"]')?.textContent || "", /Issue card renderer failed/);
+  assert.match(body.querySelector('.knowledge-list .knowledge-notification-badge')?.textContent || "", /Issue rendering failed.*Details/);
+  assert.doesNotMatch(body.textContent, /Issue card renderer failed/);
   assert.ok(sent.some(event => event.kind === "report_knowledge_error" && event.stage === "render" &&
     event.message === "Issue card renderer failed"));
   surface.applyIssueMonitorStatus({ enabled: true, state: "idle" });
@@ -149,7 +174,7 @@ test("Issue #5287: a failed Issue renderer displays and reports the cause, then 
 
 for (const stage of ["load", "render"]) {
   test(`Issue #5287: detail-only ${stage} failure stays visible and reaches diagnostics`, async (t) => {
-    const { body, surface, load, sent } = await makeFixture({
+    const { body, surface, load, sent, reports, opened } = await makeFixture({
       createKnowledgeMarkdownBody() { throw new Error("detail Markdown failed"); },
     });
     t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -165,7 +190,11 @@ for (const stage of ["load", "render"]) {
         detail: { number: 5287, title: "Detail", state: "open", labels: [],
           sections: [{ title: "Description", body: "Markdown" }], related_works: [] } }), /detail Markdown failed/);
     }
-    assert.match(body.querySelector('.knowledge-detail-pane [role="alert"]')?.textContent || "", /detail .* failed/);
+    assert.match(body.querySelector('.knowledge-detail-pane .knowledge-notification-badge')?.textContent || "", /Issue .* failed.*Details/);
+    assert.doesNotMatch(body.querySelector(".knowledge-detail-pane").textContent, /detail .* failed/);
+    assert.ok(reports.some(report => report.key === `issue-window:win-1:${stage}` && report.message.includes("detail")));
+    body.querySelector('.knowledge-detail-pane .knowledge-notification-badge').click();
+    assert.equal(opened.at(-1), `issue-window:win-1:${stage}`);
     assert.ok(sent.some(message => message.kind === "report_knowledge_error" && message.stage === stage
       && message.message.includes("detail")));
   });
@@ -393,8 +422,8 @@ function capacityStatus(overrides = {}) {
   };
 }
 
-test("Issue #3620: Auto shows zero worker capacity and distinguishes machine recommendations and usage", async (t) => {
-  const { body, surface } = await makeFixture();
+test("Issue #3620: capacity details open in the center without generating passive healthy notices", async (t) => {
+  const { body, surface, notices, opened } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const status = capacityStatus({ max_active_agents: 0 });
   status.agent_capacity.recommended_worker_limit = 0;
@@ -402,47 +431,44 @@ test("Issue #3620: Auto shows zero worker capacity and distinguishes machine rec
   assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/0");
   assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "0");
   assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Auto");
-  const capacity = body.querySelector(".knowledge-monitor-capacity");
-  assert.equal(capacity.tagName, "DETAILS");
-  assert.equal(capacity.hidden, false);
-  assert.match(capacity.textContent, /0 monitor workers.*4 implementation agents.*5 total including PM/);
-  assert.match(capacity.textContent, /Machine budget: 6.*Machine live: 5.*This project: 3.*PM: 1.*Other projects: 2/);
-  assert.match(capacity.textContent, /GUI CPU reserved: 0\.375 cores/);
-  assert.match(capacity.textContent, /CPU: 6.*limiting.*GUI CPU reserved/);
-  assert.match(capacity.textContent, /CPU limits capacity/);
+  assert.equal(notices.length, 0, "healthy capacity does not create a notification on opening a window");
+  body.querySelector(".knowledge-monitor-capacity-badge").click();
+  assert.deepEqual(opened, ["issue-monitor:capacity"]);
+  assert.match(notices[0].details, /0 monitor workers.*4 implementation agents.*5 total including PM/);
+  assert.match(notices[0].details, /Machine budget: 6.*Machine live: 5.*This project: 3.*PM: 1.*Other projects: 2/);
+  assert.match(notices[0].details, /GUI CPU reserved: 0\.375 cores/);
+  assert.match(notices[0].details, /CPU: 6.*limiting.*GUI CPU reserved/);
+  assert.equal(body.querySelector(".knowledge-monitor-capacity"), null, "no inline diagnostic block");
 });
 
 test("Issue #3620: manual excess is allowed and Use Auto waits for the backend echo", async (t) => {
-  const { body, surface, sent } = await makeFixture();
+  const { body, surface, sent, notices } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   surface.applyIssueMonitorStatus(capacityStatus());
   const input = body.querySelector(".knowledge-monitor-max-active input");
   input.value = "7";
   input.dispatchEvent(new window.Event("change", { bubbles: true }));
   assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_max_active_agents", max_active_agents: 7 });
-  assert.equal(input.hasAttribute("max"), false, "recommendation never blocks an explicit limit");
-  assert.ok(body.querySelector('[data-role="monitor-capacity-mode"]'), "Auto/manual provenance is present");
-  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Auto");
+  assert.equal(input.hasAttribute("max"), false);
   surface.applyIssueMonitorStatus(capacityStatus({ max_active_agents: 7, max_active_agents_override: 7 }));
   assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
-  const warning = body.querySelector(".knowledge-monitor-capacity-warning");
-  assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /4 over recommended/i);
-  assert.match(warning.textContent, /Lower Max active if slow/);
-  assert.equal(warning.dataset.tone, "info");
-  assert.match(body.querySelector(".knowledge-monitor-capacity").textContent, /Verification may not finish\. Timing-dependent test failures may block unrelated PRs\./);
+  const badge = body.querySelector(".knowledge-monitor-capacity-badge");
+  assert.equal(badge.hidden, false);
+  assert.match(badge.textContent, /Over recommended.*Details/);
+  assert.equal(badge.dataset.tone, "info");
+  assert.match(notices.at(-1).message, /Lower Max active if slow/);
+  assert.match(notices.at(-1).details, /Verification may not finish/);
   body.querySelector('[data-action="monitor-capacity-auto"]').click();
   assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_max_active_agents", max_active_agents: null });
   assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
   surface.applyIssueMonitorStatus(capacityStatus());
   assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Auto");
-  assert.equal(warning.hidden, true);
   surface.applyIssueMonitorStatus({ max_active_agents: 3, max_active_agents_override: null });
-  assert.equal(body.querySelector(".knowledge-monitor-capacity").hidden, true, "omitted capacity cannot retain stale measurements");
+  assert.equal(badge.hidden, true, "omitted capacity cannot retain a stale badge");
 });
 
-test("Issue #5284: incomplete Manual capacity has a private compact summary and unique collapsed diagnostics", async (t) => {
-  const { body, surface } = await makeFixture();
+test("Issue #5284: capacity uses one keyed notice with unique center-only diagnostics and a linked badge", async (t) => {
+  const { body, surface, notices, opened } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const diskReason = "Disk measurement unavailable; check that the worktree volume is mounted and free at least 4 GiB.";
   const reason = `inventory_complete=false; own_pm=0; child_identity_missing ×37; target: /Users/example/target; ${diskReason}; ${diskReason}`;
@@ -453,25 +479,29 @@ test("Issue #5284: incomplete Manual capacity has a private compact summary and 
     ] };
   surface.applyIssueMonitorStatus(status);
   assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "9");
-  assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
-  const warning = body.querySelector(".knowledge-monitor-capacity-warning");
-  assert.ok(warning, "incomplete measurements have an inline warning");
-  assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /Capacity pending.*manual limit 9.*no action needed/i);
-  assert.doesNotMatch(warning.textContent, /inventory_complete|own_pm|child_identity|\/Users\//);
-  assert.ok(warning.textContent.length <= 130, "default summary fits one or two lines");
-  assert.equal(warning.dataset.tone, "info");
-  const details = body.querySelector(".knowledge-monitor-capacity");
-  assert.equal(details.hasAttribute("open"), false);
-  assert.match(details.querySelector("summary").textContent, /^Details/);
-  assert.match(details.textContent, /Machine budget: unknown[\s\S]*Disk: unknown/);
-  assert.ok(details.textContent.includes("/Users/example/target"));
-  assert.equal(details.textContent.split(diskReason).length - 1, 1, "same reason in summary/constraints appears once");
-  assert.equal(details.textContent.split("child_identity_missing").length - 1, 1);
+  const badge = body.querySelector(".knowledge-monitor-capacity-badge");
+  assert.equal(badge.textContent, "Capacity pending · Details");
+  assert.equal(badge.dataset.tone, "info");
+  assert.doesNotMatch(body.textContent, /inventory_complete|own_pm|child_identity|\/Users\//);
+  assert.equal(body.querySelector(".knowledge-monitor-capacity-warning"), null);
+  assert.equal(body.querySelector(".knowledge-monitor-capacity"), null);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].key, "issue-monitor:capacity");
+  assert.equal(notices[0].level, "info");
+  assert.match(notices[0].message, /Capacity pending.*manual limit 9.*no action needed/i);
+  assert.match(notices[0].details, /Machine budget: unknown[\s\S]*Disk: unknown/);
+  assert.ok(notices[0].details.includes("/Users/example/target"));
+  assert.equal(notices[0].details.split(diskReason).length - 1, 1);
+  assert.equal(notices[0].details.split("child_identity_missing").length - 1, 1);
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(notices.length, 1, "identical broadcasts do not report another occurrence");
+  badge.click();
+  assert.equal(opened.at(-1), "issue-monitor:capacity");
   surface.applyIssueMonitorStatus({ ...status, max_active_agents_override: null, max_active_agents: 0 });
-  assert.equal(warning.dataset.tone, "warning");
-  assert.match(warning.textContent, /Wait or set Max active manually/);
-  assert.doesNotMatch(warning.textContent, /inventory_complete|\/Users\//);
+  assert.equal(badge.dataset.tone, "warning");
+  assert.equal(notices.at(-1).key, notices[0].key);
+  assert.equal(notices.at(-1).level, "warn");
+  assert.match(notices.at(-1).message, /Wait or set Max active manually/);
 });
 
 test("Issue #3620: the Operator strip preserves a zero effective worker cap", async () => {
@@ -737,7 +767,7 @@ test("Issue Monitor band preserves higher-priority states around quota-hold meta
   });
 
   assert.equal(band.text(), "⚠ Error | Queue 3 | Active 0/2");
-  assert.equal(band.pill.title, "issue #3785: failed");
+  assert.equal(band.pill.title, "Details in notifications");
   // FR-017: no red monitor banner; the error text is read in the
   // notification center, and the pill only says that one exists.
   assert.equal(body.querySelector(".knowledge-monitor-error"), null);
@@ -1017,9 +1047,9 @@ test("Issue #3561: Autonomous switch exposes aria-checked and shows server state
 // User ruling 2026-09-04: the Issue window shows no error surface of its own.
 // It reports every error to the notification center and renders nothing.
 
-test("FR-017: Issue Monitor last_error is reported to the center and nothing renders in the window", async (t) => {
+test("FR-017 / #5284: current Monitor error is read in the center through the state badge", async (t) => {
   const spies = errorSpies();
-  const { body, surface } = await makeFixture(spies.options);
+  const { body, surface, opened } = await makeFixture(spies.options);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   assert.equal(body.querySelector(".knowledge-monitor-error"), null, "no red banner");
   assert.equal(body.querySelector(".surface-error-indicator"), null, "no compact indicator either");
@@ -1029,6 +1059,8 @@ test("FR-017: Issue Monitor last_error is reported to the center and nothing ren
     { key: "issue-monitor:last_error", title: "Issue Monitor", message: "issue #3785: scan failed" },
   ]);
   assert.equal(body.querySelector(".surface-error-indicator"), null, "still nothing in the surface");
+  monitorBand(body).pill.click();
+  assert.equal(opened.at(-1), "issue-monitor:last_error");
 
   // issue_monitor_status is re-broadcast constantly — an unchanged error is
   // not a new occurrence.
@@ -1107,7 +1139,8 @@ test("A fleet outage is shown even while a per-issue error occupies the error li
   });
 
   assert.equal(pill.textContent, "⚠ Error");
-  assert.match(pill.title, /the fleet has been down since/, "the outage outranks the per-issue error");
+  assert.equal(pill.dataset.notificationKey, "issue-monitor:agent_blackout", "the outage outranks the per-issue error");
+  assert.equal(pill.title, "Details in notifications");
   // FR-017 (user ruling 2026-09-04): errors are read in the notification
   // center. The outage reports under its own key, so it never competes for the
   // single `last_error` slot the per-issue failure already holds.

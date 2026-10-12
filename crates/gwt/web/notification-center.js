@@ -127,9 +127,9 @@ export function createNotificationCenter({
   const unread = new Set();
   const unreadListeners = new Set();
   const openListeners = new Set();
-  // FR-017: surface errors keyed by source. A recurring failure is ONE row
-  // with an occurrence count; a resolved failure falls to read automatically.
-  const errorRows = new Map();
+  // FR-017 / Issue #5284: source-keyed surface notices update one history row.
+  // Only recurring errors increase its occurrence count.
+  const surfaceRows = new Map();
 
   function liveUnread() {
     for (const item of unread) {
@@ -279,15 +279,7 @@ export function createNotificationCenter({
     // Triage marker leads the row in DOM order too, so the severity is the
     // first thing a screen reader announces; the grid keeps it visually in the
     // left gutter next to the severity stripe.
-    const severity = severityForLevel(item.dataset.level);
-    item.dataset.severity = severity;
-    const marker = document.createElement("span");
-    marker.className = "notification-center__severity";
-    marker.dataset.severity = severity;
-    marker.setAttribute("role", "img");
-    marker.setAttribute("aria-label", SEVERITY_LABEL[severity]);
-    marker.textContent = SEVERITY_GLYPH[severity];
-    item.insertBefore(marker, item.firstChild);
+    renderSeverity(item);
 
     const stamp = now();
     const time = document.createElement("time");
@@ -314,13 +306,28 @@ export function createNotificationCenter({
     return item;
   }
 
-  function liveErrorRow(key) {
-    const entry = errorRows.get(key);
+  function renderSeverity(item) {
+    const severity = severityForLevel(item.dataset.level);
+    item.dataset.severity = severity;
+    let marker = item.querySelector(".notification-center__severity");
+    if (!marker) {
+      marker = document.createElement("span");
+      marker.className = "notification-center__severity";
+      marker.setAttribute("role", "img");
+      item.insertBefore(marker, item.firstChild);
+    }
+    marker.dataset.severity = severity;
+    marker.setAttribute("aria-label", SEVERITY_LABEL[severity]);
+    marker.textContent = SEVERITY_GLYPH[severity];
+  }
+
+  function liveSurfaceRow(key) {
+    const entry = surfaceRows.get(key);
     if (!entry) {
       return null;
     }
     if (!entry.item.isConnected) {
-      errorRows.delete(key);
+      surfaceRows.delete(key);
       return null;
     }
     return entry;
@@ -341,29 +348,34 @@ export function createNotificationCenter({
     badge.setAttribute("title", `${count} occurrences`);
   }
 
-  /**
-   * Record a surface error (FR-017). `error` = { key, title?, message?,
-   * onActivate? }. Same `key` while its row is still in the history → the
-   * row is reused: occurrence count +1, message/time refreshed, unread again.
-   */
-  function recordError(error) {
-    if (!error) {
+  function upsertSurfaceNotice(notice, incrementOccurrence) {
+    if (!notice) {
       return null;
     }
-    const key = error.key == null ? "" : String(error.key);
-    const existing = key ? liveErrorRow(key) : null;
+    const key = notice.key == null ? "" : String(notice.key);
+    const existing = key ? liveSurfaceRow(key) : null;
+    const level = HISTORY_LEVELS.includes(notice.level) ? notice.level : "info";
+    const kind = incrementOccurrence ? "error" : "surface-notice";
+    let item;
     if (existing) {
-      existing.count += 1;
-      const item = existing.item;
-      if (error.message != null) {
+      if (incrementOccurrence) existing.count += 1;
+      item = existing.item;
+      item.dataset.level = level;
+      item.dataset.kind = kind;
+      if (notice.title != null || !incrementOccurrence) {
+        item.querySelector(".notification-center__title").textContent = notice.title || "Notification";
+      }
+      renderSeverity(item);
+      if (notice.message != null) {
         let message = item.querySelector(".notification-center__message");
         if (!message) {
           message = document.createElement("div");
           message.className = "notification-center__message";
-          const time = item.querySelector(".notification-center__time");
-          item.insertBefore(message, time);
+          item.insertBefore(message, item.querySelector(".notification-center__details, .notification-center__time"));
         }
-        message.textContent = String(error.message);
+        message.textContent = String(notice.message);
+      } else if (!incrementOccurrence) {
+        item.querySelector(".notification-center__message")?.remove();
       }
       const time = item.querySelector(".notification-center__time");
       if (time) {
@@ -371,35 +383,54 @@ export function createNotificationCenter({
         time.dateTime = stamp.toISOString();
         time.textContent = formatClock(stamp);
       }
-      item.dataset.resolved = "false";
       renderErrorCount(item, existing.count);
-      if (!isOpen) {
-        unread.add(item);
+    } else {
+      item = record({ kind, level, title: notice.title, message: notice.message, onActivate: notice.onActivate });
+      if (!item) return null;
+      if (key) {
+        item.dataset.errorKey = key;
+        surfaceRows.set(key, { item, count: 1 });
       }
+    }
+    item.dataset.resolved = "false";
+    let details = item.querySelector(".notification-center__details");
+    if (notice.details) {
+      if (!details) {
+        details = document.createElement("details");
+        details.className = "notification-center__details";
+        const summary = document.createElement("summary");
+        summary.textContent = "Details";
+        summary.setAttribute("tabindex", "0");
+        details.appendChild(summary);
+        const content = document.createElement("div");
+        content.className = "notification-center__details-content";
+        details.appendChild(content);
+        item.insertBefore(details, item.querySelector(".notification-center__time"));
+      }
+      details.querySelector(".notification-center__details-content").textContent = String(notice.details);
+    } else {
+      details?.remove();
+    }
+    if (existing) {
+      if (!isOpen) unread.add(item);
       notifyUnread();
-      return item;
-    }
-    const item = record({
-      kind: "error",
-      level: "error",
-      title: error.title,
-      message: error.message,
-      onActivate: error.onActivate,
-    });
-    if (!item) {
-      return null;
-    }
-    if (key) {
-      item.dataset.errorKey = key;
-      item.dataset.resolved = "false";
-      errorRows.set(key, { item, count: 1 });
     }
     return item;
   }
 
-  /** Mark the error row for `key` resolved and read. Returns whether one existed. */
+  /** Upsert { key, title?, level?, message?, details? } without counting status updates as occurrences. */
+  function recordSurfaceNotice(notice) {
+    return upsertSurfaceNotice(notice, false);
+  }
+
+  /** FR-017 compatibility: recurring surface errors count as new occurrences. */
+  function recordError(error) {
+    return error ? upsertSurfaceNotice({ ...error, level: "error" }, true) : null;
+  }
+
+  /** Mark the keyed surface row resolved and read. Returns whether one existed. */
   function resolveError(key) {
-    const existing = key == null ? null : liveErrorRow(String(key));
+    const existing = key == null ? null : liveSurfaceRow(String(key));
     if (!existing) {
       return false;
     }
@@ -409,28 +440,38 @@ export function createNotificationCenter({
     return true;
   }
 
-  function open() {
-    if (isOpen) {
-      return;
-    }
-    isOpen = true;
-    focusReturn = document.activeElement;
-    syncDrawerState();
-    if (drawer) {
-      try {
-        drawer.focus({ preventScroll: true });
-      } catch {
-        drawer.focus?.();
+  function open(key) {
+    if (!isOpen) {
+      isOpen = true;
+      focusReturn = document.activeElement;
+      syncDrawerState();
+      if (drawer) {
+        try {
+          drawer.focus({ preventScroll: true });
+        } catch {
+          drawer.focus?.();
+        }
+        if (typeof releaseFocusTrap === "function") {
+          releaseFocusTrap();
+        }
+        releaseFocusTrap = focusTrap(drawer, { document });
       }
-      if (typeof releaseFocusTrap === "function") {
-        releaseFocusTrap();
-      }
-      releaseFocusTrap = focusTrap(drawer, { document });
+      // FR-014: opening the drawer reads everything.
+      unread.clear();
+      notifyUnread();
+      notifyOpen();
     }
-    // FR-014: opening the drawer reads everything.
-    unread.clear();
-    notifyUnread();
-    notifyOpen();
+    if (key == null) return;
+    const entry = liveSurfaceRow(String(key));
+    if (!entry) return false;
+    entry.item.setAttribute("tabindex", "-1");
+    entry.item.scrollIntoView?.({ block: "nearest" });
+    try {
+      entry.item.focus({ preventScroll: true });
+    } catch {
+      entry.item.focus?.();
+    }
+    return true;
   }
 
   function close() {
@@ -465,7 +506,7 @@ export function createNotificationCenter({
   function clearAll() {
     stack.clear();
     unread.clear();
-    errorRows.clear();
+    surfaceRows.clear();
     syncEmptyState();
     notifyUnread();
   }
@@ -489,6 +530,7 @@ export function createNotificationCenter({
   return Object.freeze({
     mount,
     record,
+    recordSurfaceNotice,
     recordError,
     resolveError,
     open,
