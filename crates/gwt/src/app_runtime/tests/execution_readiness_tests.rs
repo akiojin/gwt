@@ -629,6 +629,252 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
     );
 }
 
+/// Issue #5288 AC-2: a failed fresh Session must settle its exact Monitor
+/// delivery before closing, so another scan cannot materialize it again.
+#[test]
+fn fresh_monitor_startup_failure_stops_delivery_once() {
+    assert_fresh_monitor_startup_failures_stop(&["direct", "worker"]);
+}
+
+#[test]
+fn fresh_monitor_readiness_failure_stops_delivery_once() {
+    assert_fresh_monitor_startup_failures_stop(&["readiness"]);
+}
+
+#[test]
+fn fresh_monitor_failure_replay_closes_only_its_exact_candidate() {
+    assert_fresh_monitor_startup_failures_stop(&[
+        "replay",
+        "readiness-replay",
+        "prepty-replay",
+        "replacement",
+    ]);
+}
+
+fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for &failure in failures {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut fixture, prepty) = if failure == "prepty-replay" {
+            let (fixture, recorded, tasks, completion, _) =
+                queued_fresh_execution_completion_fixture(temp.path(), "fresh-monitor-failure");
+            (fixture, Some((recorded, tasks, completion)))
+        } else {
+            (
+                pending_fresh_execution_fixture(temp.path(), "fresh-monitor-failure"),
+                None,
+            )
+        };
+        fixture.runtime.register_window("tab-1", "agent-1");
+        let delivery_id = "launch:effect-fresh-monitor-failure";
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.repo);
+        let candidate = gwt::IssueMonitorIssue {
+            number: fixture.owner.number,
+            title: "fresh linked-owner launch".to_string(),
+            labels: vec!["bug".to_string()],
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        };
+        let config = gwt::IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut monitor = gwt::IssueMonitorState::new(config.clone());
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        monitor.terminal_queue_push(&[fixture.owner.number], "operator", "2026-07-28T00:00:00Z");
+        monitor.record_candidate(candidate.clone());
+        monitor.set_autonomous_phase(fixture.owner.number, gwt::AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            fixture.owner.number,
+            "claim-fresh-monitor-failure",
+            "host/session",
+            "effect-fresh-monitor-failure",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            fixture.owner.number,
+            delivery_id,
+            &fixture.runtime.issue_monitor_materializer_id,
+            std::process::id(),
+            &fixture.window_id,
+            |_| true,
+        ));
+        gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let feedback = LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(fixture.owner.number),
+            issue_monitor_delivery_id: Some(delivery_id.to_string()),
+            issue_monitor_project_root: Some(fixture.repo.clone()),
+            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
+        };
+        if let Some(pending) = fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .get_mut(&fixture.window_id)
+        {
+            pending.launch_feedback_context = Some(feedback.clone());
+        }
+        fixture
+            .runtime
+            .pending_launch_feedback_contexts
+            .insert(fixture.window_id.clone(), feedback);
+        let mut message = if failure.starts_with("readiness") {
+            "the authenticated SessionStart readiness nonce did not match"
+        } else {
+            "fresh Session failed before authenticated SessionStart"
+        }
+        .to_string();
+        let deferred = matches!(
+            failure,
+            "replay" | "readiness-replay" | "prepty-replay" | "replacement"
+        );
+        if deferred {
+            fixture.runtime.issue_monitor_fallback_commit_timeout = std::time::Duration::ZERO;
+        }
+        let mut events = match failure {
+            "worker" => fixture.runtime.handle_launch_complete_and_drain(
+                fixture.window_id.clone(),
+                Err(message.clone().into()),
+            ),
+            "prepty-replay" => {
+                let (recorded, tasks, mut completion) = prepty.unwrap();
+                completion.0.command = temp
+                    .path()
+                    .join("missing-agent-program")
+                    .display()
+                    .to_string();
+                completion.0.args.clear();
+                fixture
+                    .runtime
+                    .handle_launch_complete(fixture.window_id.clone(), Ok(completion));
+                drain_queued_blocking_tasks(&tasks);
+                let events = fixture
+                    .runtime
+                    .handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+                message = events
+                    .iter()
+                    .find_map(|event| match &event.event {
+                        BackendEvent::TerminalStatus {
+                            detail: Some(detail),
+                            ..
+                        } => Some(detail.clone()),
+                        _ => None,
+                    })
+                    .expect("physical spawn failure diagnostic");
+                assert!(!fixture
+                    .runtime
+                    .active_agent_sessions
+                    .contains_key(&fixture.window_id));
+                events
+            }
+            "readiness" | "readiness-replay" => {
+                fixture
+                    .runtime
+                    .finalize_fresh_execution_launch_session_start(
+                        &fixture.window_id,
+                        Some("wrong-nonce"),
+                    );
+                commit_pending_fresh_execution(&mut fixture.runtime)
+            }
+            _ => fixture
+                .runtime
+                .fresh_execution_launch_failed_events(&fixture.window_id, &message),
+        };
+        if deferred {
+            assert!(fixture.runtime.tracked_window_exists(&fixture.window_id));
+            assert!(fixture
+                .runtime
+                .pending_fresh_execution_launches
+                .contains_key(&fixture.window_id));
+            assert!(durable_launch_recovery_exists(
+                &fixture.runtime.sessions_dir,
+                &fixture.candidate_session_id,
+            ));
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
+            fixture.runtime.issue_monitor_fallback_commit_timeout =
+                super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+            if failure == "replacement" {
+                fixture
+                    .runtime
+                    .active_agent_sessions
+                    .get_mut(&fixture.window_id)
+                    .unwrap()
+                    .session_id = "replacement-session".to_string();
+            }
+            events.extend(fixture.runtime.auto_launch_issue_monitor_delivery_events(
+                &fixture.runtime.test_context(),
+                fixture.owner.number,
+                gwt::LinkedIssueKind::Issue,
+                Some(delivery_id.to_string()),
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            ));
+            if failure == "replacement" {
+                assert!(fixture.runtime.tracked_window_exists(&fixture.window_id));
+                assert_eq!(
+                    fixture.runtime.active_agent_sessions[&fixture.window_id].session_id,
+                    "replacement-session"
+                );
+                assert!(fixture
+                    .runtime
+                    .pending_fresh_execution_launches
+                    .contains_key(&fixture.window_id));
+                continue;
+            }
+        }
+        assert!(events.iter().any(|event| matches!(
+            &event.event, BackendEvent::IssueMonitorLaunchFailed { issue_number, message: reason }
+                if *issue_number == fixture.owner.number && reason == &message
+        )), "failure={failure}: startup failure must be published");
+        assert_pending_fresh_execution_was_rolled_back(&fixture);
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert!(prefs.pending_launch_deliveries.is_empty());
+        assert_eq!(
+            prefs
+                .failed_issues
+                .iter()
+                .find(|failure| failure.issue_number == fixture.owner.number)
+                .map(|failure| failure.message.as_str()),
+            Some(message.as_str())
+        );
+        let mut restored = gwt::IssueMonitorState::with_prefs(config, prefs);
+        restored.set_gui_connected(true);
+        for now in [
+            "2026-07-28T00:01:00Z",
+            "2026-07-28T00:02:00Z",
+            "2026-07-28T00:03:00Z",
+        ] {
+            gwt::scan_issue_monitor_candidates(
+                &mut restored,
+                std::slice::from_ref(&candidate),
+                now,
+            );
+            assert!(restored.take_pending_launch_requests().is_empty());
+            assert_eq!(
+                restored.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+                0
+            );
+        }
+        assert_eq!(restored.attempt_count(fixture.owner.number), 0);
+        assert!(fixture
+            .runtime
+            .fresh_execution_launch_failed_events(&fixture.window_id, &message)
+            .is_empty());
+    }
+}
+
 #[test]
 fn fresh_execution_session_start_preserves_spec_owner_kind_in_work_projection() {
     let _env_guard = env_test_lock()

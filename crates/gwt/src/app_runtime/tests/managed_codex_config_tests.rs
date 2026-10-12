@@ -1867,6 +1867,8 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     assert!(matches!(
         runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            fresh_execution: None,
+            retryable: true,
             message,
             session_mode: gwt_agent::SessionMode::Resume,
         }) if message == &error

@@ -16620,12 +16620,31 @@ impl IssueMonitorState {
         delivery_id: Option<&str>,
         materializer_id: Option<&str>,
     ) -> bool {
+        self.record_launch_failed_delivery_with_retryability(
+            issue_number,
+            message,
+            delivery_id,
+            materializer_id,
+            true,
+        )
+    }
+
+    /// A nonretryable startup failure can stop only its exact pending delivery.
+    pub fn record_launch_failed_delivery_with_retryability(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+        retryable: bool,
+    ) -> bool {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         self.record_launch_failed_delivery_at(
             issue_number,
             message,
             delivery_id,
             materializer_id,
+            retryable,
             &now,
         )
     }
@@ -16636,8 +16655,12 @@ impl IssueMonitorState {
         message: impl Into<String>,
         delivery_id: Option<&str>,
         materializer_id: Option<&str>,
+        retryable: bool,
         now: &str,
     ) -> bool {
+        if !retryable && delivery_id.is_none() {
+            return false;
+        }
         if delivery_id.is_none()
             && self
                 .pending_launch_deliveries
@@ -16664,7 +16687,22 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.record_launch_failed_at(issue_number, message, now);
+        if retryable {
+            self.record_launch_failed_at(issue_number, message, now);
+        } else {
+            self.release_confirmed_claim_for_issue(issue_number);
+            self.revoke_launch_binding(issue_number);
+            self.clear_active_tracking(issue_number);
+            if self.autonomous_record(issue_number).is_some() {
+                self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+                self.set_active_launch_id(issue_number, None);
+            }
+            self.record_terminal_failed_issue(
+                issue_number,
+                message.into(),
+                MonitorInboxState::LaunchFailed,
+            );
+        }
         true
     }
 
@@ -20518,6 +20556,15 @@ impl IssueMonitorState {
             self.record_classified_autonomous_failure(issue_number, message, classification, now);
             return;
         }
+        self.record_terminal_failed_issue(issue_number, message, state);
+    }
+
+    fn record_terminal_failed_issue(
+        &mut self,
+        issue_number: u64,
+        message: String,
+        state: MonitorInboxState,
+    ) {
         self.active_launches
             .retain(|active| *active != issue_number);
         // Issue #4150: this row really did fail, so the duplicate-attempt note

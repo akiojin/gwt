@@ -33,6 +33,7 @@ pub(super) struct LaunchErrorInput {
     session_cache: super::launch::LaunchWizardMemoryCache,
     restored_launch: Option<Option<String>>,
     pub(super) feedback: Option<LaunchFeedbackContext>,
+    pub(super) retryable: bool,
     update_observations: (
         Vec<gwt::update_drain::PaneObservation>,
         Vec<std::path::PathBuf>,
@@ -42,6 +43,7 @@ pub(super) struct LaunchErrorInput {
 }
 
 pub(super) struct PreparedLaunchError {
+    pub(super) retryable: bool,
     issue_number: Option<u64>,
     project_root: Option<std::path::PathBuf>,
     monitor: Option<super::PreparedIssueMonitorLaunchFailure>,
@@ -139,12 +141,13 @@ pub(super) fn prepare_launch_error(
             let mode = feedback
                 .and_then(|f| f.issue_monitor_session_mode)
                 .unwrap_or(gwt_agent::SessionMode::Normal);
-            let payload = AppRuntime::issue_monitor_launch_failed_payload(
+            let payload = AppRuntime::issue_monitor_launch_failed_payload_with_retryability(
                 issue_number,
                 &message,
                 delivery_id,
                 delivery_id.map(|_| input.materializer_id.as_str()),
                 mode,
+                input.retryable,
             );
             let publication = match project_root.as_deref() {
                 Some(root) => AppRuntime::publish_issue_monitor_control_owned(root, payload),
@@ -160,6 +163,7 @@ pub(super) fn prepare_launch_error(
                 &message,
                 delivery_id,
                 mode,
+                input.retryable,
                 &input.materializer_id,
                 input.fallback_timeout,
                 publication,
@@ -193,6 +197,7 @@ pub(super) fn prepare_launch_error(
         detail.to_string()
     };
     Some(PreparedLaunchError {
+        retryable: input.retryable,
         issue_number,
         project_root,
         monitor,
@@ -553,6 +558,7 @@ impl AppRuntime {
             session_cache: self.launch_wizard_cache.clone(),
             restored_launch: self.restore_launch_windows.get(window_id).cloned(),
             feedback,
+            retryable: true,
             update_observations: self.capture_update_quiescence_inputs(),
             materializer_id: self.issue_monitor_materializer_id.clone(),
             fallback_timeout: self.issue_monitor_fallback_commit_timeout,
@@ -715,6 +721,23 @@ impl AppRuntime {
                     // the Monitor's `error_message`; only then is the
                     // pre-PTY pane closed. A failed commit retains it.
                     if committed {
+                        if prepared.as_ref().is_some_and(|failure| !failure.retryable)
+                            && self
+                                .pending_fresh_execution_launches
+                                .contains_key(&window_id)
+                        {
+                            events.extend(self.fresh_execution_launch_failed_events_with_pane(
+                                &window_id,
+                                &detail,
+                                super::launch::LaunchPaneDisposition::Retain,
+                            ));
+                            if self
+                                .pending_fresh_execution_launches
+                                .contains_key(&window_id)
+                            {
+                                return events;
+                            }
+                        }
                         tracing::info!(
                             target: "gwt::agent_launch",
                             window_id = %window_id,

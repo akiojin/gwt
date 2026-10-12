@@ -2972,11 +2972,9 @@ mod tests {
         server.shutdown();
     }
 
-    /// Issue #4443 AC-10 / AC-2: no request may drive the adoption bridge to
-    /// `http_status=500 code=internal`, the shape the PM recorded when #3697's
-    /// 409 turned into a 500 in the same session. A caller-input refusal answers
-    /// `400 invalid_request`, and a state refusal answers `409` carrying the
-    /// operation the agent can actually run.
+    /// Issue #4443 AC-10 / AC-2 and #5288 AC-4: caller-input and state refusals
+    /// must not become opaque `500 code=internal` responses. Store contention
+    /// is retryable; an unexpected store failure retains its safe diagnosis.
     #[test]
     fn execution_adoption_refuses_without_an_internal_server_error() {
         let _env_lock = crate::env_test_lock()
@@ -3098,6 +3096,53 @@ mod tests {
             "a caller input error answered as an unhandled exception: {body}"
         );
         assert_eq!(status, HttpStatusCode::BAD_REQUEST, "{body}");
+
+        // AC-4: a bounded owner-lease refusal is a conflict, while a real
+        // filesystem failure remains internal. Neither may mutate authority.
+        let authority_paths = [
+            trusted.join("execution-control.json"),
+            trusted.join("execution-generation-pointer.json"),
+            gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        ];
+        let authority_bytes = || {
+            authority_paths
+                .iter()
+                .map(|path| std::fs::read(path).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let before = authority_bytes();
+        let lock_path = trusted.join(".write-lease");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let (status, body) = adopt("retry after the other writer settles");
+        fs2::FileExt::unlock(&lock).unwrap();
+        drop(lock);
+        assert_eq!(status, HttpStatusCode::CONFLICT, "{body}");
+        let refusal = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(refusal["diagnostic_reason"], "execution_adopt_store_busy");
+        assert_eq!(
+            refusal["recovery_operations"],
+            serde_json::json!(["execution.adopt"]),
+            "{body}"
+        );
+        assert_eq!(authority_bytes(), before);
+
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        let (status, body) = adopt("diagnose the unavailable store");
+        std::fs::remove_dir(&lock_path).unwrap();
+        assert_eq!(status, HttpStatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        let refusal = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(
+            refusal["diagnostic_reason"],
+            "execution_adopt_store_unavailable"
+        );
+        assert!(refusal.get("recovery_operations").is_none(), "{body}");
+        assert_eq!(authority_bytes(), before);
 
         // The inherited record refuses on state, and the refusal must name the
         // operation this agent can run to get out of it.
