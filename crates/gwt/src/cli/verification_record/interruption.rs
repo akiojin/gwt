@@ -366,7 +366,7 @@ mod tests {
         );
         let msg = result.unwrap_err();
         assert!(
-            msg.contains("replaced or interrupted"),
+            msg.to_string().contains("replaced or interrupted"),
             "unexpected error: {msg}"
         );
     }
@@ -511,6 +511,7 @@ mod tests {
         assert_eq!(marker.status.code(), Some(1), "third command ran");
         assert!(result
             .unwrap_err()
+            .to_string()
             .contains("execution infrastructure failure"));
         assert_eq!(load(dir.path()).unwrap().unwrap(), before);
 

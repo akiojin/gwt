@@ -25,6 +25,8 @@ use crate::{
 /// SPEC-1942 command model for `board.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
+    /// Best-effort Discussion synchronization, independent of local reads/writes.
+    Sync,
     /// `board.show` with optional audience filters and latest-entry limit.
     /// `unresolved` keeps only `blocked` entries whose escalation is still open
     /// (Issue #4609).
@@ -113,6 +115,7 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
             })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
+        Some("sync") => Ok(BoardCommand::Sync),
         Some("config") => match it.next().map(String::as_str) {
             Some("show") | None => Ok(BoardCommand::ConfigShow),
             Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -128,6 +131,16 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        BoardCommand::Sync => {
+            let report = crate::board_discussion_sync::sync_now(env.repo_path())
+                .map_err(|error| io_as_spec_ops_error(io::Error::other(error)))?;
+            out.push_str(
+                &serde_json::to_string_pretty(&report)
+                    .map_err(|error| io_as_spec_ops_error(io::Error::other(error)))?,
+            );
+            out.push('\n');
+            0
+        }
         BoardCommand::Show {
             json,
             workspace,

@@ -438,13 +438,18 @@ test.describe("Issue Bridge load recovery", () => {
       issueSurface.locator('[data-issue-number="3098"] .knowledge-row-badge'),
     ).toHaveText("Agent failed");
 
-    // SPEC #3885 T-034: the outage is the ⚠ pill (hover: the latest line), not
-    // a banner row. It must not be masked by whichever launch happened to
-    // occupy `last_error` first.
+    // Issue #5284: the outage pill links to the center item and outranks
+    // whichever per-issue launch first occupied `last_error`.
     await expect(issueSurface.locator(".knowledge-monitor-blackout")).toHaveCount(0);
     const pill = issueSurface.locator(".knowledge-monitor-pill");
     await expect(pill).toHaveText("⚠ Error");
-    await expect(pill).toHaveAttribute("title", /the fleet has been down since/);
+    await expect(pill).toHaveAttribute("title", "Details in notifications");
+    await expect(pill).toHaveAttribute("data-notification-key", "issue-monitor:agent_blackout");
+    await pill.click();
+    const outage = page.locator('.notification-center__item[data-error-key="issue-monitor:agent_blackout"]');
+    await expect(outage).toBeFocused();
+    await expect(outage).toContainText("the fleet has been down since");
+    await page.getByRole("button", { name: "Close notifications", exact: true }).click();
     await expect(issueSurface.locator(".knowledge-monitor-error")).toHaveCount(
       0,
     );
@@ -604,8 +609,13 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(bar.locator(".knowledge-monitor-pill")).toHaveText("⚠ Error");
     await expect(bar.locator(".knowledge-monitor-pill")).toHaveAttribute(
       "title",
-      "issue #3785: scan failed",
+      "Details in notifications",
     );
+    await bar.locator(".knowledge-monitor-pill").click();
+    const errorNotice = page.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
+    await expect(errorNotice).toBeFocused();
+    await expect(errorNotice).toContainText("issue #3785: scan failed");
+    await page.getByRole("button", { name: "Close notifications", exact: true }).click();
     expect(await root.evaluate((node) => node.childElementCount)).toBe(rootChildren);
 
     const messages = await page.evaluate(() => window.__knowledgeLoadMessages);

@@ -1056,3 +1056,47 @@ fn spec_inspection_complete_blocks_when_the_artifact_moved_under_the_snapshot() 
     assert!(out.contains("BLOCKED"), "{out}");
     assert!(out.contains("snapshot recorded"), "{out}");
 }
+
+// Issue #5176 AC-1/AC-2: a plain markdown body (no section markers) must not be
+// silently dropped; it is stored as the `spec` section and the receipt names it.
+#[test]
+fn spec_create_plain_body_is_stored_as_spec_section_with_receipt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let body = "# SPEC: Plain\n\n## 背景\n\nplain body without markers\n";
+    let mut out = String::new();
+    let code = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Plain".to_string(),
+            body: body.to_string(),
+            labels: Vec::new(),
+        },
+        &mut out,
+    )
+    .expect("plain body create succeeds");
+    assert_eq!(code, 0);
+    let stored = body.trim_end_matches('\n');
+    assert!(
+        out.contains(&format!("wrote {} bytes to section 'spec'", stored.len())),
+        "out = {out}"
+    );
+    let number: u64 = out
+        .split('#')
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .expect("created issue number in output");
+
+    let mut read = String::new();
+    run(
+        &mut env,
+        IssueCommand::SpecReadSection {
+            number,
+            section: "spec".to_string(),
+        },
+        &mut read,
+    )
+    .expect("spec section is readable");
+    assert!(read.contains("plain body without markers"), "read = {read}");
+}

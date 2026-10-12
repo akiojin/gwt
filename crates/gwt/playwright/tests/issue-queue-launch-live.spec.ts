@@ -53,11 +53,14 @@ test.describe("Issue queue real backend launch", () => {
       expect(errors, "console/page errors").toEqual([]);
       await info.attach(`queue-launch-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
     } finally {
-      await info.attach("actual-provider-handoff", { body: JSON.stringify({
-        launches: await fixture.launches(), requests: fixture.requests, comments: fixture.comments, hooks: fixture.hookAudits,
-        scope: "Real backend claim, materialization and PTY provider handoff; provider execution is a local recorder.",
-      }, null, 2), contentType: "application/json" });
-      await fixture.stop();
+      try {
+        await info.attach("actual-provider-handoff", { body: JSON.stringify({
+          launches: await fixture.launches(), requests: fixture.requests, comments: fixture.comments, hooks: fixture.hookAudits,
+          scope: "Real backend claim, materialization and PTY provider handoff; provider execution is a local recorder.",
+        }, null, 2), contentType: "application/json" });
+      } finally {
+        await fixture.stop();
+      }
     }
   });
 });

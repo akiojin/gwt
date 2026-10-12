@@ -513,6 +513,54 @@ test("FR-026: Auto start トグルは set_pm_auto_start を送る", () => {
   assert.deepEqual(sent.at(-1), { kind: "set_pm_auto_start", enabled: true });
 });
 
+test("#3812 AC-5: Pause/Resume is unavailable before project hydration", () => {
+  const { views, sent } = fixture();
+  const toggle = required(views[0], '[data-role="pm-pause-toggle"]');
+  assert.ok(toggle.classList.contains("wizard-button"));
+  assert.equal(toggle.disabled, true);
+  toggle.click();
+  assert.deepEqual(sent, []);
+});
+
+test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Monitor", () => {
+  const { document, views, sent, panel } = fixture({ mounts: 2 });
+  panel.applyStatus({ ...RUNNING_STATUS, is_running: false, paused: false });
+  const toggle = required(views[0], '[data-role="pm-pause-toggle"]');
+  assert.equal(toggle.disabled, false, "pause is independent of PM registration");
+  assert.equal(toggle.textContent, "Pause");
+  toggle.click();
+  assert.deepEqual(sent, [{ kind: "set_pm_paused", paused: true }]);
+
+  panel.applyStatus({ ...RUNNING_STATUS, paused: true });
+  const lateView = document.createElement("section");
+  document.body.appendChild(lateView);
+  panel.mount(lateView);
+  views.push(lateView);
+  for (const view of views) {
+    const pausedToggle = required(view, '[data-role="pm-pause-toggle"]');
+    assert.equal(pausedToggle.textContent, "Resume");
+    assert.equal(pausedToggle.getAttribute("aria-pressed"), "true");
+    const status = required(view, '[data-role="pm-autonomy-status"]');
+    assert.ok(status.classList.contains("settings-status"));
+    assert.equal(status.textContent, "Autonomous loop paused");
+    assert.equal(status.getAttribute("role"), "status");
+    assert.equal(status.getAttribute("aria-live"), "polite");
+    assert.match(required(view, '[data-role="pm-running-as"]').textContent, /Running as:/);
+  }
+
+  required(lateView, '[data-role="pm-pause-toggle"]').click();
+  assert.deepEqual(sent, [
+    { kind: "set_pm_paused", paused: true },
+    { kind: "set_pm_paused", paused: false },
+  ]);
+  panel.applyStatus({ ...RUNNING_STATUS, paused: false });
+  for (const view of views) {
+    assert.equal(required(view, '[data-role="pm-pause-toggle"]').textContent, "Pause");
+    assert.equal(required(view, '[data-role="pm-pause-toggle"]').getAttribute("aria-pressed"), "false");
+    assert.equal(required(view, '[data-role="pm-autonomy-status"]').textContent, "Autonomous loop active");
+  }
+});
+
 test("FR-132: missing loop interval displays the effective 60 second default", () => {
   const { views, panel } = fixture();
   const statusWithoutInterval = { ...RUNNING_STATUS };

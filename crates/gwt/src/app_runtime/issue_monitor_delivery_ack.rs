@@ -266,7 +266,7 @@ impl AppRuntime {
         };
         let barrier = if require_durable && delivery_id.is_some() {
             match self.persist_dispatcher.reserve_workspace_durable(
-                gwt::workspace_state_path(&context.project_root),
+                gwt_core::paths::gwt_project_dir(&context.project_key).join("workspace.json"),
                 self.persistable_workspace_state(tab),
             ) {
                 Ok(barrier) => Some(barrier),
@@ -410,6 +410,13 @@ impl AppRuntime {
                     }
                 }
                 events
+            }
+            Ok(None) if identity.delivery_id.is_some() && identity.handoff_id.is_none() => {
+                // The claim expired while this exact launch was materializing.
+                // Monitor already finalized it; close without another notification.
+                self.issue_monitor_launch_deliveries
+                    .remove(identity.delivery_id.as_ref().unwrap());
+                self.close_window_after_issue_monitor_finalize_events(&identity.window_id)
             }
             Ok(None) => Vec::new(),
             Err((error, stage)) => self.issue_monitor_control_error_events(

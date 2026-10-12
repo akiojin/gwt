@@ -2620,6 +2620,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             ..queued_issue_monitor_prefs(&[42])
@@ -2835,6 +2836,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 1,
             ..queued_issue_monitor_prefs(&[42])
@@ -2996,6 +2998,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 5,
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
@@ -3090,6 +3093,10 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _projection_budget = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -3106,6 +3113,7 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 5,
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
@@ -3123,7 +3131,10 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         sample_active_agent_session("tab-1", &window_id),
@@ -3132,7 +3143,28 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
     hook.project_root = Some(repo.display().to_string());
     hook.message = Some("Stop-block hit an error".to_string());
 
-    let events = runtime.handle_runtime_hook_event(hook);
+    super::super::reset_local_issue_monitor_fallback_commit_count();
+    let mut events = runtime.handle_runtime_hook_event(hook);
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. }
+                | BackendEvent::IssueMonitorInbox { .. }
+                | BackendEvent::IssueMonitorToast { .. }
+        )),
+        "RuntimeHook must defer monitor failure publication to the blocking worker"
+    );
+    assert_eq!(
+        super::super::local_issue_monitor_fallback_commit_count(),
+        0,
+        "RuntimeHook must return before any local monitor fallback commit"
+    );
+    events.extend(drain_runtime_hook_agent_failure(
+        &mut runtime,
+        &queued_tasks,
+        &recorded_events,
+    ));
 
     let status = events
         .iter()
@@ -3935,4 +3967,361 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
         runtime.active_agent_sessions.contains_key(&window_id),
         "an automatic resume must never hard-fail on a stale producing binding left by an earlier execution: {events:?}"
     );
+}
+
+#[test]
+fn runtime_hook_agent_failure_completion_preserves_replaced_session_and_pane() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let identity = runtime
+        .runtime_hook_agent_failure_identity(temp.path(), &window_id)
+        .expect("failure identity");
+    runtime
+        .runtime_hook_agent_failures_in_flight
+        .insert(window_id.clone(), identity.clone());
+    runtime
+        .active_agent_sessions
+        .get_mut(&window_id)
+        .expect("replacement session")
+        .session_id = "session-successor".to_string();
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), issue_monitor_feedback(43));
+    let monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            autonomous_mode: true,
+            autonomous_records: vec![issue_monitor_autonomous_record(
+                42,
+                gwt::AutonomousPhase::Implementing,
+                1,
+            )],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+
+    let mut prepared = super::super::PreparedRuntimeHookAgentFailure {
+        identity,
+        message: "predecessor failed".to_string(),
+        issue_number_hint: Some(42),
+        result: super::super::PreparedIssueMonitorAgentFailure::Committed {
+            monitor: Some(Box::new(monitor)),
+            issue_number: Some(42),
+            emit_local_snapshot: false,
+        },
+        status: None,
+    };
+
+    let events = runtime.handle_runtime_hook_agent_failure_prepared(prepared.clone());
+
+    assert!(events.is_empty(), "a stale failure must stay silent");
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert_eq!(
+        runtime
+            .active_agent_sessions
+            .get(&window_id)
+            .expect("successor session retained")
+            .session_id,
+        "session-successor"
+    );
+    assert_eq!(
+        runtime.pending_launch_feedback_contexts[&window_id].issue_monitor_issue_number,
+        Some(43)
+    );
+    assert!(runtime.runtime_hook_agent_failures_in_flight.is_empty());
+
+    prepared.identity = runtime
+        .runtime_hook_agent_failure_identity(temp.path(), &window_id)
+        .expect("same-session predecessor identity");
+    runtime
+        .runtime_hook_agent_failures_in_flight
+        .insert(window_id.clone(), prepared.identity.clone());
+    runtime.register_window("tab-1", "agent-1");
+    let successor = runtime
+        .runtime_hook_agent_failure_identity(temp.path(), &window_id)
+        .expect("same-session successor identity");
+    assert_eq!(successor.session_id, prepared.identity.session_id);
+    assert_ne!(
+        successor.lifecycle_generation,
+        prepared.identity.lifecycle_generation
+    );
+
+    assert!(runtime
+        .handle_runtime_hook_agent_failure_prepared(prepared)
+        .is_empty());
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert_eq!(
+        runtime.pending_launch_feedback_contexts[&window_id].issue_monitor_issue_number,
+        Some(43)
+    );
+    assert!(runtime.runtime_hook_agent_failures_in_flight.is_empty());
+}
+
+#[test]
+fn runtime_hook_agent_failure_completion_survives_sibling_tab_close() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let sibling_tab = sample_project_tab(
+        "tab-a",
+        "Sibling",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let owning_tab = sample_project_tab_with_window_at(
+        "tab-b",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![sibling_tab, owning_tab], Some("tab-b"));
+    let (spawner, _finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let window_id = combined_window_id("tab-b", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-b", &window_id),
+    );
+    let identity = runtime
+        .runtime_hook_agent_failure_identity(temp.path(), &window_id)
+        .expect("failure identity");
+    runtime
+        .runtime_hook_agent_failures_in_flight
+        .insert(window_id.clone(), identity.clone());
+
+    runtime.close_project_tab_events("tab-a");
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    let monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            autonomous_mode: true,
+            autonomous_records: vec![issue_monitor_autonomous_record(
+                42,
+                gwt::AutonomousPhase::Implementing,
+                1,
+            )],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+    let prepared = super::super::PreparedRuntimeHookAgentFailure {
+        identity,
+        message: "owning pane failed".to_string(),
+        issue_number_hint: Some(42),
+        result: super::super::PreparedIssueMonitorAgentFailure::Committed {
+            monitor: Some(Box::new(monitor)),
+            issue_number: Some(42),
+            emit_local_snapshot: false,
+        },
+        status: None,
+    };
+
+    let events = runtime.handle_runtime_hook_agent_failure_prepared(prepared);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { level, message, issue_number, .. }
+                if level == "error" && message == "owning pane failed" && *issue_number == Some(42)
+        )),
+        "the owning pane's current failure must finish after a sibling closes: {events:?}"
+    );
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+    assert!(runtime.runtime_hook_agent_failures_in_flight.is_empty());
+}
+
+#[test]
+fn runtime_hook_agent_failure_payload_preserves_captured_source_and_typed_failure() {
+    let source = gwt::runtime_daemon_events::IssueMonitorAgentFailureSource::Bound {
+        issue_number: 42,
+        identity: gwt::IssueMonitorLaunchIdentity {
+            active: true,
+            claim_id: Some("claim-old".to_string()),
+            delivery_id: Some("delivery-old".to_string()),
+            window_id: Some("tab-1::agent-42".to_string()),
+        },
+    };
+    let failure = gwt::IssueMonitorFailure::ResumeWriterConflict {
+        holder_window_id: Some("tab-1::holder".to_string()),
+    };
+    let payload = AppRuntime::issue_monitor_agent_failed_from_launch_payload(
+        "tab-1::agent-42",
+        "predecessor failed",
+        &source,
+        Some(&failure),
+    );
+    assert!(payload.get("agent_failed").is_none());
+    let notification = &payload["agent_failed_from_launch"];
+    assert_eq!(notification["window_id"], "tab-1::agent-42");
+    assert_eq!(notification["message"], "predecessor failed");
+    assert_eq!(
+        notification["source"],
+        serde_json::to_value(source).unwrap()
+    );
+    assert_eq!(
+        notification["failure"],
+        serde_json::to_value(failure).unwrap()
+    );
+}
+
+#[test]
+fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("injected failure worker spawn error");
+    let mut hook = runtime_hook_state("Error", "session-1");
+    hook.project_root = Some(temp.path().display().to_string());
+    hook.message = Some("Stop-block hit an error".to_string());
+    super::super::reset_local_issue_monitor_fallback_commit_count();
+
+    let events = runtime.handle_runtime_hook_event(hook);
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains("injected failure worker spawn error")
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+    )));
+    assert_eq!(super::super::local_issue_monitor_fallback_commit_count(), 0);
+    assert!(runtime.runtime_hook_agent_failures_in_flight.is_empty());
+}
+
+#[test]
+fn runtime_hook_agent_failure_local_fallback_preserves_successor_launch() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_without_origin(&repo);
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut prefs = gwt::IssueMonitorPrefs {
+        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: window_id.clone(),
+        }],
+        launched_claims: std::collections::BTreeMap::from([(42, "claim-old".to_string())]),
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    let source =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone())
+            .launch_identity(42);
+    // The same Issue and window now belong to a different launch. A GUI-only
+    // completion check would be too late to protect this durable state.
+    prefs
+        .launched_claims
+        .insert(42, "claim-successor".to_string());
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save successor");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut source = super::super::RuntimeHookAgentFailureSource {
+        identity: runtime
+            .runtime_hook_agent_failure_identity(&repo, &window_id)
+            .expect("failure source identity"),
+        generations: runtime.window_lifecycle_generations.clone(),
+        launch: Some((42, source)),
+    };
+
+    let result = AppRuntime::prepare_issue_monitor_agent_failure(
+        &repo,
+        Some("tab-1"),
+        &window_id,
+        "predecessor failed",
+        Some(42),
+        None,
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon unavailable".to_string(),
+            ),
+        ),
+        Some(source.clone()),
+    );
+
+    assert!(matches!(
+        result,
+        super::super::PreparedIssueMonitorAgentFailure::Rejected
+    ));
+    let actual = gwt::load_issue_monitor_prefs(&prefs_path).expect("load successor");
+    assert_eq!(actual.launched_issues, prefs.launched_issues);
+    assert_eq!(actual.launched_claims, prefs.launched_claims);
+    assert!(actual.failed_issues.is_empty());
+
+    // Retirement during the scan must also be refused, after the initial
+    // generation and launch checks succeeded.
+    let monitor =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), actual.clone());
+    source.launch = Some((42, monitor.launch_identity(42)));
+    let generations = source.generations.clone();
+    let replacement_window = window_id.clone();
+    super::super::RUNTIME_HOOK_AGENT_FAILURE_AFTER_SCAN_TEST_HOOK.with(|slot| {
+        assert!(slot
+            .replace(Some(Box::new(move || {
+                let mut generations = generations.lock().expect("source generations");
+                let next = generations.get(&replacement_window).copied().unwrap_or(0) + 1;
+                generations.insert(replacement_window, next);
+            })))
+            .is_none());
+    });
+    let result = AppRuntime::prepare_issue_monitor_agent_failure(
+        &repo,
+        Some("tab-1"),
+        &window_id,
+        "retired during scan",
+        Some(42),
+        None,
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon unavailable".to_string(),
+            ),
+        ),
+        Some(source),
+    );
+    assert!(matches!(
+        result,
+        super::super::PreparedIssueMonitorAgentFailure::Rejected
+    ));
+    let after_scan = gwt::load_issue_monitor_prefs(&prefs_path).expect("load after retired scan");
+    assert_eq!(after_scan.launched_issues, prefs.launched_issues);
+    assert_eq!(after_scan.launched_claims, prefs.launched_claims);
+    assert!(after_scan.failed_issues.is_empty());
 }

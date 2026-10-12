@@ -13191,6 +13191,40 @@ fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() 
     assert_eq!(projection.work_items[0].id, predecessor_id);
     assert!(projection.work_items[0].discarded);
     assert_eq!(projection.work_items[0].owner.as_deref(), Some("SPEC-4074"));
+    // Issue #5288 / #4249: legacy automatic repair removed the terminal
+    // predecessor's container. Its stable branch ID and Start lineage still
+    // identify the successor; historical path loss must not resurrect it.
+    projection
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == predecessor_id)
+        .unwrap()
+        .execution_containers
+        .clear();
+    // The successor's explicit Start link remains authority after routine
+    // heartbeat compaction, rather than returning to its terminal predecessor.
+    for index in 0..MAX_INLINE_WORK_EVENTS + 1 {
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Update,
+            &successor_id,
+            now + chrono::Duration::seconds(index as i64 + 6),
+        ));
+    }
+    projection.compact_inline_events();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("works.json");
+    save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    let heartbeat = WorkEvent::new(
+        WorkEventKind::Update,
+        &successor_id,
+        now + chrono::Duration::seconds(100),
+    );
+    crate::work_events_intake::ingest_work_events_content(
+        &path,
+        &serde_json::to_string(&heartbeat).unwrap(),
+    )
+    .unwrap();
+    let projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
 
     let current = find_work_item_for_container(
         &projection,
@@ -13243,11 +13277,8 @@ fn find_work_item_for_container_rejects_invalid_successor_authority() {
         match invalid {
             "owner" => successor.owner = Some("Issue #4313".to_string()),
             "container" => {
-                successor
-                    .execution_container
-                    .as_mut()
-                    .unwrap()
-                    .worktree_path = Some(PathBuf::from("/wt/other"));
+                successor.execution_container.as_mut().unwrap().branch =
+                    Some("work/other".to_string());
             }
             "link" => successor.related_work_item_id = Some("work-unrelated".to_string()),
             _ => unreachable!(),
@@ -14614,4 +14645,73 @@ fn delete_pending_marker_handle(path: &Path) -> fs::File {
     }
     .expect("mark marker delete-pending");
     file
+}
+
+/// Issue #5208: a contender for `works.lock` used to wait forever when the
+/// caller set no operation deadline, so one long holder silently stalled every
+/// Work writer. The wait is now bounded and the error names the holder.
+#[test]
+fn work_items_lock_wait_without_ambient_deadline_is_bounded_and_names_the_holder() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("project-state/works.json");
+    std::fs::create_dir_all(work_items_path.parent().unwrap()).expect("project-state dir");
+    let holder = crate::operation_deadline::NamedFileLock::acquire_quiet(
+        &work_items_path.with_extension("lock"),
+        WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
+    )
+    .expect("hold works.lock");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let contender_path = work_items_path.clone();
+    std::thread::spawn(move || {
+        WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE
+            .with(|wait| wait.set(Some(std::time::Duration::from_millis(100))));
+        let result = with_workspace_work_items_lock(&contender_path, || Ok(()));
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("works.lock acquisition must not wait forever");
+    let message = result.expect_err("a held works.lock must refuse after the bound");
+    assert!(message.contains("deadline expired"), "{message}");
+    assert!(
+        message.contains(WORKSPACE_WORK_ITEMS_LOCK_OPERATION),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("pid={}", std::process::id())),
+        "the error must name the observed holder: {message}"
+    );
+    drop(holder);
+    with_workspace_work_items_lock(&work_items_path, || Ok(()))
+        .expect("a released works.lock is available again");
+}
+
+/// Issue #5208: the Work items locks are per-handle OS locks, so a thread
+/// that re-acquired one it already held waited on itself forever. Refuse it.
+#[test]
+fn work_items_lock_reacquired_on_the_same_thread_is_refused_instead_of_deadlocking() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("project-state/works.json");
+    std::fs::create_dir_all(work_items_path.parent().unwrap()).expect("project-state dir");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let nested_path = work_items_path.clone();
+    std::thread::spawn(move || {
+        let result = with_workspace_work_items_lock(&nested_path, || {
+            let nested = with_workspace_work_items_lock(&nested_path, || Ok(()));
+            Ok(nested.map_err(|error| error.to_string()))
+        });
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+
+    let nested = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a nested works.lock acquisition must not self-deadlock")
+        .expect("the outer acquisition succeeds");
+    let message = nested.expect_err("the nested acquisition must be refused");
+    assert!(message.contains("already held by this thread"), "{message}");
+    with_workspace_work_items_lock(&work_items_path, || Ok(()))
+        .expect("the outer lock and its registration are released");
 }

@@ -313,21 +313,16 @@ pub(super) fn send_to_upstream_with_deadline(
         }
         return Ok(issue.number.0);
     }
-    let mut labels = record.input.labels.clone();
-    let label = match record.input.kind {
-        FeedbackKind::Bug => "bug",
-        _ => "enhancement",
-    };
-    if !labels.iter().any(|existing| existing == label) {
-        labels.push(label.into());
-    }
     client
         .create_owner_issue(
             &repository,
             &CreateRepositoryIssue {
                 title: record.input.title.clone(),
                 body,
-                labels,
+                // Public reporters can create Issues without push access, but
+                // GitHub discards their labels. Keep classification in the body
+                // so the strict mutation readback also succeeds for them.
+                labels: vec![],
             },
             deadline,
         )
@@ -384,7 +379,18 @@ fn similarity(left: &str, right: &str) -> f64 {
         title
             .split(|c: char| !c.is_alphanumeric())
             .filter(|word| !word.is_empty())
-            .map(str::to_lowercase)
+            .flat_map(|word| {
+                let word = word.to_lowercase();
+                if word.is_ascii() {
+                    return vec![word];
+                }
+                // Japanese has no word separators. Character tokens preserve
+                // shared wording, while pairs retain local character order.
+                let chars: Vec<_> = word.chars().collect();
+                let mut tokens: Vec<String> = chars.iter().map(char::to_string).collect();
+                tokens.extend(chars.windows(2).map(|pair| pair.iter().collect::<String>()));
+                tokens
+            })
             .collect()
     }
     let (a, b) = (words(left), words(right));
@@ -615,6 +621,53 @@ mod tests {
             client.owner_mutation_call_log()[0].operation,
             OwnerRepositoryOperation::CreateComment
         );
+    }
+
+    #[test]
+    fn similar_japanese_title_receives_a_comment_instead_of_a_duplicate_issue() {
+        let (_dir, _store, mut record) = report("https://github.com/akiojin/gwt.git");
+        record.input.title = "fix(hooks): フックの信頼検証が失敗している".into();
+        let client = FakeIssueClient::new();
+        client.seed_repository_issue(RepositoryIssue {
+            repository: RepositoryIdentity::gwt_upstream(),
+            number: IssueNumber(4918),
+            title: "fix(hooks): フックの信頼検証が失敗する".into(),
+            body: String::new(),
+            labels: vec![],
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt("2026-10-01T00:00:00Z".into()),
+        });
+        assert_eq!(send_to_upstream(&client, &record).unwrap(), 4918);
+        assert_eq!(client.owner_mutation_count(), 1);
+        assert_eq!(
+            client.owner_mutation_call_log()[0].operation,
+            OwnerRepositoryOperation::CreateComment
+        );
+        assert!(
+            similarity(
+                "フックの信頼検証が失敗する",
+                "設定画面からプロジェクトを選べない"
+            ) < 0.8
+        );
+    }
+
+    #[test]
+    fn new_feedback_needs_no_label_permission_and_preserves_requested_labels() {
+        let (_dir, _store, mut record) = report("https://github.com/akiojin/gwt.git");
+        record.input.labels = vec!["documentation".into()];
+        let client = FakeIssueClient::new();
+        let number = send_to_upstream(&client, &record).unwrap();
+        let issue = client
+            .fetch_issue(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(number),
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120)),
+            )
+            .unwrap();
+        assert!(issue.labels.is_empty());
+        assert!(issue.body.contains("\"requested_labels\""));
+        assert!(issue.body.contains("documentation"));
     }
 
     #[test]

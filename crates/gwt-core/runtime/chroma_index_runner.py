@@ -121,6 +121,8 @@ def _pending_higher_priority(than: str) -> bool:
     pending on the host-wide heavy lease (FR-389). Presence of the pending
     registration is the signal; stale files are swept by the Rust side, so
     the worst case is one unnecessary yield."""
+    if than == "background" and _refresh_budget_exhausted():
+        return True
     pending_dir = _coordinator_root() / "heavy.pending"
     try:
         entries = list(pending_dir.iterdir())
@@ -143,6 +145,15 @@ def _pending_higher_priority(than: str) -> bool:
         if _QOS_PRIORITY_RANK.get(data.get("priority"), 99) < rank:
             return True
     return False
+
+
+def _refresh_budget_exhausted() -> bool:
+    """A refresh quantum cooperatively ends at the existing batch checkpoint."""
+    try:
+        deadline_ms = int(os.environ["GWT_INDEX_REFRESH_YIELD_AT_MS"])
+    except (KeyError, ValueError):
+        return False
+    return int(time.time() * 1000) >= deadline_ms
 
 
 HEAVY_PROGRESS_FILENAME = "heavy.progress.json"
@@ -4664,6 +4675,7 @@ def _file_index_v2_yielded_result(
         "ok": True,
         "scope": scope,
         "yielded": True,
+        "budget_exhausted": _refresh_budget_exhausted(),
         "resumable": True,
         "published": False,
         "requested_embeddings": requested,
@@ -7394,6 +7406,8 @@ def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
         "last_error": error_code, "actual_document_count": actual,
         "expected_document_count": expected, "mode": mode,
     }
+    if error_code == "BUILD_INCOMPLETE" and os.environ.get("GWT_INDEX_REFRESH_RUN_ID"):
+        payload["refresh_run_id"] = os.environ["GWT_INDEX_REFRESH_RUN_ID"]
     _write_json_atomic(db_path / "repair.json", payload)
     return {"ok": False, "scope": "issues", "error_code": error_code,
             "error": f"issues rebuild failed: {error_code} ({actual}/{expected})",
@@ -7538,17 +7552,34 @@ def action_index_issues_v2(
               "cache_refresh_at": _issue_cache_refresh_meta(repo_hash).get("last_full_refresh")}
     fingerprint = source["fingerprint"]
     previous_failure = _read_issue_repair(db_path)
-    if previous_failure.get("fingerprint") == fingerprint and previous_failure.get("failures", 0):
+    expected_interrupt = previous_failure.get("expected_budget_interruption", {})
+    known_budget_interrupt = (
+        previous_failure.get("last_error") == "BUILD_INCOMPLETE"
+        and previous_failure.get("fingerprint") == fingerprint
+        and isinstance(expected_interrupt, dict)
+        and expected_interrupt.get("fingerprint") == fingerprint
+        and bool(previous_failure.get("refresh_run_id"))
+        and expected_interrupt.get("run_id") == previous_failure.get("refresh_run_id")
+    )
+    if known_budget_interrupt:
+        # Consume this one known interruption without a repair-free interval.
+        # A crash in the health probe belongs to the new run and must stop.
+        _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
+    if (not known_budget_interrupt and previous_failure.get("fingerprint") == fingerprint
+            and previous_failure.get("failures", 0)):
         return {"ok": False, "scope": "issues", "error_code": "REPAIR_STOPPED",
                 "error": "issues rebuild stopped after failure for the same source; use explicit repair",
                 "repair": previous_failure, "mode": previous_failure.get("mode", mode)}
-    health = _issue_status_v2(repo_hash, db_root=db_root, source=source)
+    health = _issue_status_v2(repo_hash, db_root=db_root, source=source,
+                              check_repair=not known_budget_interrupt)
     if respect_ttl and not repair and health.get("healthy"):
         meta = _read_issue_meta(db_path) or {}
         last = _parse_iso(meta.get("last_full_refresh", ""))
         if last is not None:
             age = (_now_utc() - last).total_seconds()
             if age < ttl_minutes * 60:
+                if known_budget_interrupt:
+                    (db_path / "repair.json").unlink(missing_ok=True)
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
@@ -7698,6 +7729,7 @@ def action_index_issues_v2(
             "ok": True,
             "scope": "issues",
             "yielded": True,
+            "budget_exhausted": _refresh_budget_exhausted(),
             "resumable": True,
             "mode": mode,
             "indexed": staged_count,

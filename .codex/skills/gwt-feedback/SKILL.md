@@ -24,7 +24,8 @@ proposal or PM registration is not a prerequisite.
 - Optional `body`: expected behavior, impact, supporting evidence, and any
   uncertainty about gwt's responsibility. Optional `error_record_id`: the
   corresponding `errors.list` record id, if known. Optional `labels`: relevant
-  existing labels.
+  existing labels to suggest in the structured report. Feedback does not assign
+  GitHub labels, so ordinary reporters do not need repository push access.
 
 gwtd adds the source project hash, gwt/gwtd versions, OS, and active agent
 count. Do not supply a destination, project identity, or environment override.

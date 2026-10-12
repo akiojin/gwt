@@ -236,6 +236,174 @@ fn terminal_convergence_grace_candidate_resets_and_closes_the_exact_window() {
     );
 }
 
+/// Issue #5078 AC-4: a restored Completed holder with no Workspace identity
+/// can reach real terminal delivery settlement and the exact window close.
+#[test]
+fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
+    use crate::app_runtime::terminal_convergence::{
+        observe_terminal_windows_in_background, RestoreAdmission, TerminalCloseEligibility,
+        TerminalCloseReason, TerminalWindowSnapshot,
+    };
+    use gwt::cli::{
+        execution_state as execution,
+        hook::{workflow_policy, HookEvent, HookOutput},
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _review_dispatch = ScopedEnvVar::unset("GWT_REVIEW_DISPATCH");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_default_branch(&repo, "feature/demo");
+    let session_id = "session-completed-restore";
+    let window_id = combined_window_id("tab-1", "agent-42");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-42",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Idle,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-42", Some(session_id.to_string())));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    fs::create_dir_all(&runtime.sessions_dir).expect("create canonical Session store");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        session_id,
+        gwt_agent::AgentStatus::Idle,
+        Some(&window_id),
+    );
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = gwt_agent::Session::load(&session_path).expect("load bound holder");
+    session.restore_window_on_startup = true;
+    session.save(&runtime.sessions_dir).expect("enable restore");
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
+    save_workspace_launch_projection(
+        &repo,
+        &runtime.active_agent_sessions[&window_id],
+        None,
+        Some(42),
+        Some(execution::ExecutionOwnerKey {
+            kind: execution::ExecutionOwnerKind::Issue,
+            number: 42,
+        }),
+        None,
+        WorkspaceLaunchProjectionKind::StartWork,
+        None,
+    )
+    .expect("materialize assigned Work with missing purpose and focus");
+    let _session_env = ScopedEnvVar::set(gwt_agent::session::GWT_SESSION_ID_ENV, session_id);
+    let event = HookEvent {
+        tool_name: Some("Write".to_string()),
+        tool_input: Some(serde_json::json!({ "file_path": repo.join("fixture.rs") })),
+        transcript_path: None,
+        cwd: Some(repo.display().to_string()),
+    };
+    assert!(matches!(
+        workflow_policy::evaluate(&event, &repo).expect("evaluate Active identity gate"),
+        HookOutput::PreToolUsePermission { .. }
+    ));
+    run_git(&repo, &["add", ".gwt/work"]);
+    run_git(
+        &repo,
+        &["commit", "-qm", "chore(work): deliver restore fixture"],
+    );
+    run_git(&repo, &["push", "-qu", "origin", "feature/demo"]);
+    gwt::cli::verification_record::save_work_event_settlement_record(&repo, session_id, false)
+        .expect("record actual delivery of the Work event");
+    assert!(matches!(
+        execution::settle(&repo, session_id, execution::ExecutionSettlement::Completed)
+            .expect("settle actual Completed record"),
+        execution::SettleResult::Settled(_)
+    ));
+    let diagnosis = execution::diagnose_for_projection(&repo, Some(session_id));
+    assert_eq!(
+        diagnosis.ecr_status,
+        execution::ExecutionDiagnosisState::Completed
+    );
+    assert_eq!(
+        diagnosis.binding_state,
+        execution::ExecutionBindingState::Terminal
+    );
+    assert_eq!(diagnosis.settlement_severity, "clear");
+    assert_eq!(
+        workflow_policy::evaluate(&event, &repo)
+            .expect("evaluate restored Completed identity gate"),
+        HookOutput::Silent
+    );
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.clone(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed exact Monitor delivery");
+    assert_eq!(
+        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        RestoreAdmission::RefuseTerminal(TerminalCloseReason::SettledExecution)
+    );
+    runtime
+        .window_lifecycle_generations
+        .lock()
+        .unwrap()
+        .insert(window_id.clone(), 1);
+    let observations = observe_terminal_windows_in_background(
+        &runtime.sessions_dir,
+        vec![TerminalWindowSnapshot {
+            window_id: window_id.clone(),
+            session_id: session_id.to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo,
+            window_status: WindowProcessStatus::Idle,
+            lifecycle_generation: Some(1),
+        }],
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        observations[0].eligibility,
+        TerminalCloseEligibility::Eligible(TerminalCloseReason::SettledExecution)
+    );
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+        .expect("read settlement")
+        .launched_issues
+        .is_empty());
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let grace = Duration::from_secs(60);
+    let t0 = Instant::now();
+    runtime.terminal_convergence_observed_events_at(grace, observations, t0);
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    runtime.close_expired_terminal_window_candidates_at(t0 + grace);
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+    assert!(runtime.tabs[0].workspace.window("agent-42").is_none());
+    let finalizer = finalizers
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("exact close finalizer");
+    finalizer();
+    let closed = gwt_agent::Session::load(&session_path).expect("read closed holder");
+    // This restored placeholder owns no PTY; exact close disables restore
+    // without fabricating a process-stop receipt.
+    assert!(!closed.restore_window_on_startup);
+}
+
 // Issue #3927 (SPEC #3340 T-627 / PM ruling): the settlement bridge releases
 // the Monitor slot through the exact terminal-delivery transition (daemon
 // control, local exact-CAS fallback here) and refuses a stale identity; the

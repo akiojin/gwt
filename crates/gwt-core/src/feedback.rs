@@ -96,6 +96,7 @@ impl FeedbackRecord {
             "kind": self.input.kind, "operation": self.input.operation,
             "environment": self.context, "reproduction": self.input.reproduction,
             "workaround": self.input.workaround, "error_record_id": self.input.error_record_id,
+            "requested_labels": self.input.labels,
         }))
         .expect("feedback metadata serializes");
         format!("{}\n<!-- gwt-feedback-kind:{kind} -->\n\n{}\n\n## Structured report\n\n```json\n{}\n```\n\n## Observed refusal (verbatim)\n\n{}text\n{}\n{}\n",

@@ -517,6 +517,10 @@ mod tests {
             )
             .unwrap();
 
+        attempt
+            .returned(Some("verify: deferred"), &coordinator)
+            .unwrap();
+        assert!(attempt.ensure_active().is_ok());
         let canceled = cancel_for_caller(
             repo.path(),
             "mine",
@@ -535,6 +539,10 @@ mod tests {
         assert!(!coordinator.heavy_reservation_path(&key).exists());
         assert!(coordinator.heavy_reservation_path(&foreign).exists());
         assert!(attempt.cancelled().unwrap());
+        attempt
+            .returned(Some("verify: deferred"), &coordinator)
+            .unwrap();
+        assert!(attempt.ensure_active().is_err());
         assert_eq!(
             load(repo.path(), attempt.id()).unwrap().unwrap().status,
             AttemptStatus::Interrupted
