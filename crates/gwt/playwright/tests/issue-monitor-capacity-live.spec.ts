@@ -128,10 +128,9 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
             .filter(({ payload }: any) => payload.kind === "issue_monitor_status").at(-1)?.payload.status;
           const current = status?.agent_capacity;
           const text = document.querySelector(`.workspace-window[data-id="${id}"] .knowledge-monitor-capacity-warning`)?.textContent ?? "";
-          return !!current && text.includes(`${value - current.recommended_worker_limit} agents above recommendation`)
-            && text.includes(current.limiting_constraint.toUpperCase());
+          return !!current && text.includes(`${value - current.recommended_worker_limit} over recommended`);
         }, { id: windowId, value: manual })).toBe(true);
-        await expect(warning).toContainText("Reduce Max active if verification slows.");
+        await expect(warning).toContainText("Lower Max active if slow.");
         await expect(warning).toHaveAttribute("data-tone", "info");
         await expect(budget).toContainText("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         await expect(warning).toBeInViewport({ ratio: 1 });
@@ -183,7 +182,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
               constraints: [{ resource: "disk", capacity: null, binding: true, reason: diskReason }],
             } });
             await expect(warning).toBeVisible();
-            await expect(warning).toContainText("Running with manual limit 9. No action needed.");
+            await expect(warning).toContainText("Manual limit 9; no action needed.");
             await expect(warning).not.toContainText(reason);
             await expect(warning).toHaveAttribute("data-tone", "info");
             const text = await warning.textContent() ?? "";
@@ -246,7 +245,8 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           detail: { kind: "issue_monitor_status", status: value },
         }));
       }, status);
-      const reason = "inventory_complete=false; own_pm=0; target: /Users/example/target; disk measurement pending; disk measurement pending";
+      const repeated = Array(37).fill("inventory_uncertain: child_identity_missing").join("; ");
+      const reason = `inventory_complete=false; own_pm=0; target: /Users/example/target; disk measurement pending; disk measurement pending; ${repeated}`;
       const status = { ...saved, enabled: true, state: "idle", last_error: null, agent_blackout: null,
         max_active_agents: 5, max_active_agents_override: 5,
         agent_capacity: { ...saved.agent_capacity, measurement_complete: false, reason,
@@ -258,7 +258,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       const details = surface.locator(".knowledge-monitor-capacity");
       const diagnostic = details.locator('[data-role="capacity-reason"]');
       const pill = surface.locator(".knowledge-monitor-pill");
-      await expect(summary).toHaveText("Capacity measurement is incomplete. Running with manual limit 5. No action needed.");
+      await expect(summary).toHaveText("Capacity pending. Manual limit 5; no action needed.");
       await expect(summary).toHaveAttribute("data-tone", "info");
       await expect(summary).not.toContainText(/inventory_complete|own_pm|\/Users\//);
       await expect(diagnostic).toBeHidden();
@@ -276,6 +276,12 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       });
       expect(metrics.lines).toBeLessThanOrEqual(2);
       expect(metrics.color).toBe(metrics.infoColor);
+      await summary.evaluate(element => { (element as HTMLElement).style.maxWidth = "220px"; });
+      expect(await summary.evaluate(element => element.getBoundingClientRect().height
+        / parseFloat(getComputedStyle(element).lineHeight))).toBeLessThanOrEqual(2);
+      expect(await summary.evaluate(element => element.scrollHeight <= element.clientHeight),
+        "Manual no-action guidance must fit without being clipped").toBe(true);
+      await summary.evaluate(element => { (element as HTMLElement).style.maxWidth = ""; });
       await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
       const summaryImage = testInfo.outputPath(`capacity-summary-${testInfo.project.name}.png`);
       await page.screenshot({ path: summaryImage, animations: "disabled" });
@@ -284,6 +290,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await expect(diagnostic).toBeVisible();
       await expect(diagnostic).toContainText("/Users/example/target");
       expect((await details.textContent() ?? "").split("disk measurement pending")).toHaveLength(2);
+      expect((await details.textContent() ?? "").split("child_identity_missing")).toHaveLength(2);
       const detailsImage = testInfo.outputPath(`capacity-details-${testInfo.project.name}.png`);
       await page.screenshot({ path: detailsImage, animations: "disabled" });
       await testInfo.attach(`capacity-details-${testInfo.project.name}`, { path: detailsImage, contentType: "image/png" });
@@ -291,9 +298,25 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await expect(pill).toContainText("Error");
       await apply(status);
       await expect(pill).toHaveText("Running");
+      await apply({ ...status, agent_capacity: { ...status.agent_capacity,
+        measurement_complete: true, recommended_worker_limit: 1, limiting_constraint: "cpu,ram,disk" } });
+      await expect(summary).toHaveText("4 over recommended. Lower Max active if slow.");
+      await summary.evaluate(element => { (element as HTMLElement).style.maxWidth = "220px"; });
+      expect(await summary.evaluate(element => element.scrollHeight <= element.clientHeight),
+        "Manual excess guidance must fit without being clipped").toBe(true);
       await apply({ ...status, max_active_agents: 0, max_active_agents_override: null });
       await expect(summary).toHaveAttribute("data-tone", "warning");
-      await expect(summary).toContainText("Wait for the next measurement or set Max active manually.");
+      await expect(summary).toContainText("Wait or set Max active manually.");
+      // Constrain the component's available width without changing its
+      // content: the default warning must never grow beyond two lines.
+      await summary.evaluate(element => { (element as HTMLElement).style.maxWidth = "220px"; });
+      expect(await summary.evaluate(element => element.getBoundingClientRect().height
+        / parseFloat(getComputedStyle(element).lineHeight))).toBeLessThanOrEqual(2);
+      expect(await summary.evaluate(element => element.scrollHeight <= element.clientHeight),
+        "the action must fit without being clipped").toBe(true);
+      const narrowImage = testInfo.outputPath(`capacity-narrow-${testInfo.project.name}.png`);
+      await page.screenshot({ path: narrowImage, animations: "disabled" });
+      await testInfo.attach(`capacity-narrow-${testInfo.project.name}`, { path: narrowImage, contentType: "image/png" });
       expect(errors, "zero console/page errors").toEqual([]);
     });
   });

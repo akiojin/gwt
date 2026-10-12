@@ -2296,6 +2296,10 @@ body {
 }
 
 .knowledge-monitor-capacity-warning {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   color: var(--color-state-needs-input);
   border-left: 2px solid var(--color-state-needs-input);
   padding-left: var(--space-2);

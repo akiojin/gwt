@@ -873,13 +873,10 @@ export function createKnowledgeKanbanSurface({
         let warningText = "";
         if (!capacity.measurement_complete) {
           warningText = manualEffective
-            ? `Capacity measurement is incomplete. Running with manual limit ${override}. No action needed.`
-            : "Capacity measurement is incomplete. Wait for the next measurement or set Max active manually.";
+            ? `Capacity pending. Manual limit ${override}; no action needed.`
+            : "Capacity pending. Wait or set Max active manually.";
         } else if (excess > 0) {
-          const resources = String(capacity.limiting_constraint || "").split(",")
-            .filter(value => ["cpu", "ram", "disk"].includes(value)).join(",").toUpperCase();
-          const resource = resources ? ` (${resources})` : "";
-          warningText = `${excess} agents above recommendation${resource}. Reduce Max active if verification slows.`;
+          warningText = `${excess} over recommended. Lower Max active if slow.`;
         }
         if (warningText) {
           warning.textContent = warningText;

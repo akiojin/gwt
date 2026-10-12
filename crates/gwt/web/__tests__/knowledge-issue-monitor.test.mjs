@@ -348,8 +348,8 @@ test("Issue #3620: manual excess is allowed and Use Auto waits for the backend e
   assert.equal(body.querySelector('[data-role="monitor-capacity-mode"]').textContent, "Manual");
   const warning = body.querySelector(".knowledge-monitor-capacity-warning");
   assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /4 agents above recommendation.*CPU/i);
-  assert.match(warning.textContent, /Reduce Max active if verification slows/);
+  assert.match(warning.textContent, /4 over recommended/i);
+  assert.match(warning.textContent, /Lower Max active if slow/);
   assert.equal(warning.dataset.tone, "info");
   assert.match(body.querySelector(".knowledge-monitor-capacity").textContent, /Verification may not finish\. Timing-dependent test failures may block unrelated PRs\./);
   body.querySelector('[data-action="monitor-capacity-auto"]').click();
@@ -378,7 +378,7 @@ test("Issue #5284: incomplete Manual capacity has a private compact summary and 
   const warning = body.querySelector(".knowledge-monitor-capacity-warning");
   assert.ok(warning, "incomplete measurements have an inline warning");
   assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /measurement is incomplete.*manual limit 9.*No action needed/i);
+  assert.match(warning.textContent, /Capacity pending.*manual limit 9.*no action needed/i);
   assert.doesNotMatch(warning.textContent, /inventory_complete|own_pm|child_identity|\/Users\//);
   assert.ok(warning.textContent.length <= 130, "default summary fits one or two lines");
   assert.equal(warning.dataset.tone, "info");
@@ -391,7 +391,7 @@ test("Issue #5284: incomplete Manual capacity has a private compact summary and 
   assert.equal(details.textContent.split("child_identity_missing").length - 1, 1);
   surface.applyIssueMonitorStatus({ ...status, max_active_agents_override: null, max_active_agents: 0 });
   assert.equal(warning.dataset.tone, "warning");
-  assert.match(warning.textContent, /Wait for the next measurement or set Max active manually/);
+  assert.match(warning.textContent, /Wait or set Max active manually/);
   assert.doesNotMatch(warning.textContent, /inventory_complete|\/Users\//);
 });
 
