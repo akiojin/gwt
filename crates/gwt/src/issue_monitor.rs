@@ -8843,6 +8843,7 @@ impl IssueMonitorState {
             return;
         }
         let reason = reason.into();
+        let intentional_stop = reason.starts_with(STOP_ONLY_REASON_PREFIX);
         // Re-observing a parked issue updates its reason without emitting a
         // second transition notice. A later departure and re-entry notifies again.
         if self
@@ -8850,7 +8851,7 @@ impl IssueMonitorState {
             .is_none_or(|record| record.phase != AutonomousPhase::NeedsHuman)
         {
             self.push_autonomous_notice_with_transition(
-                "error",
+                if intentional_stop { "info" } else { "error" },
                 issue_number,
                 format!(
                     "Issue #{issue_number} needs human [{}]: {reason}",
@@ -8868,7 +8869,9 @@ impl IssueMonitorState {
         record.steering = None;
         self.failed_issues.insert(issue_number, reason.clone());
         self.released_failures.remove(&issue_number);
-        self.last_error = Some(format!("issue #{issue_number}: {reason}"));
+        if !intentional_stop {
+            self.last_error = Some(format!("issue #{issue_number}: {reason}"));
+        }
         if let Some(item) = self
             .inbox
             .iter_mut()
@@ -11379,8 +11382,15 @@ impl IssueMonitorState {
     fn first_failed_issue_banner(&self) -> Option<String> {
         self.failed_issues
             .iter()
-            .next()
+            .find(|(_, message)| !message.starts_with(STOP_ONLY_REASON_PREFIX))
             .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
+    }
+
+    fn is_stop_only_error_banner(&self, error: &str) -> bool {
+        self.failed_issues.iter().any(|(issue_number, reason)| {
+            reason.starts_with(STOP_ONLY_REASON_PREFIX)
+                && error == format!("issue #{issue_number}: {reason}")
+        })
     }
 
     /// #3223 follow-up (codex P1): absorb the OTHER process's in-flight launch
@@ -12040,13 +12050,13 @@ impl IssueMonitorState {
                     reason = reset.reason,
                 )
             })
-            .or_else(|| self.last_error.clone())
             .or_else(|| {
-                self.failed_issues
-                    .iter()
-                    .next()
-                    .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
-            });
+                self.last_error
+                    .as_ref()
+                    .filter(|message| !self.is_stop_only_error_banner(message))
+                    .cloned()
+            })
+            .or_else(|| self.first_failed_issue_banner());
         let host = crate::process::current_hostname();
         let local_entries = self.terminal_queues.get(&host).map(|queue| {
             queue
@@ -27534,6 +27544,7 @@ mod tests {
     #[test]
     fn stop_only_revokes_the_slot_and_holds_the_issue() {
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.autonomous_mode = true;
         let target = stop_target(&monitor, 42);
         let epoch_before = monitor.effect_authority_epoch();
         let attempts_before = monitor.attempt_count(42);
@@ -27571,6 +27582,50 @@ mod tests {
                 .is_some_and(|message| message.contains("rate limit")),
             "FR-031: the reason must be diagnosable from the snapshot"
         );
+        assert_eq!(
+            monitor.status_view().last_error,
+            None,
+            "an operator stop is not a current error"
+        );
+        assert_ne!(monitor.status_view().state, "error");
+        let notices = monitor.take_autonomous_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].level, "info",
+            "intentional stops must not create an ERROR notification"
+        );
+    }
+
+    #[test]
+    fn stop_only_preserves_real_errors_and_filters_legacy_stop_banners() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.config.enabled = true;
+        monitor.record_scan_error("2026-08-07T00:00:00Z", "GitHub scan failed");
+        let target = stop_target(&monitor, 42);
+        monitor.stop_only(&target, "operator pause", "2026-08-07T00:00:01Z");
+        assert_eq!(
+            monitor.status_view().last_error.as_deref(),
+            Some("GitHub scan failed")
+        );
+        assert_eq!(monitor.status_view().state, "error");
+
+        // Old processes may still hold a stop banner. A separate real failure
+        // must win even when the stopped issue sorts first in durable prefs.
+        monitor.last_error = Some("issue #42: stopped: operator pause".to_string());
+        monitor
+            .failed_issues
+            .insert(99, "agent launch failed".to_string());
+        assert_eq!(
+            monitor.status_view().last_error.as_deref(),
+            Some("issue #99: agent launch failed")
+        );
+        assert_eq!(
+            monitor.first_failed_issue_banner().as_deref(),
+            Some("issue #99: agent launch failed")
+        );
+        monitor.failed_issues.remove(&99);
+        assert_eq!(monitor.status_view().last_error, None);
+        assert_ne!(monitor.status_view().state, "error");
     }
 
     /// SPEC-3431 FR-033: every identity component must match exactly, and a
@@ -28055,6 +28110,8 @@ mod tests {
             Some("rate limit"),
             "the stop must be durable and diagnosable after a reload"
         );
+        assert_eq!(reloaded.status_view().last_error, None);
+        assert_ne!(reloaded.status_view().state, "error");
     }
 
     /// SPEC-3431 FR-033 / T-087c: the running daemon must converge on a stop
@@ -28089,6 +28146,8 @@ mod tests {
 
         // The daemon's next scan rebases onto that disk state.
         daemon.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(daemon.status_view().last_error, None);
+        assert_ne!(daemon.status_view().state, "error");
 
         assert_eq!(
             daemon.active_count(),

@@ -2301,6 +2301,11 @@ body {
   padding-left: var(--space-2);
 }
 
+.knowledge-monitor-capacity-warning[data-tone="info"] {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
 .knowledge-monitor-capacity[hidden],
 .knowledge-monitor-capacity-warning[hidden] {
   display: none;

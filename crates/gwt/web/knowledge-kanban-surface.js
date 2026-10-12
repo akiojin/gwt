@@ -847,32 +847,48 @@ export function createKnowledgeKanbanSurface({
         warning.hidden = true;
         warning.textContent = "";
         if (!capacity) return;
-        details.querySelector("summary").textContent = `Machine budget · ${capacity.recommended_worker_limit} workers recommended`;
+        details.querySelector("summary").textContent = `Details · Machine budget · ${capacity.recommended_worker_limit} workers recommended`;
         details.querySelector('[data-role="capacity-recommendation"]').textContent =
           `Recommended: ${capacity.recommended_worker_limit} monitor workers · ${capacity.recommended_implementation_count} implementation agents · ${capacity.recommended_total_count} total including PM`;
         details.querySelector('[data-role="capacity-usage"]').textContent =
           `Machine budget: ${capacity.machine_budget ?? "unknown"} · Machine live: ${capacity.machine_live_agents} · This project: ${capacity.own_live_agents} (PM: ${capacity.own_pm_agents}) · Other projects: ${capacity.other_live_agents}`;
         details.querySelector('[data-role="capacity-gui-cpu"]').textContent =
           `GUI CPU reserved: ${Number(capacity.gui_cpu_millicores) / 1000} cores`;
-        details.querySelector('[data-role="capacity-reason"]').textContent = capacity.reason;
+        const shownReasons = new Set();
+        const uniqueReason = (reason) => String(reason || "").split(/[;\n]+/)
+          .map(part => part.trim()).filter(part => {
+            if (!part || shownReasons.has(part)) return false;
+            shownReasons.add(part);
+            return true;
+          }).join("; ");
+        details.querySelector('[data-role="capacity-reason"]').textContent = uniqueReason(capacity.reason);
         const constraints = details.querySelector('[data-role="capacity-constraints"]');
         constraints.replaceChildren();
         for (const constraint of capacity.constraints || []) {
           const resource = constraint.resource === "disk" ? "Disk" : String(constraint.resource).toUpperCase();
-          const row = createNode("li", "", `${resource}: ${constraint.capacity ?? "unknown"} agent slots${constraint.binding ? " · limiting" : ""} · ${constraint.reason}`);
+          const reason = uniqueReason(constraint.reason);
+          const row = createNode("li", "", `${resource}: ${constraint.capacity ?? "unknown"} agent slots${constraint.binding ? " · limiting" : ""}${reason ? ` · ${reason}` : ""}`);
           constraints.appendChild(row);
         }
         const excess = manual ? override - capacity.recommended_worker_limit : 0;
+        const manualEffective = manual && status.max_active_agents === override;
+        warning.dataset.tone = manualEffective ? "info" : "warning";
         let warningText = "";
         if (!capacity.measurement_complete) {
-          warningText = `Capacity measurement is incomplete.${manual ? ` Manual limit ${override} is unchanged.` : ""} ${capacity.reason}`;
+          warningText = manualEffective
+            ? `Capacity measurement is incomplete. Running with manual limit ${override}. No action needed.`
+            : "Capacity measurement is incomplete. Wait for the next measurement or set Max active manually.";
         } else if (excess > 0) {
-          warningText = `${excess} agents above recommendation (${String(capacity.limiting_constraint).toUpperCase()}). ${capacity.reason}`;
+          const resources = String(capacity.limiting_constraint || "").split(",")
+            .filter(value => ["cpu", "ram", "disk"].includes(value)).join(",").toUpperCase();
+          const resource = resources ? ` (${resources})` : "";
+          warningText = `${excess} agents above recommendation${resource}. Reduce Max active if verification slows.`;
         }
         if (warningText) {
-          warning.textContent = `${warningText} Verification may not finish. Timing-dependent test failures may block unrelated PRs.`;
+          warning.textContent = warningText;
           warning.hidden = false;
         }
+        details.querySelector('[data-role="capacity-risk"]').hidden = !warningText;
       }
 
       function renderIssueMonitorControls(element) {
@@ -4659,6 +4675,7 @@ export function createKnowledgeKanbanSurface({
                       <p data-role="capacity-gui-cpu"></p>
                       <p data-role="capacity-reason"></p>
                       <ul data-role="capacity-constraints"></ul>
+                      <p data-role="capacity-risk" hidden>Verification may not finish. Timing-dependent test failures may block unrelated PRs.</p>
                     </div>
                   </details>
                 </section>
