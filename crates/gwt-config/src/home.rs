@@ -72,10 +72,16 @@ fn is_cargo_test_binary(exe: &Path) -> bool {
     exe.parent()
         .and_then(Path::file_name)
         .is_some_and(|name| name == "deps")
-        && exe
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name.contains('-'))
+        && exe.file_name().and_then(OsStr::to_str).is_some_and(|name| {
+            name.strip_suffix(".exe")
+                .unwrap_or(name)
+                .rsplit_once('-')
+                .is_some_and(|(target, hash)| {
+                    !target.is_empty()
+                        && !hash.is_empty()
+                        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        })
 }
 
 /// Panic before test config IO can access a path outside temporary storage.
@@ -86,19 +92,6 @@ fn is_cargo_test_binary(exe: &Path) -> bool {
 #[track_caller]
 pub fn assert_test_path(path: &Path) {
     if is_test_process() || gwt_home_override().is_some() {
-        #[cfg(windows)]
-        assert!(
-            is_isolated(path),
-            "test HOME isolation: refusing access to {}; use TempDir and ScopedGwtHome; \
-             trusted_temp={:?}, resolved={:?}, parent={:?}, prefix_metadata={:?}, prefix_canonical={:?}",
-            path.display(),
-            dirs::data_local_dir().map(|root| root.join("Temp").canonicalize()),
-            resolved_path(path),
-            path.parent().and_then(resolved_path),
-            path.components().next().map(|prefix| std::fs::symlink_metadata(prefix.as_os_str()).map(|value| value.is_dir())),
-            path.components().next().map(|prefix| std::fs::canonicalize(prefix.as_os_str())),
-        );
-        #[cfg(not(windows))]
         assert!(
             is_isolated(path),
             "test HOME isolation: refusing access to {}; use TempDir and ScopedGwtHome",
@@ -111,8 +104,8 @@ fn is_isolated(path: &Path) -> bool {
     // Environment temp roots can be set to / or HOME. Only OS-owned roots
     // may authorize test IO; nested verification directories remain covered.
     #[cfg(windows)]
-    if dirs::data_local_dir()
-        .and_then(|directory| directory.join("Temp").canonicalize().ok())
+    if windows_user_temp_dir()
+        .and_then(|temporary| temporary.canonicalize().ok())
         .is_some_and(|temporary| is_isolated_under(path, &temporary))
     {
         return true;
@@ -138,6 +131,45 @@ fn is_isolated(path: &Path) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(windows)]
+fn windows_user_temp_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::{
+        core::{Owned, PWSTR},
+        Win32::{
+            Foundation::HANDLE,
+            Security::TOKEN_QUERY,
+            System::Threading::{GetCurrentProcess, OpenProcessToken},
+            UI::Shell::GetUserProfileDirectoryW,
+        },
+    };
+
+    // KnownFolder lookup can fail when tests replace USERPROFILE before its
+    // first call. Query the OS profile of the process token instead.
+    // SAFETY: the current process is valid, token is writable, and Owned
+    // takes ownership only after OpenProcessToken returns a valid handle.
+    let token = unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        Owned::new(token)
+    };
+    let mut length = 0;
+    // SAFETY: a null buffer queries the required size, including the NUL.
+    let _ = unsafe { GetUserProfileDirectoryW(*token, None, &mut length) };
+    if length == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; length as usize];
+    // SAFETY: buffer has the requested length and remains live for the call.
+    unsafe { GetUserProfileDirectoryW(*token, Some(PWSTR(buffer.as_mut_ptr())), &mut length) }
+        .ok()?;
+    buffer.truncate(length as usize);
+    if buffer.pop() != Some(0) {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_wide(&buffer)).join("AppData/Local/Temp"))
 }
 
 #[cfg(target_os = "macos")]
@@ -187,6 +219,9 @@ fn resolved_path(path: &Path) -> Option<PathBuf> {
     let mut resolved = PathBuf::new();
     for component in absolute.components() {
         match component {
+            // A Windows drive prefix alone is not the absolute root. In
+            // particular, `\\?\C:` cannot be opened until RootDir is appended.
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
             Component::CurDir => {}
             // create_dir_all(original_path) can create an escaped ancestor
             // before traversing back into temp. Reject rather than normalize.
@@ -266,7 +301,12 @@ mod tests {
         assert!(is_cargo_test_binary(Path::new(
             "target/debug/deps/gwt-abc123"
         )));
+        assert!(is_cargo_test_binary(Path::new(
+            "target/debug/deps/gwt-123.exe"
+        )));
         assert!(!is_cargo_test_binary(Path::new("target/debug/gwtd")));
+        assert!(!is_cargo_test_binary(Path::new("/opt/app/deps/gwt-linux")));
+        assert!(!is_cargo_test_binary(Path::new("target/debug/deps/gwt-")));
     }
 
     #[test]
