@@ -26,7 +26,7 @@ use std::{
 };
 
 use gwt_core::work_events_intake::{
-    content_fingerprint, ingest_work_event_sources_with_local_path, ingest_work_events_sources,
+    content_fingerprint, ingest_work_event_sources_with_local_path,
     rebuild_work_events_with_shared_loader, work_events_intake_group_of, SharedWorkEventsSource,
     WorkEventsIntakeStore,
 };
@@ -101,8 +101,7 @@ type ReloadedWorkEventsSources = (Vec<SharedWorkEventsSource>, SourceFingerprint
 #[cfg(test)]
 thread_local! {
     /// Issue #5208: every payload read of a work event source on this thread,
-    /// so a test can prove a rebuild does not re-read unchanged sources while
-    /// holding `works.lock`.
+    /// so a test can prove a rebuild does not re-read unchanged sources.
     static WORK_EVENT_SOURCE_READS: std::cell::RefCell<Vec<PathBuf>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -297,13 +296,8 @@ fn load_pending_sources_for_rebuild(
         fingerprints.push((source.key.clone(), source.fingerprint.clone()));
     }
 
-    // Issue #5208: this loader runs while `works.lock` is held, and every
-    // Work writer in the fleet (SessionStart hooks, workspace.update, Host
-    // continuation/adoption, GUI projection preparation) waits on that lock.
-    // Re-reading every shard of every worktree here held the lock for tens of
-    // minutes on a repository with hundreds of worktrees × thousands of
-    // shards. The pre-lock pass already read and validated each worktree
-    // source, so reuse that content whenever the re-scan observes the same
+    // Issue #5208: reuse the discovery pass's validated content whenever the
+    // lock-free re-scan observes the same
     // key and size/mtime/container fingerprint — the same identity the
     // incremental poll already trusts — and read only new or changed sources.
     let prelock_reads = pending_sources
@@ -312,8 +306,8 @@ fn load_pending_sources_for_rebuild(
         .map(|source| (source.key.as_str(), source))
         .collect::<HashMap<_, _>>();
 
-    // Re-scan the already enumerated worktree roots after the projection lock
-    // is taken. This catches an immutable shard atomically published between
+    // Re-scan the already enumerated worktree roots after the authoritative
+    // snapshot is captured. This catches an immutable shard published between
     // the initial source scan and intake without paying for a second
     // `git worktree list` process.
     for source in worktree_event_sources(worktree_entries)? {
@@ -854,8 +848,8 @@ where
             || {
                 let loaded = load_pending_sources_for_rebuild(&pending_sources, worktree_entries)?;
                 if let Some(error) = summary.load_error.as_ref() {
-                    // Discovery preceded the projection lock. Refuse recovery if
-                    // that source set became incomplete while intake was waiting.
+                    // Discovery preceded the authoritative snapshot. Refuse
+                    // recovery if that source set became incomplete before prepare.
                     let available = loaded
                         .1
                         .iter()
@@ -870,9 +864,9 @@ where
                         );
                         return Err(error.into());
                     }
-                    // Local lifecycle writers hold this same Works lock, so
-                    // validate their discovered snapshot here before the core
-                    // rebuild reads it under the still-held lock.
+                    // Validate the discovered lifecycle history. The core also
+                    // compares its locked snapshot before publishing, so a later
+                    // writer cannot be overwritten or marked ingested.
                     if let (Some(path), Some((_, expected))) =
                         (close_path.as_ref(), pending_local_lifecycle.as_ref())
                     {
@@ -892,7 +886,10 @@ where
             },
             close_path.as_deref(),
         )
-    } else if pending_local_lifecycle.is_some() {
+    } else {
+        // A close writer can append successfully and fail to save Works while
+        // this pass prepares shared events. Include lifecycle truth and its CAS
+        // guard even when discovery considered its fingerprint current.
         ingest_work_event_sources_with_local_path(
             work_items_path,
             shared_sources,
@@ -906,17 +903,6 @@ where
                     .map(|source| (source.key.clone(), source.fingerprint.clone()))
                     .collect(),
                 local_fingerprint,
-            )
-        })
-    } else {
-        ingest_work_events_sources(work_items_path, shared_sources).map(|report| {
-            (
-                report,
-                pending_sources
-                    .iter()
-                    .map(|source| (source.key.clone(), source.fingerprint.clone()))
-                    .collect(),
-                None,
             )
         })
     };
@@ -2830,11 +2816,9 @@ mod tests {
         shard
     }
 
-    /// Issue #5208: a rebuild holds `works.lock` while it re-scans worktree
-    /// sources. Re-reading every unchanged shard there kept the lock for tens
-    /// of minutes on a large fleet and stalled every Work writer. Unchanged
-    /// sources must reuse their pre-lock read; a shard published while intake
-    /// waits for the lock must still be read and folded.
+    /// Issue #5208: re-reading every unchanged shard made fleet rebuilds slow.
+    /// Unchanged sources reuse their discovery read; a shard published while
+    /// intake waits for its authoritative snapshot must still be read and folded.
     #[test]
     fn rebuild_reuses_prelock_reads_and_still_folds_shards_published_before_the_lock() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -4050,6 +4034,67 @@ mod tests {
         let current = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
         assert_eq!(current.events_applied, 0);
         assert_eq!(current.sources_ingested, 0);
+    }
+
+    /// A cached local log may gain a durable close after discovery and before intake.
+    #[test]
+    fn issue_5335_shared_source_intake_recovers_local_close_appended_after_discovery() {
+        use chrono::{TimeZone, Utc};
+        use gwt_core::workspace_projection::{
+            load_workspace_work_items_from_path, WorkEvent, WorkEventKind, WorkspaceStatusCategory,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        write_shard(&repo, "evt-local-race-start", "work-local-race");
+        let works = temp.path().join("state/works.json");
+        let state = works.with_file_name("work-events-intake.json");
+        let ledger = works.with_file_name("work-events-closed.jsonl");
+        std::fs::create_dir_all(works.parent().unwrap()).unwrap();
+        std::fs::write(&ledger, "").unwrap();
+        assert!(ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
+        let local_key = format!("{SOURCE_LOCAL_LIFECYCLE}{}", ledger.display());
+        assert!(
+            load_work_events_intake_state(&state).is_current(&local_key, &content_fingerprint(""))
+        );
+        assert_eq!(
+            ingest_project_work_events_paths(&repo, &works, &state).sources_ingested,
+            0
+        );
+
+        write_shard(&repo, "evt-new-shared-source", "work-new-shared-source");
+        let done_at = Utc.with_ymd_and_hms(2026, 9, 15, 2, 0, 0).unwrap();
+        let mut done = WorkEvent::new(WorkEventKind::Done, "work-local-race", done_at);
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        let summary =
+            ingest_project_work_events_paths_with_before_intake(&repo, &works, &state, || {
+                std::fs::write(
+                    &ledger,
+                    format!("{}\n", serde_json::to_string(&done).unwrap()),
+                )
+                .expect("append durable close without saving the projection");
+            });
+        assert!(
+            !summary.projection_rebuilt,
+            "incremental intake: {summary:?}"
+        );
+        let projection = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-new-shared-source"));
+        let closed = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-local-race")
+            .unwrap();
+        assert_eq!(closed.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(closed.completed_at, Some(done_at));
     }
 
     #[test]

@@ -4080,6 +4080,103 @@ enum WorkItemsReadSnapshot {
     Synthesized(WorkItemsProjection),
 }
 
+/// Startup intake snapshots authoritative bytes briefly, then prepares outside
+/// the lock. Missing files and empty files are deliberately distinct CAS inputs.
+pub(crate) struct WorkItemsIntakeSnapshot {
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl WorkItemsIntakeSnapshot {
+    pub(crate) fn capture(works_path: &Path, local_path: Option<&Path>) -> Result<Self> {
+        with_workspace_work_items_lock(works_path, || {
+            let mut paths = vec![
+                works_path.to_path_buf(),
+                container_detachments_path(works_path),
+            ];
+            paths.extend(local_path.map(Path::to_path_buf));
+            let files = paths
+                .into_iter()
+                .map(|path| {
+                    let bytes = read_intake_snapshot_file(&path)?;
+                    Ok((path, bytes))
+                })
+                .collect::<Result<_>>()?;
+            Ok(Self { files })
+        })
+    }
+
+    fn detachments(&self) -> Result<ContainerDetachments> {
+        let (path, bytes) = &self.files[1];
+        match bytes {
+            Some(bytes) => serde_json::from_slice(bytes).map_err(|error| {
+                GwtError::Other(format!("container detachments {}: {error}", path.display()))
+            }),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    pub(crate) fn projection(&self) -> Result<Option<WorkItemsProjection>> {
+        let detachments = self.detachments()?;
+        let (path, bytes) = &self.files[0];
+        bytes
+            .as_ref()
+            .map(|bytes| decode_workspace_work_items(path, bytes, &detachments))
+            .transpose()
+    }
+
+    pub(crate) fn local_content(&self) -> Result<Option<&str>> {
+        self.files
+            .get(2)
+            .and_then(|(_, bytes)| bytes.as_ref())
+            .map(|bytes| {
+                std::str::from_utf8(bytes).map_err(|error| {
+                    GwtError::Other(format!("work events local lifecycle is not UTF-8: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    pub(crate) fn apply_detachments(&self, projection: &mut WorkItemsProjection) -> Result<()> {
+        remove_detached_containers(projection, &self.detachments()?);
+        Ok(())
+    }
+
+    pub(crate) fn prepare(&self, mut projection: WorkItemsProjection) -> Result<Vec<u8>> {
+        self.apply_detachments(&mut projection)?;
+        projection.compact_inline_events();
+        serde_json::to_vec_pretty(&projection)
+            .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))
+    }
+
+    /// The caller strictly decoded the snapshot (or proved complete-source
+    /// malformed recovery). Exact byte comparison protects that admission and
+    /// concurrent writers without re-decoding/serializing under the lock.
+    pub(crate) fn commit(&self, prepared: Option<&[u8]>) -> Result<()> {
+        let works_path = &self.files[0].0;
+        with_workspace_work_items_lock(works_path, || {
+            for (path, expected) in &self.files {
+                if read_intake_snapshot_file(path)? != *expected {
+                    return Err(GwtError::Other(
+                        "work events intake snapshot changed; retry on the next poll".into(),
+                    ));
+                }
+            }
+            if let Some(bytes) = prepared {
+                write_atomic(works_path, bytes)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn read_intake_snapshot_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(WorkspaceStateLoadError::io(path, error).into()),
+    }
+}
+
 pub fn load_or_synthesize_workspace_work_items_from_paths(
     work_items_path: &Path,
     current_path: &Path,
