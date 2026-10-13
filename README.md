@@ -1088,15 +1088,30 @@ gwt shows an actionable hint.
 ## PM project configuration
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
-time, and a **Copy** button. It is read-only; use **Execution log** for terminal
+time, and a **Copy** button. Q&A reports separate the question or instruction from
+the answer and action results; use **Report kind** to filter the history. It is
+read-only; use **Execution log** for terminal
 interaction. Reports survive restarts in
 `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`, with no automatic
 expiry or count limit. Each non-empty report is limited to 64 KiB.
 
 A registered PM can publish through `pm.report.post` with `kind` (`progress`,
-`decision`, or `blocker`) and `body`; `pm.report.list` reads the saved history.
+`decision`, `blocker`, or `qa`) and `body`; `qa` also requires a non-empty
+`question` summarizing the user's question or instruction. Its `body` contains
+the answer, actions taken, and their results. `pm.report.list` reads the saved history.
 These use the standard gwtd JSON envelope. A successful post confirms the report
 was saved and read back; failures return an explicit error.
+
+The **PM の現在** card stays above the report history. It separates the PM's
+explanation from observed active windows, queue head, human handoffs, release PR,
+and pending update. Unavailable observations are shown as unknown. The PM updates
+its explanation with `pm.status.set`: supply 1–3 `items` (`kind`: `working` or
+`waiting`, `text`, and RFC3339 `started_at`), `next_trigger`, and optional
+`user_action`. Set `stale_after_minutes` to change the default 15-minute warning.
+`pm.status` returns the latest explanation, retained status history, and reporting
+diagnostics. Identical statements with unchanged Monitor state do not renew their
+timestamp. A human PM turn requires a successfully saved Q&A report before Stop;
+scheduled automatic cycles are exempt.
 
 The resident PM starts in a gwt-owned runtime directory. Repository skills,
 hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are
@@ -1482,6 +1497,14 @@ The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
 volume, based on measured target and temporary growth plus 20% headroom.
 `verify.lease.status` reports `capacity`, `running`, `available`, each holder in
 `slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
+
+A non-resident reservation keeps exclusive FIFO priority for three minutes
+after its last refresh. After that grace, resident work may pass it in the
+verification lane, including commands that require exclusive admission.
+Status reports the bypass reason; the reservation retains its arrival and
+expiry. Rerun `verify.run` with the identical full matrix to reclaim that
+priority. A successor attempt inherits an existing deferred reservation before
+waiting for Cargo artifacts; an older attempt cannot cancel the successor's turn.
 
 ```bash
 gwtd <<'JSON'

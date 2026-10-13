@@ -35,6 +35,16 @@ CHECK_REPO_HASH="$(
 # browser-check-agent-seed-begin
 CHECK_PROJECT_STATE="$CHECK_HOME/.gwt/projects/${CHECK_REPO_HASH:?Resolve project_store.hash first}/project-state"
 mkdir -p "$CHECK_PROJECT_STATE"
+# The current card reuses the shared budget/TTL PR cache. Keep this isolated
+# release observation fresh without reaching the user's remote repository.
+cat > "$CHECK_HOME/.gwt/config.toml" <<'TOML'
+[pr_inventory]
+cache_ttl_secs = 3600
+checks_refresh_secs = 3600
+TOML
+jq -n --arg observed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{fetched_at:$observed,rows:[{number:5352,title:"Release v9.117.2",url:"https://github.com/akiojin/gwt/pull/5352",headRefName:"develop",baseRefName:"main",isDraft:false,updatedAt:$observed,createdAt:$observed,mergeable:"UNKNOWN",mergeStateStatus:"UNKNOWN",statusCheckRollup:[]}]}' \
+  > "$CHECK_HOME/.gwt/projects/$CHECK_REPO_HASH/pr-inventory-cache.json"
 jq -n --arg root "$REPO_ROOT" \
   '{settings:{auto_start:false},registration:{session_id:"pm-reports-fixture",agent_id:"codex",worktree_path:$root,created_at:"2026-10-11T00:00:00Z"}}' \
   > "$CHECK_PROJECT_STATE/pm.json"

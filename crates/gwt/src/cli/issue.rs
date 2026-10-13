@@ -20,6 +20,19 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
 }
 
+fn guard_pm_owner_check(
+    repo_path: &Path,
+    owner_check: Option<&super::hook::pm_spec_survey::IssueOwnerCheck>,
+) -> Result<(), SpecOpsError> {
+    if !super::pm::caller_is_registered_pm(repo_path) {
+        return Ok(());
+    }
+    let evidence = owner_check.ok_or_else(|| {
+        SpecOpsError::Validation(super::hook::pm_spec_survey::OWNER_CHECK_RECOVERY.to_string())
+    })?;
+    evidence.validate().map_err(SpecOpsError::Validation)
+}
+
 /// Issue #3873: refuse to write an autonomous-candidate body the Issue Monitor
 /// cannot read.
 ///
@@ -119,6 +132,7 @@ pub(super) fn run<E: CliEnv>(
             file,
             labels,
         } => {
+            guard_pm_owner_check(env.repo_path(), None)?;
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             super::intake_outcome::auto_record_issue_operation(
@@ -135,7 +149,9 @@ pub(super) fn run<E: CliEnv>(
             title,
             body,
             labels,
+            owner_check,
         } => {
+            guard_pm_owner_check(env.repo_path(), owner_check.as_ref())?;
             guard_autonomous_acceptance_block(&labels, &body)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             super::intake_outcome::auto_record_issue_operation(
@@ -588,7 +604,7 @@ fn attach_issue_cache_status(
     ));
 }
 
-fn merge_board_escalations_into_needs_human(
+pub(crate) fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
 ) -> serde_json::Value {
@@ -905,7 +921,7 @@ fn session_row_mismatch(
 /// The Issue Monitor projection `issue.monitor.status` reports: the daemon's
 /// published status while one is live, otherwise a projection rebuilt from
 /// prefs and the local Issue cache.
-fn load_monitor_agent_status(
+pub(crate) fn load_monitor_agent_status(
     project_root: &std::path::Path,
     active_session_count: usize,
 ) -> Result<(crate::IssueMonitorAgentStatus, Option<serde_json::Value>), SpecOpsError> {
@@ -8339,6 +8355,7 @@ mod tests {
                 run(
                     &mut env,
                     IssueCommand::CreateBody {
+                        owner_check: None,
                         title: format!("issue {number}"),
                         body: String::new(),
                         labels: if number == 2 {
@@ -13631,6 +13648,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "docs: typo".to_string(),
                 body: "free text".to_string(),
                 labels: vec!["documentation".to_string()],
@@ -13652,6 +13670,76 @@ mod tests {
         assert!(Cache::new(env.cache_root())
             .validation_receipt_path(IssueNumber(number))
             .exists());
+    }
+
+    #[test]
+    fn issue_create_from_registered_pm_refuses_missing_owner_evidence_before_mutation() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::pm_registry::try_register_pm(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            crate::pm_registry::PmRegistration {
+                session_id: "registration-pm".into(),
+                agent_id: "codex".into(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .unwrap();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registration-pm");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let error = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                owner_check: None,
+                title: "fix: missing registration evidence".into(),
+                body: "body".into(),
+                labels: Vec::new(),
+            },
+            &mut String::new(),
+        )
+        .expect_err("PM registration must fail closed without owner_check");
+        let error = error.to_string();
+        for recovery_field in ["owner_check", "owner_spec", "search_queries", "reason"] {
+            assert!(
+                error.contains(recovery_field),
+                "missing recovery field: {error}"
+            );
+        }
+        assert!(
+            env.client.call_log().is_empty(),
+            "refusal must precede remote mutation"
+        );
+        for owner_check in [
+            serde_json::json!({"owner_spec": null, "search_queries": ["PM current state"]}),
+            serde_json::json!({"owner_spec": 3431, "reason": "Independently deliverable current-state child"}),
+        ] {
+            env.stdin = serde_json::json!({
+                "schema_version": 1,
+                "operation": "issue.create",
+                "params": {"title": "fix: checked ownership", "body": "body", "owner_check": owner_check},
+            })
+            .to_string();
+            assert_eq!(super::super::json_envelope::dispatch(&mut env, "gwtd"), 0);
+        }
+        assert_eq!(
+            env.client
+                .call_log()
+                .iter()
+                .filter(|call| call.starts_with("create_issue:"))
+                .count(),
+            2
+        );
     }
 
     /// Issue #4392 AC-1 / AC-5: when the receipt cannot be published the
@@ -13692,6 +13780,7 @@ mod tests {
         let err = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "fix: something".to_string(),
                 body: "## 成功基準\n- [ ] AC-1: hidden under the wrong heading\n".to_string(),
                 labels: vec!["auto-merge".to_string()],
@@ -13722,6 +13811,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "fix: something".to_string(),
                 body: "## 受け入れ基準\n- [ ] AC-1: cargo test is GREEN\n".to_string(),
                 labels: vec!["Auto-Merge".to_string()],
@@ -13741,6 +13831,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "docs: typo".to_string(),
                 body: "free text, no criteria".to_string(),
                 labels: vec!["documentation".to_string()],

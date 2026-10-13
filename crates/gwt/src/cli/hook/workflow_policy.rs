@@ -397,8 +397,8 @@ fn evaluate_pm_spec_survey_guard(
         "establish the owning gwt-spec before registering",
         "Run JSON operation `issue.spec.list` first, then register.\n\n\
 It returns every open `gwt-spec` with its scope in one call, so it cannot miss the owner the way a keyword phrasing can. `gwt-search` is the supporting step: an empty search result does not establish that no spec owns the area, because the result turns on the words you chose.\n\n\
-If a `gwt-spec` owns the area, register this as that spec's implementation Issue — name the parent spec in the body and make registering the change in its `spec` / `plan` / `tasks` sections one of the acceptance criteria.\n\n\
-If no spec owns it, register exactly as you intended. This gate asks whether you looked, not what you found."
+Read the candidate owner's body, spec/plan/tasks, and all addenda, corrections, and comments. Compare them with current develop, source code, tests, merged PRs, and closed Issues before deciding what remains. Update the existing owner's FR/AC, or justify an independently deliverable child Issue that names its parent.\n\n\
+For `issue.create`, supply `params.owner_check`: `owner_spec` is a positive spec number with a nonempty `reason` for the child, or null with nonempty `search_queries` when no spec owns the area. Record the rationale and search queries in one to three lines. No owner remains a valid outcome; this survey gate asks whether you looked, not what you found."
             .to_string(),
     ))
 }

@@ -2093,6 +2093,8 @@ pub enum BackendEvent {
         id: String,
         session_id: Option<String>,
         reports: Vec<PmReportView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     },
     /// Origin-client completion receipt for one authenticated pane snapshot
@@ -3742,11 +3744,15 @@ mod tests {
         assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None,
+            current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
-                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress,
+                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
                 created_at: chrono::Utc::now(),
-            })],
+            }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
+                "id": "qa", "kind": "qa", "question": "Can we ship?",
+                "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
+            })).unwrap())],
         };
         let value = serde_json::to_value(&event).unwrap();
         let html = value["reports"][0]["body_html"].as_str().unwrap();
@@ -3761,6 +3767,12 @@ mod tests {
         }
         assert!(!html.contains("<script>"));
         assert_eq!(value["reports"][0]["kind"], "progress");
+        assert_eq!(value["reports"][1]["kind"], "qa");
+        assert_eq!(value["reports"][1]["question"], "Can we ship?");
+        assert!(value["reports"][1]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>Yes.</strong>"));
         assert_eq!(
             event.delivery_policy().delivery,
             BackendEventDeliveryClass::Snapshot
