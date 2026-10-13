@@ -1445,6 +1445,12 @@ restoration runs last. An admission timeout before the first remaining command
 starts preserves any predecessor without writing a replacement record. Later
 timeouts retain completed results in an incomplete, non-PASS deferred record.
 
+For a single package's library, a positive test-name filter is Light.
+Nextest also supports one `-E 'test(=module::case)'` or
+`--filterset='test(=module::case)'` exact filter here. The name must contain only
+ASCII letters, digits, underscores and colons. Repeated filtersets, broader or
+compound expressions, and widened package/target selection remain Heavy.
+
 The following short non-Cargo gates are Light and run without a Heavy lease:
 
 | Command | Resource bound |

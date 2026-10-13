@@ -1351,6 +1351,12 @@ Markdown 描画を選びます。移行対象と受け入れ条件は
 残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
 
+単一 package の library は、正のテスト名 filter があれば Light です。
+Nextest の `-E 'test(=module::case)'` または
+`--filterset='test(=module::case)'` も、厳密一致 filter 1 個なら対応します。
+名前に使えるのは ASCII 英数字・underscore・colon です。複数の filterset、広域・複合式、
+package / target の選択範囲を広げる指定は Heavy のままです。
+
 次の短命な non-Cargo ゲートは Light として Heavy lease を取らずに実行します。
 
 | コマンド | 資源を限定できる根拠 |
