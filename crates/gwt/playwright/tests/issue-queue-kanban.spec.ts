@@ -413,6 +413,43 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
 });
 
 
+test("T-7b.2a: tier minimums and failures explain reported facts and clear on omission", async ({page}) => {
+  await confirm(page, [3, 4], { tier_facts: [
+    { issue_number: 3, recorded_launch_tier: 0, history_floor: 1, minimum_tier_override: 0,
+      agent_failures: 2, next_minimum_tier: 1 },
+    { issue_number: 4, history_floor: 0, minimum_tier_override: 2, agent_failures: 3, next_minimum_tier: 2 },
+  ] });
+  const chips = row(page, 3).locator('[data-kind="tier"]');
+  await expect(chips).toHaveText(["Min tier 0", "2 agent failures → ≥ tier 1"]);
+  await expect(row(page, 4).locator('[data-kind="tier"]')).toHaveCount(0);
+  const select = row(page, 3).locator(".knowledge-row-select");
+  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  await page.mouse.move(1590, 1090);
+  await select.focus();
+  await expect(popup).toContainText("zero-based");
+  await expect(popup).toContainText("not a profile lock");
+  await expect(popup).toContainText("availability can select a higher tier");
+  await expect(select).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await expect(select.locator('[tabindex="0"]')).toHaveCount(0);
+  await chips.last().hover();
+  await expect(popup).toContainText("2 classified agent failures");
+  await expect(popup).toContainText("Infrastructure and unknown failures are excluded");
+  await page.screenshot({path: test.info().outputPath("issue-tier-chips.png")});
+  const before = await page.evaluate(() => (window as any).__queueMessages.length);
+  await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  await page.evaluate(() => (window as any).__queueOmitTierFacts());
+  await expect(row(page, 3).locator('[data-kind="tier"]')).toHaveCount(0);
+  // Refresh restores row focus; move away so returning actually opens its new explanation.
+  await page.locator(".knowledge-search").focus();
+  await select.focus();
+  await expect(popup).toBeVisible();
+  await expect(popup).not.toContainText("zero-based");
+  const controls = await page.evaluate(before => (window as any).__queueMessages.slice(before).filter((message: any) =>
+    /^(set_|issue_monitor_queue_|update_viewport|input$)/.test(message.kind)), before);
+  expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
+});
+
 test("card selection keeps issue body, acceptance and provenance beside switchable output", async ({page}) => {
   const detail=page.locator(".knowledge-detail-pane");
   for (const [number,source] of [[3,"Operator"],[4,"Auto-refill"]] as const) {
@@ -580,6 +617,9 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         const entry=entries.find(entry=>entry.number===number);
         if(entry) entry.title=title;
         this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
+      }; fixture.__queueOmitTierFacts=()=>{
+        delete status.tier_facts;
+        this.emit({kind:"issue_monitor_status",status});
       }; fixture.__queueAddForeground=()=>{
         const workspace=fixture.__queueWorkspace;
         workspace.tabs[0].workspace.windows.push({id:"tab-queue::console",title:"Console",preset:"console",

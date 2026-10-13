@@ -1266,6 +1266,12 @@ fn pm_registration_is_denied_until_the_spec_survey_has_run() {
             rendered.contains("issue.spec.list"),
             "{operation} denial should name the remedy: {rendered}"
         );
+        for recovery_step in ["all addenda", "current develop", "owner_check"] {
+            assert!(
+                rendered.contains(recovery_step),
+                "missing recovery step: {rendered}"
+            );
+        }
     }
 }
 

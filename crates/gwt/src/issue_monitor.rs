@@ -36,7 +36,10 @@ pub use urgent::{
 
 mod tiers;
 pub(crate) use tiers::record_work_done_tier_landing;
-pub use tiers::{IssueMonitorTierLandingStats, IssueMonitorTierRecord, IssueMonitorTierSelection};
+pub use tiers::{
+    IssueMonitorTierFacts, IssueMonitorTierLandingStats, IssueMonitorTierRecord,
+    IssueMonitorTierSelection,
+};
 mod quota;
 pub(crate) use quota::provider_quota_reset_label;
 use quota::{PROVIDER_QUOTA_UNKNOWN_RESET_AT, PROVIDER_QUOTA_UNKNOWN_RESET_LABEL};
@@ -3481,6 +3484,10 @@ pub struct IssueMonitorStatusView {
     /// decision boundary (phase, attempts, needs-human) is observable.
     #[serde(default)]
     pub autonomous_issues: Vec<AutonomousIssueSummary>,
+    /// SPEC #4777 T-7b.1: historical selections and policy minimums, without
+    /// inferring the tier or liveness of a current launch from issue history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tier_facts: Vec<IssueMonitorTierFacts>,
     /// Issue #3628 (AC-5): the fleet has run nothing for longer than the
     /// blackout window while work was runnable.
     ///
@@ -12274,6 +12281,9 @@ impl IssueMonitorState {
             .filter(|(terminal, _)| *terminal != &host)
             .map(|(_, queue)| queue.entries.len())
             .sum();
+        let auto_tier_count = self
+            .launch_auto
+            .then(|| self.prefs().effective_launch_tiers().len());
         IssueMonitorStatusView {
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
@@ -12327,11 +12337,8 @@ impl IssueMonitorState {
             } else {
                 IssueMonitorLaunchProfileSource::Saved
             },
-            launch_profile_summary: if self.launch_auto {
-                format!(
-                    "Auto ({} tiers)",
-                    self.prefs().effective_launch_tiers().len()
-                )
+            launch_profile_summary: if let Some(count) = auto_tier_count {
+                format!("Auto ({count} tiers)")
             } else {
                 issue_monitor_launch_profile_pool_summary(&self.launch_profiles)
             },
@@ -12347,6 +12354,7 @@ impl IssueMonitorState {
             effective_launch_profile: self.effective_launch_profile_at(now),
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             usage_threshold_percent: self.launch_usage_threshold_percent,
+            tier_facts: self.tier_facts(auto_tier_count),
             autonomous_issues: self
                 .autonomous_records
                 .values()
@@ -24830,6 +24838,9 @@ mod tests {
         );
         let status = monitor.status_view();
         let summary = &status.autonomous_issues[0];
+        let facts = serde_json::to_value(&status).unwrap();
+        assert_eq!(facts["tier_facts"][0]["agent_failures"], 1);
+        assert_eq!(facts["tier_facts"][0]["next_minimum_tier"], 1);
         assert_eq!(
             (
                 summary.attempts,
@@ -24957,12 +24968,55 @@ mod tests {
         let roundtrip: IssueMonitorPrefs =
             serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
         assert_eq!(roundtrip.issue_tiers[&42].floor, 1);
+        let facts = serde_json::to_value(monitor.status_view()).unwrap();
+        assert_eq!(facts["tier_facts"][0]["recorded_launch_tier"], 1);
+        assert_eq!(facts["tier_facts"][0]["history_floor"], 1);
+        assert_eq!(facts["tier_facts"][0]["agent_failures"], 0);
+        assert!(
+            facts["tier_facts"][0]["next_minimum_tier"].is_null(),
+            "no inbox means unknown spec eligibility"
+        );
         let choice = roundtrip
             .select_auto_launch_profile(42, false, None, |pool| {
                 select_launch_profile(pool, &BTreeMap::new(), &[], None, "2026-09-29T00:00:00Z")
             })
             .unwrap();
         assert_eq!(choice.tier, 1);
+    }
+
+    #[test]
+    fn tier_facts_project_minimums_without_claiming_running_tiers() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        let mut prefs = monitor.prefs();
+        prefs.launch_auto = true;
+        prefs.record_tier_launch(42, 0);
+        prefs.tier_overrides.insert(42, 0);
+        prefs.tier_overrides.insert(7, 2);
+        monitor.rebase_daemon_driver_prefs(&prefs);
+        let before = monitor.prefs();
+        let wire = serde_json::to_value(monitor.status_view()).unwrap();
+        assert_eq!(wire["tier_facts"][0]["issue_number"], 7);
+        assert!(wire["tier_facts"][0]["recorded_launch_tier"].is_null());
+        assert!(wire["tier_facts"][0]["next_minimum_tier"].is_null());
+        let facts = &wire["tier_facts"][1];
+        assert_eq!(facts["issue_number"], 42);
+        assert_eq!(facts["recorded_launch_tier"], 0);
+        assert_eq!(facts["minimum_tier_override"], 0);
+        assert_eq!(facts["history_floor"], 0);
+        assert_eq!(facts["next_minimum_tier"], 0);
+        assert!(facts.get("running_tier").is_none());
+        assert_eq!(monitor.prefs(), before, "projection never mutates policy");
+
+        monitor.inbox[0].issue.labels.push("GWT-SPEC".to_string());
+        let wire = serde_json::to_value(monitor.status_view()).unwrap();
+        assert_eq!(wire["tier_facts"][1]["next_minimum_tier"], 1);
+        monitor.issue_tiers.get_mut(&42).unwrap().floor = 9;
+        let wire = serde_json::to_value(monitor.status_view()).unwrap();
+        assert_eq!(wire["tier_facts"][1]["next_minimum_tier"], 2);
+        monitor.launch_auto = false;
+        let wire = serde_json::to_value(monitor.status_view()).unwrap();
+        assert!(wire["tier_facts"][1]["next_minimum_tier"].is_null());
+        assert_eq!(wire["tier_facts"][1]["history_floor"], 9);
     }
 
     #[test]

@@ -684,6 +684,34 @@ test("T-7a: two Issue windows keep independent explanation identities and cleanu
   assert.match(document.getElementById(secondId)?.textContent, /queued issues/i);
 });
 
+test("T-7b.2a: tier chips show only reported minimums and agent failures with attempt history", async (t) => {
+  const { body, surface, state } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  state.entries = [entry(11, "queued"), entry(12, "queued"), entry(13, "queued")];
+  surface.applyIssueMonitorStatus({ ...STATUS, tier_facts: [
+    { issue_number: 11, recorded_launch_tier: 0, history_floor: 2, minimum_tier_override: 0,
+      agent_failures: 2, next_minimum_tier: 2 },
+    { issue_number: 12, history_floor: 2, minimum_tier_override: 1, agent_failures: 9, next_minimum_tier: 2 },
+    { issue_number: 13, recorded_landing_tier: 0, history_floor: 1, agent_failures: 1 },
+  ] });
+  const chips = number => [...body.querySelectorAll(`[data-issue-number="${number}"] [data-kind="tier"]`)];
+  assert.deepEqual(chips(11).map(node => node.textContent), ["Min tier 0", "2 agent failures → ≥ tier 2"]);
+  assert.deepEqual(chips(12), [], "override and counters alone do not prove launch-attempt history");
+  assert.deepEqual(chips(13).map(node => node.textContent), ["1 agent failure"], "no invented next tier or Fixed from history floor");
+  for (const chip of [...chips(11), ...chips(13)]) {
+    assert.ok(chip.classList.contains("knowledge-monitor-chip"), "reuse the Operator chip primitive");
+    assert.equal(chip.hasAttribute("tabindex"), false, "no nested tab stop inside the row button");
+    assert.ok(chip.getAttribute("aria-description"));
+  }
+  const select = body.querySelector('[data-issue-number="11"] .knowledge-row-select');
+  assert.match(select.getAttribute("aria-description"), /zero-based/);
+  assert.match(select.getAttribute("aria-description"), /minimum.*not.*lock/i);
+  assert.match(select.getAttribute("aria-description"), /availability.*higher/i);
+  assert.doesNotMatch(select.getAttribute("aria-description"), /currently running|successfully started/i);
+  surface.applyIssueMonitorStatus({ ...STATUS });
+  assert.equal(body.querySelectorAll('[data-kind="tier"]').length, 0, "omitted facts clear stale chips");
+});
+
 test("T-7a: explanation styling extends the shared popover with Operator tokens", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   const block = css.match(/\/\* SPEC-4777 T-7a explanations \*\/([\s\S]*?)\/\* \/SPEC-4777 T-7a \*\//)?.[1];

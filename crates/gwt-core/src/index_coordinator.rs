@@ -37,6 +37,9 @@ pub const VERIFICATION_SCOPE: &str = "verification";
 /// is 3 minutes, so a reservation only lapses once the agent has truly given
 /// up; background index jobs defer to it the whole time (AC-1).
 pub const VERIFICATION_RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
+/// Keep retry priority briefly, then let resident verification work use idle
+/// capacity without deleting the absent claimant's remembered FIFO position.
+pub const VERIFICATION_RESERVATION_GRACE: Duration = Duration::from_secs(3 * 60);
 /// Issue #4086: TTL horizon on index-job heavy leases. The kernel lock still
 /// decides exclusion; the TTL makes a runaway runner visible as `expired` in
 /// status output instead of `expires_at_ms=unknown`.
@@ -614,6 +617,8 @@ pub struct HeavyQueueEntry {
     /// Only populated when owner and target generation match this claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_status: Option<JobStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass_reason: Option<String>,
 }
 
 /// A claimant as the queue sees it, before it is published.
@@ -635,6 +640,7 @@ struct QueueRecord {
     present: bool,
     attempt_id: Option<String>,
     job_status: Option<JobStatus>,
+    bypass_reason: Option<&'static str>,
 }
 
 impl QueueRecord {
@@ -656,10 +662,12 @@ impl QueueRecord {
 
     /// Whether `me` has to leave a free lease alone because of this claimant.
     ///
-    /// Live reservations keep their FIFO turn between retries. Their existing
-    /// TTL bounds how long a departed claimant can hold up the next one.
+    /// Reservations retain their rank when an absent verification claimant
+    /// yields idle capacity after its retry grace.
     fn blocks(&self, me: &QueueRecord) -> bool {
-        self.waiting && self.rank().cmp(&me.rank()) == Ordering::Less
+        self.waiting
+            && self.bypass_reason.is_none()
+            && self.rank().cmp(&me.rank()) == Ordering::Less
     }
 
     fn published(&self, now: u64) -> HeavyQueueEntry {
@@ -671,6 +679,7 @@ impl QueueRecord {
             resident: self.present,
             attempt_id: self.attempt_id.clone(),
             job_status: self.job_status,
+            bypass_reason: self.bypass_reason.map(str::to_string),
         }
     }
 }
@@ -947,6 +956,20 @@ impl IndexCoordinator {
                 Ok(()) => {
                     let state_path = self.target_state_path(key);
                     let epoch = read_state(&state_path).map(|s| s.epoch).unwrap_or(0) + 1;
+                    if self.verification_pool && key.is_verification() {
+                        // Sweep while the predecessor's epoch is still readable.
+                        // Deferred retries survive; completed/failed work must
+                        // not become unmatchable when this job publishes Running.
+                        sweep_heavy_queue_entry(&self.heavy_reservation_path(key), now_ms())
+                            .map_err(|error| match error {
+                                CoordinatorError::Io(error) if is_contended(&error) => {
+                                    CoordinatorError::Timeout {
+                                        waited_ms: started.elapsed().as_millis() as u64,
+                                    }
+                                }
+                                other => other,
+                            })?;
+                    }
                     let owner = OwnerIdentity::current();
                     write_json_atomic(
                         &self.target_ticket_path(key),
@@ -1397,6 +1420,32 @@ impl TargetJobGuard {
         self.priority
     }
 
+    /// Transfer only an existing reservation to this owned target generation
+    /// before artifact waiting. Arrival, retry grace and expiry are unchanged.
+    pub fn inherit_heavy_reservation_for_attempt(
+        &self,
+        attempt: &HeavyAttempt<'_>,
+    ) -> Result<(), CoordinatorError> {
+        let dir = self.root.join("heavy.pending");
+        let _queue_state = lock_heavy_queue_entries(&dir)?;
+        let target = self.key.file_stem();
+        check_heavy_attempt_locked(&dir, &target, Some(attempt))?;
+        let path = heavy_queue_entry_path(&dir, &target);
+        let registration = read_registration(&path).map_err(|error| match error {
+            CoordinatorError::Io(error) if is_contended(&error) => {
+                CoordinatorError::Timeout { waited_ms: 0 }
+            }
+            other => other,
+        })?;
+        if let Some(mut entry) = registration {
+            entry.owner = OwnerIdentity::current();
+            entry.job_epoch = Some(self.epoch);
+            entry.attempt_id = Some(attempt.id.to_string());
+            write_json_atomic(&path, &entry)?;
+        }
+        Ok(())
+    }
+
     /// Acquire the host-wide heavy lease (model-loading runner slot). Only
     /// reachable through an owned target guard, enforcing the fixed lock
     /// order target job -> heavy (FR-392). Non-interactive claimants defer
@@ -1624,6 +1673,7 @@ fn acquire_heavy_at(
         present: true,
         attempt_id: attempt.map(|attempt| attempt.id.to_string()),
         job_status: Some(JobStatus::Running),
+        bypass_reason: None,
     };
     let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
     let registration = Registration {
@@ -2735,6 +2785,11 @@ fn enroll_in_heavy_queue_for_attempt(
 /// The heavy queue in service order, one record per claimant target.
 fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
     let now = now_ms();
+    // This is the lane's capacity, not the command's shared/exclusive mode:
+    // unknown commands in the verification lane must make progress too.
+    let verification_pool = dir
+        .parent()
+        .is_some_and(|root| read_verification_capacity(root).is_ok());
     let mut by_target: BTreeMap<String, QueueRecord> = BTreeMap::new();
     let mut untargeted: Vec<QueueRecord> = Vec::new();
     for live in sweep_live_registrations(dir)? {
@@ -2750,6 +2805,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
                 present: true,
                 attempt_id: None,
                 job_status: None,
+                bypass_reason: None,
             });
             continue;
         };
@@ -2762,6 +2818,12 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
             present: live.locked,
             attempt_id: registration.attempt_id.clone(),
             job_status: matching_heavy_job_state(dir, &registration).map(|state| state.status),
+            bypass_reason: (verification_pool
+                && !live.locked
+                && registration.has_live_reservation(now)
+                && now.saturating_sub(registration.registered_at_ms)
+                    >= VERIFICATION_RESERVATION_GRACE.as_millis() as u64)
+                .then_some("non-resident reservation grace elapsed"),
         };
         match record.target.clone() {
             // The same target can show up twice — its own attempt and the
@@ -2775,6 +2837,11 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
                         kept.priority = kept.priority.min(record.priority);
                         kept.waiting |= record.waiting;
                         kept.present |= record.present;
+                        if kept.present {
+                            kept.bypass_reason = None;
+                        } else if record.waiting {
+                            kept.bypass_reason = record.bypass_reason;
+                        }
                         if record.present {
                             kept.attempt_id = record.attempt_id.clone();
                             kept.job_status = record.job_status;
@@ -4116,6 +4183,13 @@ mod tests {
             .unwrap();
         finished.complete(JobOutcome::Completed).unwrap();
 
+        let successor = own(&coordinator, &finished_key, JobPriority::ManualRebuild);
+        assert!(
+            !coordinator.heavy_reservation_path(&finished_key).exists(),
+            "a new job must sweep terminal residue before replacing its epoch"
+        );
+        successor.complete(JobOutcome::Completed).unwrap();
+
         assert!(coordinator.heavy_pool_status().unwrap().queue.is_empty());
         assert!(!coordinator.heavy_reservation_path(&finished_key).exists());
         let next_key = TargetKey::verification("different-project", "worktree");
@@ -4125,6 +4199,82 @@ mod tests {
             .expect("a completed project must not stall another project until TTL");
         drop(lease);
         next.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn absent_verification_reservation_yields_without_losing_fifo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let early_key = TargetKey::verification("repo", "early");
+        let early = own(&coordinator, &early_key, JobPriority::ManualRebuild);
+        coordinator
+            .reserve_heavy(
+                &early_key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                None,
+            )
+            .unwrap();
+        let late = own(
+            &coordinator,
+            &TargetKey::verification("repo", "late"),
+            JobPriority::ManualRebuild,
+        );
+        assert!(matches!(
+            late.acquire_heavy(Duration::ZERO),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+
+        let path = coordinator.heavy_reservation_path(&early_key);
+        let mut entry = read_registration(&path).unwrap().unwrap();
+        let arrival = (entry.queued_at(), entry.queue_seq);
+        entry.registered_at_ms = now_ms().saturating_sub(3 * 60 * 1000);
+        write_json_atomic(&path, &entry).unwrap();
+        let shared = late
+            .acquire_heavy(Duration::ZERO)
+            .expect("an absent reservation must not waste a free verification slot");
+        shared.release().unwrap();
+        let exclusive = late
+            .acquire_exclusive_heavy_with_disk_budget(
+                Duration::ZERO,
+                VERIFICATION_RESERVATION_TTL,
+                &[],
+            )
+            .expect("unknown exclusive commands must also pass an absent reservation");
+        let saved = read_registration(&path).unwrap().unwrap();
+        assert_eq!((saved.queued_at(), saved.queue_seq), arrival);
+        assert_eq!(saved.reserved_until_ms, entry.reserved_until_ms);
+        let queue = coordinator.heavy_pool_status().unwrap().queue;
+        let diagnostic = serde_json::to_value(&queue[0]).unwrap();
+        assert!(diagnostic["bypass_reason"]
+            .as_str()
+            .unwrap()
+            .contains("non-resident"));
+
+        assert!(matches!(
+            early.acquire_heavy(Duration::ZERO),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        let returned = coordinator.heavy_pool_status().unwrap().queue;
+        assert_eq!(returned[0].queued_at_ms, arrival.0);
+        assert!(serde_json::to_value(&returned[0]).unwrap()["bypass_reason"].is_null());
+        exclusive.release().unwrap();
+        assert!(
+            matches!(
+                late.acquire_heavy(Duration::ZERO),
+                Err(CoordinatorError::Timeout { .. })
+            ),
+            "the returning claimant regains its earlier FIFO priority"
+        );
+        early
+            .acquire_heavy(Duration::ZERO)
+            .unwrap()
+            .release()
+            .unwrap();
+        late.acquire_heavy(Duration::ZERO)
+            .unwrap()
+            .release()
+            .unwrap();
     }
 
     #[test]
@@ -4464,6 +4614,69 @@ mod tests {
     }
 
     #[test]
+    fn target_reservation_contention_preserves_the_predecessor_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let key = verification_key();
+        let predecessor = own(&coordinator, &key, JobPriority::ManualRebuild);
+        coordinator
+            .reserve_heavy(
+                &key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                None,
+            )
+            .unwrap();
+        predecessor
+            .complete(JobOutcome::Failed {
+                message: "host admission deferred".into(),
+            })
+            .unwrap();
+        let state = fs::read(coordinator.target_state_path(&key)).unwrap();
+        let path = coordinator.heavy_reservation_path(&key);
+        let before = fs::read(&path).unwrap();
+        let probe = open_lock_file(&path).unwrap();
+        fs2::FileExt::lock_exclusive(&probe).unwrap();
+        assert!(
+            matches!(
+                coordinator.request_job(&key, JobPriority::ManualRebuild, Duration::ZERO),
+                Err(CoordinatorError::Timeout { .. })
+            ),
+            "a transient reservation read must remain retryable admission"
+        );
+        assert_eq!(
+            fs::read(coordinator.target_state_path(&key)).unwrap(),
+            state
+        );
+        drop(probe);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let successor = own(&coordinator, &key, JobPriority::ManualRebuild);
+        let check = || Ok(false);
+        let probe = open_lock_file(&path).unwrap();
+        fs2::FileExt::lock_exclusive(&probe).unwrap();
+        assert!(
+            matches!(
+                successor.inherit_heavy_reservation_for_attempt(&HeavyAttempt {
+                    id: "successor",
+                    check_cancelled: &check,
+                }),
+                Err(CoordinatorError::Timeout { .. })
+            ),
+            "inheritance must also leave transient contention retryable"
+        );
+        drop(probe);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        successor
+            .inherit_heavy_reservation_for_attempt(&HeavyAttempt {
+                id: "successor",
+                check_cancelled: &check,
+            })
+            .unwrap();
+        let inherited = read_registration(&path).unwrap().unwrap();
+        assert_eq!(inherited.attempt_id.as_deref(), Some("successor"));
+    }
+
+    #[test]
     fn transient_registration_read_failure_keeps_fifo_arrival() {
         let tmp = tempfile::tempdir().unwrap();
         let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
@@ -4752,6 +4965,7 @@ mod tests {
                                     present,
                                     attempt_id: None,
                                     job_status: None,
+                                    bypass_reason: None,
                                 });
                             }
                         }
