@@ -789,7 +789,7 @@ fn failed_launch_marks_inbox_failed_and_clears_active_launch() {
         monitor.status_view().last_error.as_deref(),
         Some("issue #42: binary missing")
     );
-    assert_eq!(monitor.status_view().state, "error");
+    assert_eq!(monitor.status_view().state, "idle");
 }
 
 #[test]
@@ -823,7 +823,7 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
         item.error_message.as_deref(),
         Some("Stop-block hit an error")
     );
-    assert_eq!(monitor.status_view().state, "error");
+    assert_eq!(monitor.status_view().state, "settings_required");
     assert_eq!(
         monitor.status_view().last_error.as_deref(),
         Some("issue #42: Stop-block hit an error")
@@ -853,7 +853,17 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
         Some("Stop-block hit an error")
     );
     assert_eq!(restored.queue_len(), 0);
-    assert_eq!(restored.status_view().state, "error");
+    assert_eq!(restored.status_view().state, "idle");
+    assert_eq!(
+        restored.status_view().last_error.as_deref(),
+        Some("issue #42: Stop-block hit an error")
+    );
+    monitor.complete_active_launch(43, "tab::agent-43");
+    assert_eq!(monitor.status_view().state, "active");
+    assert_eq!(
+        monitor.status_view().last_error.as_deref(),
+        Some("issue #42: Stop-block hit an error")
+    );
 }
 
 #[test]
@@ -1446,6 +1456,13 @@ fn status_view_at_marks_scan_stalled_at_three_poll_intervals() {
         ..IssueMonitorConfig::default()
     });
     scan_queued_candidates(&mut monitor, &[], "2026-07-27T10:00:00Z");
+    monitor.record_launch_failed(42, "previous launch failed");
+    let before_stall = monitor.status_view_at("2026-07-27T10:00:29Z");
+    assert_eq!(before_stall.state, "idle");
+    assert_eq!(
+        before_stall.last_error.as_deref(),
+        Some("issue #42: previous launch failed")
+    );
 
     let status = monitor.status_view_at("2026-07-27T10:00:30Z");
 
@@ -1471,6 +1488,14 @@ fn status_view_at_preserves_explicit_error_when_scan_is_stalled() {
     assert_eq!(status.state, "error");
     assert_eq!(status.last_error.as_deref(), Some("GitHub API unavailable"));
     assert_eq!(status.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
+
+    monitor.record_control_commit_error("Monitor settings commit failed");
+    let status = monitor.status_view_at("2026-07-27T10:00:30Z");
+    assert_eq!(status.state, "error");
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("Monitor settings commit failed")
+    );
 }
 
 #[test]
@@ -1522,7 +1547,7 @@ fn scan_error_keeps_visible_queue_candidates() {
 }
 
 #[test]
-fn launch_auth_required_keeps_visible_queue_with_blocking_error() {
+fn launch_auth_required_keeps_visible_queue_with_auth_wait() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
@@ -1532,7 +1557,7 @@ fn launch_auth_required_keeps_visible_queue_with_blocking_error() {
     monitor.record_launch_auth_required("2026-06-23T10:02:00Z");
 
     let status = monitor.status_view();
-    assert_eq!(status.state, "error");
+    assert_eq!(status.state, "auth_required");
     assert_eq!(status.queue_len, 1);
     assert_eq!(status.total_candidates, 1);
     assert_eq!(
@@ -1543,6 +1568,10 @@ fn launch_auth_required_keeps_visible_queue_with_blocking_error() {
     assert!(message.contains("gh auth login --hostname github.com"));
     assert!(message.contains("gh auth setup-git"));
     assert!(message.contains("git ls-remote origin HEAD"));
+    assert_eq!(
+        monitor.status_view_at("2026-06-23T10:30:00Z").state,
+        "auth_required"
+    );
     assert_eq!(
         monitor.inbox_item(42).expect("inbox item").state,
         MonitorInboxState::Queued

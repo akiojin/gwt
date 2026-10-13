@@ -127,14 +127,14 @@ test("AC-23: the toolbar is two bands and no summary/settings/quick/error/status
   assert.ok(toolbar.querySelector('[data-action="refresh-knowledge"]'), "↻ sits in band 1");
 });
 
-test("AC-23: the Monitor band carries pill, Active, Queue, switch, Max, Start and ⚙", async (t) => {
+test("AC-23: the Issues summary carries only status, counts and frequent controls", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const bar = body.querySelector(".knowledge-monitor-bar");
   const pill = bar.querySelector(".knowledge-monitor-pill");
 
   assert.equal(pill.textContent, "Stopped");
-  assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Start monitor");
+  assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
 
   surface.applyIssueMonitorStatus(STATUS);
   assert.equal(pill.textContent, "Running");
@@ -143,13 +143,15 @@ test("AC-23: the Monitor band carries pill, Active, Queue, switch, Max, Start an
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
   assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));
-  assert.equal(bar.querySelector(".knowledge-monitor-max-active input").value, "2");
+  for (const selector of [".knowledge-monitor-max-active", '[data-action="monitor-auto-refill"]', '[data-action="monitor-auto-apply"]', ".knowledge-monitor-labels", ".knowledge-monitor-pool"]) {
+    assert.equal(body.querySelector(selector), null, `${selector} belongs to Settings`);
+  }
 
   surface.applyIssueMonitorStatus({
     ...STATUS,
     quota_hold: { provider: "codex", reset_at: "2026-09-04T09:30:00Z" },
   });
-  assert.equal(pill.textContent, "Quota hold");
+  assert.equal(pill.textContent, "Waiting · Hold");
   assert.match(pill.title, /Provider codex/);
   assert.match(pill.title, /Reset 2026-09-04T09:30:00Z/);
 
@@ -162,7 +164,7 @@ test("AC-23: ⚙ holds the settings copy and the held fallback in its tooltip", 
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const gear = body.querySelector('.knowledge-monitor-bar [data-action="monitor-settings"]');
-  assert.equal(gear.textContent, "⚙ Settings");
+  assert.equal(gear.textContent, "⚙");
 
   surface.applyIssueMonitorStatus({
     ...STATUS,
@@ -177,18 +179,6 @@ test("AC-23: ⚙ holds the settings copy and the held fallback in its tooltip", 
 
   surface.applyIssueMonitorStatus(STATUS);
   assert.equal(gear.title, "Agent settings Saved: codex / gpt-5 / high");
-});
-
-test("AC-23: Set up agent appears only while no launch profile is configured", async (t) => {
-  const { body, sent, surface } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  const setup = body.querySelector('.knowledge-monitor-bar [data-action="monitor-setup"]');
-  surface.applyIssueMonitorStatus({ ...STATUS, launch_profile_source: "missing" });
-  assert.equal(setup.hidden, false);
-  setup.click();
-  assert.deepEqual(sent.at(-1), { kind: "issue_monitor_configure_profile" });
-  surface.applyIssueMonitorStatus(STATUS);
-  assert.equal(setup.hidden, true);
 });
 
 test("AC-23: ↻ carries the cached count and the refreshed time in its tooltip", async (t) => {
@@ -208,6 +198,25 @@ test("AC-23: ↻ carries the cached count and the refreshed time in its tooltip"
   const refresh = body.querySelector('[data-action="refresh-knowledge"]');
   assert.match(refresh.title, /2 cached/);
   assert.match(refresh.title, /Refreshed \d{2}:\d{2}/);
+});
+
+test("Issue #5321: four states distinguish current failures, waiting and stopped history", async (t) => {
+  const { body, surface, reported } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const pill = body.querySelector(".knowledge-monitor-pill");
+  for (const [status, label, tone] of [
+    [{ enabled: false, state: "disabled", last_error: "old error", agent_blackout: "old blackout" }, "Stopped", "idle"],
+    [{ state: "idle", active_count: 0, queue_len: 0, last_error: "old error" }, "Waiting · Empty", "idle"],
+    [{ active_count: 2 }, "Waiting · Full", "idle"],
+    [{ state: "quota_hold", quota_hold: { provider: "codex", reset_at: "2099-01-01T00:00:00Z" }, agent_blackout: "held provider" }, "Waiting · Hold", "idle"],
+    [{ state: "active", last_error: "old issue failure" }, "Running", "active"],
+    [{ state: "error", last_error: "scan failed" }, "⚠ Error", "blocked"],
+  ]) {
+    surface.applyIssueMonitorStatus({ ...STATUS, agent_blackout: null, last_error: null, quota_hold: null, ...status });
+    assert.equal(pill.textContent, label);
+    assert.equal(pill.dataset.tone, tone);
+  }
+  assert.ok(reported.some(item => item.message === "old error"), "history remains in notifications");
 });
 
 // --- T-033 / AC-24 ---------------------------------------------------------
@@ -394,6 +403,7 @@ test("AC-25: the detail pane renders in FR-023 order with the row's badge vocabu
   state.entries = [entry(10, "queued", { queue_position: 1 }), queued];
   state.baseEntries = state.entries.slice();
   state.selectedNumber = 11;
+  state.previewHidden = false;
   state.detail = {
     number: 11,
     title: "Issue 11",
@@ -461,18 +471,12 @@ test("AC-25: the detail pane renders in FR-023 order with the row's badge vocabu
   });
 });
 
-test("AC-25: the empty detail pane says Select an Issue with one hint line", async (t) => {
-  const { body, surface, state } = await makeFixture();
+test("Issue #5321: the default board has no open preview", async (t) => {
+  const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  state.entries = [entry(1, null)];
-  state.baseEntries = state.entries.slice();
-  state.selectedNumber = null;
-  state.detail = null;
-  surface.renderKnowledgeBridge("win-1");
-  const empty = body.querySelector(".knowledge-detail-pane .knowledge-detail-empty");
-  assert.ok(empty);
-  assert.match(empty.textContent, /^Select an Issue/);
-  assert.ok(empty.querySelector(".issue-detail-hint"));
+  assert.equal(body.querySelector(".issue-bridge-root").dataset.previewHidden, "true");
+  assert.equal(body.querySelector(".knowledge-detail-pane").hidden, true);
+  assert.equal(body.querySelector('[data-action="toggle-issue-preview"]').hidden, true);
 });
 
 // --- AC-28: tokens only ----------------------------------------------------
@@ -511,8 +515,27 @@ test("queue detail provenance follows authoritative terminal queue", async (t) =
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   state.entries = [entry(11, "queued", { queued_by: "operator" })];
   state.selectedNumber = 11;
+  state.previewHidden = false;
   state.detail = { number: 11, title: "Issue 11", labels: [], sections: [] };
   surface.applyIssueMonitorStatus({ ...STATUS, terminal_queue: [{ number: 11, queued_by: "auto-refill" }] });
   surface.renderKnowledgeBridge("win-1");
   assert.equal(body.querySelector(".issue-detail-provenance")?.textContent, "Queued by: Auto-refill");
+});
+
+
+test("Issue #5321: responsive preview reuses the shared nonmodal dialog primitive and tokens", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const pane = body.querySelector(".knowledge-detail-pane");
+  assert.ok(pane.classList.contains("modal-shell"));
+  assert.equal(pane.getAttribute("role"), "dialog");
+  assert.equal(pane.getAttribute("aria-modal"), "false");
+  assert.ok(pane.getAttribute("aria-label"));
+  const css = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+  const block = css.split("/* Issue #5321: compact summary and selection preview. */")[1]?.split("/* /Issue #5321 */")[0];
+  assert.ok(block);
+  assert.match(block, /@container/);
+  assert.match(block, /@container[^}]+\.issue-bridge-root\[data-view-mode="list"\]/, "only Kanban uses the narrow overlay; Split keeps its two panes");
+  assert.match(block, /-webkit-line-clamp:\s*2/);
+  assert.doesNotMatch(block, /#[\da-f]{3,8}\b|\brgba?\(|\bposition:\s*(?:fixed|absolute)/i);
 });

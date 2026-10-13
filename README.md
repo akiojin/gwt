@@ -460,17 +460,21 @@ them, or reorder items within Queued. Selecting multiple items sends one queue
 change. Active and Done follow the execution lifecycle and cannot be changed by
 dragging. Queued items show who added them, including `auto-refill`.
 
-Search and the Kanban / Split switch share one row. Monitor status and controls
-are separate, with visible labels for Settings, Autonomous, Auto-refill, its
-limit, and Start monitor / Stop. Auto-refill is **off by default**; enabling it
-opts into adding eligible open Issues up to the configured queue limit. An empty
-queue starts no new work; already-running work continues. Monitor errors appear
-in the notification center. The detail pane shows acceptance-criteria progress
-and state-specific actions. Select a card and use **Issue / Output** to switch
-between its body and acceptance criteria and its agent's read-only output.
-**Windowize** moves the agent to Canvas. **Hide preview / Show preview** gives
-the board the full width or restores the detail pane; columns scroll horizontally
-instead of shrinking. The legacy `issue_monitor` preset opens this same Issue surface.
+Search and the Kanban / Split switch share one row. A compact summary shows
+Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
+a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
+appear red; error details and history stay in the notification center. Use ⚙ to
+open and focus **Settings → Issues** for Max active, Auto-refill, its limit and
+Allowed labels; candidate profiles live in **Settings → Agents**. Auto-refill is
+**off by default**; enabling it adds eligible open Issues up to the configured
+queue limit. An empty queue starts no new work; already-running work continues.
+
+The Kanban board starts at full width. Select a card to open its preview and use
+**Issue / Output** to switch between the body and acceptance criteria and the
+agent's read-only output. **Windowize** moves the agent to Canvas. **Close preview**
+or Escape restores the full board. At narrow widths the preview overlays the
+board; columns scroll horizontally instead of shrinking. The legacy
+`issue_monitor` preset opens this same Issue surface.
 
 **Max active** uses **Auto** for new settings. Its recommendation reflects CPU,
 free memory and disk space, the GUI's CPU use, and live agents in other projects.
@@ -488,12 +492,10 @@ timing-dependent test failures may block unrelated PRs. Automation uses
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override`, and the shared `agent_capacity` measurement.
 
-**Allowed labels** controls which Issues this terminal's Monitor admits. Add or
-remove one label at a time; an Issue needs any label in the saved list. Matching
+**Allowed labels** in Settings → Issues accepts a comma-separated list; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and
 preserves the existing admission rules. Changes apply on the next scan without
-cancelling running agents. The control shows the saved labels and excluded Issue
-count/numbers. Automation can set the same list with `issue.monitor.config.set`
+cancelling running agents. Automation can set the same list with `issue.monitor.config.set`
 and `{"allowed_labels":["agent:mac"]}`; `issue.monitor.status` reports
 `allowed_labels`, `label_excluded_count`, and `label_excluded_issues`.
 

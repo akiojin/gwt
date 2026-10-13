@@ -5356,7 +5356,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             _ => None,
         })
         .expect("issue monitor status");
-    assert_eq!(status.state, "error");
+    assert_eq!(status.state, "idle");
     assert_eq!(
         status.last_error.as_deref(),
         Some("issue #42: Stop-block hit an error")
