@@ -834,6 +834,27 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
+      function issueTierChips(issueNumber) {
+        const facts = issueMonitorModel.read().status.tier_facts?.find(item => item.issue_number === issueNumber);
+        const isTier = value => Number.isInteger(value) && value >= 0;
+        if (!facts || (!isTier(facts.recorded_launch_tier) && !isTier(facts.recorded_landing_tier))) return [];
+        const chips = [];
+        if (isTier(facts.minimum_tier_override)) {
+          chips.push({ kind: "tier", key: "tier-minimum", label: `Min tier ${facts.minimum_tier_override}`,
+            explanation: `Explicit minimum tier ${facts.minimum_tier_override} (tiers are zero-based). This minimum is not a profile lock; availability can select a higher tier. Recorded launch attempts describe history.` });
+        }
+        if (Number.isInteger(facts.agent_failures) && facts.agent_failures > 0) {
+          const count = facts.agent_failures;
+          const next = isTier(facts.next_minimum_tier);
+          chips.push({ kind: "tier", key: "tier-failures",
+            label: `${count} agent failure${count === 1 ? "" : "s"}${next ? ` → ≥ tier ${facts.next_minimum_tier}` : ""}`,
+            explanation: `${count} classified agent failure${count === 1 ? "" : "s"}. Infrastructure and unknown failures are excluded. ${next
+              ? `Next automatic selection starts at minimum tier ${facts.next_minimum_tier} (tiers are zero-based); availability can select a higher tier.`
+              : "The next automatic minimum tier has not been reported."}` });
+        }
+        return chips;
+      }
+
       function issueStateExplanation(primary) {
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
@@ -1469,6 +1490,8 @@ export function createKnowledgeKanbanSurface({
           // Issue #4366 AC-6b: omitted once the hold clears, so it must not
           // survive from the previous status the way merged fields do.
           effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
+          // Empty facts are omitted on the wire; never retain an older snapshot.
+          tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
           // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
           agent_blackout: nextStatus?.agent_blackout ?? null,
           update_drain: nextStatus?.update_drain ?? null,
@@ -4614,10 +4637,12 @@ export function createKnowledgeKanbanSurface({
         main.appendChild(badge);
         select.appendChild(main);
 
-        if (model.secondary.length > 0) {
+        const tierChips = issueTierChips(entry.number);
+        const secondaryItems = [...model.secondary, ...tierChips];
+        if (secondaryItems.length > 0) {
           const secondary = createNode("div", "knowledge-row-secondary");
-          for (const item of model.secondary) {
-            const node = createNode("span", "knowledge-row-secondary-item", item.label);
+          for (const item of secondaryItems) {
+            const node = createNode("span", `knowledge-row-secondary-item${item.kind === "tier" ? " knowledge-monitor-chip" : ""}`, item.label);
             node.dataset.kind = item.kind;
             node.dataset.key = item.key;
             if (item.title) {
@@ -4625,13 +4650,16 @@ export function createKnowledgeKanbanSurface({
             }
             if (item.key === "queue") {
               explainIssueControl(node, `Position ${entry.queue_position} in the launch queue. ${issueQueueSourceExplanation(entry)}`, `row-queue-${entry.number}`, false);
+            } else if (item.kind === "tier") {
+              explainIssueControl(node, item.explanation, `${item.key}-${entry.number}`, false);
             }
             secondary.appendChild(node);
           }
           select.appendChild(secondary);
         }
         explainIssueControl(select,
-          [issueStateExplanation(model.primary), Number.isFinite(entry.queue_position) ? issueQueueSourceExplanation(entry) : ""].filter(Boolean).join("\n"),
+          [issueStateExplanation(model.primary), Number.isFinite(entry.queue_position) ? issueQueueSourceExplanation(entry) : "",
+            ...tierChips.map(item => item.explanation)].filter(Boolean).join("\n"),
           `issue-${entry.number}`);
 
         row.addEventListener("click", (event) => {
