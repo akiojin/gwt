@@ -17,7 +17,13 @@ pub fn configured() -> io::Result<Option<bool>> {
 }
 
 pub fn enabled() -> bool {
-    configured().ok().flatten().unwrap_or(false)
+    match configured() {
+        Ok(value) => value.unwrap_or(false),
+        Err(error) => {
+            tracing::warn!(target: "gwt::update", %error, "automatic update settings unreadable; treating as OFF");
+            false
+        }
+    }
 }
 
 /// None initializes from all legacy projects. Some is an explicit operator

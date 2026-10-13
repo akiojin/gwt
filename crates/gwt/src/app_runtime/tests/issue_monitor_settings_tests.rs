@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn app_runtime_system_settings_get_survives_a_corrupt_legacy_auto_apply_project() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let config_path = gwt_core::paths::gwt_config_path();
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fs::write(&config_path, "[ai]\nlanguage = 'ja'\n").unwrap();
+    let legacy_path =
+        gwt_core::paths::gwt_projects_dir().join("legacy/project-state/issue-monitor.json");
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, "invalid legacy prefs").unwrap();
+
+    let events = runtime.system_settings_get_events("client-1".to_string());
+    assert!(matches!(
+        &events[0].event,
+        BackendEvent::SystemSettings { language, auto_apply_updates: false, .. }
+            if language == "ja"
+    ));
+    assert_eq!(gwt::update_settings::configured().unwrap(), None);
+    assert!(
+        !fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("auto_apply_updates"),
+        "an unreadable legacy value must not be migrated to durable OFF"
+    );
+
+    fs::write(&legacy_path, r#"{"autonomous_mode":true}"#).unwrap();
+    let events = runtime.system_settings_get_events("client-1".to_string());
+    assert!(matches!(
+        events[0].event,
+        BackendEvent::SystemSettings {
+            auto_apply_updates: true,
+            ..
+        }
+    ));
+    assert_eq!(gwt::update_settings::configured().unwrap(), Some(true));
+}
+
+#[test]
 fn app_runtime_issue_monitor_profiles_get_returns_the_saved_pool_for_the_requesting_project() {
     let _env_lock = env_test_lock()
         .lock()

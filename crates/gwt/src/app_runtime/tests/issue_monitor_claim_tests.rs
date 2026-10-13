@@ -2285,7 +2285,8 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
 }
 
 /// Issue #4376 AC-3 / AC-7: the manual-click drain is applied by the same
-/// tick as the auto path — attended monitor (`autonomous_mode:false`), the
+/// tick as the auto path — a legacy manual-click drain with an autonomous
+/// monitor and explicit project auto-apply OFF, the
 /// Running pane blocks, the pane going Idle settles over two ticks, the grace
 /// is announced, and the apply goes through `ApplyUpdateDrained`, never
 /// `ApplyUpdateRestartNow`. Agents are never stopped.
@@ -2304,7 +2305,8 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         &prefs_path,
         &gwt::IssueMonitorPrefs {
             enabled: true,
-            autonomous_mode: false,
+            autonomous_mode: true,
+            auto_apply_updates: Some(false),
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
                 version: "9.99.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

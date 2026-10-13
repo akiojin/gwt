@@ -3144,7 +3144,8 @@ pub struct IssueMonitorUpdateDrain {
     pub since: String,
     pub reason: IssueMonitorUpdateDrainReason,
     /// Distinguish automatic discovery from a manual Update click's drain.
-    /// Legacy drains infer their origin from the project's autonomous mode.
+    /// Legacy drains infer their origin from the project's auto-apply override
+    /// or autonomous mode when no override was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automatic: Option<bool>,
     /// Issue #3906 AC-12: what still keeps the host from being quiescent.
@@ -12995,14 +12996,15 @@ impl IssueMonitorState {
     }
 
     fn release_disabled_automatic_update_drain(&mut self) {
-        if self
+        if self.update_drain.as_ref().is_some_and(|drain| {
+            drain
+                .automatic
+                .or(self.auto_apply_updates)
+                .unwrap_or(self.autonomous_mode)
+        }) && self
             .update_drain
             .as_ref()
-            .is_some_and(|drain| drain.automatic.unwrap_or(self.autonomous_mode))
-            && self
-                .update_drain
-                .as_ref()
-                .is_some_and(|drain| drain.reason == IssueMonitorUpdateDrainReason::Auto)
+            .is_some_and(|drain| drain.reason == IssueMonitorUpdateDrainReason::Auto)
         {
             self.clear_update_drain();
         }
@@ -13200,7 +13202,22 @@ impl IssueMonitorState {
     /// SPEC #3200 T-047/FR-001: toggle unattended autonomous mode. Default OFF
     /// keeps the SPEC #3165 human-gated behavior exactly.
     pub fn set_autonomous_mode(&mut self, enabled: bool) {
+        if self.autonomous_mode != enabled {
+            self.capture_legacy_update_drain_origin(
+                self.auto_apply_updates.unwrap_or(self.autonomous_mode),
+            );
+        }
         self.autonomous_mode = enabled;
+    }
+
+    fn capture_legacy_update_drain_origin(&mut self, automatic: bool) {
+        if let Some(drain) = self
+            .update_drain
+            .as_mut()
+            .filter(|drain| drain.reason == IssueMonitorUpdateDrainReason::Auto)
+        {
+            drain.automatic.get_or_insert(automatic);
+        }
     }
 
     /// Current durable remote-effect authority generation.
@@ -13666,12 +13683,18 @@ impl IssueMonitorState {
     }
 
     pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
-        advance_autonomous_effect_authority(
+        let previous_mode = self.autonomous_mode;
+        let automatic = self.auto_apply_updates.unwrap_or(previous_mode);
+        let epoch = advance_autonomous_effect_authority(
             &mut self.autonomous_mode,
             &mut self.effect_authority_epoch,
             &mut self.pending_effects,
             enabled,
-        )
+        )?;
+        if previous_mode != enabled {
+            self.capture_legacy_update_drain_origin(automatic);
+        }
+        Some(epoch)
     }
 
     /// SPEC #3200 T-032/FR-003/004: the pure two-stage opt-in pre-gate — an issue
@@ -38791,6 +38814,38 @@ mod tests {
         monitor.set_auto_apply_updates(Some(false)).unwrap();
         assert!(monitor.update_drain().is_none());
         assert!(monitor.prefs().update_drain.is_none());
+
+        for revoke_effects in [true, false] {
+            monitor.set_autonomous_mode(true);
+            monitor.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.110.0", now);
+            if revoke_effects {
+                monitor
+                    .set_autonomous_mode_with_effect_revocation(false)
+                    .unwrap();
+            } else {
+                monitor.set_autonomous_mode(false);
+            }
+            monitor.set_auto_apply_updates(Some(false)).unwrap();
+            assert!(
+                monitor.update_drain().is_none(),
+                "turning autonomous mode off must preserve a legacy automatic drain's origin"
+            );
+        }
+
+        let mut legacy_manual = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                auto_apply_updates: Some(false),
+                ..Default::default()
+            },
+        );
+        legacy_manual.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.110.0", now);
+        legacy_manual.set_auto_apply_updates(Some(false)).unwrap();
+        assert!(
+            legacy_manual.update_drain().is_some(),
+            "a legacy manual-click drain honors its project's explicit auto-apply OFF"
+        );
 
         monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.110.0", now);
         monitor.set_auto_apply_updates(Some(false)).unwrap();

@@ -2,8 +2,7 @@
 // Build first: cargo build -p gwt --bin gwt --bin gwtd
 // Usage: node crates/gwt/playwright/verify-issue-5322.mjs [Playwright arguments]
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -119,8 +118,8 @@ try {
     backends.push(backend);
     await mkdir(join(home, ".gwt"), { recursive: true });
     await mkdir(join(home, ".codex"), { recursive: true });
-    const runtime = join(process.env.HOME || homedir(), ".gwt/runtime");
-    if (await exists(runtime)) await symlink(runtime, join(home, ".gwt/runtime"));
+    // Coordinator and runtime writes must remain in this fixture's HOME.
+    await mkdir(join(home, ".gwt/runtime"), { recursive: true });
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GWT_|CODEX_|CLAUDE_|GIT_)/i.test(key)
       && !["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(key.toUpperCase())));
     Object.assign(env, { HOME: home, USERPROFILE: home, CODEX_HOME: join(home, ".codex"),

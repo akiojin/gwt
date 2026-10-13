@@ -539,12 +539,7 @@ impl AppRuntime {
 
     pub(super) fn system_settings_get_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
         if let Err(error) = gwt::update_settings::migrate() {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::SystemSettingsError {
-                    message: error.to_string(),
-                },
-            )];
+            tracing::warn!(target: "gwt::update", %error, "automatic update migration failed; returning existing system settings");
         }
         let path = gwt_core::paths::gwt_config_path();
         vec![OutboundEvent::reply(
@@ -726,7 +721,14 @@ impl AppRuntime {
     }
 
     pub(crate) fn automatic_updates_enabled(&self) -> bool {
-        gwt::update_settings::migrate().unwrap_or(false)
+        let enabled = match gwt::update_settings::migrate() {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::warn!(target: "gwt::update", %error, "automatic update migration failed; treating as OFF");
+                false
+            }
+        };
+        enabled
             && self.project_contexts().iter().any(|context| {
                 gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
                     &context.project_root,
@@ -752,7 +754,11 @@ impl AppRuntime {
         for context in self.project_contexts() {
             if !enabled {
                 if let Some((prefs, drain)) = self.project_auto_update_drain(&context) {
-                    if drain.automatic.unwrap_or(prefs.autonomous_mode) {
+                    if drain
+                        .automatic
+                        .or(prefs.auto_apply_updates)
+                        .unwrap_or(prefs.autonomous_mode)
+                    {
                         events.extend(
                             self.release_update_auto_apply_for_project(&context, &drain.version),
                         );

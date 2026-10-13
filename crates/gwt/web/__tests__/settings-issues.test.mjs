@@ -86,6 +86,9 @@ test("section-addressed Settings selects and focuses the requested project panel
   const { document, CustomEvent } = parseHTML('<html><body><div id="settings"><button class="settings-tab" data-settings-tab="issues"></button><section class="settings-panel" data-settings-panel="issues"></section></div></body></html>');
   const body = document.getElementById("settings");
   body.dataset.settingsProjectRoot = "/A";
+  const unbound = body.cloneNode(true);
+  delete unbound.dataset.settingsProjectRoot;
+  document.body.prepend(unbound);
   const panel = body.querySelector("section");
   let focused = 0, scrollOptions, spawned = 0;
   panel.focus = () => focused++;
@@ -93,7 +96,7 @@ test("section-addressed Settings selects and focuses the requested project panel
   const start = source.indexOf("export function switchSettingsTab");
   const end = source.indexOf("export function createSettingsSurface", start);
   const install = Function(`${source.slice(start, end).replaceAll("export ", "")}; return installSettingsOpenHandler;`)();
-  install({ document, settingsWindowBodies: new Set([body]), activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset: () => spawned++, setPendingTarget: () => assert.fail("existing window") });
+  install({ document, settingsWindowBodies: new Set([unbound, body]), activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset: () => spawned++, setPendingTarget: () => assert.fail("existing window") });
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues", project_root: "/A" } }));
   assert.equal(body.querySelector("button").getAttribute("aria-selected"), "true");
   assert.equal(focused, 1);

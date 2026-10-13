@@ -413,7 +413,7 @@ export function installSettingsOpenHandler(options) {
       return;
     }
     const existingBody = Array.from(settingsWindowBodies).find(
-      (settingsBody) => settingsBody.isConnected && (!settingsBody.dataset.settingsProjectRoot || settingsBody.dataset.settingsProjectRoot === projectRoot),
+      (settingsBody) => settingsBody.isConnected && (settingsBody.dataset.settingsProjectRoot || "") === projectRoot,
     );
     if (existingBody) {
       switchSettingsTab(existingBody, target, true);

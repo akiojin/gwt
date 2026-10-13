@@ -10306,7 +10306,12 @@ impl AppRuntime {
                     .iter()
                     .filter_map(|context| self.project_auto_update_drain(context))
                     .filter(|(_, drain)| drain.version == *version)
-                    .all(|(prefs, drain)| drain.automatic.unwrap_or(prefs.autonomous_mode));
+                    .all(|(prefs, drain)| {
+                        drain
+                            .automatic
+                            .or(prefs.auto_apply_updates)
+                            .unwrap_or(prefs.autonomous_mode)
+                    });
                 self.proxy.send(UserEvent::ApplyUpdateDrained {
                     version: version.clone(),
                     automatic,
@@ -10328,7 +10333,12 @@ impl AppRuntime {
             }
             return Vec::new();
         };
-        if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
+        if drain
+            .automatic
+            .or(prefs.auto_apply_updates)
+            .unwrap_or(prefs.autonomous_mode)
+            && !self.automatic_updates_enabled()
+        {
             return self.release_update_auto_apply_for_project(context, &drain.version);
         }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
