@@ -6324,6 +6324,10 @@ fn prepare_monitor_relaunch(
     fixture: &mut MonitorRelaunchFixture,
     strategy: gwt::IssueMonitorLaunchSessionStrategy,
 ) -> Vec<OutboundEvent> {
+    let linked_issue_kind = match fixture.execution_owner.kind {
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec => LinkedIssueKind::Spec,
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue => LinkedIssueKind::Issue,
+    };
     let previous_spawner = fixture.runtime.blocking_tasks.clone();
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
@@ -6332,7 +6336,7 @@ fn prepare_monitor_relaunch(
         .auto_launch_issue_monitor_delivery_events_for_project(
             &fixture.project_root,
             3165,
-            LinkedIssueKind::Spec,
+            linked_issue_kind,
             None,
             strategy,
         );
@@ -6392,6 +6396,7 @@ fn monitor_relaunch_fixture(
         conversation,
         holder,
         durable_delivery,
+        LinkedIssueKind::Spec,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     )
 }
@@ -6402,21 +6407,34 @@ fn monitor_relaunch_fixture_with_settlement(
     conversation: MonitorProviderConversationFixture,
     holder: MonitorNativeHolderFixture,
     durable_delivery: bool,
+    linked_issue_kind: LinkedIssueKind,
     settlement: gwt::cli::execution_state::ExecutionSettlement,
 ) -> MonitorRelaunchFixture {
     let case_root = root.join(case_name);
     fs::create_dir_all(&case_root).expect("create monitor relaunch case root");
     let repo = case_root.join("repo");
     init_git_clone_with_origin(&repo);
+    let (title, labels, owner_kind) = match linked_issue_kind {
+        LinkedIssueKind::Spec => (
+            "SPEC: monitor relaunch safety",
+            &["gwt-spec"],
+            gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        ),
+        LinkedIssueKind::Issue => (
+            "fix: monitor relaunch safety",
+            &["bug"],
+            gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        ),
+    };
     Cache::new(issue_cache_root(&repo))
         .write_snapshot(&sample_issue_snapshot(
             3165,
-            "SPEC: monitor relaunch safety",
-            &["gwt-spec"],
+            title,
+            labels,
             "Monitor relaunch fixture",
             "2026-08-13T00:00:00Z",
         ))
-        .expect("seed monitored SPEC authority");
+        .expect("seed monitored owner authority");
     let worktree = case_root.join("issue-worktree");
     let target_branch = "work/issue-3165";
     let status = gwt_core::process::hidden_command("git")
@@ -6452,7 +6470,7 @@ fn monitor_relaunch_fixture_with_settlement(
         source.docker_service = Some("app".to_string());
     }
     let execution_owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        kind: owner_kind,
         number: 3165,
     };
     gwt::cli::execution_state::materialize_at_launch(
@@ -6597,8 +6615,8 @@ fn monitor_relaunch_fixture_with_settlement(
         monitor.terminal_queue_push(&[3165], "operator", "2026-07-28T00:00:00Z");
         monitor.record_candidate(gwt::IssueMonitorIssue {
             number: 3165,
-            title: "SPEC: monitor relaunch safety".to_string(),
-            labels: vec!["gwt-spec".to_string()],
+            title: title.to_string(),
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
             state: gwt::IssueMonitorIssueState::Open,
             body: None,
             url: None,

@@ -17,6 +17,30 @@ pub(super) fn run<E: CliEnv>(
     action: SkillStateAction,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if matches!(
+        &action,
+        SkillStateAction::Start { .. } | SkillStateAction::Phase { .. }
+    ) {
+        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        // Canonical successor activation takes this same lease. Keep both
+        // ownership admission and persistence inside it so a stale caller
+        // cannot overwrite a successor that became live in between.
+        return super::trusted_store::with_write_lease(&worktree, || {
+            Ok(run_action(env, action, out))
+        })
+        .map_err(|error| {
+            SpecOpsError::from(gwt_github::client::ApiError::Unexpected(error.to_string()))
+        })?;
+    }
+    // Finalization already owns its write lease; it must not nest this one.
+    run_action(env, action, out)
+}
+
+fn run_action<E: CliEnv>(
+    env: &mut E,
+    action: SkillStateAction,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
     if let SkillStateAction::Phase { spec, .. } = &action {
         if let Some(code) = admit_build_phase(env, *spec, out) {
             return Ok(code);
@@ -4790,8 +4814,25 @@ format_version: Some(1),
             ] {
                 let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
                 let mut output = String::new();
+                let lease_observed = std::rc::Rc::new(std::cell::Cell::new(false));
+                let observed = lease_observed.clone();
+                let repo = fixture.repo.clone();
+                crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                    let error = crate::cli::trusted_store::with_write_lease_wait(
+                        &repo,
+                        std::time::Duration::ZERO,
+                        || Ok(()),
+                    )
+                    .expect_err("a concurrent canonical owner writer must be refused");
+                    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                    observed.set(true);
+                });
                 assert_eq!(run(&mut env, action, &mut output).unwrap(), 2, "{output}");
                 assert!(output.contains("execution_session_mismatch"), "{output}");
+                assert!(
+                    lease_observed.get(),
+                    "start/phase must hold the owner lease before judging ownership"
+                );
                 assert_eq!(
                     gwt_core::skill_state::load(&fixture.repo, SKILL_NAME).unwrap(),
                     Some(state.clone()),

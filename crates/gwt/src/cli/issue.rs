@@ -2339,10 +2339,11 @@ fn issues_held_by_provider(
 /// daemon→GUI channel that could disagree with it.
 ///
 /// Issue #4200: the launch row is only one of the two holds a launch takes on
-/// an Issue. The other is its execution generation, and revoking the launch is
-/// exactly the decision that its holder must not return, so this releases that
-/// too — see [`crate::cli::execution_state::release_revoked_launch_generation`]
-/// for why no liveness proof is asked for. The two results are reported
+/// an Issue. The other is its execution generation. Revoking queue intent does
+/// not stop an agent that has already started: an exact live started holder
+/// retains its generation. A never-started or dead holder can still be released
+/// under Issue #4200 — see
+/// [`crate::cli::execution_state::release_revoked_launch_generation`]. The two results are reported
 /// separately: `status` is about the launch row, `generation_release` is about
 /// the generation. That is also the recovery route for an Issue whose launch
 /// row is already gone but whose generation still refuses every relaunch: the
@@ -4766,9 +4767,40 @@ fn run_issue_set_state<E: CliEnv>(
         reconcile_issue_state(env, &current)?;
         // `reason` describes what was written, and nothing was: echoing the
         // requested one here would claim a rationale GitHub never recorded.
-        write_issue_state_result(out, number, target, false, None, None);
+        write_issue_state_result(out, number, target, false, None, None, None);
         return Ok(0);
     }
+
+    // Issue #5043: a completed close while `work/issue-<N>` still holds source
+    // that origin/develop lacks would strand that source. The check is the
+    // merge settlement's, and so is its advisory stance: an equivalent change
+    // may have landed through another PR, so a confirmed difference is posted
+    // on the Issue before the close and an unknown one is reported to the
+    // caller. A `not_planned` close abandons the work and is not checked.
+    let delivery_warning = if target == IssueState::Closed
+        && reason != Some(gwt_github::client::IssueCloseReason::NotPlanned)
+    {
+        let delivery =
+            crate::issue_monitor_settlement::fetched_issue_owner_delivery(env.repo_path(), number);
+        let confirmed = delivery.as_ref().is_ok_and(|changes| !changes.is_empty());
+        let warning = crate::issue_monitor_settlement::render_issue_delivery_warning(
+            number,
+            "直接 close 前検査",
+            delivery,
+        );
+        if let Some(warning) = warning.as_deref().filter(|_| confirmed) {
+            if !current
+                .comments
+                .iter()
+                .any(|comment| comment.body == warning)
+            {
+                env.client().create_comment(issue, warning)?;
+            }
+        }
+        warning
+    } else {
+        None
+    };
 
     // The rationale lands before the state change, so a reader who finds the
     // Issue closed already sees why it was closed.
@@ -4794,7 +4826,15 @@ fn run_issue_set_state<E: CliEnv>(
     // the UI and the Monitor never read a state this operation already changed.
     let written = refresh_issue_cache(env, issue)?.snapshot;
     reconcile_issue_state(env, &written)?;
-    write_issue_state_result(out, number, target, true, reason, comment_id);
+    write_issue_state_result(
+        out,
+        number,
+        target,
+        true,
+        reason,
+        comment_id,
+        delivery_warning.as_deref(),
+    );
     Ok(0)
 }
 
@@ -4899,20 +4939,22 @@ fn write_issue_state_result(
     changed: bool,
     reason: Option<gwt_github::client::IssueCloseReason>,
     comment_id: Option<u64>,
+    delivery_warning: Option<&str>,
 ) {
-    out.push_str(
-        &serde_json::json!({
-            "number": number,
-            "status": match state {
-                IssueState::Closed => "closed",
-                IssueState::Open => "open",
-            },
-            "changed": changed,
-            "reason": reason.map(gwt_github::client::IssueCloseReason::as_str),
-            "comment_id": comment_id,
-        })
-        .to_string(),
-    );
+    let mut result = serde_json::json!({
+        "number": number,
+        "status": match state {
+            IssueState::Closed => "closed",
+            IssueState::Open => "open",
+        },
+        "changed": changed,
+        "reason": reason.map(gwt_github::client::IssueCloseReason::as_str),
+        "comment_id": comment_id,
+    });
+    if let Some(warning) = delivery_warning {
+        result["delivery_warning"] = serde_json::Value::from(warning);
+    }
+    out.push_str(&result.to_string());
     out.push('\n');
 }
 
@@ -7221,6 +7263,104 @@ mod tests {
             ],
             "the comment must land before the close, and the reason must reach the client"
         );
+    }
+
+    fn git_in(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = gwt_core::process::run_git_logged(args, Some(repo)).expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Issue #5043 AC-3: an agent's direct `issue.close` while its owner
+    /// branch holds source that origin/develop lacks posts the settlement's
+    /// delivery warning on the Issue *before* closing it, and reports it to
+    /// the caller. A `not_planned` close abandons the work and is not warned.
+    #[test]
+    fn issue_close_warns_before_closing_over_an_undelivered_owner_branch() {
+        let (tmp, mut env) = seeded_edit_env(&["bug"]);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_in(&repo, &["init", "-b", "develop"]);
+        git_in(&repo, &["config", "user.name", "Test"]);
+        git_in(&repo, &["config", "user.email", "test@example.com"]);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "base"]);
+        git_in(&repo, &["clone", "--bare", ".", "origin.git"]);
+        git_in(&repo, &["remote", "add", "origin", "origin.git"]);
+        let base = git_in(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("fix.rs"), "fn fixed() {}\n").unwrap();
+        git_in(&repo, &["add", "fix.rs"]);
+        git_in(&repo, &["commit", "-m", "undelivered fix"]);
+        let head = git_in(&repo, &["rev-parse", "HEAD"]);
+        git_in(&repo, &["push", "origin", "HEAD:refs/heads/work/issue-7"]);
+        git_in(&repo, &["update-ref", "refs/heads/develop", &base]);
+        env.repo_path = repo;
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("close over an undelivered branch");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["status"], "closed", "{out}");
+        let warning = result["delivery_warning"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the caller must see the warning: {out}"));
+        assert!(
+            warning.contains("gwt-issue-close-delivery-warning"),
+            "{warning}"
+        );
+        assert!(warning.contains("work/issue-7"), "{warning}");
+        assert!(warning.contains(&head), "{warning}");
+
+        let calls: Vec<String> = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("create_comment") || call.starts_with("set_state"))
+            .collect();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0], "create_comment:#7", "the warning must land first");
+        assert!(calls[1].starts_with("set_state:#7"), "{calls:?}");
+        assert_eq!(fetched(&env, 7).comments[0].body, warning);
+
+        // Abandoning the work is not a delivery question.
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("reopen");
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("not planned close");
+        assert!(
+            state_result(&out).get("delivery_warning").is_none(),
+            "{out}"
+        );
+        assert_eq!(fetched(&env, 7).comments.len(), 1, "no second warning");
     }
 
     /// SPEC #4249 FR-001: replaying the same envelope is a no-op. Nothing

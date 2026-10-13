@@ -12,6 +12,7 @@
 //! callers (`cli::env`, `cli::run`, `cli::tests`) keep accessing them via
 //! `super::pr::name` / `crate::cli::pr::name` exactly as before.
 
+pub(crate) mod ci_delivery;
 mod gh;
 pub(crate) mod head_check;
 pub(crate) mod types;
@@ -441,6 +442,9 @@ pub(super) fn run<E: CliEnv>(
     cmd: PrCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if let PrCommand::CreateFromCi(request) = cmd {
+        return ci_delivery::run(env, request, out);
+    }
     // SPEC-3248 P8b (T-112/FR-037/AS-33): Ready handoffs — a non-draft PR
     // creation or `pr.ready` — require the current session's execution to be
     // settled or backed by fresh verification evidence. Exact Board decision
@@ -508,6 +512,22 @@ pub(super) fn run<E: CliEnv>(
                 | PrCommand::CreateBody { draft: false, .. }
                 | PrCommand::Ready { .. }
         );
+        // Show the terminal lifecycle exit before stale/missing local evidence
+        // can hide it behind another verify.run -> reopen instruction (#4214).
+        if crate::cli::execution_state::load(&worktree)
+            .map_err(super::io_as_api_error)?
+            .is_some_and(|record| {
+                record.status == crate::cli::execution_state::ExecutionControlStatus::Blocked
+            })
+        {
+            if let Some(refusal) =
+                crate::cli::execution_state::pr_handoff_refusal(&worktree, is_ready_handoff)
+            {
+                out.push_str(&refusal);
+                out.push('\n');
+                return Ok(2);
+            }
+        }
         if is_ready_handoff {
             let target_pr = match &cmd {
                 PrCommand::Ready { number } => Some(*number),
@@ -675,6 +695,7 @@ pub(super) fn run<E: CliEnv>(
     }
     let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
+        PrCommand::CreateFromCi(_) => unreachable!("CI creation dispatched separately"),
         PrCommand::HeadCheck { base, head } => head_check::read(env, &base, head.as_deref(), out)?,
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -2204,6 +2225,394 @@ mod tests {
         crate::cli::execution_state::current_execution_binding(worktree, owner)
             .expect("read PR generation authority")
             .expect("current PR generation binding")
+    }
+
+    fn ci_request_for(repo: &std::path::Path) -> ci_delivery::CiCreateRequest {
+        let mut request = ci_delivery::tests::request();
+        request.head = current_branch_name(repo).unwrap();
+        let head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        request.head_sha = String::from_utf8(head.stdout).unwrap().trim().into();
+        request
+    }
+
+    fn seed_ci_delivery(env: &mut crate::cli::TestEnv, request: &ci_delivery::CiCreateRequest) {
+        let mut evidence = ci_delivery::tests::snapshot();
+        evidence.head = request.head.clone();
+        evidence.head_sha = request.head_sha.clone();
+        evidence.check_runs[0]["head_sha"] = serde_json::json!(request.head_sha);
+        env.ci_delivery_snapshots = [evidence.clone(), evidence].into();
+        let mut pr = seeded_pr();
+        pr.head_ref_name = request.head.clone();
+        env.seed_pr(pr.number, pr.clone());
+        env.seed_created_pr(pr);
+    }
+
+    #[test]
+    fn ci_creation_escapes_blocked_execution_with_unavailable_verification_lease() {
+        use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        use std::time::Duration;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _legacy = ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+        gwt_config::Settings::update_global(|settings| {
+            settings.verification.slots = std::num::NonZeroU16::new(1);
+            settings.verification.disk_budget_bytes = Some(0);
+            Ok(())
+        })
+        .unwrap();
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "ci-blocked-owner";
+        let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, identity);
+        enable_autonomous_pr_session(&fixture.repo, session_id);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let (failed, _) = crate::cli::verification_record::run_verification(
+            &fixture.repo,
+            session_id,
+            &["git --gwt-intentionally-invalid-command".into()],
+        )
+        .unwrap();
+        assert!(!failed.all_passed);
+        crate::cli::execution_state::settle(
+            &fixture.repo,
+            session_id,
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "verification admission unavailable".into(),
+                missing_verification: Some("local matrix".into()),
+            },
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let request = ci_request_for(&fixture.repo);
+        seed_ci_delivery(&mut env, &request);
+        crate::cli::action_obligation::mark_from_prompt(
+            &fixture.repo,
+            session_id,
+            "PRを作成してください",
+        )
+        .unwrap();
+        let mut ordinary_out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: request.base.clone(),
+                    head: Some(request.head.clone()),
+                    title: request.title.clone(),
+                    body: request.body.clone(),
+                    labels: vec![],
+                    draft: false,
+                },
+                &mut ordinary_out
+            )
+            .unwrap(),
+            2,
+            "{ordinary_out}"
+        );
+        assert!(
+            ordinary_out.contains("pr.create_from_ci") && ordinary_out.contains("do not loop"),
+            "{ordinary_out}"
+        );
+        let coordinator = crate::cli::verification_lease::open_coordinator().unwrap();
+        let key = TargetKey::verification("other-repository", "other-worktree");
+        let JobAdmission::Owner(holder) = coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("isolated holder must be admitted");
+        };
+        let lease = holder
+            .acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(60))
+            .unwrap();
+        let Err(refusal) = crate::cli::verification_lease::admission::admit(
+            &mut env,
+            &fixture.repo,
+            None,
+            Duration::ZERO,
+            |_| String::new(),
+        ) else {
+            panic!("real lease is unavailable");
+        };
+        assert!(refusal.to_string().contains("deferred"), "{refusal}");
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo).unwrap();
+        let protected = [
+            trusted.join("execution-control.json"),
+            trusted.join("verification-run.json"),
+            crate::cli::execution_state::state_path(&fixture.repo),
+            crate::cli::verification_record::state_path(&fixture.repo),
+            gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            coordinator
+                .heavy_ticket_path_for_lease(lease.id())
+                .unwrap()
+                .unwrap(),
+        ];
+        let before = protected
+            .iter()
+            .map(std::fs::read)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(request.clone()), &mut out).unwrap(),
+            0,
+            "{out}"
+        );
+        assert_eq!(env.pr_create_call_log.len(), 1);
+        assert!(!env.pr_create_call_log[0].draft);
+        assert_eq!(
+            env.pr_create_call_log[0].head.as_deref(),
+            Some(request.head.as_str())
+        );
+        assert!(out.contains("CI delivery audit"), "{out}");
+        assert!(crate::cli::action_obligation::open_kinds(&fixture.repo, session_id).is_empty());
+        assert_eq!(
+            protected
+                .iter()
+                .map(std::fs::read)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            before
+        );
+        assert!(
+            !crate::cli::verification_record::load(&fixture.repo)
+                .unwrap()
+                .unwrap()
+                .all_passed
+        );
+        assert_eq!(
+            crate::cli::execution_state::load(&fixture.repo)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::cli::execution_state::ExecutionControlStatus::Blocked
+        );
+        assert_eq!(
+            coordinator
+                .heavy_lease_status()
+                .unwrap()
+                .lease_id
+                .as_deref(),
+            Some(lease.id())
+        );
+    }
+
+    #[test]
+    fn ci_creation_preserves_authority_permission_ui_and_head_movement_gates() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "ci-negative-owner";
+        let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, identity);
+        enable_autonomous_pr_session(&fixture.repo, session_id);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let request = ci_request_for(&fixture.repo);
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let mut out = String::new();
+        seed_ci_delivery(&mut env, &request);
+        env.ci_delivery_snapshots[1].head_sha = "c".repeat(40);
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(request.clone()), &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        seed_ci_delivery(&mut env, &request);
+        env.ci_delivery_snapshots[0].changed_files = vec!["crates/gwt/web/app.js".into()];
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(request.clone()), &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        seed_ci_delivery(&mut env, &request);
+        let mut forged = request.clone();
+        forged.body = "User Verification Result: confirmed".into();
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(forged), &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        seed_ci_delivery(&mut env, &request);
+        let mut deferred = request.clone();
+        deferred.body = "User Verification Result: deferred (human verification pending)".into();
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(deferred), &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        assert!(env.pr_create_call_log.is_empty(), "{out}");
+        seed_ci_delivery(&mut env, &request);
+        {
+            let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "foreign-ci-session");
+            assert_eq!(
+                run(&mut env, PrCommand::CreateFromCi(request.clone()), &mut out).unwrap(),
+                2,
+                "{out}"
+            );
+        }
+        crate::cli::permission_readiness::record_prompt_regression(
+            &fixture.repo,
+            "issue",
+            42,
+            session_id,
+            "codex",
+            7,
+        )
+        .unwrap();
+        seed_ci_delivery(&mut env, &request);
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(request), &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "every refusal occurs before external creation"
+        );
+    }
+
+    #[test]
+    fn ci_creation_allows_registered_pm_to_nominate_another_producing_head() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let git = |args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&fixture.repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        // These are disposable fixture repositories, never the agent checkout.
+        git(&["branch", "-m", "work/issue-42"]);
+        git(&["push", "-q", "origin", "work/issue-42"]);
+        let producer = "ci-proxy-producer";
+        let identity = initialize_pr_generation_authority(&fixture.repo, producer);
+        persist_pr_generation_session(&fixture.repo, producer, identity);
+        enable_autonomous_pr_session(&fixture.repo, producer);
+        crate::cli::execution_state::settle(
+            &fixture.repo,
+            producer,
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "local verification unavailable".into(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        crate::cli::action_obligation::mark_from_prompt(
+            &fixture.repo,
+            producer,
+            "PRを作成してください",
+        )
+        .unwrap();
+        let pm_path = crate::pm_registry::pm_worktree_path_for_repo_path(&fixture.repo);
+        std::fs::create_dir_all(pm_path.parent().unwrap()).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "--detach",
+            "-q",
+            pm_path.to_str().unwrap(),
+            "HEAD",
+        ]);
+        let pm_id = "ci-registered-pm";
+        let prefs = crate::pm_registry::PmPrefs {
+            registration: Some(crate::pm_registry::PmRegistration {
+                session_id: pm_id.into(),
+                agent_id: "codex".into(),
+                worktree_path: pm_path.to_str().unwrap().into(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }),
+            ..Default::default()
+        };
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&fixture.repo),
+            &prefs,
+        )
+        .unwrap();
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, pm_id);
+        let request = ci_request_for(&fixture.repo);
+        let protected = [
+            crate::cli::execution_state::state_path(&fixture.repo),
+            gwt_core::paths::gwt_sessions_dir().join(format!("{producer}.toml")),
+        ];
+        let before = protected
+            .iter()
+            .map(std::fs::read)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut env = crate::cli::TestEnv::new(pm_path.clone());
+        seed_ci_delivery(&mut env, &request);
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(request.clone()), &mut out).unwrap(),
+            0,
+            "{out}"
+        );
+        assert_eq!(
+            env.pr_create_call_log[0].head.as_deref(),
+            Some("work/issue-42")
+        );
+        assert!(!env.pr_create_call_log[0].draft);
+        assert_eq!(
+            protected
+                .iter()
+                .map(std::fs::read)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(&fixture.repo, producer),
+            vec![crate::cli::action_obligation::ObligationKind::Pr],
+            "PM cannot settle another Session's obligation"
+        );
+        assert!(crate::cli::verification_record::load(&pm_path)
+            .unwrap()
+            .is_none());
+        crate::cli::permission_readiness::record_prompt_regression(
+            &fixture.repo,
+            "issue",
+            42,
+            producer,
+            "codex",
+            9,
+        )
+        .unwrap();
+        seed_ci_delivery(&mut env, &request);
+        assert_eq!(
+            run(&mut env, PrCommand::CreateFromCi(request), &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        assert_eq!(
+            env.pr_create_call_log.len(),
+            1,
+            "producer permission blocker forbids proxy creation"
+        );
     }
 
     fn assert_pr_mutations_refuse_without_caller_authority(

@@ -2120,8 +2120,8 @@ fn launch_release_operation_id(
 /// drifting away from the fail-closed checks the first one makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchGenerationReleaseAuthority {
-    /// The operator revoked the launch (AC-1 / AC-3). No liveness proof is
-    /// asked for: revoking *is* the decision that the holder must not return.
+    /// The operator revoked the launch (AC-1 / AC-3). A known live agent that
+    /// actually started keeps its execution authority (Issue #4214 AC-7).
     Revoked,
     /// The holder never delivered a single agent lifecycle event (AC-2), so
     /// there is no agent whose work could be interrupted by settling it.
@@ -2200,12 +2200,13 @@ pub enum LaunchGenerationRelease {
 /// process itself, which stays alive. Every evidence-based route then answers
 /// "cannot prove it is dead" and refuses, correctly, forever.
 ///
-/// Revoking a launch supplies the missing fact directly: it is not evidence
-/// about the holder, it is the operator's decision that the holder must not
-/// return. So this deliberately asks for no liveness proof. It still refuses,
-/// byte-preserving, on every reading that says the generation is not the one
-/// being revoked — a changed current generation, a prepared successor or
-/// takeover mid-flight, or a projection that no longer matches.
+/// Revoking releases that stranded launch without requiring proof its Host
+/// exited. Issue #4214 AC-7 distinguishes it from an agent that actually started
+/// and still has exact live runtime evidence: revoking its Monitor row does not
+/// settle the agent's execution. It also refuses, byte-preserving, on every
+/// reading that says the generation is not the one being revoked — a changed
+/// current generation, a prepared successor or takeover mid-flight, or a
+/// projection that no longer matches.
 pub fn release_revoked_launch_generation(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -2216,8 +2217,30 @@ pub fn release_revoked_launch_generation(
         owner,
         LaunchGenerationReleaseAuthority::Revoked,
         reason,
-        |_, _| None,
+        |holder_session_id, record| {
+            revoked_live_holder_refusal(worktree, holder_session_id, record)
+        },
     )
+}
+
+fn revoked_live_holder_refusal(
+    worktree: &Path,
+    session_id: &str,
+    record: &ExecutionControlRecord,
+) -> Option<&'static str> {
+    gwt_agent::validate_session_id_path_component(session_id).ok()?;
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let gwt_agent::SessionPathState::Present(holder) =
+        gwt_agent::inspect_session_path(&session_path)
+    else {
+        return None;
+    };
+    if !holder.has_lifecycle_recovery_evidence() && holder.exact_resume_session_id().is_none() {
+        return None;
+    }
+    live_active_owner_generation(worktree, record.owner_number).map(|_| {
+        "the holder agent has started and is still live; revoking the Monitor row does not settle its execution"
+    })
 }
 
 /// Issue #4200 AC-2: release an owner's Active execution generation because the
@@ -5008,6 +5031,8 @@ enum CurrentExecutionBindingAuthority {
     ActiveMutation,
     BlockedBuildAbort,
     PrMutation,
+    /// Exact GitHub CI admits only Ready creation, without reopening Blocked.
+    CiPrCreation,
     /// Issue #5078 (AC-1): the Workspace identity (purpose / current focus)
     /// of the Session that holds the exact current binding. A Blocked
     /// generation recovered by `execution.continue` must be able to lift the
@@ -5028,6 +5053,10 @@ impl CurrentExecutionBindingAuthority {
             Self::PrMutation => matches!(
                 status,
                 ExecutionControlStatus::Active | ExecutionControlStatus::Completed
+            ),
+            Self::CiPrCreation => matches!(
+                status,
+                ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
             ),
         }
     }
@@ -5237,6 +5266,22 @@ pub(crate) fn with_current_pr_mutation_execution_binding_lease<T>(
         expected,
         ACTIVE_BINDING_LEASE_WAIT,
         CurrentExecutionBindingAuthority::PrMutation,
+        operation,
+    )
+}
+
+/// Dedicated Issue #4214 dispatch authority. The caller must independently
+/// validate exact-head GitHub CI; this never grants ordinary PR mutations.
+pub(crate) fn with_current_ci_pr_creation_binding_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_execution_binding_lease_wait(
+        sessions_dir,
+        expected,
+        ACTIVE_BINDING_LEASE_WAIT,
+        CurrentExecutionBindingAuthority::CiPrCreation,
         operation,
     )
 }
@@ -6064,6 +6109,7 @@ fn with_current_session_execution_identity_held_global_lease<T>(
                     )?
                 }
                 CurrentExecutionBindingAuthority::PrMutation
+                | CurrentExecutionBindingAuthority::CiPrCreation
                 | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
             };
             if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -6156,6 +6202,7 @@ fn with_current_session_execution_identity_global_lease<T>(
                             )?
                         }
                         CurrentExecutionBindingAuthority::PrMutation
+                        | CurrentExecutionBindingAuthority::CiPrCreation
                         | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
                     };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -11680,7 +11727,7 @@ fn evaluate_pr_handoff(
         }
         ExecutionControlStatus::Completed => Ok(Vec::new()),
         ExecutionControlStatus::Blocked => Err(format!(
-            "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR. In the same owning session, resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run it through `verify.run`, then call `execution.reopen` with a non-empty `params.reason`; otherwise use a fresh launch or leave the blocked report as the outcome.",
+            "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). Ordinary PR mutations cannot use a blocked execution. If local verification admission is unavailable, do not loop through pr.create → verify.run → execution.reopen: use `pr.create_from_ci` with explicit base, head and head_sha only when canonical mandatory GitHub CI passes for that exact pushed head, or hand that nominated head to the registered PM. This exit leaves the execution Blocked and local verification unchanged. Otherwise resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run `verify.run`, then call `execution.reopen` with a non-empty reason. For a CLOSED delivered owner with no source to hand off, use `execution.settle_delivered` to settle remaining obligations without a matrix.",
             kind = record.owner_kind.as_str(),
             number = record.owner_number,
             reason = record
@@ -11769,6 +11816,11 @@ pub enum ExecutionCommand {
     /// it commits nothing, pushes nothing, requires no verification record,
     /// and rewrites no byte of the predecessor record.
     NoAction {
+        reason: String,
+    },
+    /// Settle the holder's leftover obligations for a freshly proven delivered
+    /// terminal owner, preserving execution and verification history in place.
+    SettleDelivered {
         reason: String,
     },
     /// Issue #4161: abort the Prepared successors/takeovers that fence an
@@ -12509,7 +12561,9 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 15] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 17] = [
+    "execution.settle_delivered",
+    "pr.create_from_ci",
     "execution.release_prepared",
     "execution.no_action",
     "execution.continue",
@@ -15760,6 +15814,44 @@ fn run_no_action(
     }
 }
 
+fn run_settle_delivered<E: CliEnv>(
+    env: &mut E,
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::delivered_owner::DeliveredSettlementOutcome;
+
+    match crate::cli::delivered_owner::record_delivered_settlement(
+        env, worktree, session_id, reason,
+    ) {
+        Ok(DeliveredSettlementOutcome::Settled(audit)) => {
+            out.push_str(&format!(
+                "execution: delivered-owner obligations settled for {} #{} (session {})\nThe terminal execution, generation ledger, Session, and historical verification remain unchanged. No implementation, verification, PR, or completion is claimed.\n",
+                audit.owner_kind.as_str(), audit.owner_number, audit.session_id,
+            ));
+            Ok(0)
+        }
+        Ok(DeliveredSettlementOutcome::Refused(reason)) => {
+            out.push_str(&format!("execution: settle_delivered refused — {reason}\n"));
+            *refusal = Some(agent_recoverable_refusal(
+                "execution_delivered_settlement_not_applicable",
+                "execution.status",
+            ));
+            Ok(2)
+        }
+        Err(error) => {
+            *refusal = Some(operation_store_failure_refusal(
+                "execution.settle_delivered",
+                &error,
+            ));
+            Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExecutionRunResult {
     pub exit_code: i32,
@@ -16321,6 +16413,9 @@ fn run_impl<E: CliEnv>(
         // all. Nothing here commits, pushes, or reads verification evidence.
         return run_no_action(&worktree, &session_id, reason, out, refusal);
     }
+    if let ExecutionCommand::SettleDelivered { reason } = &command {
+        return run_settle_delivered(env, &worktree, &session_id, reason, out, refusal);
+    }
     if matches!(&command, ExecutionCommand::Complete) {
         // Issue #4544 AC-3: a launch that stopped at a provider permission
         // prompt did not run unattended, whatever else it produced. Checked
@@ -16356,7 +16451,8 @@ fn run_impl<E: CliEnv>(
         | ExecutionCommand::Repair { .. }
         | ExecutionCommand::Continue { .. }
         | ExecutionCommand::Reopen { .. }
-        | ExecutionCommand::NoAction { .. } => {
+        | ExecutionCommand::NoAction { .. }
+        | ExecutionCommand::SettleDelivered { .. } => {
             unreachable!("handled above")
         }
         ExecutionCommand::Complete => {
@@ -19830,6 +19926,74 @@ mod tests {
             authority_before,
             "an already-terminal release is byte-preserving"
         );
+    }
+
+    /// Issue #4214 AC-7: stopping a Monitor row must not terminalize an agent
+    /// that has actually started and is still running in the same worktree.
+    #[test]
+    fn revoked_launch_release_preserves_a_started_live_holder() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 922,
+        };
+        let session_id = "revoked-started-live-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut holder = gwt_agent::Session::load(&session_path).unwrap();
+        holder.record_hook_event("SessionStart");
+        holder.save(&sessions_dir).unwrap();
+        let process_started_at = crate::process::host_process_start_time(std::process::id())
+            .expect("current process start identity");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&runtime_path)
+        .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Live,
+        );
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+        let session_before = fs::read(&session_path).unwrap();
+        let runtime_before = fs::read(&runtime_path).unwrap();
+
+        assert_eq!(
+            release_revoked_launch_generation(worktree.path(), owner, "PM stopped the wrong row")
+                .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: candidate.generation_id,
+                detail: "the holder agent has started and is still live; revoking the Monitor row does not settle its execution",
+            },
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before,
+            "the live holder's ECR, owner ledger, and execution binding stay unchanged",
+        );
+        assert_eq!(fs::read(session_path).unwrap(), session_before);
+        assert_eq!(fs::read(runtime_path).unwrap(), runtime_before);
     }
 
     /// Issue #4200: the release is still fail-closed about *which* generation it
