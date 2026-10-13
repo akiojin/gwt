@@ -1773,9 +1773,28 @@ fn regenerate_managed_hook_configs_for_targets(
         // The workspace-home copy of `.codex/hooks.json` resolves to the main
         // checkout for every linked worktree, so this one write is shared.
         with_shared_repo_asset_lock(worktree, || {
-            generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
-                io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
-            })
+            generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(
+                |error| {
+                    io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+                },
+            )?;
+            for path in gwt_skills::codex_hooks_paths_for_codex_discovery(
+                worktree,
+                CodexHookDiscoveryMode::Both,
+            )
+            .into_iter()
+            .filter(|path| path.exists())
+            {
+                tracing::info!(
+                    writer_pid = std::process::id(),
+                    writer_executable = ?std::env::current_exe().ok(),
+                    worktree = %worktree.display(),
+                    destination = %path.display(),
+                    fallback = %gwt_skills::settings_local::sanitize_hook_bin_for_config_path(&path, &hook_bin),
+                    "regenerated managed Codex hooks"
+                );
+            }
+            Ok(())
         })?;
     }
     if targets.contains(&ManagedAssetTarget::OpenCode) {

@@ -126,27 +126,36 @@ an old browser tab.
        CHECK_HOOK_BIN=""
      fi
      if [ -z "$CHECK_HOOK_BIN" ]; then
-       PATH_HOOK_BIN="$(command -v gwtd 2>/dev/null || true)"
-       if [ -n "$PATH_HOOK_BIN" ] \
-         && ! is_checkout_local_hook_bin "$PATH_HOOK_BIN"; then
-         CHECK_HOOK_BIN="gwtd"
+       if ! command -v jq >/dev/null 2>&1; then
+         echo "browser-check preflight failed: jq is required to parse hook.doctor evidence; install jq (for example: brew install jq) and rerun" >&2
+         exit 1
        fi
-     fi
-     if [ -z "$CHECK_HOOK_BIN" ] \
-       && [ -x /Applications/GWT.app/Contents/MacOS/gwtd ]; then
-       CHECK_HOOK_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
-     fi
-     if [ -z "$CHECK_HOOK_BIN" ]; then
-       CHECK_HOOK_BIN="gwtd"
+       if ! CHECK_HOOK_RESOLVER="$(
+         cd "$REPO_ROOT" && printf '%s\n' '{"schema_version":1,"operation":"hook.doctor","params":{}}' \
+           | env -u GWT_BIN_PATH -u GWT_HOOK_BIN "$CHECKOUT_GWTD"
+       )" || ! CHECK_HOOK_BIN="$(
+         printf '%s' "$CHECK_HOOK_RESOLVER" \
+           | jq -er 'select(.ok == true) | .output | fromjson | .managed_hook_bin | strings | select(length > 0)'
+       )"; then
+         echo "browser-check managed-hook fallback resolver failed: rebuild checkout gwt/gwtd and rerun" >&2
+         exit 1
+       fi
+       if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then
+         echo "browser-check managed-hook fallback resolver returned a checkout-local binary" >&2
+         exit 1
+       fi
      fi
      # browser-check-hook-authority-end
      ```
 
    - Before launch, repair existing managed hook surfaces to the selected
-     fallback with the checkout `gwtd`. This keeps a portable bare `gwtd`
-     fallback when `PATH` already resolves a stable install, preserves user
-     hooks, and prevents the fresh GUI from inheriting provider-to-provider
-     fallback skew. The block parses `hook.doctor` evidence with `jq`, which
+     fallback with the checkout `gwtd`. Automatic selection uses doctor’s
+     `managed_hook_bin`, the same resolver used by ordinary launch and
+     self-heal. This preserves installed fallbacks when PATH is absent and
+     avoids invalidating shared-root trust with a separate bare-name default.
+     A valid explicit pin remains intentional; use it consistently across
+     writers of that repository. User hooks remain unchanged. The block parses
+     `hook.doctor` evidence with `jq`, which
      is not a gwt runtime requirement, so it preflights `jq` explicitly and
      fails closed with install guidance instead of dying on
      `jq: command not found`. Only POSIX utilities (`grep`, `env`) are
