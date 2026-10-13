@@ -8207,7 +8207,7 @@ mod tests {
             .into_iter()
             .map(|entry| CoordinationEvent::MessageAppended { entry })
             .collect();
-        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 4) {
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT - 1) {
             events.push(CoordinationEvent::MessageAppended {
                 entry: escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
             });
@@ -8221,15 +8221,20 @@ mod tests {
             HOT_PROJECTION_ENTRY_LIMIT,
             "the final status append must start with a full hot projection"
         );
-        post_entry(
-            dir.path(),
-            escalation_entry(
-                BoardEntryKind::Status,
-                "2338",
-                &format!("noise {}", HOT_PROJECTION_ENTRY_LIMIT + 4),
-            ),
-        )
-        .unwrap();
+        assert!(
+            projection
+                .entries
+                .iter()
+                .any(|entry| entry.kind == BoardEntryKind::Blocked),
+            "the real status append must evict the blocked post"
+        );
+        for idx in (HOT_PROJECTION_ENTRY_LIMIT - 1)..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
 
         let snapshot = load_snapshot(dir.path()).unwrap();
         assert!(
@@ -8264,7 +8269,7 @@ mod tests {
             .into_iter()
             .map(|entry| CoordinationEvent::MessageAppended { entry })
             .collect();
-        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 4) {
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT - 1) {
             events.push(CoordinationEvent::MessageAppended {
                 entry: escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
             });
@@ -8278,15 +8283,20 @@ mod tests {
             HOT_PROJECTION_ENTRY_LIMIT,
             "the final status append must start with a full hot projection"
         );
-        post_entry(
-            dir.path(),
-            escalation_entry(
-                BoardEntryKind::Status,
-                "2338",
-                &format!("noise {}", HOT_PROJECTION_ENTRY_LIMIT + 4),
-            ),
-        )
-        .unwrap();
+        assert!(
+            projection
+                .entries
+                .iter()
+                .any(|entry| entry.kind == BoardEntryKind::Blocked),
+            "the real status append must evict the blocked post"
+        );
+        for idx in (HOT_PROJECTION_ENTRY_LIMIT - 1)..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
 
         let snapshot = load_snapshot(dir.path()).unwrap();
         assert!(
