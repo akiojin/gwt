@@ -224,7 +224,11 @@ impl Drop for ScopedGwtHome {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
+    // gwt-core depends on this crate. Unix needs no window suppression, and
+    // current_exe is an absolute executable path rather than a PATH lookup.
+    #[allow(clippy::disallowed_methods)]
     fn configured_temp_root_cannot_disable_the_guard() {
         // The child only constructs a protected path; it never writes to HOME.
         let output = std::process::Command::new(std::env::current_exe().unwrap())
