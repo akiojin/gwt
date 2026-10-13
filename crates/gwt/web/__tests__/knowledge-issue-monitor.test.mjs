@@ -920,8 +920,10 @@ test("Issue rows render monitor projections and send controls from the full cano
     kind: "set_issue_monitor_auto_apply_updates",
     enabled: true,
   });
+  let settingsSection;
+  document.addEventListener("settings:open", event => { settingsSection = event.detail.section; });
   body.querySelector('[data-action="monitor-settings"]').click();
-  assert.deepEqual(sent.at(-1), { kind: "issue_monitor_configure_profile" });
+  assert.equal(settingsSection, "issues");
 
   // SPEC #3885 T-033: quick register moved into the "+ New" popover.
   body.querySelector('[data-action="issue-new"]').click();

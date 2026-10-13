@@ -20,6 +20,76 @@ impl IssueMonitorTierRecord {
     }
 }
 
+/// Read-only tier facts for presentation, independent of live launch identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTierFacts {
+    pub issue_number: u64,
+    /// Max-merged history written before spawn, not the latest or running tier
+    /// and not proof that an agent successfully started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_launch_tier: Option<u8>,
+    /// Recorded exact Work-done observation, not a GitHub merge observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_landing_tier: Option<u8>,
+    pub history_floor: u8,
+    /// Explicit operator minimum, including zero; never an exact profile lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_tier_override: Option<u8>,
+    /// Only classified agent failures, excluding infrastructure and unknown.
+    pub agent_failures: u32,
+    /// Auto-selection starting floor; availability can select a higher tier.
+    /// Absent for manual profiles or when the Issue's spec status is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_minimum_tier: Option<u8>,
+}
+
+impl IssueMonitorState {
+    pub(super) fn tier_facts(&self, auto_tier_count: Option<usize>) -> Vec<IssueMonitorTierFacts> {
+        let spec_by_issue = auto_tier_count.map(|_| {
+            self.inbox
+                .iter()
+                .map(|item| (item.issue.number, has_gwt_spec_label(&item.issue.labels)))
+                .collect::<BTreeMap<_, _>>()
+        });
+        self.issue_tiers
+            .keys()
+            .chain(self.tier_overrides.keys())
+            .chain(self.autonomous_records.keys())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|issue_number| {
+                let history = self.issue_tiers.get(&issue_number);
+                let history_floor = history.map_or(0, |record| record.floor);
+                let minimum_tier_override = self.tier_overrides.get(&issue_number).copied();
+                let agent_failures = self
+                    .autonomous_records
+                    .get(&issue_number)
+                    .map_or(0, AutonomousIssueRecord::tier_input);
+                let next_minimum_tier = auto_tier_count.and_then(|count| {
+                    spec_by_issue.as_ref()?.get(&issue_number).map(|is_spec| {
+                        tier_for(
+                            agent_failures,
+                            *is_spec,
+                            history_floor.max(minimum_tier_override.unwrap_or(0)),
+                            count.min(255) as u8,
+                        )
+                    })
+                });
+                IssueMonitorTierFacts {
+                    issue_number,
+                    recorded_launch_tier: history.and_then(|record| record.launch_tier),
+                    recorded_landing_tier: history.and_then(|record| record.landing_tier),
+                    history_floor,
+                    minimum_tier_override,
+                    agent_failures,
+                    next_minimum_tier,
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IssueMonitorTierSelection {
     pub tier: u8,

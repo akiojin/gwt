@@ -20,6 +20,19 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
 }
 
+fn guard_pm_owner_check(
+    repo_path: &Path,
+    owner_check: Option<&super::hook::pm_spec_survey::IssueOwnerCheck>,
+) -> Result<(), SpecOpsError> {
+    if !super::pm::caller_is_registered_pm(repo_path) {
+        return Ok(());
+    }
+    let evidence = owner_check.ok_or_else(|| {
+        SpecOpsError::Validation(super::hook::pm_spec_survey::OWNER_CHECK_RECOVERY.to_string())
+    })?;
+    evidence.validate().map_err(SpecOpsError::Validation)
+}
+
 /// Issue #3873: refuse to write an autonomous-candidate body the Issue Monitor
 /// cannot read.
 ///
@@ -119,6 +132,7 @@ pub(super) fn run<E: CliEnv>(
             file,
             labels,
         } => {
+            guard_pm_owner_check(env.repo_path(), None)?;
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             super::intake_outcome::auto_record_issue_operation(
@@ -135,7 +149,9 @@ pub(super) fn run<E: CliEnv>(
             title,
             body,
             labels,
+            owner_check,
         } => {
+            guard_pm_owner_check(env.repo_path(), owner_check.as_ref())?;
             guard_autonomous_acceptance_block(&labels, &body)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             super::intake_outcome::auto_record_issue_operation(
@@ -588,7 +604,7 @@ fn attach_issue_cache_status(
     ));
 }
 
-fn merge_board_escalations_into_needs_human(
+pub(crate) fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
 ) -> serde_json::Value {
@@ -905,7 +921,7 @@ fn session_row_mismatch(
 /// The Issue Monitor projection `issue.monitor.status` reports: the daemon's
 /// published status while one is live, otherwise a projection rebuilt from
 /// prefs and the local Issue cache.
-fn load_monitor_agent_status(
+pub(crate) fn load_monitor_agent_status(
     project_root: &std::path::Path,
     active_session_count: usize,
 ) -> Result<(crate::IssueMonitorAgentStatus, Option<serde_json::Value>), SpecOpsError> {
@@ -924,6 +940,11 @@ fn load_monitor_agent_status(
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
         status.source = crate::IssueMonitorStatusSource::Daemon;
+        status.auto_apply_updates = authority.auto_apply_updates();
+        status.auto_apply_updates_effective = Some(authority.auto_apply_updates_enabled());
+        if let Some(gui) = status.gui_status.as_mut() {
+            gui.auto_apply_updates = authority.auto_apply_updates_enabled();
+        }
         // Keep reported counts and owners together before current capacity,
         // durable identity, and closed-Issue action reconciliation.
         let capacity = launch_capacity(&status, active_session_count, configured_max_active);
@@ -2334,10 +2355,11 @@ fn issues_held_by_provider(
 /// daemon→GUI channel that could disagree with it.
 ///
 /// Issue #4200: the launch row is only one of the two holds a launch takes on
-/// an Issue. The other is its execution generation, and revoking the launch is
-/// exactly the decision that its holder must not return, so this releases that
-/// too — see [`crate::cli::execution_state::release_revoked_launch_generation`]
-/// for why no liveness proof is asked for. The two results are reported
+/// an Issue. The other is its execution generation. Revoking queue intent does
+/// not stop an agent that has already started: an exact live started holder
+/// retains its generation. A never-started or dead holder can still be released
+/// under Issue #4200 — see
+/// [`crate::cli::execution_state::release_revoked_launch_generation`]. The two results are reported
 /// separately: `status` is about the launch row, `generation_release` is about
 /// the generation. That is also the recovery route for an Issue whose launch
 /// row is already gone but whose generation still refuses every relaunch: the
@@ -3299,13 +3321,13 @@ fn apply_monitor_config_set(
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
-    if let Some(auto_apply_updates) = auto_apply_updates {
-        candidate.set_auto_apply_updates(Some(auto_apply_updates));
-    }
     if let Some(launch_agent) = launch_agent {
         candidate
             .switch_launch_profile_agent(launch_agent)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    }
+    if let Some(auto_apply_updates) = auto_apply_updates {
+        candidate.set_auto_apply_updates(Some(auto_apply_updates))?;
     }
     apply_update_drain(&mut candidate, update_drain);
     *prefs = candidate.prefs();
@@ -3327,9 +3349,11 @@ pub(crate) fn apply_update_drain(
             &now,
         ),
         // Issue #3906 AC-3: the update mechanism names the staged version.
-        Some(crate::IssueMonitorUpdateDrainControl::Raise { reason, version }) => {
-            monitor.set_update_drain(reason, &version, &now)
-        }
+        Some(crate::IssueMonitorUpdateDrainControl::Raise {
+            reason,
+            version,
+            automatic,
+        }) => monitor.set_update_drain_with_origin(reason, &version, &now, automatic),
         Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)) => monitor.clear_update_drain(),
         None => {}
     }
@@ -3508,10 +3532,8 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
                 .unwrap_or(prefs.autonomous_mode),
-            "auto_apply_updates": prefs.auto_apply_updates,
-            "auto_apply_updates_effective": prefs
-                .auto_apply_updates
-                .unwrap_or(prefs.autonomous_mode),
+            "auto_apply_updates": monitor.auto_apply_updates_enabled(),
+            "auto_apply_updates_effective": monitor.auto_apply_updates_enabled(),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
             }),
@@ -4761,9 +4783,40 @@ fn run_issue_set_state<E: CliEnv>(
         reconcile_issue_state(env, &current)?;
         // `reason` describes what was written, and nothing was: echoing the
         // requested one here would claim a rationale GitHub never recorded.
-        write_issue_state_result(out, number, target, false, None, None);
+        write_issue_state_result(out, number, target, false, None, None, None);
         return Ok(0);
     }
+
+    // Issue #5043: a completed close while `work/issue-<N>` still holds source
+    // that origin/develop lacks would strand that source. The check is the
+    // merge settlement's, and so is its advisory stance: an equivalent change
+    // may have landed through another PR, so a confirmed difference is posted
+    // on the Issue before the close and an unknown one is reported to the
+    // caller. A `not_planned` close abandons the work and is not checked.
+    let delivery_warning = if target == IssueState::Closed
+        && reason != Some(gwt_github::client::IssueCloseReason::NotPlanned)
+    {
+        let delivery =
+            crate::issue_monitor_settlement::fetched_issue_owner_delivery(env.repo_path(), number);
+        let confirmed = delivery.as_ref().is_ok_and(|changes| !changes.is_empty());
+        let warning = crate::issue_monitor_settlement::render_issue_delivery_warning(
+            number,
+            "直接 close 前検査",
+            delivery,
+        );
+        if let Some(warning) = warning.as_deref().filter(|_| confirmed) {
+            if !current
+                .comments
+                .iter()
+                .any(|comment| comment.body == warning)
+            {
+                env.client().create_comment(issue, warning)?;
+            }
+        }
+        warning
+    } else {
+        None
+    };
 
     // The rationale lands before the state change, so a reader who finds the
     // Issue closed already sees why it was closed.
@@ -4789,7 +4842,15 @@ fn run_issue_set_state<E: CliEnv>(
     // the UI and the Monitor never read a state this operation already changed.
     let written = refresh_issue_cache(env, issue)?.snapshot;
     reconcile_issue_state(env, &written)?;
-    write_issue_state_result(out, number, target, true, reason, comment_id);
+    write_issue_state_result(
+        out,
+        number,
+        target,
+        true,
+        reason,
+        comment_id,
+        delivery_warning.as_deref(),
+    );
     Ok(0)
 }
 
@@ -4894,20 +4955,22 @@ fn write_issue_state_result(
     changed: bool,
     reason: Option<gwt_github::client::IssueCloseReason>,
     comment_id: Option<u64>,
+    delivery_warning: Option<&str>,
 ) {
-    out.push_str(
-        &serde_json::json!({
-            "number": number,
-            "status": match state {
-                IssueState::Closed => "closed",
-                IssueState::Open => "open",
-            },
-            "changed": changed,
-            "reason": reason.map(gwt_github::client::IssueCloseReason::as_str),
-            "comment_id": comment_id,
-        })
-        .to_string(),
-    );
+    let mut result = serde_json::json!({
+        "number": number,
+        "status": match state {
+            IssueState::Closed => "closed",
+            IssueState::Open => "open",
+        },
+        "changed": changed,
+        "reason": reason.map(gwt_github::client::IssueCloseReason::as_str),
+        "comment_id": comment_id,
+    });
+    if let Some(warning) = delivery_warning {
+        result["delivery_warning"] = serde_json::Value::from(warning);
+    }
+    out.push_str(&result.to_string());
     out.push('\n');
 }
 
@@ -7218,6 +7281,104 @@ mod tests {
         );
     }
 
+    fn git_in(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = gwt_core::process::run_git_logged(args, Some(repo)).expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Issue #5043 AC-3: an agent's direct `issue.close` while its owner
+    /// branch holds source that origin/develop lacks posts the settlement's
+    /// delivery warning on the Issue *before* closing it, and reports it to
+    /// the caller. A `not_planned` close abandons the work and is not warned.
+    #[test]
+    fn issue_close_warns_before_closing_over_an_undelivered_owner_branch() {
+        let (tmp, mut env) = seeded_edit_env(&["bug"]);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_in(&repo, &["init", "-b", "develop"]);
+        git_in(&repo, &["config", "user.name", "Test"]);
+        git_in(&repo, &["config", "user.email", "test@example.com"]);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "base"]);
+        git_in(&repo, &["clone", "--bare", ".", "origin.git"]);
+        git_in(&repo, &["remote", "add", "origin", "origin.git"]);
+        let base = git_in(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("fix.rs"), "fn fixed() {}\n").unwrap();
+        git_in(&repo, &["add", "fix.rs"]);
+        git_in(&repo, &["commit", "-m", "undelivered fix"]);
+        let head = git_in(&repo, &["rev-parse", "HEAD"]);
+        git_in(&repo, &["push", "origin", "HEAD:refs/heads/work/issue-7"]);
+        git_in(&repo, &["update-ref", "refs/heads/develop", &base]);
+        env.repo_path = repo;
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("close over an undelivered branch");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["status"], "closed", "{out}");
+        let warning = result["delivery_warning"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the caller must see the warning: {out}"));
+        assert!(
+            warning.contains("gwt-issue-close-delivery-warning"),
+            "{warning}"
+        );
+        assert!(warning.contains("work/issue-7"), "{warning}");
+        assert!(warning.contains(&head), "{warning}");
+
+        let calls: Vec<String> = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("create_comment") || call.starts_with("set_state"))
+            .collect();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0], "create_comment:#7", "the warning must land first");
+        assert!(calls[1].starts_with("set_state:#7"), "{calls:?}");
+        assert_eq!(fetched(&env, 7).comments[0].body, warning);
+
+        // Abandoning the work is not a delivery question.
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("reopen");
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("not planned close");
+        assert!(
+            state_result(&out).get("delivery_warning").is_none(),
+            "{out}"
+        );
+        assert_eq!(fetched(&env, 7).comments.len(), 1, "no second warning");
+    }
+
     /// SPEC #4249 FR-001: replaying the same envelope is a no-op. Nothing
     /// reaches the API — a second `comment` would otherwise duplicate itself on
     /// every retry.
@@ -8194,6 +8355,7 @@ mod tests {
                 run(
                     &mut env,
                     IssueCommand::CreateBody {
+                        owner_check: None,
                         title: format!("issue {number}"),
                         body: String::new(),
                         labels: if number == 2 {
@@ -9839,7 +10001,7 @@ mod tests {
                 "max_active": 3,
                 "enabled": true,
                 "autonomous_mode": false,
-                "auto_apply_updates": null,
+                "auto_apply_updates": false,
                 "auto_apply_updates_effective": false,
                 "has_launch_profile": false,
                 "launch_profile_summary": "configure before auto start",
@@ -10795,6 +10957,58 @@ mod tests {
         assert_eq!(ledgers(&cleared), ledgers(&before));
         let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
         assert!(reply["update_drain"].is_null());
+    }
+
+    #[test]
+    fn issue_monitor_config_set_auto_apply_updates_writes_global_setting() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                allowed_labels: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                max_active_auto: false,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+                update_drain: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let path = gwt_core::paths::gwt_config_path();
+        assert!(
+            path.exists(),
+            "legacy config setter must persist app-wide config"
+        );
+        let saved: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .get("auto_apply_updates")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
+                .status_view()
+                .auto_apply_updates
+        );
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        assert!(
+            !prefs.autonomous_mode,
+            "global setting cannot authorize autonomous operation"
+        );
     }
 
     #[test]
@@ -13434,6 +13648,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "docs: typo".to_string(),
                 body: "free text".to_string(),
                 labels: vec!["documentation".to_string()],
@@ -13455,6 +13670,76 @@ mod tests {
         assert!(Cache::new(env.cache_root())
             .validation_receipt_path(IssueNumber(number))
             .exists());
+    }
+
+    #[test]
+    fn issue_create_from_registered_pm_refuses_missing_owner_evidence_before_mutation() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::pm_registry::try_register_pm(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            crate::pm_registry::PmRegistration {
+                session_id: "registration-pm".into(),
+                agent_id: "codex".into(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .unwrap();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registration-pm");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let error = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                owner_check: None,
+                title: "fix: missing registration evidence".into(),
+                body: "body".into(),
+                labels: Vec::new(),
+            },
+            &mut String::new(),
+        )
+        .expect_err("PM registration must fail closed without owner_check");
+        let error = error.to_string();
+        for recovery_field in ["owner_check", "owner_spec", "search_queries", "reason"] {
+            assert!(
+                error.contains(recovery_field),
+                "missing recovery field: {error}"
+            );
+        }
+        assert!(
+            env.client.call_log().is_empty(),
+            "refusal must precede remote mutation"
+        );
+        for owner_check in [
+            serde_json::json!({"owner_spec": null, "search_queries": ["PM current state"]}),
+            serde_json::json!({"owner_spec": 3431, "reason": "Independently deliverable current-state child"}),
+        ] {
+            env.stdin = serde_json::json!({
+                "schema_version": 1,
+                "operation": "issue.create",
+                "params": {"title": "fix: checked ownership", "body": "body", "owner_check": owner_check},
+            })
+            .to_string();
+            assert_eq!(super::super::json_envelope::dispatch(&mut env, "gwtd"), 0);
+        }
+        assert_eq!(
+            env.client
+                .call_log()
+                .iter()
+                .filter(|call| call.starts_with("create_issue:"))
+                .count(),
+            2
+        );
     }
 
     /// Issue #4392 AC-1 / AC-5: when the receipt cannot be published the
@@ -13495,6 +13780,7 @@ mod tests {
         let err = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "fix: something".to_string(),
                 body: "## 成功基準\n- [ ] AC-1: hidden under the wrong heading\n".to_string(),
                 labels: vec!["auto-merge".to_string()],
@@ -13525,6 +13811,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "fix: something".to_string(),
                 body: "## 受け入れ基準\n- [ ] AC-1: cargo test is GREEN\n".to_string(),
                 labels: vec!["Auto-Merge".to_string()],
@@ -13544,6 +13831,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::CreateBody {
+                owner_check: None,
                 title: "docs: typo".to_string(),
                 body: "free text, no criteria".to_string(),
                 labels: vec!["documentation".to_string()],

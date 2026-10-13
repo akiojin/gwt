@@ -349,6 +349,7 @@ impl AppEventProxy {
 /// Issue #3906 AC-2: the client id the automatic apply commits under; no
 /// frontend client owns it, so failures are broadcast, never replied.
 pub(crate) const UPDATE_AUTO_APPLY_CLIENT_ID: &str = "update-auto-apply";
+pub(crate) const UPDATE_MANUAL_DRAIN_CLIENT_ID: &str = "update-manual-drain";
 
 /// Why [`AppRuntime::release_update_auto_apply_events`] released the drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,6 +360,8 @@ pub(crate) enum UpdateAutoApplyRelease {
     PayloadMissing,
     /// A newer release invalidated this staged version.
     Superseded,
+    RequiresElevation,
+    PreviousFailure,
 }
 
 #[derive(Debug, Clone)]
@@ -372,6 +375,10 @@ pub(crate) struct UpdateDrainObservation {
 /// every client through the Issue Monitor toast channel.
 fn update_notice(level: &str, message: String) -> OutboundEvent {
     OutboundEvent::global_update_notice(level, message)
+}
+
+fn update_elevation_notice(version: &str) -> String {
+    format!("Update v{version}: Administrator privileges required; the update stays staged. Use the update button to apply manually.")
 }
 
 fn record_pending_update_observation(
@@ -7901,6 +7908,7 @@ impl AppRuntime {
         client_id: &str,
         patches: Vec<gwt::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
+        request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let resolve = |prefs: &gwt::IssueMonitorPrefs| {
             let pool = prefs.launch_profile_pool();
@@ -7936,7 +7944,7 @@ impl AppRuntime {
                 "usage_threshold_percent": usage_threshold_percent,
             }}),
         );
-        self.issue_monitor_authorizing_control_result_events(
+        let mut events = self.issue_monitor_authorizing_control_result_events(
             context,
             client_id,
             publication,
@@ -7954,7 +7962,22 @@ impl AppRuntime {
                 }
                 Ok(())
             },
-        )
+        );
+        if !events.iter().any(|outbound| {
+            matches!(&outbound.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error")
+        }) {
+            if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+                events.push(OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorProfiles {
+                        project_root: context.project_root.display().to_string(),
+                        profiles: prefs.launch_profile_pool(),
+                        request_id,
+                    },
+                ));
+            }
+        }
+        events
     }
 
     fn issue_monitor_authorizing_control_result_events(
@@ -8383,6 +8406,7 @@ impl AppRuntime {
                         .gui_status
                         .map(|mut status| {
                             self.retain_missing_issue_monitor_capacity(project_root, &mut status);
+                            status.auto_apply_updates = gwt::update_settings::enabled();
                             self.remember_issue_monitor_status(Some(project_root), &status);
                             vec![OutboundEvent::reply(
                                 client_id,
@@ -9933,7 +9957,11 @@ impl AppRuntime {
             .filter(|result| result.outcome == gwt_core::update::UpdateApplyOutcome::Failure)
             .map(|result| result.to_version);
         let refusal = gwt::update_drain::auto_apply_refusal(
-            gwt_core::update::install_requires_elevation(),
+            gwt_core::update::load_pending_update_manifest().is_some_and(|manifest| {
+                std::env::current_exe().map_or(true, |exe| {
+                    gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+                })
+            }),
             last_failed_version.as_deref(),
             version,
         );
@@ -9949,11 +9977,19 @@ impl AppRuntime {
         version: &str,
         refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
     ) -> Vec<OutboundEvent> {
+        let automatic = self
+            .update_download_in_flight
+            .as_deref()
+            .map(|client_id| client_id == UPDATE_AUTO_APPLY_CLIENT_ID)
+            .unwrap_or_else(|| self.automatic_updates_enabled());
         if gwt_core::update::load_pending_update_manifest()
             .is_some_and(|manifest| manifest.version == version && manifest.auto_apply_deferred)
         {
             return self
                 .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Cancelled);
+        }
+        if automatic && !self.automatic_updates_enabled() {
+            return Vec::new();
         }
         let mut events = Vec::new();
         let contexts = self.project_contexts();
@@ -9972,6 +10008,7 @@ impl AppRuntime {
                 &context,
                 version,
                 refusal.clone(),
+                automatic,
             ));
         }
         Self::deduplicate_update_host_events(events)
@@ -9982,6 +10019,7 @@ impl AppRuntime {
         context: &ProjectContext,
         version: &str,
         refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
+        automatic: bool,
     ) -> Vec<OutboundEvent> {
         let project_root = context.project_root.clone();
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
@@ -10005,8 +10043,7 @@ impl AppRuntime {
                 return Vec::new();
             }
         };
-        let auto_apply = prefs.auto_apply_updates.unwrap_or(prefs.autonomous_mode);
-        if !(prefs.autonomous_mode && auto_apply) {
+        if !automatic {
             // Issue #4376 AC-1 / AC-2 / AC-3: a manual Update click waits for
             // the agents that are running. The payload is staged; when the
             // host is not quiescent right now, the click joins the `Auto`
@@ -10039,6 +10076,12 @@ impl AppRuntime {
                 ?refusal,
                 "staged update is not applied automatically; manual update button kept"
             );
+            if refusal == gwt::update_drain::UpdateAutoApplyRefusal::RequiresElevation {
+                return self.release_update_auto_apply_events(
+                    version,
+                    UpdateAutoApplyRelease::RequiresElevation,
+                );
+            }
             return vec![update_notice("warn", refusal.notice(version))];
         }
         tracing::info!(
@@ -10059,7 +10102,7 @@ impl AppRuntime {
             context,
             serde_json::json!({
                 "config_set": {
-                    "update_drain": { "reason": "auto", "version": version },
+                    "update_drain": { "reason": "auto", "version": version, "automatic": automatic },
                 }
             }),
         );
@@ -10068,10 +10111,11 @@ impl AppRuntime {
             Err(error) if error.allows_local_fallback() => {
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 match self.commit_local_issue_monitor_control(context, |monitor| {
-                    monitor.set_update_drain(
+                    monitor.set_update_drain_with_origin(
                         gwt::IssueMonitorUpdateDrainReason::Auto,
                         &version,
                         &now,
+                        Some(automatic),
                     );
                 }) {
                     Ok((monitor, ())) => {
@@ -10273,8 +10317,20 @@ impl AppRuntime {
                 ..
             } = &event.event
             {
+                let automatic = self
+                    .project_contexts()
+                    .iter()
+                    .filter_map(|context| self.project_auto_update_drain(context))
+                    .filter(|(_, drain)| drain.version == *version)
+                    .all(|(prefs, drain)| {
+                        drain
+                            .automatic
+                            .or(prefs.auto_apply_updates)
+                            .unwrap_or(prefs.autonomous_mode)
+                    });
                 self.proxy.send(UserEvent::ApplyUpdateDrained {
                     version: version.clone(),
+                    automatic,
                 });
             }
         }
@@ -10293,6 +10349,14 @@ impl AppRuntime {
             }
             return Vec::new();
         };
+        if drain
+            .automatic
+            .or(prefs.auto_apply_updates)
+            .unwrap_or(prefs.autonomous_mode)
+            && !self.automatic_updates_enabled()
+        {
+            return self.release_update_auto_apply_for_project(context, &drain.version);
+        }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
         let wait_reason = match &outcome {
             Ok(()) => "waiting for consecutive quiet observations or apply grace".to_string(),
@@ -10562,6 +10626,14 @@ impl AppRuntime {
                 "info",
                 format!("Update v{version} was replaced by a newer release; its automatic apply was cancelled."),
             ),
+            UpdateAutoApplyRelease::RequiresElevation => (
+                "warn",
+                update_elevation_notice(version),
+            ),
+            UpdateAutoApplyRelease::PreviousFailure => (
+                "warn",
+                format!("Update v{version} was not applied automatically because its previous apply failed; the update stays staged for manual retry."),
+            ),
         };
         self.record_update_apply_observation(
             version,
@@ -10569,13 +10641,19 @@ impl AppRuntime {
                 UpdateAutoApplyRelease::Cancelled => "pending_refused",
                 UpdateAutoApplyRelease::PayloadMissing => "pending_failed",
                 UpdateAutoApplyRelease::Superseded => "pending_superseded",
+                UpdateAutoApplyRelease::RequiresElevation => "pending_refused",
+                UpdateAutoApplyRelease::PreviousFailure => "pending_refused",
             },
             &message,
         );
         events.push(update_notice(level, message));
         events.push(OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
             version: version.to_string(),
-            phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+            phase: if release == UpdateAutoApplyRelease::RequiresElevation {
+                gwt::protocol::UpdateAutoApplyPhase::ElevationRequired
+            } else {
+                gwt::protocol::UpdateAutoApplyPhase::Cancelled
+            },
             grace_secs: None,
         }));
         Self::deduplicate_update_host_events(events)
@@ -10919,6 +10997,9 @@ impl AppRuntime {
                 self.apply_update_restart_now_events(&client_id)
             }
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
+            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+                self.set_global_auto_apply_updates_events(&client_id, enabled)
+            }
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)
             }
@@ -11854,21 +11935,7 @@ impl AppRuntime {
                 )
             }
             FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
-                // Issue #3906 AC-1: the override rides the same `config_set`
-                // control the CLI uses, so daemon and local fallback agree.
-                let publication = self.publish_project_issue_monitor_control(
-                    context,
-                    serde_json::json!({ "config_set": { "auto_apply_updates": enabled } }),
-                );
-                self.issue_monitor_control_result_events(
-                    context,
-                    &client_id,
-                    publication,
-                    "auto-apply-updates",
-                    |monitor| {
-                        monitor.set_auto_apply_updates(Some(enabled));
-                    },
-                )
+                self.set_global_auto_apply_updates_events(&client_id, enabled)
             }
             FrontendEvent::SetIssueMonitorAllowedLabels {
                 allowed_labels,
@@ -11886,14 +11953,38 @@ impl AppRuntime {
                     request_id,
                 )
             }
+            FrontendEvent::GetIssueMonitorProfiles => {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
+                match gwt::load_issue_monitor_prefs(&prefs_path) {
+                    Ok(prefs) => vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorProfiles {
+                            project_root: context.project_root.display().to_string(),
+                            profiles: prefs.launch_profile_pool(),
+                            request_id: None,
+                        },
+                    )],
+                    Err(error) => self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        Some(&client_id),
+                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
+                            format!("failed to load Issue Monitor profiles: {error}"),
+                        ),
+                        "profiles-get",
+                        None,
+                    ),
+                }
+            }
             FrontendEvent::IssueMonitorProfilesSet {
                 profiles,
                 usage_threshold_percent,
+                request_id,
             } => self.issue_monitor_profiles_set_events(
                 context,
                 &client_id,
                 profiles,
                 usage_threshold_percent,
+                request_id,
             ),
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
                 let publication = self.publish_project_issue_monitor_control(
@@ -12948,6 +13039,57 @@ impl AppRuntime {
                 BackendEvent::UpdateState(state.clone()),
             ));
         }
+        events.extend(self.staged_update_sync_events(client_id));
+        events
+    }
+
+    /// Bootstrap may retain an automatic payload after OFF/Autonomous or
+    /// elevation checks. Hydrate it as ready on every connection, including
+    /// a fresh process whose release poll is suppressed by that manifest.
+    fn staged_update_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        let Some(manifest) = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
+            gwt_core::update::pending_version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))
+                && !matches!(&self.pending_update,
+                    Some(gwt_core::update::UpdateState::Available { latest, .. })
+                        if gwt_core::update::pending_version_is_newer(latest, &manifest.version))
+        }) else {
+            return Vec::new();
+        };
+        let state = gwt_core::update::UpdateState::Available {
+            current: env!("CARGO_PKG_VERSION").into(),
+            latest: manifest.version.clone(),
+            release_url: manifest.asset_url.clone(),
+            asset_url: Some(manifest.asset_url.clone()),
+            checked_at: chrono::Utc::now(),
+        };
+        self.pending_update = Some(state.clone());
+        let mut events = vec![
+            OutboundEvent::reply(client_id, BackendEvent::UpdateState(state)),
+            OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateApplyPendingPersisted {
+                    version: manifest.version.clone(),
+                },
+            ),
+        ];
+        if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic
+            && std::env::current_exe().map_or(true, |exe| {
+                gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+            })
+        {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateAutoApply {
+                    version: manifest.version.clone(),
+                    phase: gwt::protocol::UpdateAutoApplyPhase::ElevationRequired,
+                    grace_secs: None,
+                },
+            ));
+            events.push(OutboundEvent::reply(
+                client_id,
+                update_notice("warn", update_elevation_notice(&manifest.version)).event,
+            ));
+        }
         events
     }
 
@@ -13036,6 +13178,7 @@ impl AppRuntime {
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
         );
+        events.extend(self.staged_update_sync_events(client_id));
         events.splice(
             1..1,
             terminal_previews.into_iter().map(|(id, text)| {

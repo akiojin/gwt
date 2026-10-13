@@ -545,9 +545,10 @@ fn scan_records(
     Ok(complete_bytes)
 }
 
-fn internal_prompt(text: &str) -> bool {
+pub(crate) fn internal_prompt(text: &str) -> bool {
     use crate::pm_registry::{
-        PM_CYCLE_REPORTING_CLAUSE, PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_STEERING_WAKE_CLAUSE,
+        PM_AGENT_IDLE_WAKE_PREFIX, PM_CYCLE_REPORTING_CLAUSE, PM_ESCALATION_PROMPT_PREFIX,
+        PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_STEERING_WAKE_CLAUSE,
     };
     let text = text.trim();
     if text == "$gwt-pm" || crate::pm_registry::parse_protected_pm_delivery_prompt(text).is_some() {
@@ -556,6 +557,27 @@ fn internal_prompt(text: &str) -> bool {
     let suffix = format!(
         " {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_WAKE_CLAUSE} {PM_CYCLE_REPORTING_CLAUSE}"
     );
+    const IDLE_SUFFIX: &str =
+        ". Reconcile pane.list and issue.monitor.status; steer the idle agents.";
+    // Delivery appends these blockers after the canonical wake. Idle deliveries
+    // may cut the tail at the PTY byte cap, so the whole decoration is optional.
+    let text = text
+        .rsplit_once(PM_ESCALATION_PROMPT_PREFIX)
+        .filter(|(base, tail)| {
+            (base.ends_with(&suffix) || base.ends_with(IDLE_SUFFIX))
+                && !tail.contains(['\r', '\n'])
+                && tail
+                    .split_once(')')
+                    .is_some_and(|(count, _)| count.parse::<usize>().is_ok_and(|count| count > 0))
+        })
+        .map_or(text, |(base, _)| base);
+    if text
+        .strip_prefix(PM_AGENT_IDLE_WAKE_PREFIX)
+        .and_then(|labels| labels.strip_suffix(IDLE_SUFFIX))
+        .is_some_and(|labels| !labels.trim().is_empty() && !labels.contains(['\r', '\n']))
+    {
+        return true;
+    }
     if let Some(body) = text.strip_suffix(&suffix) {
         if body == "[gwt] Scheduled supervision tick: reconcile now — read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close)." { return true; }
         if let Some(reasons) = body.strip_prefix("[gwt] Monitor activity while the PM was idle (")

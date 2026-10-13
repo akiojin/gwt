@@ -93,6 +93,13 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
         self.inner.fetch_pr_head_sha(number)
     }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        base: &str,
+        head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        self.inner.fetch_ci_delivery_snapshot(base, head)
+    }
     fn fetch_completion_pr(
         &mut self,
         number: u64,

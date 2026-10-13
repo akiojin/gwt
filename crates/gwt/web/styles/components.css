@@ -1167,6 +1167,29 @@ button.op-status-strip__cell {
   display: none;
 }
 
+/* SPEC-4777 T-7a explanations */
+.knowledge-monitor-bar .knowledge-monitor-pill[aria-disabled="true"] {
+  cursor: default;
+}
+
+.issue-control-explanation {
+  width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.4;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-2);
+}
+
+.issue-bridge-root [data-issue-explanation]:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+/* /SPEC-4777 T-7a */
+
 .op-runtime-health-detail__summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -7215,12 +7238,27 @@ button.workspace-board-ref:focus-visible {
 .pm-chat button:disabled { cursor: default; color: var(--color-text-disabled); }
 .pm-chat button:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.pm-chat__current { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: var(--space-2) var(--space-4); flex: 0 1 auto; min-height: 0; max-height: 50%; overflow: auto; padding: var(--space-3); border-bottom: 1px solid var(--color-border-strong); background: var(--color-surface-elevated); overflow-wrap: anywhere; }
+.pm-chat__current h2 { grid-column: 1 / -1; margin: 0; font-size: var(--type-sm); }
+.pm-chat__current h3 { margin: 0 0 var(--space-1); font-size: var(--type-xs); color: var(--color-text-muted); }
+.pm-chat__current p { margin: var(--space-1) 0; }
+.pm-chat__current ul { margin: var(--space-1) 0; padding-inline-start: var(--space-5); }
+.pm-chat__current-authored { border-inline-start: 2px solid var(--color-role-pm); padding-inline-start: var(--space-2); }
+.pm-chat__current-facts { padding-inline-start: var(--space-3); border-inline-start: 1px solid var(--color-border); }
+.pm-chat__current-meta { font-size: var(--type-xs); color: var(--color-text-muted); }
+.pm-chat__current-stale { color: var(--color-state-needs-input); }
+.pm-chat__filter { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-3); color: var(--color-text-muted); font-size: var(--type-xs); border-bottom: 1px solid var(--color-border); }
+.pm-chat__filter select { padding: var(--space-1) var(--space-2); border: 1px solid var(--color-button-border); border-radius: var(--radius-sm); background: var(--color-button-bg); color: var(--color-button-fg); font: inherit; }
+.pm-chat__filter select:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__notice { padding: var(--space-3); margin: 0; color: var(--color-text-muted); }
 .pm-chat__transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); }
 .pm-chat__message { margin-bottom: var(--space-3); padding: var(--space-3); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
 .pm-chat__author { display: flex; align-items: center; gap: var(--space-2); color: var(--color-text-muted); font-size: var(--type-xs); }
 .pm-chat__author button { margin-inline-start: auto; }
 .pm-chat__text { margin: var(--space-2) 0 0; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__section-label { margin: var(--space-3) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.pm-chat__question { margin: var(--space-2) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__answer { margin-top: var(--space-3); border-top: 1px solid var(--color-border); }
 .pm-conversation-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .pm-conversation-log { position: relative; flex: 1; min-height: 0; }
 .pm-conversation-log[hidden] { display: none; }

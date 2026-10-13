@@ -427,6 +427,13 @@ Common windows include:
   the OS locale and falls back to English when the locale is `C` / `POSIX`
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
+  Application settings and project settings are labeled separately. Open
+  `Issues` for Autonomous, Max active, queue refill and allowed labels, or
+  `Agents` to edit launch profiles and candidate order/preferences. Each
+  project section names its target project; the Issue window's ⚙ opens its
+  `Issues` section. `System > Auto-apply updates` applies across all projects
+  when at least one open project has Autonomous enabled. Legacy project
+  values migrate once: any enabled value enables the application setting.
 - `PR` — pull-request workflow surface; detailed list support depends on the
   cache-backed PR source as it lands
 
@@ -1081,15 +1088,30 @@ gwt shows an actionable hint.
 ## PM project configuration
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
-time, and a **Copy** button. It is read-only; use **Execution log** for terminal
+time, and a **Copy** button. Q&A reports separate the question or instruction from
+the answer and action results; use **Report kind** to filter the history. It is
+read-only; use **Execution log** for terminal
 interaction. Reports survive restarts in
 `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`, with no automatic
 expiry or count limit. Each non-empty report is limited to 64 KiB.
 
 A registered PM can publish through `pm.report.post` with `kind` (`progress`,
-`decision`, or `blocker`) and `body`; `pm.report.list` reads the saved history.
+`decision`, `blocker`, or `qa`) and `body`; `qa` also requires a non-empty
+`question` summarizing the user's question or instruction. Its `body` contains
+the answer, actions taken, and their results. `pm.report.list` reads the saved history.
 These use the standard gwtd JSON envelope. A successful post confirms the report
 was saved and read back; failures return an explicit error.
+
+The **PM の現在** card stays above the report history. It separates the PM's
+explanation from observed active windows, queue head, human handoffs, release PR,
+and pending update. Unavailable observations are shown as unknown. The PM updates
+its explanation with `pm.status.set`: supply 1–3 `items` (`kind`: `working` or
+`waiting`, `text`, and RFC3339 `started_at`), `next_trigger`, and optional
+`user_action`. Set `stale_after_minutes` to change the default 15-minute warning.
+`pm.status` returns the latest explanation, retained status history, and reporting
+diagnostics. Identical statements with unchanged Monitor state do not renew their
+timestamp. A human PM turn requires a successfully saved Q&A report before Stop;
+scheduled automatic cycles are exempt.
 
 The resident PM starts in a gwt-owned runtime directory. Repository skills,
 hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are
@@ -1423,6 +1445,12 @@ restoration runs last. An admission timeout before the first remaining command
 starts preserves any predecessor without writing a replacement record. Later
 timeouts retain completed results in an incomplete, non-PASS deferred record.
 
+For a single package's library, a positive test-name filter is Light.
+Nextest also supports one `-E 'test(=module::case)'` or
+`--filterset='test(=module::case)'` exact filter here. The name must contain only
+ASCII letters, digits, underscores and colons. Repeated filtersets, broader or
+compound expressions, and widened package/target selection remain Heavy.
+
 The following short non-Cargo gates are Light and run without a Heavy lease:
 
 | Command | Resource bound |
@@ -1475,6 +1503,14 @@ The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
 volume, based on measured target and temporary growth plus 20% headroom.
 `verify.lease.status` reports `capacity`, `running`, `available`, each holder in
 `slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
+
+A non-resident reservation keeps exclusive FIFO priority for three minutes
+after its last refresh. After that grace, resident work may pass it in the
+verification lane, including commands that require exclusive admission.
+Status reports the bypass reason; the reservation retains its arrival and
+expiry. Rerun `verify.run` with the identical full matrix to reclaim that
+priority. A successor attempt inherits an existing deferred reservation before
+waiting for Cargo artifacts; an older attempt cannot cancel the successor's turn.
 
 ```bash
 gwtd <<'JSON'

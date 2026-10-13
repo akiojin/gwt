@@ -2760,6 +2760,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
             version: "9.110.0".to_string(),
             since: "2026-10-10T08:21:17Z".to_string(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
             blocking: Vec::new(),
         }),
         ..Default::default()
@@ -2825,6 +2826,7 @@ fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
                 version: "9.110.0".into(),
                 since: "2026-10-10T08:21:17Z".into(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..Default::default()
