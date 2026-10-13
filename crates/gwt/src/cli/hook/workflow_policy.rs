@@ -671,6 +671,10 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             // is exactly the kind that cannot set a title yet needs to settle.
             | "execution.no_action"
             | "execution.no-action"
+            // Both typed exits authenticate their subject and exact proof
+            // internally; neither requires a verification lease or Work title.
+            | "execution.settle_delivered"
+            | "pr.create_from_ci"
             | "execution.blocked"
             | "memory.add"
     )
@@ -2204,6 +2208,14 @@ mod tests {
             envelope_command("execution.adopt", r#"{"reason":"relaunch takeover"}"#),
             envelope_command("execution.repair", r#"{"reason":"integrity failure"}"#),
             envelope_command("execution.reopen", r#"{"reason":"blocker resolved"}"#),
+            envelope_command(
+                "execution.settle_delivered",
+                r#"{"reason":"closed owner is already pushed"}"#,
+            ),
+            envelope_command(
+                "pr.create_from_ci",
+                r#"{"base":"develop","head":"work/issue-4214","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"fix: delivery","body":"User Verification Result: n/a (autonomous)"}"#,
+            ),
             envelope_command(
                 "execution.release_prepared",
                 r#"{"reason":"stale fence","operation_id":"op-1"}"#,

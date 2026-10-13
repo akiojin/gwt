@@ -51,6 +51,66 @@ test.describe("Update drain CTA", () => {
     expect(errors).toEqual([]);
   });
 
+  test("administrator-required staging keeps a manual CTA and the reason in notifications", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(error.message));
+    // The staged release is injected, so Later must not persist a nonexistent
+    // manifest. Its acknowledgement is injected below, as in update-modal.spec.
+    await page.addInitScript(() => {
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string" && JSON.parse(data).kind === "apply_update_later") return;
+        return originalSend.call(this, data);
+      };
+    });
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true, suppressUpdateApplyStart: true });
+    const inject = (detail: Record<string, unknown>) =>
+      page.evaluate((payload) => {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+      }, detail);
+
+    await inject({ kind: "update_state", state: "available", current: "9.105.0", latest: "9.106.0" });
+    await inject({ kind: "update_ready", version: "9.106.0", asset_path: "staged-test-payload" });
+    await inject({ kind: "update_auto_apply", version: "9.106.0", phase: "elevation_required" });
+    await inject({
+      kind: "issue_monitor_toast", level: "warn", issue_number: 0,
+      message: "Update v9.106.0: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+    });
+
+    const cta = page.locator("#update-cta");
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await expect(cta).toContainText("Administrator privileges required");
+    await expect(cta).toContainText("Restart now");
+    await expect(cta).toBeEnabled();
+    await expect(page.locator("#update-modal")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("update-elevation-required.png") });
+
+    await page.locator("#op-notifications-button").click();
+    const notice = page.locator("#notification-center .notification-center__item[data-level='warn']")
+      .filter({ hasText: "Administrator privileges required" }).first();
+    await expect(notice).toBeVisible();
+    await expect(notice).toHaveAttribute("data-level", "warn");
+    await expect(notice).toContainText("Use the update button to apply manually");
+    await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+
+    await cta.click();
+    const modal = page.locator("#update-modal");
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await expect(modal).toHaveAttribute("data-version", "9.106.0");
+    // Observe the manual action without invoking an actual installer/restart.
+    await expect(modal.locator("[data-update-modal-restart-now]")).toHaveText("Restart now");
+    await modal.locator("[data-update-modal-later]").click();
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await expect(cta).toContainText("Administrator privileges required");
+    await inject({ kind: "update_apply_pending_persisted", version: "9.106.0" });
+    await expect(cta).toContainText("Administrator privileges required");
+    expect(errors).toEqual([]);
+  });
+
   test("issue_monitor_status.update_drain renders the draining CTA and clears back to ready", async ({
     page,
   }) => {

@@ -1536,10 +1536,11 @@ fn issue_5062_deferred_update_releases_drain_on_the_next_observation() {
     let tab = sample_project_tab("active", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
     let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
-    monitor.set_update_drain(
+    monitor.set_update_drain_with_origin(
         gwt::IssueMonitorUpdateDrainReason::Auto,
         "9.110.0",
         "2026-10-10T00:00:00Z",
+        Some(true),
     );
     gwt::save_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
@@ -1845,6 +1846,38 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
 /// while autonomous); an explicit `auto_apply_updates:false` keeps the manual
 /// button path and raises nothing. Launch ledgers are untouched (#4037).
 #[test]
+fn app_runtime_staged_update_respects_global_off_over_legacy_project_on() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            autonomous_mode: true,
+            auto_apply_updates: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let config = gwt_core::paths::gwt_config_path();
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(config, "auto_apply_updates = false\n").unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.update_download_in_flight =
+        Some(crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID.to_string());
+    runtime.update_staged_events_with("9.999.0", None);
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)).unwrap();
+    assert!(
+        prefs.update_drain.is_none(),
+        "global OFF wins over legacy project ON"
+    );
+}
+
+#[test]
 fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -1871,6 +1904,7 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
     };
 
     seed(Some(false));
+    gwt::update_settings::set(Some(false)).unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     assert!(runtime.update_staged_events("9.99.0").is_empty());
@@ -1880,6 +1914,7 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
         .is_none());
 
     seed(None);
+    gwt::update_settings::set(Some(true)).unwrap();
     let events = runtime.update_staged_events("9.99.0");
     let status = events
         .iter()
@@ -2145,6 +2180,24 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
 
     // Running agent pane: the click waits.
     seed();
+    let payload = temp.path().join("manual-update");
+    fs::write(&payload, "payload").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "9.99.0".into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    gwt::update_settings::set(Some(false)).unwrap();
+    assert!(
+        !gwt_core::update::load_pending_update_manifest()
+            .unwrap()
+            .auto_apply_deferred,
+        "global OFF preserves the operator defer flag"
+    );
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
@@ -2155,6 +2208,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    runtime.update_download_in_flight = Some("manual-client".into());
     let events = runtime.update_staged_events_with("9.99.0", None);
     let status = events
         .iter()
@@ -2165,6 +2219,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
         .expect("drain status broadcast: {events:?}");
     let drain = status.update_drain.as_ref().expect("drain raised");
     assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
+    assert_eq!(drain.automatic, Some(false));
     assert_eq!(drain.version, "9.99.0");
     assert_eq!(
         drain.blocking,
@@ -2231,7 +2286,8 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
 }
 
 /// Issue #4376 AC-3 / AC-7: the manual-click drain is applied by the same
-/// tick as the auto path — attended monitor (`autonomous_mode:false`), the
+/// tick as the auto path — a legacy manual-click drain with an autonomous
+/// monitor and explicit project auto-apply OFF, the
 /// Running pane blocks, the pane going Idle settles over two ticks, the grace
 /// is announced, and the apply goes through `ApplyUpdateDrained`, never
 /// `ApplyUpdateRestartNow`. Agents are never stopped.
@@ -2250,17 +2306,31 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         &prefs_path,
         &gwt::IssueMonitorPrefs {
             enabled: true,
-            autonomous_mode: false,
+            autonomous_mode: true,
+            auto_apply_updates: Some(false),
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
                 version: "9.99.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
     .expect("seed prefs");
+    let payload = temp.path().join("manual-update");
+    fs::write(&payload, "payload").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "9.99.0".into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    gwt::update_settings::set(Some(false)).unwrap();
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
@@ -2279,7 +2349,10 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
             .filter(|event| {
                 matches!(
                     recorded_project_payload(event),
-                    UserEvent::ApplyUpdateDrained { .. }
+                    UserEvent::ApplyUpdateDrained {
+                        automatic: false,
+                        ..
+                    }
                 )
             })
             .count()
@@ -2396,6 +2469,7 @@ fn app_runtime_restart_after_manual_drain_restores_pre_drain_monitor_setting() {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     since: "2026-09-15T00:00:00Z".to_string(),
                     reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                    automatic: None,
                     blocking: Vec::new(),
                 }),
                 launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
@@ -2473,6 +2547,7 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
                         version: "9.99.0".into(),
                         since: since.to_rfc3339(),
                         reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                        automatic: None,
                         blocking: Vec::new(),
                     }),
                     ..Default::default()
@@ -2566,6 +2641,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
                 version: "9.99.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..gwt::IssueMonitorPrefs::default()
@@ -2729,6 +2805,7 @@ fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() 
                 version: "9.99.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..gwt::IssueMonitorPrefs::default()
@@ -2845,6 +2922,51 @@ fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
             toasts[0].1
         );
     }
+}
+
+#[test]
+fn issue_5343_reconnect_restores_staged_cta_and_elevation_notice() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let payload = temp.path().join("update.pkg");
+    fs::write(&payload, "prepared installer").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "999.0.0".into(),
+        asset_url: "https://example.invalid/update.pkg".into(),
+        payload: gwt_core::update::PreparedPayload::Installer {
+            path: payload,
+            kind: gwt_core::update::InstallerKind::MacPkg,
+        },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let events = runtime.frontend_sync_events("browser");
+    assert!(
+        events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateApplyPendingPersisted { .. }
+        )),
+        "disk-staged update must restore the manual CTA"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateAutoApply {
+                phase: gwt::protocol::UpdateAutoApplyPhase::ElevationRequired,
+                ..
+            }
+        )),
+        "CTA must name the elevation requirement"
+    );
+    assert!(update_resume_toasts(&events)
+        .iter()
+        .any(|(level, message)| {
+            *level == "warn" && message.contains("Administrator privileges required")
+        }));
+    assert!(gwt_core::update::load_pending_update_manifest().is_some());
 }
 
 #[test]
@@ -5468,6 +5590,7 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
                 version: "9.99.0".into(),
                 since: now.to_rfc3339(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             },
         )),

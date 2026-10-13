@@ -20,12 +20,14 @@ fn global_broadcast_allows_host_settings_payloads() {
     for event in [
         BackendEvent::SystemSettings {
             language: "ja".into(),
+            auto_apply_updates: false,
             codex_trust_managed_hooks: None,
             board_provider: None,
             agent_resource: None,
         },
         BackendEvent::SystemSettingsUpdated {
             language: "ja".into(),
+            auto_apply_updates: false,
             codex_trust_managed_hooks: None,
             board_provider: None,
             agent_resource: None,

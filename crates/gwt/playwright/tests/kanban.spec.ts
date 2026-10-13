@@ -403,7 +403,11 @@ test.describe("Issue Bridge load recovery", () => {
       kind: "set_issue_monitor_auto_apply_updates",
       enabled: true,
     });
-    expect(messages).toContainEqual({ kind: "issue_monitor_configure_profile" });
+    // Issue #5322: the gear opens Settings instead of the profile wizard.
+    expect(messages).toContainEqual(expect.objectContaining({
+      kind: "create_window",
+      preset: "settings",
+    }));
     expect(messages).toContainEqual({
       kind: "quick_register_issue",
       title: "Investigate flaky release gate",

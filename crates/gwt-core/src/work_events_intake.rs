@@ -25,12 +25,13 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{GwtError, Result, WorkspaceStateLoadErrorKind};
+use crate::error::{GwtError, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
     save_workspace_work_items_projection_to_path, workspace_execution_container_same,
     DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
-    WorkEventKind, WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef,
+    WorkEventKind, WorkItem, WorkItemsIntakeSnapshot, WorkItemsProjection,
+    WorkspaceExecutionContainerRef,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -129,16 +130,14 @@ pub fn ingest_work_events_sources(
     work_items_path: &Path,
     sources: impl IntoIterator<Item = SharedWorkEventsSource>,
 ) -> Result<WorkEventsIntakeReport> {
-    let sources = sources.into_iter().collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        ingest_work_events_sources_locked(work_items_path, sources, None)
-    })
+    ingest_work_event_sources_with_local_path(work_items_path, sources, None)
+        .map(|(report, _)| report)
 }
 
 /// Ingest changed shared sources plus the strict machine-local lifecycle log.
-/// The local file is read while holding the same projection transaction lock
-/// used by event writers, which also recovers an event appended before a
-/// failed or interrupted projection save.
+/// Authoritative files are snapshotted under the writer's transaction lock;
+/// decode/fold/serialize run outside it, then byte comparison fences publication.
+/// This also recovers an event appended before an interrupted projection save.
 pub fn ingest_work_events_with_local_path<'a>(
     work_items_path: &Path,
     shared_contents: impl IntoIterator<Item = &'a str>,
@@ -159,31 +158,27 @@ pub fn ingest_work_event_sources_with_local_path(
     shared_sources: impl IntoIterator<Item = SharedWorkEventsSource>,
     local_path: Option<&Path>,
 ) -> Result<(WorkEventsIntakeReport, Option<String>)> {
+    let snapshot = WorkItemsIntakeSnapshot::capture(work_items_path, local_path)?;
     let shared_sources = shared_sources.into_iter().collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        let local_content = match local_path.map(std::fs::read_to_string) {
-            Some(Ok(content)) => Some(content),
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Some(Err(error)) => return Err(error.into()),
-            None => None,
-        };
-        let local_fingerprint = local_content.as_deref().map(content_fingerprint);
-        let report = ingest_work_events_sources_locked(
-            work_items_path,
-            shared_sources,
-            local_content.as_deref(),
-        )?;
-        Ok((report, local_fingerprint))
-    })
+    let local_content = snapshot.local_content()?;
+    let local_fingerprint = local_content.map(content_fingerprint);
+    let (report, projection) =
+        prepare_ingested_work_events(&snapshot, shared_sources, local_content)?;
+    let prepared = projection
+        .map(|projection| snapshot.prepare(projection))
+        .transpose()?;
+    snapshot.commit(prepared.as_deref())?;
+    Ok((report, local_fingerprint))
 }
 
-fn ingest_work_events_sources_locked(
-    work_items_path: &Path,
+fn prepare_ingested_work_events(
+    snapshot: &WorkItemsIntakeSnapshot,
     sources: Vec<SharedWorkEventsSource>,
     local_content: Option<&str>,
-) -> Result<WorkEventsIntakeReport> {
+) -> Result<(WorkEventsIntakeReport, Option<WorkItemsProjection>)> {
     let mut report = WorkEventsIntakeReport::default();
-    let previous = load_workspace_work_items_from_path(work_items_path)?
+    let previous = snapshot
+        .projection()?
         .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now()));
     let seen_event_ids: HashSet<String> = previous
         .work_items
@@ -227,7 +222,7 @@ fn ingest_work_events_sources_locked(
         });
     }
     if incoming.is_empty() {
-        return Ok(report);
+        return Ok((report, None));
     }
 
     // Keep the existing per-run accounting behavior, then independently
@@ -255,10 +250,7 @@ fn ingest_work_events_sources_locked(
         })
         .collect();
     let mut projection = refold_work_events_projection_with_keys(&previous, replayable)?;
-    crate::workspace_projection::apply_workspace_container_detachments(
-        work_items_path,
-        &mut projection,
-    )?;
+    snapshot.apply_detachments(&mut projection)?;
     let changed = !work_item_sets_equal(&projection, &previous);
     reconcile_refold_report(
         &previous,
@@ -269,9 +261,8 @@ fn ingest_work_events_sources_locked(
     );
     if changed {
         projection.updated_at = Utc::now();
-        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     }
-    Ok(report)
+    Ok((report, changed.then_some(projection)))
 }
 
 fn work_item_sets_equal(left: &WorkItemsProjection, right: &WorkItemsProjection) -> bool {
@@ -439,43 +430,42 @@ pub fn rebuild_work_events_contents<'a>(
     shared_contents: impl IntoIterator<Item = &'a str>,
     close_content: Option<&str>,
 ) -> Result<WorkEventsIntakeReport> {
+    let snapshot = WorkItemsIntakeSnapshot::capture(work_items_path, None)?;
     let shared_sources = shared_contents
         .into_iter()
         .map(|content| SharedWorkEventsSource::new(content, None))
         .collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        rebuild_work_event_sources_locked(work_items_path, shared_sources, close_content)
-    })
+    publish_rebuilt_work_events(&snapshot, shared_sources, close_content)
 }
 
 /// Rebuild using the machine-local lifecycle log at `close_path`. The file is
-/// read only after the projection transaction lock is held, so a concurrent
-/// terminal writer is either fully before or fully after this rebuild.
+/// snapshotted under the projection lock and checked again before publication,
+/// so a concurrent terminal writer is never overwritten by this rebuild.
 pub fn rebuild_work_events_paths<'a>(
     work_items_path: &Path,
     shared_contents: impl IntoIterator<Item = &'a str>,
     close_path: Option<&Path>,
 ) -> Result<WorkEventsIntakeReport> {
-    let shared_sources = shared_contents
-        .into_iter()
-        .map(|content| SharedWorkEventsSource::new(content, None))
-        .collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        let close_content = match close_path.map(std::fs::read_to_string) {
-            Some(Ok(content)) => Some(content),
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Some(Err(error)) => return Err(error.into()),
-            None => None,
-        };
-        rebuild_work_event_sources_locked(work_items_path, shared_sources, close_content.as_deref())
-    })
+    rebuild_work_events_with_shared_loader(
+        work_items_path,
+        || {
+            Ok((
+                shared_contents
+                    .into_iter()
+                    .map(|content| SharedWorkEventsSource::new(content, None))
+                    .collect(),
+                (),
+            ))
+        },
+        close_path,
+    )
+    .map(|(report, _, _)| report)
 }
 
-/// Rebuild from shared source contents loaded only after the project-scoped
-/// projection lock is held. The loader lets the orchestrator discover and
-/// fingerprint sources first, then re-read mutable worktree logs at the
-/// transaction boundary so a writer cannot be overwritten by a stale
-/// pre-lock snapshot.
+/// Capture authoritative state before loading mutable shared sources, then run
+/// the loader and heavy preparation without the Work lock. Byte comparison at
+/// publication rejects concurrent writers; callers must not advance fingerprints
+/// on that error and should retry discovery on their next poll.
 pub fn rebuild_work_events_with_shared_loader<F, T>(
     work_items_path: &Path,
     load_shared_contents: F,
@@ -484,22 +474,31 @@ pub fn rebuild_work_events_with_shared_loader<F, T>(
 where
     F: FnOnce() -> Result<(Vec<SharedWorkEventsSource>, T)>,
 {
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        let (shared_contents, loaded_metadata) = load_shared_contents()?;
-        let close_content = match close_path.map(std::fs::read_to_string) {
-            Some(Ok(content)) => Some(content),
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Some(Err(error)) => return Err(error.into()),
-            None => None,
-        };
-        let close_fingerprint = close_content.as_deref().map(content_fingerprint);
-        let report = rebuild_work_event_sources_locked(
-            work_items_path,
-            shared_contents,
-            close_content.as_deref(),
-        )?;
-        Ok((report, loaded_metadata, close_fingerprint))
-    })
+    let snapshot = WorkItemsIntakeSnapshot::capture(work_items_path, close_path)?;
+    let (shared_contents, loaded_metadata) = load_shared_contents()?;
+    let close_content = snapshot.local_content()?;
+    let close_fingerprint = close_content.map(content_fingerprint);
+    let report = publish_rebuilt_work_events(&snapshot, shared_contents, close_content)?;
+    Ok((report, loaded_metadata, close_fingerprint))
+}
+
+fn publish_rebuilt_work_events(
+    snapshot: &WorkItemsIntakeSnapshot,
+    shared_sources: Vec<SharedWorkEventsSource>,
+    close_content: Option<&str>,
+) -> Result<WorkEventsIntakeReport> {
+    let (report, projection, corrupt_state) = prepare_rebuilt_work_events(
+        snapshot.projection(),
+        shared_sources,
+        close_content,
+        Vec::new(),
+    )?;
+    let prepared = snapshot.prepare(projection)?;
+    snapshot.commit(Some(&prepared))?;
+    if let Some(error) = corrupt_state {
+        tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
+    }
+    Ok(report)
 }
 
 /// Issue #3524 (folded into #3606): rebuild without taking the projection lock,
@@ -507,7 +506,7 @@ where
 ///
 /// The store consolidation has to hold the `works.lock` of the canonical store
 /// *and* of every store it quarantines for the whole move-then-rebuild
-/// sequence. Re-entering [`crate::workspace_projection::with_workspace_work_items_lock`]
+/// sequence. Re-entering `with_workspace_work_items_lock`
 /// from inside that transaction would deadlock against the lock the caller
 /// already owns, so this entry point is lock-free by contract.
 ///
@@ -532,27 +531,46 @@ pub(crate) fn rebuild_work_events_contents_locked<'a>(
     )
 }
 
-fn rebuild_work_event_sources_locked(
-    work_items_path: &Path,
-    shared_sources: Vec<SharedWorkEventsSource>,
-    close_content: Option<&str>,
-) -> Result<WorkEventsIntakeReport> {
-    rebuild_work_event_sources_locked_with_legacy(
-        work_items_path,
-        shared_sources,
-        close_content,
-        Vec::new(),
-    )
-}
-
 fn rebuild_work_event_sources_locked_with_legacy(
     work_items_path: &Path,
     shared_sources: Vec<SharedWorkEventsSource>,
     close_content: Option<&str>,
     extra_legacy_items: Vec<WorkItem>,
 ) -> Result<WorkEventsIntakeReport> {
+    let (report, mut projection, corrupt_state) = prepare_rebuilt_work_events(
+        load_workspace_work_items_from_path(work_items_path),
+        shared_sources,
+        close_content,
+        extra_legacy_items,
+    )?;
+    crate::workspace_projection::apply_workspace_container_detachments(
+        work_items_path,
+        &mut projection,
+    )?;
+    if let Some(error) = corrupt_state {
+        crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
+            work_items_path,
+            &projection,
+        )?;
+        tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
+    } else {
+        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    }
+    Ok(report)
+}
+
+fn prepare_rebuilt_work_events(
+    previous: Result<Option<WorkItemsProjection>>,
+    shared_sources: Vec<SharedWorkEventsSource>,
+    close_content: Option<&str>,
+    extra_legacy_items: Vec<WorkItem>,
+) -> Result<(
+    WorkEventsIntakeReport,
+    WorkItemsProjection,
+    Option<WorkspaceStateLoadError>,
+)> {
     let mut corrupt_state = None;
-    let previous = match load_workspace_work_items_from_path(work_items_path) {
+    let previous = match previous {
         Ok(previous) => previous,
         Err(GwtError::WorkspaceStateLoad(error))
             if error.kind == WorkspaceStateLoadErrorKind::Malformed =>
@@ -600,24 +618,11 @@ fn rebuild_work_event_sources_locked_with_legacy(
     for item in eventless_items {
         merge_eventless_legacy_item(&mut projection, item);
     }
-    crate::workspace_projection::apply_workspace_container_detachments(
-        work_items_path,
-        &mut projection,
-    )?;
     projection
         .work_items
         .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
     projection.updated_at = Utc::now();
-    if let Some(error) = corrupt_state {
-        crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
-            work_items_path,
-            &projection,
-        )?;
-        tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
-    } else {
-        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
-    }
-    Ok(report)
+    Ok((report, projection, corrupt_state))
 }
 
 #[derive(Debug, Clone)]
@@ -1456,6 +1461,94 @@ mod tests {
     use crate::workspace_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
     use std::sync::Arc;
+
+    /// AC-3: benchmark an isolated copy, never resolve or mutate the live HOME.
+    #[test]
+    #[ignore = "requires GWT_STARTUP_STORE_COPY pointing to a copied production store"]
+    fn issue_5335_measure_copied_store() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let source = PathBuf::from(std::env::var("GWT_STARTUP_STORE_COPY").unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let works = temp.path().join("works.json");
+        let ledger = temp.path().join("work-events-closed.jsonl");
+        for name in [
+            "works.json",
+            "work-events-closed.jsonl",
+            "works.detachments.json",
+        ] {
+            if source.join(name).is_file() {
+                std::fs::copy(source.join(name), temp.path().join(name)).unwrap();
+            }
+        }
+        let work_count = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .len();
+        let event_count = std::fs::read_to_string(&ledger).unwrap().lines().count();
+        assert!(work_count >= 1000 && event_count >= 200_000);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(works.with_extension("lock"))
+            .unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let observing = Arc::clone(&done);
+        let (ready, started_observing) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            let mut held_since = None;
+            let mut holds = Vec::new();
+            let mut last_probe = Instant::now();
+            let mut max_gap = 0.0_f64;
+            ready.send(()).unwrap();
+            while !observing.load(Ordering::Acquire) {
+                max_gap = max_gap.max(last_probe.elapsed().as_secs_f64());
+                last_probe = Instant::now();
+                match fs2::FileExt::try_lock_exclusive(&lock) {
+                    Ok(()) => {
+                        fs2::FileExt::unlock(&lock).unwrap();
+                        if let Some(started) = held_since.take() {
+                            holds.push(Instant::now().duration_since(started).as_secs_f64());
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            || error.raw_os_error()
+                                == fs2::lock_contended_error().raw_os_error() =>
+                    {
+                        held_since.get_or_insert_with(Instant::now);
+                    }
+                    Err(error) => panic!("observe copied store lock: {error}"),
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if let Some(started) = held_since {
+                holds.push(started.elapsed().as_secs_f64());
+            }
+            max_gap = max_gap.max(last_probe.elapsed().as_secs_f64());
+            (holds, max_gap)
+        });
+        started_observing.recv().unwrap();
+        let mode = std::env::var("GWT_STARTUP_MEASURE_MODE").unwrap_or_else(|_| "rebuild".into());
+        let started = Instant::now();
+        let result = if mode == "ingest" {
+            ingest_work_events_with_local_path(&works, [], Some(&ledger)).map(|result| result.0)
+        } else {
+            rebuild_work_events_paths(&works, [], Some(&ledger))
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        done.store(true, Ordering::Release);
+        let (holds, max_gap) = observer.join().unwrap();
+        // Use observed probe gaps, including scheduling delays, to cover both
+        // interval edges and any hold that fell entirely between two probes.
+        let max_hold_upper_bound = holds.iter().copied().fold(0.0, f64::max) + 2.0 * max_gap;
+        eprintln!("copied-store mode={mode} works={work_count} ledger_events={event_count} total_seconds={elapsed:.3} sampled_lock_holds_seconds={holds:?} max_probe_gap_seconds={max_gap:.3} max_hold_upper_bound_seconds={max_hold_upper_bound:.3}");
+        result.unwrap();
+    }
 
     fn event_json(id: &str, work_id: &str, kind: &str, updated_at: &str, extra: &str) -> String {
         format!(

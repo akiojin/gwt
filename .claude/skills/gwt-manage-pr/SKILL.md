@@ -176,6 +176,20 @@ operation `verify.run`). Run the pre-PR matrix through `verify.run` so the
 evidence exists before the Ready handoff; Draft PR creation stays available
 mid-work.
 
+Issue #4214 provides a separate Ready-creation exit when a terminal producer
+cannot acquire local verification admission: `pr.create_from_ci` requires
+explicit `base`, `head`, `head_sha`, `title`, `body` and optional `labels`.
+The canonical operation fetches the repository's mandatory GitHub checks,
+requires exact-head all-pass evidence, rechecks refs/policy before dispatch,
+and audits its use without changing the Blocked execution or local test
+results. Only the exact owning durable Session or the registered repository
+PM may call it. A PM nominates the producer's head; the PM worktree's local
+matrix cannot stand in for that head. Permission, measured UI evidence and
+human/autonomous verification distinctions remain mandatory. Missing,
+failed, stale or unreadable CI refuses creation. Never use a Draft PR or a
+blanket Board waiver as this exit. Continue the existing auto-merge workflow
+for the resulting Ready PR.
+
 `gwt-verify` is a project-agnostic Generic Verification Contract: it
 autodetects the host project's test runners (Cargo.toml / package.json /
 pyproject.toml / go.mod / ProjectSettings / *.sln / etc.), runs the
