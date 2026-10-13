@@ -1138,6 +1138,9 @@ mod tests {
 
     #[test]
     fn settle_delivered_closes_pr_obligation_and_preserves_terminal_history() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fx = pushed_fixture();
         fx.launch("sess-1");
         block(&fx);
@@ -1229,6 +1232,9 @@ mod tests {
 
     #[test]
     fn settle_delivered_refuses_open_or_unknown_owner_without_changes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fx = pushed_fixture();
         fx.launch("sess-1");
         block(&fx);
@@ -1267,6 +1273,9 @@ mod tests {
 
     #[test]
     fn settle_delivered_refuses_source_foreign_holder_and_unpushed_head() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fx = pushed_fixture();
         fx.launch("sess-1");
         block(&fx);
