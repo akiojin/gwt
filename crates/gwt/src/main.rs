@@ -3244,6 +3244,7 @@ mod tests {
             launch_profile_summary: "configure before auto start".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
+            tier_facts: Vec::new(),
             agent_blackout: None,
             quota_hold: None,
             update_drain: None,
