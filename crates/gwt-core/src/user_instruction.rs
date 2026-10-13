@@ -159,8 +159,10 @@ fn redact(value: &str) -> String {
     let token = TOKEN.get_or_init(|| {
         Regex::new(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}").expect("API token regex")
     });
-    let redacted = crate::process_console::redact_line(value);
-    let redacted = assignment.replace_all(&redacted, "${1}***redacted***");
+    // Redact complete quoted assignments before the line filter can consume
+    // their key and leave a whitespace-separated suffix behind.
+    let redacted = assignment.replace_all(value, "${1}***redacted***");
+    let redacted = crate::process_console::redact_line(&redacted);
     token.replace_all(&redacted, "***redacted***").into_owned()
 }
 
@@ -221,7 +223,10 @@ mod tests {
             "{secret} password=\"correct horse battery staple\""
         ));
         input.answer = "OPENAI_API_KEY=sk-proj-0123456789abcdefghijklmnop".into();
-        input.actions = vec!["Authorization: Bearer private-value".into()];
+        input.actions = vec![
+            "Authorization: Bearer private-value".into(),
+            "token=\"correct horse battery staple\"".into(),
+        ];
         let saved = record(&repo, input).unwrap();
         let raw = std::fs::read_to_string(instructions_path(&repo)).unwrap();
         for value in [
