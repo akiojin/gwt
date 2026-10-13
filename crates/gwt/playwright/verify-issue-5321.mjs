@@ -87,8 +87,9 @@ async function cleanup() {
     }
     if (home) for (const [name, record] of [["gwt", gui], ["gwtd", daemon], ["github-fixture", github]]) {
       if (!record) continue;
-      await writeFile(join(home, `${name}.stdout.log`), record.stdout);
-      await writeFile(join(home, `${name}.stderr.log`), record.stderr);
+      // Canonical verification removes its child TMPDIR, including HOME.
+      await writeFile(join(evidence, `${name}.stdout.log`), record.stdout);
+      await writeFile(join(evidence, `${name}.stderr.log`), record.stderr);
     }
     if (evidence) {
       await writeFile(join(evidence, "cleanup.json"), JSON.stringify({ failures,
