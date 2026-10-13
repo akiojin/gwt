@@ -2340,10 +2340,11 @@ fn issues_held_by_provider(
 /// daemon→GUI channel that could disagree with it.
 ///
 /// Issue #4200: the launch row is only one of the two holds a launch takes on
-/// an Issue. The other is its execution generation, and revoking the launch is
-/// exactly the decision that its holder must not return, so this releases that
-/// too — see [`crate::cli::execution_state::release_revoked_launch_generation`]
-/// for why no liveness proof is asked for. The two results are reported
+/// an Issue. The other is its execution generation. Revoking queue intent does
+/// not stop an agent that has already started: an exact live started holder
+/// retains its generation. A never-started or dead holder can still be released
+/// under Issue #4200 — see
+/// [`crate::cli::execution_state::release_revoked_launch_generation`]. The two results are reported
 /// separately: `status` is about the launch row, `generation_release` is about
 /// the generation. That is also the recovery route for an Issue whose launch
 /// row is already gone but whose generation still refuses every relaunch: the

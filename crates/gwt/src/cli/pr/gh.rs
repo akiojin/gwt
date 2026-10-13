@@ -25,7 +25,11 @@ use crate::cli::{
 
 use super::{PrQuarantineComment, PrQuarantineContext};
 
-fn run_gh_in<I, S>(label: &str, repo_path: Option<&Path>, args: I) -> io::Result<SpawnOutput>
+pub(super) fn run_gh_in<I, S>(
+    label: &str,
+    repo_path: Option<&Path>,
+    args: I,
+) -> io::Result<SpawnOutput>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

@@ -326,6 +326,18 @@ impl CliEnv for DefaultCliEnv {
             &request,
         )
     }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        base: &str,
+        head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        crate::cli::pr::ci_delivery::fetch(
+            &self.repo_path,
+            &format!("{}/{}", self.owner, self.repo),
+            base,
+            head,
+        )
+    }
     fn compare_pr_head(
         &mut self,
         base: &str,

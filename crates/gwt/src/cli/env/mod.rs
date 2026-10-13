@@ -76,6 +76,16 @@ pub trait CliEnv {
         labels: &[String],
         draft: bool,
     ) -> io::Result<PrStatus>;
+    /// Canonical remote observations; never accepts caller-supplied CI results.
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        _base: &str,
+        _head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        Err(io::Error::other(
+            "canonical GitHub CI reader is unavailable",
+        ))
+    }
     fn compare_pr_head(
         &mut self,
         base: &str,
