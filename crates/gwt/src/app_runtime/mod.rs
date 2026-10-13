@@ -360,6 +360,8 @@ pub(crate) enum UpdateAutoApplyRelease {
     PayloadMissing,
     /// A newer release invalidated this staged version.
     Superseded,
+    RequiresElevation,
+    PreviousFailure,
 }
 
 #[derive(Debug, Clone)]
@@ -373,6 +375,10 @@ pub(crate) struct UpdateDrainObservation {
 /// every client through the Issue Monitor toast channel.
 fn update_notice(level: &str, message: String) -> OutboundEvent {
     OutboundEvent::global_update_notice(level, message)
+}
+
+fn update_elevation_notice(version: &str) -> String {
+    format!("Update v{version}: Administrator privileges required; the update stays staged. Use the update button to apply manually.")
 }
 
 fn record_pending_update_observation(
@@ -9951,7 +9957,11 @@ impl AppRuntime {
             .filter(|result| result.outcome == gwt_core::update::UpdateApplyOutcome::Failure)
             .map(|result| result.to_version);
         let refusal = gwt::update_drain::auto_apply_refusal(
-            gwt_core::update::install_requires_elevation(),
+            gwt_core::update::load_pending_update_manifest().is_some_and(|manifest| {
+                std::env::current_exe().map_or(true, |exe| {
+                    gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+                })
+            }),
             last_failed_version.as_deref(),
             version,
         );
@@ -10066,6 +10076,12 @@ impl AppRuntime {
                 ?refusal,
                 "staged update is not applied automatically; manual update button kept"
             );
+            if refusal == gwt::update_drain::UpdateAutoApplyRefusal::RequiresElevation {
+                return self.release_update_auto_apply_events(
+                    version,
+                    UpdateAutoApplyRelease::RequiresElevation,
+                );
+            }
             return vec![update_notice("warn", refusal.notice(version))];
         }
         tracing::info!(
@@ -10610,6 +10626,14 @@ impl AppRuntime {
                 "info",
                 format!("Update v{version} was replaced by a newer release; its automatic apply was cancelled."),
             ),
+            UpdateAutoApplyRelease::RequiresElevation => (
+                "warn",
+                update_elevation_notice(version),
+            ),
+            UpdateAutoApplyRelease::PreviousFailure => (
+                "warn",
+                format!("Update v{version} was not applied automatically because its previous apply failed; the update stays staged for manual retry."),
+            ),
         };
         self.record_update_apply_observation(
             version,
@@ -10617,13 +10641,19 @@ impl AppRuntime {
                 UpdateAutoApplyRelease::Cancelled => "pending_refused",
                 UpdateAutoApplyRelease::PayloadMissing => "pending_failed",
                 UpdateAutoApplyRelease::Superseded => "pending_superseded",
+                UpdateAutoApplyRelease::RequiresElevation => "pending_refused",
+                UpdateAutoApplyRelease::PreviousFailure => "pending_refused",
             },
             &message,
         );
         events.push(update_notice(level, message));
         events.push(OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
             version: version.to_string(),
-            phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+            phase: if release == UpdateAutoApplyRelease::RequiresElevation {
+                gwt::protocol::UpdateAutoApplyPhase::ElevationRequired
+            } else {
+                gwt::protocol::UpdateAutoApplyPhase::Cancelled
+            },
             grace_secs: None,
         }));
         Self::deduplicate_update_host_events(events)
@@ -13009,6 +13039,57 @@ impl AppRuntime {
                 BackendEvent::UpdateState(state.clone()),
             ));
         }
+        events.extend(self.staged_update_sync_events(client_id));
+        events
+    }
+
+    /// Bootstrap may retain an automatic payload after OFF/Autonomous or
+    /// elevation checks. Hydrate it as ready on every connection, including
+    /// a fresh process whose release poll is suppressed by that manifest.
+    fn staged_update_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        let Some(manifest) = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
+            gwt_core::update::pending_version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))
+                && !matches!(&self.pending_update,
+                    Some(gwt_core::update::UpdateState::Available { latest, .. })
+                        if gwt_core::update::pending_version_is_newer(latest, &manifest.version))
+        }) else {
+            return Vec::new();
+        };
+        let state = gwt_core::update::UpdateState::Available {
+            current: env!("CARGO_PKG_VERSION").into(),
+            latest: manifest.version.clone(),
+            release_url: manifest.asset_url.clone(),
+            asset_url: Some(manifest.asset_url.clone()),
+            checked_at: chrono::Utc::now(),
+        };
+        self.pending_update = Some(state.clone());
+        let mut events = vec![
+            OutboundEvent::reply(client_id, BackendEvent::UpdateState(state)),
+            OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateApplyPendingPersisted {
+                    version: manifest.version.clone(),
+                },
+            ),
+        ];
+        if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic
+            && std::env::current_exe().map_or(true, |exe| {
+                gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+            })
+        {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateAutoApply {
+                    version: manifest.version.clone(),
+                    phase: gwt::protocol::UpdateAutoApplyPhase::ElevationRequired,
+                    grace_secs: None,
+                },
+            ));
+            events.push(OutboundEvent::reply(
+                client_id,
+                update_notice("warn", update_elevation_notice(&manifest.version)).event,
+            ));
+        }
         events
     }
 
@@ -13097,6 +13178,7 @@ impl AppRuntime {
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
         );
+        events.extend(self.staged_update_sync_events(client_id));
         events.splice(
             1..1,
             terminal_previews.into_iter().map(|(id, text)| {

@@ -849,6 +849,35 @@ fn admit_prepared_update(
         );
     }
     if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+        && std::env::current_exe().map_or(true, |exe| {
+            gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+        })
+    {
+        admission.failed();
+        return (
+            false,
+            app.release_update_auto_apply_events(
+                &manifest.version,
+                app_runtime::UpdateAutoApplyRelease::RequiresElevation,
+            ),
+        );
+    }
+    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+        && gwt_core::update::load_update_apply_result().is_some_and(|result| {
+            result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
+                && result.to_version == manifest.version
+        })
+    {
+        admission.failed();
+        return (
+            false,
+            app.release_update_auto_apply_events(
+                &manifest.version,
+                app_runtime::UpdateAutoApplyRelease::PreviousFailure,
+            ),
+        );
+    }
+    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
         || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID
     {
         let release = match gwt_core::update::load_pending_update_manifest() {
@@ -5054,6 +5083,7 @@ mod tests {
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: Utc::now().to_rfc3339(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
@@ -5069,6 +5099,34 @@ mod tests {
             .0
         );
         assert!(!runtime.agent_maintenance.app_update_committing);
+
+        gwt::update_settings::set(Some(true)).unwrap();
+        gwt_core::update::persist_update_apply_result(&gwt_core::update::UpdateApplyResult {
+            outcome: gwt_core::update::UpdateApplyOutcome::Failure,
+            from_version: "9.0.0".into(),
+            to_version: manifest.version.clone(),
+            observed_version: "9.0.0".into(),
+            attempt: 1,
+            recorded_at: Utc::now().to_rfc3339(),
+            message: Some("previous helper failed".into()),
+        })
+        .unwrap();
+        assert!(admission.begin_resolution());
+        assert!(
+            !super::admit_prepared_update(
+                &mut runtime,
+                &manifest,
+                &mut admission,
+                crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+            )
+            .0,
+            "a restored drain must not auto-apply the known failed version"
+        );
+        assert!(admission.begin_resolution());
+        assert!(
+            super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual").0,
+            "an explicit manual retry remains available"
+        );
     }
 
     #[test]
@@ -5265,6 +5323,7 @@ mod tests {
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
             downloaded_at: Utc::now().to_rfc3339(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
@@ -5408,6 +5467,7 @@ mod tests {
                 path: temp.path().join("prepared"),
             },
             downloaded_at: Utc::now().to_rfc3339(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
@@ -5438,6 +5498,7 @@ mod tests {
                 path: temp.path().join("prepared"),
             },
             downloaded_at: Utc::now().to_rfc3339(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
@@ -11969,7 +12030,12 @@ fn main() -> std::io::Result<()> {
                                 asset_url: prepared.asset_url.clone(),
                                 payload: prepared.payload.clone(),
                                 downloaded_at: chrono::Utc::now().to_rfc3339(),
-                                auto_apply_deferred: false,
+                                origin: if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID {
+                                    gwt_core::update::PendingUpdateOrigin::Automatic
+                                } else {
+                                    gwt_core::update::PendingUpdateOrigin::ManualLater
+                                },
+                auto_apply_deferred: false,
                             };
                             if let Err(message) =
                                 gwt_core::update::persist_pending_update_manifest(&manifest)

@@ -6327,6 +6327,7 @@ mod tests {
                 path: payload_path.clone(),
             },
             downloaded_at: "2026-10-01T00:00:00Z".into(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         // Seed the format used before the explicit defer control existed.
