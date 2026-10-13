@@ -34,20 +34,31 @@ def main():
         "cargo", "test", "-p", "gwt-core", "-p", "gwt", "-p", "gwt-config",
         "--all-features",
     ]
+    # Exercise the real HOME fallback, but never let fixtures forward their
+    # operations to the live gwt Host that launched this verification.
+    environment = os.environ.copy()
+    for key in (
+        "GWT_BIN_PATH", "GWT_BROWSER_URL_FILE", "GWT_HOOK_BIN",
+        "GWT_HOOK_FORWARD_TOKEN", "GWT_HOOK_FORWARD_URL", "GWT_PROJECT_ROOT",
+        "GWT_REPO_HASH", "GWT_SESSION_ID", "GWT_SESSION_KIND",
+        "GWT_SESSION_RUNTIME_PATH", "GWT_WORKTREE_HASH",
+        "GWT_AUTONOMOUS_EXECUTION", "GWT_AUTONOMOUS_ISSUE",
+    ):
+        environment.pop(key, None)
     print("Running: " + " ".join(command), flush=True)
     try:
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, check=False, env=environment)
     finally:
-        unchanged = (
-            fingerprint(config) == before_config
-            and fingerprint(sentinel) == before_sentinel
-        )
+        config_unchanged = fingerprint(config) == before_config
+        sentinel_unchanged = fingerprint(sentinel) == before_sentinel
+        unchanged = config_unchanged and sentinel_unchanged
         sentinel.unlink(missing_ok=True)
-        print(
-            "Real HOME config + sentinel contents/mtime: "
-            + ("PASS (unchanged)" if unchanged else "FAIL (changed)"),
-            flush=True,
-        )
+        for name, passed in (("config", config_unchanged), ("sentinel", sentinel_unchanged)):
+            print(
+                "Real HOME " + name + " contents/mtime: "
+                + ("PASS (unchanged)" if passed else "FAIL (changed)"),
+                flush=True,
+            )
     return result.returncode if unchanged else 1
 
 
