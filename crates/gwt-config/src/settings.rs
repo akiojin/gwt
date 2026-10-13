@@ -2,7 +2,6 @@
 
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
     num::NonZeroU16,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -18,6 +17,7 @@ use crate::{
     atomic::write_atomic,
     board_config::BoardConfig,
     error::{ConfigError, Result},
+    home::{assert_test_path, user_home},
     profile::ProfilesConfig,
     usage_config::UsageConfig,
     voice_config::VoiceConfig,
@@ -95,17 +95,6 @@ impl Default for PerfConfig {
             budgets: PerfBudgetOverrides::default(),
         }
     }
-}
-
-fn resolve_config_home_dir(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    fallback: Option<PathBuf>,
-) -> Option<PathBuf> {
-    home.filter(|value| !value.is_empty())
-        .or_else(|| userprofile.filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .or(fallback)
 }
 
 fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
@@ -224,17 +213,14 @@ impl Default for Settings {
 impl Settings {
     /// Build the global config file path for a known home directory.
     pub fn global_config_path_for_home(home: &Path) -> PathBuf {
-        home.join(".gwt").join("config.toml")
+        let path = home.join(".gwt").join("config.toml");
+        assert_test_path(&path);
+        path
     }
 
     /// Return the global config file path: `~/.gwt/config.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
-        resolve_config_home_dir(
-            std::env::var_os("HOME"),
-            std::env::var_os("USERPROFILE"),
-            dirs::home_dir(),
-        )
-        .map(|home| Self::global_config_path_for_home(&home))
+        user_home().map(|home| Self::global_config_path_for_home(&home))
     }
 
     /// Load settings from `~/.gwt/config.toml`, falling back to defaults.
@@ -252,6 +238,7 @@ impl Settings {
 
     /// Load settings from an explicit path.
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        assert_test_path(path);
         let content = std::fs::read_to_string(path).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to read config");
             ConfigError::ParseError {
@@ -295,6 +282,7 @@ impl Settings {
     /// future keys, and the file's minimal shape. The typed parse still runs
     /// first so malformed or incompatible settings remain fatal.
     pub fn persist_embedded_port(path: &Path, port: NonZeroU16) -> Result<()> {
+        assert_test_path(path);
         let _guard = UPDATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -450,16 +438,31 @@ gwtd_mutation_p95_ms = 350.0
 
     #[test]
     fn global_config_path_for_home_uses_canonical_layout() {
-        let home = PathBuf::from("home-dir");
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path();
 
         assert_eq!(
-            Settings::global_config_path_for_home(&home),
+            Settings::global_config_path_for_home(home),
             home.join(".gwt").join("config.toml")
         );
     }
 
     #[test]
+    fn global_config_path_is_isolated_without_a_scoped_override() {
+        let path = Settings::global_config_path().expect("test config path");
+        assert!(path.starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn explicit_global_config_path_rejects_an_unisolated_home() {
+        // Pure path construction: RED never attempts a real-home write.
+        Settings::global_config_path_for_home(Path::new("/__gwt_protected_test_home__"));
+    }
+
+    #[test]
     fn config_home_resolution_prefers_env_over_dirs_fallback() {
+        use crate::home::resolve_config_home_dir;
         assert_eq!(
             resolve_config_home_dir(
                 Some("home-env".into()),
@@ -552,7 +555,8 @@ gwtd_mutation_p95_ms = 350.0
 
     #[test]
     fn load_from_missing_file_returns_error() {
-        let result = Settings::load_from_path(Path::new("/nonexistent/config.toml"));
+        let directory = tempfile::tempdir().unwrap();
+        let result = Settings::load_from_path(&directory.path().join("missing/config.toml"));
         assert!(result.is_err());
     }
 

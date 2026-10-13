@@ -16,6 +16,9 @@ thiserror.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 
+[features]
+test-support = []
+
 [dev-dependencies]
 tempfile.workspace = true
 tracing-subscriber.workspace = true

@@ -266,9 +266,10 @@ fn load_from_path_reports_parse_error_for_missing_file() {
 
 #[test]
 fn global_config_path_for_home_is_dot_gwt_config_toml() {
-    let home = Path::new("home-fixture");
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path();
     assert_eq!(
         Settings::global_config_path_for_home(home),
-        Path::new("home-fixture").join(".gwt").join("config.toml")
+        home.join(".gwt").join("config.toml")
     );
 }

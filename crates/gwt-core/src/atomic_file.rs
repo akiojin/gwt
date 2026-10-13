@@ -13,7 +13,7 @@
 //! holds the whole payload.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,11 +31,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// that need crash durability must sync the file and its parent directory
 /// themselves.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    gwt_config::home::assert_test_path(path);
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
     let temp = temp_path_for(path, parent);
-    fs::write(&temp, bytes)?;
+    // A leftover or planted sibling symlink must never be followed.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    file.write_all(bytes)?;
+    drop(file);
     match fs::rename(&temp, path) {
         Ok(()) => Ok(()),
         Err(error) => {

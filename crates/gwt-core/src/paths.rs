@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashSet,
-    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -15,99 +14,12 @@ use crate::{
     },
 };
 
-/// Return the gwt home directory (`~/.gwt/`).
+/// Return the gwt home directory (`~/.gwt/`), sharing settings' test isolation.
 pub fn gwt_home() -> PathBuf {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(home) = crate::test_support::gwt_home_override() {
-        return home.join(".gwt");
-    }
-
-    let home = std::env::var_os("HOME");
-    let userprofile = std::env::var_os("USERPROFILE");
-    if let Some(test_home) = cargo_test_home_override(home.as_deref(), userprofile.as_deref()) {
-        return test_home.join(".gwt");
-    }
-    resolve_home_dir(home, userprofile, dirs::home_dir()).join(".gwt")
-}
-
-static CARGO_TEST_HOME_OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-fn cargo_test_home_override(home: Option<&OsStr>, userprofile: Option<&OsStr>) -> Option<PathBuf> {
-    if is_explicit_isolated_home(home) || is_explicit_isolated_home(userprofile) {
-        return None;
-    }
-    CARGO_TEST_HOME_OVERRIDE
-        .get_or_init(detect_cargo_test_home)
-        .clone()
-}
-
-fn detect_cargo_test_home() -> Option<PathBuf> {
-    cargo_test_home_for_exe(
-        &std::env::current_exe().ok()?,
-        &std::env::temp_dir(),
-        std::process::id(),
-    )
-}
-
-fn cargo_test_home_for_exe(exe: &Path, temp_dir: &Path, process_id: u32) -> Option<PathBuf> {
-    if !is_cargo_test_binary(exe) {
-        return None;
-    }
-    let binary_name = exe.file_name()?.to_string_lossy();
-    Some(
-        temp_dir
-            .join("gwt-cargo-test-home")
-            .join(sanitize_test_binary_name(&binary_name))
-            .join(process_id.to_string()),
-    )
-}
-
-fn is_cargo_test_binary(exe: &Path) -> bool {
-    exe.parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == "deps")
-        && exe
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name.contains('-'))
-}
-
-fn sanitize_test_binary_name(name: &str) -> String {
-    name.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn is_explicit_isolated_home(path: Option<&OsStr>) -> bool {
-    let Some(path) = path
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    else {
-        return false;
-    };
-    path.starts_with(std::env::temp_dir())
-}
-
-fn resolve_home_dir(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    fallback: Option<PathBuf>,
-) -> PathBuf {
-    non_empty_os(home)
-        .or_else(|| non_empty_os(userprofile))
-        .map(PathBuf::from)
-        .or(fallback)
-        .expect("home directory must be resolvable")
-}
-
-fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
-    value.filter(|value| !value.is_empty())
+    let home = gwt_config::home::user_home().expect("home directory must be resolvable");
+    let path = home.join(".gwt");
+    gwt_config::home::assert_test_path(&path);
+    path
 }
 
 /// Normalize host filesystem paths before passing them to child processes.
@@ -913,80 +825,6 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = gwt_home();
         assert!(home.ends_with(".gwt"));
-    }
-
-    #[test]
-    fn gwt_home_prefers_home_env_over_dirs_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_home = tmp.path().join("custom-home");
-
-        let home = resolve_home_dir(
-            Some(override_home.clone().into_os_string()),
-            Some(tmp.path().join("ignored-userprofile").into_os_string()),
-            None,
-        )
-        .join(".gwt");
-
-        assert_eq!(home, override_home.join(".gwt"));
-    }
-
-    #[test]
-    fn gwt_home_falls_back_to_userprofile_when_home_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_profile = tmp.path().join("custom-userprofile");
-
-        let home = resolve_home_dir(None, Some(override_profile.clone().into_os_string()), None)
-            .join(".gwt");
-
-        assert_eq!(home, override_profile.join(".gwt"));
-    }
-
-    #[test]
-    fn gwt_home_treats_empty_env_values_as_unset() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_profile = tmp.path().join("custom-userprofile");
-        let fallback = tmp.path().join("fallback-home");
-
-        let userprofile_home = resolve_home_dir(
-            Some(OsString::from("")),
-            Some(override_profile.clone().into_os_string()),
-            Some(fallback.clone()),
-        );
-        let fallback_home = resolve_home_dir(
-            Some(OsString::from("")),
-            Some(OsString::from("")),
-            Some(fallback.clone()),
-        );
-
-        assert_eq!(userprofile_home, override_profile);
-        assert_eq!(fallback_home, fallback);
-    }
-
-    #[test]
-    fn cargo_test_home_for_exe_redirects_test_binaries_to_temp_home() {
-        let temp = tempfile::tempdir().unwrap();
-        let exe = Path::new("/repo/target/debug/deps/gwt-abc123");
-
-        let home = cargo_test_home_for_exe(exe, temp.path(), 42).expect("test home");
-
-        assert_eq!(home, temp.path().join("gwt-cargo-test-home/gwt-abc123/42"));
-    }
-
-    #[test]
-    fn cargo_test_home_for_exe_ignores_non_test_binaries() {
-        let temp = tempfile::tempdir().unwrap();
-
-        assert!(
-            cargo_test_home_for_exe(Path::new("/repo/target/debug/gwtd"), temp.path(), 42)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn cargo_test_home_override_preserves_explicit_temp_home() {
-        let temp = tempfile::tempdir().unwrap();
-
-        assert!(cargo_test_home_override(Some(temp.path().as_os_str()), None).is_none());
     }
 
     #[test]
