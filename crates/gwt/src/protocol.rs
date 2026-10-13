@@ -1972,6 +1972,8 @@ pub enum UpdateAutoApplyPhase {
     Scheduled,
     Postponed,
     Cancelled,
+    /// Automatic apply needs an administrator; retain the staged manual action.
+    ElevationRequired,
     Applying,
 }
 
@@ -3859,6 +3861,26 @@ mod tests {
         assert!(
             errors.contains("project_context_for_root"),
             "control errors must resolve their explicit project owner"
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_elevation_required_serializes_without_a_grace() {
+        let phase: super::UpdateAutoApplyPhase =
+            serde_json::from_value(serde_json::json!("elevation_required"))
+                .expect("administrator-required phase is part of the update protocol");
+        let event = BackendEvent::UpdateAutoApply {
+            version: "9.106.0".into(),
+            phase,
+            grace_secs: None,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "update_auto_apply",
+                "version": "9.106.0",
+                "phase": "elevation_required",
+            })
         );
     }
 

@@ -2350,3 +2350,62 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
     let projection = wait_for_active_work_projection(&mut runtime);
     assert_eq!(projection.active_agents, 1);
 }
+
+/// Issue #5043 AC-2 / AC-4: Launch Now evaluates the actual owner branch.
+#[test]
+fn app_runtime_issue_monitor_launch_now_uses_owner_delivery_prompt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    run_git(&repo, &["branch", "work/issue-3165", "origin/develop"]);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorLaunchNow {
+            issue_number: 3165,
+            linked_issue_kind: Some(LinkedIssueKind::Issue),
+        },
+    );
+    let equal = &runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("equal branch launch wizard")
+        .wizard
+        .initial_prompt;
+    assert!(equal.contains("against origin/develop"), "{equal}");
+    assert!(equal.contains("close Issue #3165 and finish"), "{equal}");
+
+    run_git(&repo, &["switch", "work/issue-3165"]);
+    fs::write(repo.join("fix.rs"), "fn fixed() {}\n").expect("write source");
+    run_git(&repo, &["add", "fix.rs"]);
+    run_git(&repo, &["commit", "-qm", "undelivered fix"]);
+    run_git(&repo, &["switch", "develop"]);
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorLaunchNow {
+            issue_number: 3165,
+            linked_issue_kind: Some(LinkedIssueKind::Issue),
+        },
+    );
+    let ahead = &runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("ahead branch launch wizard")
+        .wizard
+        .initial_prompt;
+    assert!(
+        ahead.contains("verify.run, a pull request, and its merge into develop"),
+        "{ahead}"
+    );
+    assert!(!ahead.contains("close Issue #3165 and finish"), "{ahead}");
+}

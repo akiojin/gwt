@@ -51,6 +51,7 @@ pub struct TestEnv {
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
+    pub ci_delivery_snapshots: std::collections::VecDeque<crate::cli::pr::ci_delivery::CiSnapshot>,
     pub pr_comments: Vec<(u64, String)>,
     pub pr_create_call_log: Vec<PrCreateCall>,
     pub pr_edit_call_log: Vec<PrEditCall>,
@@ -114,6 +115,7 @@ impl TestEnv {
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
+            ci_delivery_snapshots: std::collections::VecDeque::new(),
             pr_comments: Vec::new(),
             pr_create_call_log: Vec::new(),
             pr_edit_call_log: Vec::new(),
@@ -294,6 +296,15 @@ impl CliEnv for TestEnv {
         self.created_pr
             .clone()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no created pr seeded"))
+    }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        _base: &str,
+        _head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        self.ci_delivery_snapshots
+            .pop_front()
+            .ok_or_else(|| io::Error::other("canonical CI snapshot not seeded"))
     }
     fn compare_pr_head(
         &mut self,

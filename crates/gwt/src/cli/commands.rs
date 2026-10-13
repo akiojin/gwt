@@ -375,6 +375,8 @@ pub enum IssueCommand {
 /// SPEC-1942 command model for `pr.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
+    /// Narrow Ready-creation path backed by exact canonical GitHub CI.
+    CreateFromCi(crate::cli::pr::ci_delivery::CiCreateRequest),
     Current,
     /// Independent canonical-record/remote-head diagnostic; never admits a PR mutation.
     HeadCheck {

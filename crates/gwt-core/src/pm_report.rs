@@ -48,6 +48,11 @@ pub fn post_report(
             "PM Q&A report question must be nonempty".into(),
         ));
     }
+    if question.is_some_and(|value| value.len() > 64 * 1024) {
+        return Err(GwtError::Config(
+            "PM report question must not exceed 64 KiB".into(),
+        ));
+    }
     if body.trim().is_empty() {
         return Err(GwtError::Config("PM report body must be nonempty".into()));
     }
@@ -258,6 +263,16 @@ mod tests {
         let oversized =
             post_report(&repo, PmReportKind::Progress, &"x".repeat(65_537), None).unwrap_err();
         assert!(oversized.to_string().contains("64 KiB"), "{oversized}");
+        let oversized_question = "あ".repeat(21_846);
+        for kind in [PmReportKind::Qa, PmReportKind::Progress] {
+            let error = post_report(&repo, kind, "Answer", Some(&oversized_question)).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("question must not exceed 64 KiB"),
+                "{error}"
+            );
+        }
         let path = reports_path(&repo);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::create_dir(&path).unwrap();
