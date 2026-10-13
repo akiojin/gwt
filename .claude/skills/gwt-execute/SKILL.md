@@ -113,6 +113,28 @@ session/owner/worktree fingerprint, and valid integrity hashes. It appends a
 recovery audit entry and returns the execution to Active; it does not claim
 completion. Completed executions remain immutable.
 
+For a terminal execution whose local verification admission is unavailable,
+do not chase `pr.create` → `verify.run` → `execution.reopen` in a loop or
+create a Draft PR. The narrowly scoped exit is `pr.create_from_ci` with
+`base`, `head`, `head_sha`, `title`, `body`, and optional `labels`. gwtd reads
+the repository's current mandatory GitHub checks for that exact pushed head,
+requires every check to pass, and rechecks the refs and policy at dispatch.
+Only the exact owning durable Session or the registered repository PM may
+use it. The PM nominates the producing head explicitly instead of verifying
+the PM worktree. This creates a Ready PR and records a CI delivery audit;
+it never reopens the execution or rewrites local verification as PASS.
+Permission and UI verification gates remain in force. A moved head, missing
+or failed CI, unreadable policy, or missing measured UI evidence refuses the
+operation. Keep the existing auto-merge delivery workflow after creation.
+
+When a CLOSED owner is already delivered and its execution is terminal,
+use `execution.settle_delivered` with a non-empty `reason` to settle this
+Session's remaining obligations, including `pr`, in one operation. gwtd
+requires a fresh CLOSED read, zero source surface, and live upstream proof
+that HEAD is pushed. It preserves terminal execution, Session and verification
+history, takes no verification lease, and claims neither a new PR nor PASS.
+An open owner or any unpushed/remaining/unprovable source refuses this exit.
+
 When a worktree inherits a terminal Blocked record from a Session that is gone
 — the startup reaper settles a defunct generation, and the relaunch lands in
 the same worktree — the relaunched Session takes the record over with audited

@@ -6097,12 +6097,7 @@ mod tests {
             entry.updated_at = entry.created_at;
             events.push(CoordinationEvent::MessageAppended { entry });
         }
-        write_events_to_segments(
-            &coordination_dir(dir.path()),
-            &events,
-            EVENT_SEGMENT_MAX_BYTES,
-        )
-        .unwrap();
+        write_prompt_board_fixture(&coordination_dir(dir.path()), &events);
 
         let snapshot = load_snapshot(dir.path()).unwrap();
 
@@ -6138,12 +6133,7 @@ mod tests {
             entry.updated_at = entry.created_at;
             events.push(CoordinationEvent::MessageAppended { entry });
         }
-        write_events_to_segments(
-            &coordination_dir(dir.path()),
-            &events,
-            EVENT_SEGMENT_MAX_BYTES,
-        )
-        .unwrap();
+        write_prompt_board_fixture(&coordination_dir(dir.path()), &events);
 
         let snapshot = load_snapshot(dir.path()).unwrap();
         assert!(!snapshot
@@ -7810,7 +7800,7 @@ mod tests {
             entry.updated_at = entry.created_at;
             events.push(CoordinationEvent::MessageAppended { entry });
         }
-        write_events(&coordination_events_path(dir.path()), &events);
+        write_prompt_board_fixture(&coordination_dir(dir.path()), &events);
 
         let snapshot = load_snapshot(dir.path()).unwrap();
         assert_eq!(snapshot.board.entries.len(), HOT_PROJECTION_ENTRY_LIMIT);
@@ -7858,8 +7848,9 @@ mod tests {
         };
         let mut segment_index = 1;
         let mut current_meta = empty_segment(segment_index);
-        let mut current_file =
-            std::fs::File::create(segments_dir.join(&current_meta.file)).unwrap();
+        let mut current_file = std::io::BufWriter::new(
+            std::fs::File::create(segments_dir.join(&current_meta.file)).unwrap(),
+        );
 
         for idx in 0..100_000 {
             let mut entry = BoardEntry::new(
@@ -7886,8 +7877,9 @@ mod tests {
                 manifest.segments.push(current_meta);
                 segment_index += 1;
                 current_meta = empty_segment(segment_index);
-                current_file =
-                    std::fs::File::create(segments_dir.join(&current_meta.file)).unwrap();
+                current_file = std::io::BufWriter::new(
+                    std::fs::File::create(segments_dir.join(&current_meta.file)).unwrap(),
+                );
             }
             current_file.write_all(&event_bytes).unwrap();
             update_segment_meta(&mut current_meta, &event, event_bytes.len() as u64);
@@ -8223,12 +8215,39 @@ mod tests {
         // blocked post leaves the 500-entry projection within hours, and every
         // reader that derives "who is blocked" from the timeline goes blind.
         let dir = tempfile::tempdir().unwrap();
-        post_entry(
+        let initial = post_entry(
             dir.path(),
             escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
         )
         .unwrap();
-        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+        let mut events: Vec<_> = initial
+            .board
+            .entries
+            .into_iter()
+            .map(|entry| CoordinationEvent::MessageAppended { entry })
+            .collect();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT - 1) {
+            events.push(CoordinationEvent::MessageAppended {
+                entry: escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            });
+        }
+        write_prompt_board_fixture(&coordination_dir(dir.path()), &events);
+        load_snapshot(dir.path()).unwrap();
+        let projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(
+            projection.entries.len(),
+            HOT_PROJECTION_ENTRY_LIMIT,
+            "the final status append must start with a full hot projection"
+        );
+        assert!(
+            projection
+                .entries
+                .iter()
+                .any(|entry| entry.kind == BoardEntryKind::Blocked),
+            "the real status append must evict the blocked post"
+        );
+        for idx in (HOT_PROJECTION_ENTRY_LIMIT - 1)..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
             post_entry(
                 dir.path(),
                 escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
@@ -8262,8 +8281,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
         let blocked_id = blocked.id.clone();
-        post_entry(dir.path(), blocked).unwrap();
-        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+        let initial = post_entry(dir.path(), blocked).unwrap();
+        let mut events: Vec<_> = initial
+            .board
+            .entries
+            .into_iter()
+            .map(|entry| CoordinationEvent::MessageAppended { entry })
+            .collect();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT - 1) {
+            events.push(CoordinationEvent::MessageAppended {
+                entry: escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            });
+        }
+        write_prompt_board_fixture(&coordination_dir(dir.path()), &events);
+        load_snapshot(dir.path()).unwrap();
+        let projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(
+            projection.entries.len(),
+            HOT_PROJECTION_ENTRY_LIMIT,
+            "the final status append must start with a full hot projection"
+        );
+        assert!(
+            projection
+                .entries
+                .iter()
+                .any(|entry| entry.kind == BoardEntryKind::Blocked),
+            "the real status append must evict the blocked post"
+        );
+        for idx in (HOT_PROJECTION_ENTRY_LIMIT - 1)..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
             post_entry(
                 dir.path(),
                 escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),

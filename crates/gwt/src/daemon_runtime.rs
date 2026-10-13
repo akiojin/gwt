@@ -116,7 +116,7 @@ pub(crate) struct AgentBridgeFailure {
     bridge_reason: Option<String>,
     recovery_operations: RecoveryOperationSet,
     diagnostic_reason: Option<String>,
-    mismatched_fields: Vec<String>,
+    mismatched_fields: Box<[String]>,
     exact_workspace_ensure_required: bool,
     message: &'static str,
 }
@@ -131,7 +131,7 @@ impl AgentBridgeFailure {
             bridge_reason: None,
             recovery_operations: RecoveryOperationSet::default(),
             diagnostic_reason: None,
-            mismatched_fields: Vec::new(),
+            mismatched_fields: Box::default(),
             exact_workspace_ensure_required: false,
             message,
         }
@@ -302,11 +302,11 @@ fn read_bounded_agent_bridge_error_body(
 /// filtered out but unrepresentable, and so the agent-visible diagnostic keeps
 /// the canonical spelling rather than whatever the response wrote.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct RecoveryOperationSet(u16);
+struct RecoveryOperationSet(u32);
 
 impl RecoveryOperationSet {
     fn from_response(values: Option<&Vec<String>>) -> Self {
-        let mut bits = 0u16;
+        let mut bits = 0u32;
         for value in values.into_iter().flatten() {
             if let Some(index) = crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS
                 .iter()
@@ -2616,7 +2616,10 @@ mod tests {
                 "message": "private-message-sentinel",
                 // Issue #4443 AC-2 / #4396: the real operation crosses, the
                 // one that does not exist is discarded.
-                "recovery_operations": ["execution.continue", "workspace.prune"]
+                "recovery_operations": [
+                    "execution.continue", "workspace.prune", "execution.settle_delivered",
+                    "pr.create_from_ci", "verify.run"
+                ]
             }),
         );
         let request = crate::AgentExecutionContinuationRequest {
@@ -2636,7 +2639,10 @@ mod tests {
             "bridge_reason=authority_mismatch",
             "diagnostic_reason=host_binding_stale",
             "mismatched_fields=ledger_head_hash,capability_generation",
-            "run JSON operation `execution.continue`",
+            "run JSON operation `execution.settle_delivered`",
+            "`pr.create_from_ci`",
+            "`execution.continue`",
+            "`verify.run`",
         ] {
             assert!(error.contains(expected), "missing {expected}: {error}");
         }

@@ -42,8 +42,10 @@ test.describe("Issue preview placement", () => {
   });
 
   test("Active cards show all three live tails without selecting their terminals", async ({ page }, info) => {
+    // Match the Issue controls fixture's viewport and fixed window height.
+    await page.setViewportSize({ width: 1600, height: 1100 });
     if (!liveUrl) await installEmbeddedRoutes(page);
-    await installIssuePreviewBackend(page);
+    await installIssuePreviewBackend(page, { issueHeight: 950 });
     await page.goto(liveUrl || APP_URL);
     const outputs = page.locator('[data-queue-column="active"] .issue-card-output');
     await expect(outputs).toHaveCount(3);
@@ -846,16 +848,16 @@ async function openIssueOutput(page: Page) {
   await page.getByRole("button", { name: "Output", exact: true }).click();
 }
 
-async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}) {
+async function installIssuePreviewBackend(page, { agentStatus = "running", issueHeight = 860 } = {}) {
   await page.addInitScript(
-    ({ agentStatus: status, projectKey }) => {
+    ({ agentStatus: status, projectKey, issueHeight }) => {
       window.__knowledgeLoadMessages = [];
 
       const issueWindow = {
         id: "tab-issue::issue-1",
         title: "Issue",
         preset: "issue",
-        geometry: { x: 40, y: 60, width: 1400, height: 860 },
+        geometry: { x: 40, y: 60, width: 1400, height: issueHeight },
         z_index: 1,
         status: "running",
         persist: true,
@@ -1124,6 +1126,6 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
         value: FixtureWebSocket,
       });
     },
-    { agentStatus, projectKey: new URL(liveUrl || APP_URL).pathname.split("/")[2] },
+    { agentStatus, issueHeight, projectKey: new URL(liveUrl || APP_URL).pathname.split("/")[2] },
   );
 }
