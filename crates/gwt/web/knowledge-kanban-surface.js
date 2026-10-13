@@ -1407,7 +1407,11 @@ export function createKnowledgeKanbanSurface({
           bar
             .querySelector(`[data-action="${action}"]`)
             ?.addEventListener("click", () => {
-              send({ kind: "issue_monitor_configure_profile" });
+              if (action === "monitor-settings") {
+                document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { section: "issues" } }));
+              } else {
+                send({ kind: "issue_monitor_configure_profile" });
+              }
             });
         }
         const maxActiveInput = bar.querySelector(".knowledge-monitor-max-active input");

@@ -2461,7 +2461,9 @@ fn try_apply_issue_monitor_control(
                 ))?;
             }
             if let Some(auto_apply_updates) = auto_apply_updates {
-                candidate.set_auto_apply_updates(Some(auto_apply_updates));
+                candidate
+                    .set_auto_apply_updates(Some(auto_apply_updates))
+                    .ok()?;
             }
             // Issue #4037 AC-3: the drain touches admission only, so it needs
             // no authority-epoch advance and revokes nothing.
@@ -11655,6 +11657,8 @@ exit 0
 
     #[test]
     fn issue_monitor_config_set_decodes_and_commits_atomically() {
+        let home = TempDir::new().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let _prefs_budget = pin_prefs_hang_guard();
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
@@ -11732,6 +11736,7 @@ exit 0
                 auto_apply_updates: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Raise {
                     reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                    automatic: None,
                     version: "9.99.0".to_string(),
                 }),
                 launch_agent: None,

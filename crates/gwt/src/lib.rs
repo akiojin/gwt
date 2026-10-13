@@ -74,6 +74,7 @@ pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
+pub mod update_settings;
 pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;

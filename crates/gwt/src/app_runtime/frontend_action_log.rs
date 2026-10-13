@@ -793,6 +793,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadPmReports { .. }
+        | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }
