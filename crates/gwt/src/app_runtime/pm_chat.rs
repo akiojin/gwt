@@ -58,7 +58,7 @@ impl AppRuntime {
             };
             let (current, error) =
                 match gwt::pm_current::snapshot(&project_root, pending_update.as_ref()) {
-                    Ok(current) => (Some(current), error),
+                    Ok(current) => (Some(Box::new(current)), error),
                     Err(current_error) => (None, Some(error.unwrap_or(current_error))),
                 };
             proxy.send(UserEvent::PmReportsLoaded {
@@ -79,7 +79,7 @@ impl AppRuntime {
         window_id: &str,
         session_id: &str,
         reports: Vec<gwt::protocol::PmReportView>,
-        current: Option<gwt::pm_current::PmCurrentSnapshot>,
+        current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     ) -> Vec<OutboundEvent> {
         if self.pm_chat_session_id(window_id) != Some(session_id) {

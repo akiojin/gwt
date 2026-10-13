@@ -2270,7 +2270,7 @@ enum UserEvent {
         window_id: String,
         session_id: String,
         reports: Vec<gwt::protocol::PmReportView>,
-        current: Option<gwt::pm_current::PmCurrentSnapshot>,
+        current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     },
     AgentBackendConnectionProbeComplete {

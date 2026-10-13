@@ -2092,7 +2092,7 @@ pub enum BackendEvent {
         session_id: Option<String>,
         reports: Vec<PmReportView>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        current: Option<crate::pm_current::PmCurrentSnapshot>,
+        current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     },
     /// Origin-client completion receipt for one authenticated pane snapshot

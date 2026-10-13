@@ -39,7 +39,7 @@ fn facts_from_monitor(
     title: impl Fn(u64) -> Option<String>,
 ) -> PmMonitorFacts {
     PmMonitorFacts {
-        source: serde_json::to_value(&status.source)
+        source: serde_json::to_value(status.source)
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_else(|| "unavailable".into()),
