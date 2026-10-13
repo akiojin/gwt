@@ -101,6 +101,15 @@ fn is_isolated(path: &Path) -> bool {
     {
         return true;
     }
+    // Nested verification narrows TMPDIR. Parent fixtures still belong to
+    // the OS user's temporary directory, which confstr resolves independently.
+    #[cfg(target_os = "macos")]
+    if macos_user_temp_dir()
+        .and_then(|temporary| temporary.canonicalize().ok())
+        .is_some_and(|temporary| is_isolated_under(path, &temporary))
+    {
+        return true;
+    }
     // Socket fixtures deliberately use the OS short temp root when TMPDIR
     // is a long per-user or per-verification directory. Resolve /tmp's macOS
     // alias, and apply the same parent/leaf checks to this trusted root.
@@ -112,6 +121,30 @@ fn is_isolated(path: &Path) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(target_os = "macos")]
+fn macos_user_temp_dir() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    // SAFETY: confstr accepts a null buffer when querying the required size.
+    let length = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, std::ptr::null_mut(), 0) };
+    if length == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; length];
+    // SAFETY: the buffer has the requested length and remains live for the call.
+    let written = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if written != length || buffer.pop() != Some(0) {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_vec(buffer)))
 }
 
 fn is_isolated_under(path: &Path, temporary: &Path) -> bool {
