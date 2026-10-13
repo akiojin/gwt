@@ -4174,6 +4174,41 @@ pub fn load_owner_generation_ledger(
     load_owner_generation_ledger_from_context(&context)
 }
 
+/// A build predecessor may have settled while its PTY is still winding down.
+/// Prove termination from its exact binding, including later lifecycle events;
+/// the presence of a concurrent successor alone proves nothing about it.
+pub(crate) fn session_generation_is_terminal(
+    worktree: &Path,
+    identity: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<bool> {
+    let binding = &identity.execution_binding;
+    let kind = match binding.owner_kind.as_str() {
+        "issue" => ExecutionOwnerKind::Issue,
+        "spec" => ExecutionOwnerKind::Spec,
+        _ => return Ok(false),
+    };
+    let owner = ExecutionOwnerKey {
+        kind,
+        number: binding.owner_number,
+    };
+    let Some(ledger) = load_owner_generation_ledger(worktree, owner)? else {
+        return Ok(false);
+    };
+    Ok(ledger.generations.iter().any(|generation| {
+        generation.identity.worktree_binding_hash == worktree_binding_hash(&identity.worktree_path)
+            && matches!(
+                ledger.effective_status_for(generation),
+                ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed
+            )
+            && execution_binding_authorizes_lifecycle_descendant(
+                &ledger,
+                generation,
+                &identity.session_id,
+                &binding.identity,
+            )
+    }))
+}
+
 /// Load and validate an owner-scoped ledger together with the caller
 /// worktree's independent pointer/projection. Mutation/verification gates use
 /// this strict view so stale worktrees and old flat writers fail closed.
