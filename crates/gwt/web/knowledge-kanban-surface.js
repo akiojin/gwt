@@ -771,7 +771,8 @@ export function createKnowledgeKanbanSurface({
         for (const [type, listener] of Object.entries(listeners)) root.addEventListener(type, listener);
         popup.addEventListener("mouseenter", () => { popupHovered = true; });
         popup.addEventListener("mouseleave", leavePopup);
-        document.addEventListener("keydown", escape);
+        // Dismiss before the app's bubble handler turns Escape into overview.
+        document.addEventListener("keydown", escape, true);
         document.addEventListener("scroll", refresh, true);
         document.addEventListener("pointerup", pointerEnd);
         document.addEventListener("pointercancel", pointerEnd);
@@ -799,7 +800,7 @@ export function createKnowledgeKanbanSurface({
             hide();
             for (const [type, listener] of Object.entries(listeners)) root.removeEventListener(type, listener);
             document.removeEventListener("scroll", refresh, true);
-            document.removeEventListener("keydown", escape);
+            document.removeEventListener("keydown", escape, true);
             document.removeEventListener("pointerup", pointerEnd);
             document.removeEventListener("pointercancel", pointerEnd);
             document.defaultView?.removeEventListener("resize", hide);

@@ -169,7 +169,8 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
 test("T-7a: current labels explain themselves with keyboard focus and hover", async ({ page }) => {
   const popup = page.locator('.issue-control-explanation[role="tooltip"]');
   const controlMessages = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
-    message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")));
+    message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")
+      || message.kind === "update_viewport"));
   const before = await controlMessages();
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
