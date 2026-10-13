@@ -25,7 +25,9 @@ test.describe('PM reports', () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
-      await expect(reports).toBeVisible();
+      // Startup restores the PM registration after the canvas-ready round trip.
+      // Allow that real backend hydration on a shared, loaded verification host.
+      await expect(reports).toBeVisible({ timeout: 30_000 });
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
       const id = await pane.getAttribute('data-id');
