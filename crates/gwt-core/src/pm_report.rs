@@ -48,13 +48,8 @@ pub fn reports_path(repo_path: &Path) -> PathBuf {
     crate::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm-reports.jsonl")
 }
 
-/// A successful post has been appended, synced and read back while holding the lock.
-pub fn post_report(
-    repo_path: &Path,
-    kind: PmReportKind,
-    body: &str,
-    question: Option<&str>,
-) -> Result<PmReport> {
+/// Validate fields shared by legacy Reports and instruction-backed Q&A.
+pub fn validate_report_input(kind: PmReportKind, body: &str, question: Option<&str>) -> Result<()> {
     if kind == PmReportKind::Qa && question.is_none_or(|value| value.trim().is_empty()) {
         return Err(GwtError::Config(
             "PM Q&A report question must be nonempty".into(),
@@ -73,6 +68,17 @@ pub fn post_report(
             "PM report body must not exceed 64 KiB".into(),
         ));
     }
+    Ok(())
+}
+
+/// A successful post has been appended, synced and read back while holding the lock.
+pub fn post_report(
+    repo_path: &Path,
+    kind: PmReportKind,
+    body: &str,
+    question: Option<&str>,
+) -> Result<PmReport> {
+    validate_report_input(kind, body, question)?;
     let path = reports_path(repo_path);
     fs::create_dir_all(path.parent().expect("report store has a parent"))?;
     let mut file = OpenOptions::new()

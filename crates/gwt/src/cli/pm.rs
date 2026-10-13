@@ -176,6 +176,13 @@ pub(super) fn run<E: CliEnv>(
                 ));
             }
             let (report, saved_instruction) = if let Some(mut input) = instruction {
+                pm_report::validate_report_input(kind, &body, question.as_deref()).map_err(
+                    |error| {
+                        SpecOpsError::from(ApiError::Unexpected(format!(
+                            "failed to validate PM report: {error}"
+                        )))
+                    },
+                )?;
                 // Preserve the existing post contract: reject damaged history
                 // before saving a report that the Reports reader cannot show.
                 pm_report::load_reports(&repo_path).map_err(|error| {
@@ -183,10 +190,8 @@ pub(super) fn run<E: CliEnv>(
                         "failed to validate PM report history: {error}"
                     )))
                 })?;
-                if kind != PmReportKind::Qa || body.len() > 64 * 1024 {
-                    return Err(refusal(
-                        "instruction capture requires a Q&A report body of at most 64 KiB".into(),
-                    ));
+                if kind != PmReportKind::Qa {
+                    return Err(refusal("instruction capture requires a Q&A report".into()));
                 }
                 input.summary = question.unwrap_or_default();
                 input.answer = body;

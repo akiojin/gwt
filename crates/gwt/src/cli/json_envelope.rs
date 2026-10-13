@@ -5835,6 +5835,15 @@ mod tests {
         );
         let source = gwt_core::user_instruction::instructions_path(&repo);
         let before = std::fs::read(&source).unwrap();
+        let mut oversized = capture();
+        let crate::cli::pm::PmCommand::ReportPost { question, .. } = &mut oversized else {
+            panic!("expected Q&A capture")
+        };
+        *question = Some("q".repeat(64 * 1024 + 1));
+        output.clear();
+        let error = crate::cli::pm::run(&mut env, oversized, &mut output).unwrap_err();
+        assert!(error.to_string().contains("question"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), before);
         std::fs::write(gwt_core::pm_report::reports_path(&repo), b"broken\n").unwrap();
         output.clear();
         assert!(crate::cli::pm::run(&mut env, capture(), &mut output).is_err());
