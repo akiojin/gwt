@@ -267,8 +267,15 @@ try {
   env.GWT_BROWSER_URL_FILE = join(home, "url");
   gui = start(gwt, ["--no-tray", "--no-open"], env, project);
   console.log(`Fresh gwt PID: ${gui.child.pid}; isolated HOME: ${home}`);
-  await waitFor(() => exists(env.GWT_BROWSER_URL_FILE), gui, 90_000, "Fresh gwt did not publish its URL");
-  const url = (await readFile(env.GWT_BROWSER_URL_FILE, "utf8")).trim();
+  let url;
+  await waitFor(async () => {
+    try {
+      const candidate = (await readFile(env.GWT_BROWSER_URL_FILE, "utf8")).trim();
+      if (!["http:", "https:"].includes(new URL(candidate).protocol)) return false;
+      url = candidate;
+      return true;
+    } catch { return false; }
+  }, gui, 90_000, "Fresh gwt did not publish a valid URL");
   await finish(start("curl", ["-fsS", "-I", url]), 15_000);
   if (/another tray-resident gwt instance is already running/i.test(gui.stdout + gui.stderr)) throw new Error("Fresh instance isolation failed");
   // Retain a real Hub connection between the separate dark/light contexts.
