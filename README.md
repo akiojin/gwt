@@ -1081,13 +1081,17 @@ gwt shows an actionable hint.
 ## PM project configuration
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
-time, and a **Copy** button. It is read-only; use **Execution log** for terminal
+time, and a **Copy** button. Q&A reports separate the question or instruction from
+the answer and action results; use **Report kind** to filter the history. It is
+read-only; use **Execution log** for terminal
 interaction. Reports survive restarts in
 `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`, with no automatic
 expiry or count limit. Each non-empty report is limited to 64 KiB.
 
 A registered PM can publish through `pm.report.post` with `kind` (`progress`,
-`decision`, or `blocker`) and `body`; `pm.report.list` reads the saved history.
+`decision`, `blocker`, or `qa`) and `body`; `qa` also requires a non-empty
+`question` summarizing the user's question or instruction. Its `body` contains
+the answer, actions taken, and their results. `pm.report.list` reads the saved history.
 These use the standard gwtd JSON envelope. A successful post confirms the report
 was saved and read back; failures return an explicit error.
 

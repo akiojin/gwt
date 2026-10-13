@@ -120,6 +120,13 @@ into this generated skill supplements the PM contract.
   surface with `pm.report.post` (`kind`: `progress` / `decision` /
   `blocker`, `body` in the user's language), in addition to the
   conversation. Keep the body to the same at-a-glance format.
+- After answering a user's question or instruction, post exactly one Q&A
+  report in the same turn with `pm.report.post`, `kind: "qa"`, required
+  `question`, and `body`. Summarize the question or instruction in `question`;
+  include the answer and the actions taken with their results in `body`,
+  naming Issue numbers created, changed, or launched. If none were taken,
+  state "No action" and why. Write both fields in the user's language.
+  This rule takes precedence over unchanged-cycle silence and digest suppression.
 
 ## Request intake via sub-agents
 
@@ -2961,6 +2968,19 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, codex, "mirrors must be byte-identical");
         assert_eq!(claude, render_skill_md());
         let intake = unwrapped(&claude);
+        for phrase in [
+            "After answering a user's question or instruction, post exactly one Q&A report in the same turn",
+            "`kind: \"qa\"`",
+            "required `question`",
+            "Summarize the question or instruction in `question`",
+            "include the answer and the actions taken with their results in `body`",
+            "Issue numbers created, changed, or launched",
+            "state \"No action\" and why",
+            "Write both fields in the user's language",
+            "takes precedence over unchanged-cycle silence and digest suppression",
+        ] {
+            assert!(intake.contains(phrase), "missing generated Q&A rule `{phrase}`");
+        }
         assert!(intake.contains("Before registration, offer one optional line"));
         assert!(intake.contains("If the user opts in, follow the existing `gwt-discussion` skill"));
         assert!(intake.contains("If the user says no or gives no answer"));
