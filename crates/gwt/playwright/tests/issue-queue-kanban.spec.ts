@@ -171,8 +171,6 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const controlMessages = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
     message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")));
   const before = await controlMessages();
-  // Keep native hover from competing with this keyboard-only phase.
-  await page.mouse.move(1590, 1090);
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
   await page.keyboard.press("Tab");
@@ -180,9 +178,10 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await expect(autonomous).toBeFocused();
   await expect(popup).toBeVisible();
   await expect(popup).toHaveText("Allow eligible issues to run without waiting for human approval.");
-  await page.screenshot({ path: test.info().outputPath("issue-control-explanation.png") });
   await expect(autonomous).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
   await autonomous.hover();
+  // Capture can refresh native hover, so finish the keyboard checks first.
+  await page.screenshot({ path: test.info().outputPath("issue-control-explanation.png") });
   await page.keyboard.press("Escape");
   await expect(popup).not.toBeVisible();
   await page.mouse.move(1590, 1090);
