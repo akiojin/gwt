@@ -114,6 +114,7 @@ test("camera-only workspace echoes preserve the committed catalog reference", ()
   const publishSource = source.slice(source.indexOf("      function publishWindowCatalog()"),
     source.indexOf("      // Existing shell callers"));
   const publish = new Function("windowCatalogModel", "appState", "windowRuntimeStateMap", "focusedId",
+    "reconcilingWindowCatalog = false",
     `${publishSource}\nreturn publishWindowCatalog();`);
   const appState = { active_tab_id: "a", tabs: [{ id: "a", title: "Alpha", workspace: {
     windows: [windowAt("a::one", 0, 0)], viewport: { x: 0, y: 0, zoom: 1 },
@@ -125,6 +126,8 @@ test("camera-only workspace echoes preserve the committed catalog reference", ()
   publish(model, appState, new Map(), null);
   assert.equal(model.read().catalog, committed, "camera echo must not notify catalog subscribers");
   appState.tabs[0].workspace.windows[0].title = "Changed";
+  publish(model, appState, new Map(), null, true);
+  assert.equal(model.read().catalog, committed, "reconciliation must finish before notifying views");
   publish(model, appState, new Map(), null);
   assert.notEqual(model.read().catalog, committed, "window changes still notify both views");
   assert.equal(model.read().catalog.version, committed.version + 1);
