@@ -7215,12 +7215,18 @@ button.workspace-board-ref:focus-visible {
 .pm-chat button:disabled { cursor: default; color: var(--color-text-disabled); }
 .pm-chat button:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.pm-chat__filter { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-3); color: var(--color-text-muted); font-size: var(--type-xs); border-bottom: 1px solid var(--color-border); }
+.pm-chat__filter select { padding: var(--space-1) var(--space-2); border: 1px solid var(--color-button-border); border-radius: var(--radius-sm); background: var(--color-button-bg); color: var(--color-button-fg); font: inherit; }
+.pm-chat__filter select:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__notice { padding: var(--space-3); margin: 0; color: var(--color-text-muted); }
 .pm-chat__transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); }
 .pm-chat__message { margin-bottom: var(--space-3); padding: var(--space-3); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
 .pm-chat__author { display: flex; align-items: center; gap: var(--space-2); color: var(--color-text-muted); font-size: var(--type-xs); }
 .pm-chat__author button { margin-inline-start: auto; }
 .pm-chat__text { margin: var(--space-2) 0 0; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__section-label { margin: var(--space-3) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.pm-chat__question { margin: var(--space-2) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.pm-chat__answer { margin-top: var(--space-3); border-top: 1px solid var(--color-border); }
 .pm-conversation-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .pm-conversation-log { position: relative; flex: 1; min-height: 0; }
 .pm-conversation-log[hidden] { display: none; }

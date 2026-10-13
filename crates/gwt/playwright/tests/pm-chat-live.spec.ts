@@ -13,7 +13,7 @@ test.describe('PM reports', () => {
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(90_000);
 
-  test('durable Markdown reports, copy, read-only view, reload and unchanged execution log', async ({ page, context }, info) => {
+  test('durable Markdown and Q&A reports, kind filter, copy, reload and unchanged execution log', async ({ page, context }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -37,15 +37,19 @@ test.describe('PM reports', () => {
       for (const key of Object.keys(childEnv)) {
         if (key.startsWith('GWT_SESSION_') || key.startsWith('GWT_HOOK_FORWARD_')) delete childEnv[key];
       }
-      const post = spawnSync(`${ROOT}/target/debug/gwtd`, [], {
-        cwd: ROOT, env: childEnv, encoding: 'utf8',
-        input: JSON.stringify({ schema_version: 1, operation: 'pm.report.post', params: { kind: 'progress', body } }),
-      });
-      expect(post.status, post.stderr).toBe(0);
-      const envelope = JSON.parse(post.stdout);
-      expect(envelope.ok).toBe(true);
-      const saved = JSON.parse(envelope.output);
-      expect(saved.ok).toBe(true);
+      const pmOperation = (operation: string, params: Record<string, string> = {}) => {
+        const result = spawnSync(`${ROOT}/target/debug/gwtd`, [], {
+          cwd: ROOT, env: childEnv, encoding: 'utf8',
+          input: JSON.stringify({ schema_version: 1, operation, params }),
+        });
+        expect(result.status, result.stderr).toBe(0);
+        const envelope = JSON.parse(result.stdout);
+        expect(envelope.ok).toBe(true);
+        const output = JSON.parse(envelope.output);
+        expect(output.ok).toBe(true);
+        return output;
+      };
+      const saved = pmOperation('pm.report.post', { kind: 'progress', body });
       expect(saved.report.body).toBe(body);
       expect(saved.report.id).toBeTruthy();
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
@@ -72,6 +76,36 @@ test.describe('PM reports', () => {
       await report.getByRole('button', { name: 'Copy report' }).click();
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(body);
 
+      const question = 'Why did PM recommend waiting?\nWhat should I do next?';
+      const answerMarker = `PM answer ${info.project.name}`;
+      const answerBody = `# ${answerMarker}\n\n**Confirmed**: use \`pm.report.post\`.\n\n- Keep the question\n- Read the answer`;
+      const qaSaved = pmOperation('pm.report.post', { kind: 'qa', question, body: answerBody });
+      expect(qaSaved.report).toMatchObject({ kind: 'qa', question, body: answerBody });
+      const listed = pmOperation('pm.report.list');
+      expect(listed.reports.find((entry: { id: string }) => entry.id === qaSaved.report.id))
+        .toMatchObject({ kind: 'qa', question, body: answerBody });
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      const qaReport = reports.locator('article').filter({ has: page.getByRole('heading', { name: answerMarker, exact: true }) });
+      await expect(qaReport.getByRole('heading', { name: 'Q', exact: true })).toBeVisible();
+      await expect(qaReport.getByRole('region', { name: 'Question', exact: true }).locator('.pm-chat__question')).toHaveText(question);
+      await expect(qaReport.getByRole('heading', { name: 'A', exact: true })).toBeVisible();
+      await expect(qaReport.getByRole('region', { name: 'Answer', exact: true }).locator('strong')).toHaveText('Confirmed');
+      await qaReport.getByRole('button', { name: 'Copy report' }).click();
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(`Q: ${question}\n\nA:\n${answerBody}`);
+      const kindFilter = pane.getByRole('combobox', { name: 'Report kind', exact: true });
+      await kindFilter.selectOption('qa');
+      await expect(qaReport).toBeVisible();
+      await expect(report).not.toBeVisible();
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(kindFilter).toHaveValue('qa');
+      await kindFilter.selectOption('progress');
+      await expect(report).toBeVisible();
+      await expect(qaReport).not.toBeVisible();
+      await kindFilter.selectOption('blocker');
+      await expect(reports.locator('article')).toHaveCount(0);
+      await expect(pane.getByRole('status')).toHaveText('No Blocker reports yet.');
+      await kindFilter.selectOption('all');
+
       const terminal = await pane.locator('.terminal-root').elementHandle();
       await page.evaluate(({ id, session }) => {
         const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
@@ -86,6 +120,7 @@ test.describe('PM reports', () => {
       await expect(reports).not.toContainText('RAW');
       await expect(reports).not.toContainText('Native transcript');
       await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+      await expect(kindFilter).not.toBeVisible();
       await expect(pane.locator('.xterm')).toContainText('RAW snapshot');
       await expect(pane.locator('.xterm')).toContainText('RAW appended');
       expect(await pane.locator('.terminal-root').evaluate((node, original) => node === original, terminal)).toBe(true);
@@ -94,6 +129,10 @@ test.describe('PM reports', () => {
       expect(await page.evaluate(() => (window as any).__pmReportAttachmentCalls)).toEqual([]);
       await page.reload();
       await expect(report).toBeVisible();
+      await expect(qaReport.locator('.pm-chat__question')).toHaveText(question);
+      await expect(qaReport.locator('strong')).toHaveText('Confirmed');
+      await kindFilter.selectOption('qa');
+      await qaReport.scrollIntoViewIfNeeded();
       const screenshot = info.outputPath(`pm-reports-${info.project.name}.png`);
       await page.screenshot({ path: screenshot });
       await info.attach('PM reports', { path: screenshot, contentType: 'image/png' });

@@ -1017,12 +1017,14 @@ gwt が対処メッセージを表示）。
 ## PM のプロジェクト設定
 
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
-**Copy** ボタン付きで表示します。閲覧専用で、ターミナル操作には **Execution log** を
+**Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
+**Report kind** で種類を絞り込めます。閲覧専用で、ターミナル操作には **Execution log** を
 使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存し、
 再起動後も保持します。自動失効・件数制限はなく、空でない本文は 1 件 64 KiB までです。
 
-登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker`）と
-`body` で投稿し、`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
+登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker` / `qa`）と
+`body` で投稿します。`qa` には、ユーザーの質問・指示を要約した空でない `question` が必須で、
+`body` に回答・取った行動・結果を記載します。`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
 使用します。投稿成功は保存と読み戻しの確認を意味し、失敗時は明示的なエラーを返します。
 
 常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、

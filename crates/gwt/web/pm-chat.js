@@ -52,6 +52,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let disposed = false;
   let logs = false;
   let digest = '';
+  let latestState;
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -67,12 +68,23 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   reportsButton.type = logButton.type = 'button';
   toolbar.append(reportsButton, logButton);
   const body = element('div', 'pm-chat__body');
+  const filter = element('label', 'pm-chat__filter', 'Report kind');
+  const kindSelect = element('select', '');
+  kindSelect.setAttribute('aria-label', 'Report kind');
+  const kindLabels = { all: 'All reports', qa: 'Q&A', progress: 'Progress', decision: 'Decision', blocker: 'Blocker' };
+  for (const [kind, label] of Object.entries(kindLabels)) {
+    const option = element('option', '', label);
+    option.value = kind;
+    option.selected = kind === 'all';
+    kindSelect.append(option);
+  }
+  filter.append(kindSelect);
   const notice = element('p', 'pm-chat__notice');
   notice.setAttribute('role', 'status');
   const transcript = element('div', 'pm-chat__transcript');
   transcript.setAttribute('role', 'log');
   transcript.setAttribute('aria-label', 'PM reports');
-  body.append(notice, transcript);
+  body.append(filter, notice, transcript);
   root.append(toolbar, body);
 
   function showLogs(value) {
@@ -85,17 +97,21 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   }
   const showReports = () => showLogs(false);
   const showLog = () => showLogs(true);
+  const filterReports = () => update(latestState);
   function update(state) {
     if (disposed || !state) return;
     setSession(state.sessionId);
+    latestState = state;
     root.dataset.stateVersion = String(state.revision);
     const reports = state.reports;
-    const nextDigest = JSON.stringify(reports);
+    const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
+    const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
     if (digest !== nextDigest) {
       const atBottom = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop <= 32;
       const previousScroll = transcript.scrollTop;
-      const nodes = reports.map(report => {
+      const nodes = visibleReports.map(report => {
         const row = element('article', 'pm-chat__message');
+        const qa = report.kind === 'qa';
         const header = element('div', 'pm-chat__author');
         const time = element('time', '', new Date(report.created_at).toLocaleString());
         time.setAttribute('datetime', report.created_at);
@@ -104,7 +120,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         copy.setAttribute('aria-label', 'Copy report');
         copy.addEventListener('click', async () => {
           try {
-            await copyText(report.body);
+            await copyText(qa ? `Q: ${report.question || ''}\n\nA:\n${report.body}` : report.body);
             if (!disposed) copy.textContent = 'Copied';
           } catch {
             if (!disposed) {
@@ -113,8 +129,18 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
             }
           }
         });
-        header.append(element('span', '', report.kind), time, copy);
-        row.append(header, renderUiContent(document, markdownContent(report), 'pm-chat__text'));
+        header.append(element('span', '', qa ? 'Q&A' : report.kind), time, copy);
+        row.append(header);
+        const content = renderUiContent(document, markdownContent(report), 'pm-chat__text');
+        if (qa) {
+          const question = element('section', '');
+          question.setAttribute('aria-label', 'Question');
+          question.append(element('h2', 'pm-chat__section-label', 'Q'), element('p', 'pm-chat__question', report.question || ''));
+          const answer = element('section', 'pm-chat__answer');
+          answer.setAttribute('aria-label', 'Answer');
+          answer.append(element('h2', 'pm-chat__section-label', 'A'), content);
+          row.append(question, answer);
+        } else row.append(content);
         return row;
       });
       transcript.replaceChildren(...nodes);
@@ -122,7 +148,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
       digest = nextDigest;
     }
     notice.textContent = state.error || (!state.loaded ? 'Loading PM reports…'
-      : reports.length ? '' : 'No PM reports yet. Use the execution log to interact with PM.');
+      : !reports.length ? 'No PM reports yet. Use the execution log to interact with PM.'
+        : visibleReports.length ? '' : `No ${kindLabels[kindSelect.value]} reports yet.`);
     notice.hidden = !notice.textContent;
   }
   function setSession(nextSession) {
@@ -137,11 +164,13 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     disposed = true;
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
+    kindSelect.removeEventListener('change', filterReports);
     root.replaceChildren();
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }
   reportsButton.addEventListener('click', showReports);
   logButton.addEventListener('click', showLog);
+  kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showLogs(false);
   return { update, setSession, dispose };
