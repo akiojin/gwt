@@ -38,6 +38,60 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   assert.deepEqual(copied, [report().body]);
 });
 
+test('Q&A separates safe question text from the Markdown answer and copies both', async () => {
+  const { root, update, copied } = fixture();
+  const qa = { ...report(), kind: 'qa', question: 'Why <img src=x onerror=alert(1)>?\nWhat next?' };
+  update([qa]);
+  const question = root.querySelector('section[aria-label="Question"]');
+  const answer = root.querySelector('section[aria-label="Answer"]');
+  assert.ok(question, 'Q&A must have a distinct question section');
+  assert.equal(question.querySelector('h2').textContent, 'Q');
+  assert.equal(question.querySelector('.pm-chat__question').textContent, qa.question);
+  assert.equal(question.querySelector('img'), null);
+  assert.equal(answer.querySelector('h2').textContent, 'A');
+  assert.equal(answer.querySelector('.knowledge-markdown-body strong').textContent, 'Ready');
+  root.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`Q: ${qa.question}\n\nA:\n${qa.body}`]);
+});
+
+test('report kind filter retains its selection on polling and hides with the execution log', () => {
+  const { root, update } = fixture();
+  const history = [report(), { ...report('qa'), kind: 'qa', question: 'Why?' }, { ...report('decision'), kind: 'decision' }];
+  update(history);
+  const select = root.querySelector('select');
+  assert.ok(select, 'Reports must offer a report kind selector');
+  assert.match(select.closest('label').textContent, /^Report kind/);
+  assert.deepEqual(Array.from(select.options, option => [option.value, option.textContent]), [
+    ['all', 'All reports'], ['qa', 'Q&A'], ['progress', 'Progress'], ['decision', 'Decision'], ['blocker', 'Blocker'],
+  ]);
+  const choose = kind => {
+    select.querySelector(`option[value="${kind}"]`).selected = true;
+    select.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));
+  };
+  choose('qa');
+  assert.equal(root.querySelectorAll('article').length, 1);
+  assert.ok(root.querySelector('.pm-chat__question'));
+  update([...history, { ...report('follow-up'), kind: 'qa', question: 'What next?' }]);
+  assert.equal(select.value, 'qa');
+  assert.equal(root.querySelectorAll('article').length, 2);
+  for (const kind of ['progress', 'decision']) {
+    choose(kind);
+    assert.equal(root.querySelectorAll('article').length, 1);
+    assert.equal(root.querySelector('.pm-chat__author span').textContent, kind);
+  }
+  choose('blocker');
+  assert.equal(root.querySelectorAll('article').length, 0);
+  assert.match(root.querySelector('[role="status"]').textContent, /No Blocker reports yet/);
+  root.querySelectorAll('.pm-chat__toolbar button')[1].click();
+  assert.equal(select.closest('.pm-chat__body').hidden, true);
+  root.querySelectorAll('.pm-chat__toolbar button')[0].click();
+  assert.equal(select.value, 'blocker');
+  assert.equal(select.closest('.pm-chat__body').hidden, false);
+  choose('all');
+  assert.equal(root.querySelectorAll('article').length, 4);
+});
+
 test('report updates preserve nodes and scroll, append history, and retain history on read failure', () => {
   const { root, update } = fixture();
   update([report()]);
@@ -100,6 +154,10 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
   const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
   const section = css.slice(css.indexOf('/* PM conversation */'));
   assert.match(section, /var\(--color-/);
+  assert.match(section, /\.pm-chat__filter\s*\{[^}]*var\(--space-/);
+  assert.match(section, /\.pm-chat__filter select:focus-visible\s*\{[^}]*var\(--color-focus-ring\)/);
+  assert.match(section, /\.pm-chat__question\s*\{[^}]*white-space:\s*pre-wrap/);
+  assert.match(section, /\.pm-chat__section-label\s*\{[^}]*var\(--type-/);
   assert.doesNotMatch(section, /#[\da-f]{3,8}\b|rgba?\(|position:\s*(fixed|absolute)/i);
 });
 

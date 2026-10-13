@@ -1485,15 +1485,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.report.post" => {
-            let kind = required_string(params, "kind")?;
+            let kind: gwt_core::pm_report::PmReportKind = serde_json::from_value(Value::String(
+                required_string(params, "kind")?,
+            ))
+            .map_err(|_| CliParseError::InvalidValue {
+                flag: "kind",
+                reason: "expected one of: progress, decision, blocker, qa",
+            })?;
+            let question = if kind == gwt_core::pm_report::PmReportKind::Qa {
+                Some(required_string(params, "question")?)
+            } else {
+                optional_string(params, "question")?
+            };
             CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
                 project_root: optional_string(params, "project_root")?,
-                kind: serde_json::from_value(Value::String(kind)).map_err(|_| {
-                    CliParseError::InvalidValue {
-                        flag: "kind",
-                        reason: "expected one of: progress, decision, blocker",
-                    }
-                })?,
+                kind,
+                question,
                 body: required_string(params, "body")?,
             })
         }
@@ -5672,6 +5679,26 @@ mod tests {
     }
 
     #[test]
+    fn qa_reports_require_a_nonempty_question() {
+        assert!(matches!(
+            ok(
+                "pm.report.post",
+                json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed."})
+            ),
+            CliCommand::Pm(_)
+        ));
+        for params in [
+            json!({"kind":"qa", "body":"Checks passed."}),
+            json!({"kind":"qa", "question":" \n ", "body":"Checks passed."}),
+        ] {
+            assert!(matches!(
+                err("pm.report.post", params),
+                CliParseError::MissingFlag("question")
+            ));
+        }
+    }
+
+    #[test]
     fn pm_report_post_requires_pm_authority_except_for_direct_cli() {
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
         let _lock = crate::env_test_lock()
@@ -5683,7 +5710,7 @@ mod tests {
         let mut env = TestEnv::new(repo.clone());
         let post = || match ok(
             "pm.report.post",
-            json!({"kind":"progress", "body":"Persisted progress"}),
+            json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed."}),
         ) {
             CliCommand::Pm(command) => command,
             other => panic!("unexpected report command: {other:?}"),
@@ -5694,7 +5721,11 @@ mod tests {
             crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
             0
         );
-        assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["ok"], true);
+        let saved: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(saved["ok"], true);
+        assert_eq!(saved["report"]["kind"], "qa");
+        assert_eq!(saved["report"]["question"], "Can we ship?");
+        assert_eq!(saved["report"]["body"], "Checks passed.");
         let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
         output.clear();
         let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
@@ -5729,6 +5760,10 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["reports"][1]["question"],
+            "Can we ship?"
         );
     }
 

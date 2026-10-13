@@ -3724,10 +3724,13 @@ mod tests {
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
-                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress,
+                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
                 created_at: chrono::Utc::now(),
-            })],
+            }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
+                "id": "qa", "kind": "qa", "question": "Can we ship?",
+                "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
+            })).unwrap())],
         };
         let value = serde_json::to_value(&event).unwrap();
         let html = value["reports"][0]["body_html"].as_str().unwrap();
@@ -3742,6 +3745,12 @@ mod tests {
         }
         assert!(!html.contains("<script>"));
         assert_eq!(value["reports"][0]["kind"], "progress");
+        assert_eq!(value["reports"][1]["kind"], "qa");
+        assert_eq!(value["reports"][1]["question"], "Can we ship?");
+        assert!(value["reports"][1]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>Yes.</strong>"));
         assert_eq!(
             event.delivery_policy().delivery,
             BackendEventDeliveryClass::Snapshot
