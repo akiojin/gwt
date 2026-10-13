@@ -506,6 +506,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
+        "board.sync" => {
+            reject_unknown_params(params, &[], "board.sync")?;
+            CliCommand::Board(BoardCommand::Sync)
+        }
         "board.config.show" | "board.config-show" => {
             CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
         }
@@ -1045,6 +1049,36 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 body: required_string(params, "body")?,
             })
         }
+        "actions.dispatch" => {
+            reject_unknown_params(params, &["workflow", "ref", "inputs"], "actions.dispatch")?;
+            let workflow = match lookup(params, "workflow") {
+                Some(Value::String(name)) => name.clone(),
+                Some(Value::Number(id)) if id.as_u64().is_some() => id.to_string(),
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "workflow",
+                        reason: "must be a workflow filename or positive ID",
+                    })
+                }
+            };
+            let inputs = match lookup(params, "inputs") {
+                None => Map::new(),
+                Some(Value::Object(inputs)) => inputs.clone(),
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "inputs",
+                        reason: "must be a JSON object",
+                    })
+                }
+            };
+            let call = super::ActionsDispatchCall {
+                workflow,
+                git_ref: required_string(params, "ref")?,
+                inputs,
+            };
+            super::actions::validate_dispatch_call(&call)?;
+            CliCommand::Actions(ActionsCommand::Dispatch { call })
+        }
         "actions.logs" => CliCommand::Actions(ActionsCommand::Logs {
             run_id: required_u64(params, "run_id")?,
         }),
@@ -1450,6 +1484,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.report.post" => {
+            let kind = required_string(params, "kind")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
+                project_root: optional_string(params, "project_root")?,
+                kind: serde_json::from_value(Value::String(kind)).map_err(|_| {
+                    CliParseError::InvalidValue {
+                        flag: "kind",
+                        reason: "expected one of: progress, decision, blocker",
+                    }
+                })?,
+                body: required_string(params, "body")?,
+            })
+        }
+        "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
+            project_root: optional_string(params, "project_root")?,
+        }),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
@@ -5215,6 +5265,16 @@ mod tests {
     }
 
     #[test]
+    fn board_sync_is_available_without_enabling_external_io() {
+        let command = ok("board.sync", json!({}));
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(&mut env, command).unwrap();
+        assert_eq!(code, 0);
+        assert!(output.contains("disabled"), "{output}");
+    }
+
+    #[test]
     fn board_post_rejects_work_keys() {
         assert!(matches!(
             err(
@@ -5573,6 +5633,105 @@ mod tests {
     }
 
     // SPEC-3431: PM agent diagnostics parse variants.
+    #[test]
+    fn pm_report_operations_parse_and_expose_read_only_listing() {
+        let command = ok(
+            "pm.report.post",
+            json!({"kind": "decision", "body": "# Decision", "project_root": "/tmp/project"}),
+        );
+        assert!(matches!(command, CliCommand::Pm(_)));
+        assert!(matches!(ok("pm.report.list", json!({})), CliCommand::Pm(_)));
+        assert!(matches!(
+            ok("pm.report.list", json!({"project_root": "/tmp/project"})),
+            CliCommand::Pm(_)
+        ));
+        assert!(matches!(
+            err("pm.report.post", json!({"kind":"other", "body":"text"})),
+            CliParseError::InvalidValue { flag: "kind", .. }
+        ));
+        assert!(matches!(
+            err("pm.report.post", json!({"kind":"progress"})),
+            CliParseError::MissingFlag("body")
+        ));
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pm.report.list"
+            )
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pm.report.post"
+            )
+        );
+        for operation in ["pm.report.post", "pm.report.list"] {
+            assert!(crate::cli::pm::capabilities_report()
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_report_post_requires_pm_authority_except_for_direct_cli() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let post = || match ok(
+            "pm.report.post",
+            json!({"kind":"progress", "body":"Persisted progress"}),
+        ) {
+            CliCommand::Pm(command) => command,
+            other => panic!("unexpected report command: {other:?}"),
+        };
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let mut output = String::new();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            0
+        );
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["ok"], true);
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
+        output.clear();
+        let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
+        assert!(error.to_string().contains("registered PM"), "{error}");
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "registered-pm".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..crate::pm_registry::PmPrefs::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            0
+        );
+        let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
+            panic!("expected PM list")
+        };
+        output.clear();
+        crate::cli::pm::run(&mut env, list, &mut output).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["reports"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn pm_status_variants() {
         assert!(matches!(
@@ -6403,6 +6562,32 @@ mod tests {
     }
 
     #[test]
+    fn actions_dispatch_accepts_selectors_and_rejects_invalid_contract() {
+        for workflow in [
+            json!("prepare-release.yml"),
+            json!("日本語 Release.yml"),
+            json!(42),
+        ] {
+            assert!(matches!(
+                ok(
+                    "actions.dispatch",
+                    json!({"workflow":workflow,"ref":"develop","inputs":{"bump":"auto"}})
+                ),
+                CliCommand::Actions(_)
+            ));
+        }
+        for params in [
+            json!({"workflow":"../release.yml","ref":"develop"}),
+            json!({"workflow":0,"ref":"develop"}),
+            json!({"workflow":"release.yml","ref":""}),
+            json!({"workflow":"release.yml","ref":"develop","inputs":[]}),
+            json!({"workflow":"release.yml","ref":"develop","force":true}),
+        ] {
+            let _ = err("actions.dispatch", params);
+        }
+    }
+
+    #[test]
     fn issue_4188_actions_cancel_requires_a_run_id() {
         assert_eq!(
             ok("actions.cancel", json!({"run_id": 5})),
@@ -7036,17 +7221,26 @@ mod tests {
         }))
         .unwrap();
         gwt_core::error_ledger::record(host).unwrap();
-        for (params, expected) in [
-            (json!({}), 2),
-            (json!({"scope":"project"}), 2),
-            (json!({"scope":"host"}), 1),
-            (json!({"scope":"unknown"}), 1),
-            (json!({"scope":"all"}), 4),
-            (json!({"project_root":"/project-a","scope":"all"}), 1),
-            (json!({"project_root":"/project-a","scope":"host"}), 1),
-            (json!({"project_root":"/missing"}), 0),
+        for (caller_root, params, expected) in [
+            ("/project-a", json!({}), 1),
+            ("/project-b", json!({}), 1),
+            ("/project-a", json!({"scope":"project"}), 1),
+            ("/project-a", json!({"scope":"host"}), 1),
+            ("/project-a", json!({"scope":"unknown"}), 1),
+            ("/project-a", json!({"scope":"all"}), 4),
+            (
+                "/project-b",
+                json!({"project_root":"/project-a","scope":"all"}),
+                1,
+            ),
+            (
+                "/project-b",
+                json!({"project_root":"/project-a","scope":"host"}),
+                1,
+            ),
+            ("/project-a", json!({"project_root":"/missing"}), 0),
         ] {
-            let mut env = TestEnv::new(dir.path().to_path_buf());
+            let mut env = TestEnv::new(caller_root.into());
             let (_, output) =
                 crate::cli::run_collect(&mut env, ok("errors.list", params.clone())).unwrap();
             let payload: Value = serde_json::from_str(&output).unwrap();
@@ -7064,8 +7258,14 @@ mod tests {
                     assert_eq!(row["scope"], expected_scope, "{params}");
                 }
             }
-            if params.get("project_root").is_some() && expected > 0 {
-                assert_eq!(payload["errors"][0]["target"]["project_root"], "/project-a");
+            if expected_scope == "project" && expected > 0 {
+                assert_eq!(
+                    payload["errors"][0]["target"]["project_root"],
+                    params
+                        .get("project_root")
+                        .and_then(Value::as_str)
+                        .unwrap_or(caller_root)
+                );
             }
         }
         assert!(matches!(

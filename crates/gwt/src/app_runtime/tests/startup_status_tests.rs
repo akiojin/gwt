@@ -2935,6 +2935,8 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
     runtime.issue_monitor_launch_deliveries.insert(
         delivery_id.to_string(),
         super::super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            fresh_execution: None,
+            retryable: true,
             message: "seeded so the replay settles without a launch".to_string(),
             session_mode: gwt_agent::SessionMode::Normal,
         },

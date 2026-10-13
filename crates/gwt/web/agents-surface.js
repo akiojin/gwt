@@ -2,7 +2,8 @@ import { surfaceForWindow } from "./surface-rail.js";
 
 // The grid owns presentation only. Sessions and terminal runtimes remain shared
 // with the existing window model; column changes never persist canvas geometry.
-export function createAgentsSurface({ document, mountTerminal, mountPreview, onLayout,
+export function createAgentsSurface({ document, windowCatalogModel, getWindows,
+  isMounted = () => true, mountTerminal, mountPreview, onLayout,
   onFocus = () => {}, onPreviewFocus = onFocus }) {
   const element = document.createElement("section");
   element.className = "agents-surface";
@@ -56,6 +57,7 @@ export function createAgentsSurface({ document, mountTerminal, mountPreview, onL
     previewGrid.classList.toggle("is-single", selectedId !== null);
     previewGrid.style.gridTemplateColumns = grid.style.gridTemplateColumns;
     previewElement.querySelector(".agents-empty").hidden = tiles.size > 0;
+    previewElement.dataset.catalogVersion = element.dataset.catalogVersion;
   }
   function setPreviewHost(host) {
     if (!host) {
@@ -167,7 +169,10 @@ export function createAgentsSurface({ document, mountTerminal, mountPreview, onL
   columns.addEventListener("input", setColumns);
   setColumns();
 
-  function sync(windows) {
+  function sync() {
+    if (!isMounted()) return;
+    const catalog = windowCatalogModel.read().catalog;
+    const windows = getWindows(catalog);
     const agents = windows.filter((data) => surfaceForWindow(data) === "agents");
     const ids = new Set(agents.map((data) => data.id));
     let changed = false;
@@ -210,12 +215,16 @@ export function createAgentsSurface({ document, mountTerminal, mountPreview, onL
       mountTerminal(data.id, tile.querySelector(".terminal-root"));
     }
     if (selectedId !== null && !ids.has(selectedId)) selectedId = null;
+    element.dataset.catalogVersion = String(catalog.version);
     updateSelection();
     if (restoreFocus) tabs.get(selectedId).focus();
     element.querySelector(".agents-empty").hidden = agents.length > 0;
     if (changed) onLayout();
   }
-  return { element, sync, setPreviewHost, contains: (id) => tiles.has(id),
+  const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
+  return { element, sync, setPreviewHost,
+    dispose() { unsubscribe(); setPreviewHost(null); },
+    contains: (id) => tiles.has(id),
     isVisible: (id) => tiles.has(id) && !tiles.get(id).hidden,
     reveal: (id) => { if (tiles.has(id) && (!tabs.has(id) || selectedId !== null)) openTab(id); },
   };

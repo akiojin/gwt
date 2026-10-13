@@ -1,4 +1,4 @@
-// Issue #4964: a new manual launch after Aborted must create a new attempt.
+// Issues #4964 / #5288: retry creates usable successor Work across host history.
 // Opt in after building this checkout's gwt/gwtd. No production HOME is used.
 const { test, expect } = require('@playwright/test');
 const { spawn, spawnSync } = require('node:child_process');
@@ -29,18 +29,21 @@ async function compileFixtures() {
     return candidates[0].path;
   }
   const gwtLibrary = await artifact('gwt');
-  // Test/feature builds can leave several serde identities in deps. Use the
+  // Test/feature builds can leave several dependency identities in deps. Use the
   // exact dependency fingerprint of the gwt library, rather than its mtime.
   const gwtHash = gwtLibrary.match(/libgwt-([a-f0-9]+)\.rlib$/)[1];
   const gwtMetadata = await readFile(join(ROOT, 'target/debug/.fingerprint', `gwt-${gwtHash}`, 'lib-gwt.json'), 'utf8');
-  const jsonFingerprint = BigInt(gwtMetadata.match(/\[\d+,"serde_json",false,(\d+)\]/)[1]);
-  let jsonLibrary;
-  for (const name of files.filter(name => /^libserde_json-[a-f0-9]+\.rlib$/.test(name))) {
-    const hash = name.match(/libserde_json-([a-f0-9]+)\.rlib$/)[1];
-    const fingerprint = (await readFile(join(ROOT, 'target/debug/.fingerprint', `serde_json-${hash}`, 'lib-serde_json'), 'utf8')).trim();
-    if (BigInt(`0x${fingerprint.match(/../g).reverse().join('')}`) === jsonFingerprint) jsonLibrary = join(deps, name);
+  async function exactDependency(crate, packageName = crate) {
+    const expected = BigInt(gwtMetadata.match(new RegExp(`\\[\\d+,"${crate}",false,(\\d+)\\]`))[1]);
+    for (const name of files.filter(name => name.startsWith(`lib${crate}-`) && name.endsWith('.rlib'))) {
+      const hash = name.slice(`lib${crate}-`.length, -'.rlib'.length);
+      const fingerprint = (await readFile(join(ROOT, 'target/debug/.fingerprint', `${packageName}-${hash}`, `lib-${crate}`), 'utf8')).trim();
+      if (BigInt(`0x${fingerprint.match(/../g).reverse().join('')}`) === expected) return join(deps, name);
+    }
+    throw new Error(`Missing exact ${crate} dependency for ${gwtLibrary}; build gwt/gwtd first`);
   }
-  if (!jsonLibrary) throw new Error(`Missing exact serde_json dependency for ${gwtLibrary}; build gwt/gwtd first`);
+  const jsonLibrary = await exactDependency('serde_json');
+  const coreLibrary = await exactDependency('gwt_core', 'gwt-core');
   const nativeDirectories = new Set();
   for (const entry of await readdir(join(ROOT, 'target/debug/build'))) {
     const path = join(ROOT, 'target/debug/build', entry, 'out');
@@ -62,7 +65,7 @@ async function compileFixtures() {
       join(ROOT, 'crates/gwt/playwright/fixtures', `manual-successor-${name}.rs`),
       '-L', `dependency=${deps}`, ...nativePaths, '--extern', `serde_json=${jsonLibrary}`];
     if (WINDOWS && linker) args.push('-C', `linker=${linker}`);
-    if (name === 'seed') args.push('--extern', `gwt=${gwtLibrary}`);
+    if (name === 'seed') args.push('--extern', `gwt=${gwtLibrary}`, '--extern', `gwt_core=${coreLibrary}`);
     args.push('-o', binary);
     const run = spawnSync('rustc', args, { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 120000 });
     if (run.status !== 0) throw new Error(`Fixture ${name} compilation failed: ${run.stdout}\n${run.stderr}`);
@@ -118,10 +121,10 @@ async function startFixture(info) {
     await access(runtime);
     await symlink(runtime, join(state, 'runtime'), WINDOWS ? 'junction' : 'dir');
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  function rpc(operation, params = {}) {
-    const run = spawnSync(gwtd, [], { cwd: project, env, encoding: 'utf8', timeout: 30000, windowsHide: true,
+  function rpc(operation, params = {}, sessionEnv = {}) {
+    const run = spawnSync(gwtd, [], { cwd: project, env: { ...env, ...sessionEnv }, encoding: 'utf8', timeout: 30000, windowsHide: true,
       input: JSON.stringify({ schema_version: 1, operation, params }) });
-    if (run.status !== 0) throw new Error(`Isolated ${operation} failed: ${run.stdout} ${run.stderr}`);
+    if (run.status !== 0) throw new Error(`Isolated ${operation} failed (exit=${run.status}, signal=${run.signal}, error=${run.error?.code}): ${run.stdout} ${run.stderr}`);
     const envelope = JSON.parse(run.stdout);
     if (!envelope.ok) throw new Error(`Isolated ${operation} refused: ${run.stdout}`);
     return envelope;
@@ -201,6 +204,11 @@ async function startFixture(info) {
     await info.attach('isolated-fixture', { body: JSON.stringify({ home, project, url, logPath, host_pid: host.pid, checkout: ROOT }),
       contentType: 'application/json' });
     return { home, project, url, inspect, launches, stop,
+      sessionRpc: async (session, operation, params) => {
+        const sessionEnv = JSON.parse(await readFile(join(home, `rpc-env-${session}.json`), 'utf8'));
+        expect(sessionEnv.GWT_SESSION_ID).toBe(session);
+        return rpc(operation, params, sessionEnv);
+      },
       providerAlive: pid => exactProviderProcess(pid, join(bin, `codex${EXE}`)),
       ready: session => writeFile(join(home, `ready-${session}`), 'ready') };
   } catch (error) { await stop(); throw error; }
@@ -263,6 +271,11 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const predecessor = fixture.inspect();
+      const oldWork = predecessor.works.work_items.find(work => work.id === predecessor.workspace.id);
+      expect(oldWork.owner).toBeNull();
+      expect(oldWork.status_category).toBe('done');
+      expect(oldWork.execution_containers).toHaveLength(1);
+      expect(oldWork.execution_containers[0].worktree_path).toBe(`E:\\gwt\\work\\issue-${OWNER}`);
       await launch(page);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 60000 }).toBe(1);
       const first = (await fixture.launches())[0];
@@ -301,7 +314,8 @@ test.describe('Manual successor retry (isolated checkout)', () => {
         try {
           const state = fixture.inspect();
           return { status: latestAttempt(state).status, current_generation_id: state.ledger.current_generation_id,
-            binding_generation_id: state.binding?.generation_id, record_status: state.record?.status, primary_session_id: state.record?.primary_session_id };
+            binding_generation_id: state.binding?.generation_id, record_status: state.record?.status, primary_session_id: state.record?.primary_session_id,
+            affiliation_status: state.workspace?.agents.find(agent => agent.session_id === second.session_id)?.affiliation_status };
         } catch (error) {
           // Publication may briefly expose the new ledger before its pointer.
           if (!error.message.startsWith('Fixture inspect failed: ')
@@ -309,10 +323,20 @@ test.describe('Manual successor retry (isolated checkout)', () => {
           return { pending_read_error: error.message };
         }
       }, { timeout: 60000 }).toEqual({ status: 'activated', current_generation_id: nextAttempt.candidate_generation_id,
-        binding_generation_id: nextAttempt.candidate_generation_id, record_status: 'active', primary_session_id: second.session_id });
+        binding_generation_id: nextAttempt.candidate_generation_id, record_status: 'active', primary_session_id: second.session_id,
+        affiliation_status: 'assigned' });
       const activated = fixture.inspect();
       expect(activated.ledger.generations).toHaveLength(2);
       expect(activated.ledger.continuation_attempts.map(attempt => attempt.status)).toEqual(['prepared', 'aborted', 'prepared', 'activated']);
+      const assigned = activated.workspace.agents.find(agent => agent.session_id === second.session_id);
+      expect(assigned.affiliation_status).toBe('assigned');
+      const successor = activated.works.work_items.find(work => work.id === assigned.workspace_id);
+      expect(successor.id).not.toBe(oldWork.id);
+      expect(successor.status_category).not.toBe('done');
+      expect(successor.discarded).toBe(false);
+      expect(successor.related_work_item_ids).toContain(oldWork.id);
+      expect(successor.events.some(event => event.kind === 'start' && event.related_work_item_id === oldWork.id)).toBe(true);
+      expect(activated.works.work_items.find(work => work.id === oldWork.id)).toEqual(oldWork);
       await expect.poll(async () => {
         try {
           return JSON.parse(await readFile(join(fixture.home, `hook-${second.session_id}.json`), 'utf8')).success;
@@ -321,8 +345,23 @@ test.describe('Manual successor retry (isolated checkout)', () => {
           throw error;
         }
       }, { timeout: 30000 }).toBe(true);
+      await fixture.sessionRpc(second.session_id, 'workspace.ensure', {
+        purpose: 'Manual successor retry fixture', issue: OWNER, current_focus: 'Successor Work verification',
+      });
+      await fixture.sessionRpc(second.session_id, 'workspace.update', { current_focus: 'Validating successor execution authority' });
+      // Probe verify authority without requesting a nested Heavy host slot.
+      const commands = ['git diff --check'];
+      await fixture.sessionRpc(second.session_id, 'verify.plan', { commands });
+      await fixture.sessionRpc(second.session_id, 'verify.run', { commands });
+      const verified = fixture.inspect();
+      expect(verified.verification_plan.session_id).toBe(second.session_id);
+      expect(verified.verification_run.session_id).toBe(second.session_id);
+      expect(verified.verification_plan.execution_binding).toEqual(verified.binding);
+      expect(verified.verification_run.execution_binding).toEqual(verified.binding);
+      expect(verified.verification_run.all_passed).toBe(true);
+      expect(verified.works.work_items.find(work => work.id === oldWork.id)).toEqual(oldWork);
       await info.attach(`active-${theme}`, { body: await page.screenshot(), contentType: 'image/png' });
-      await info.attach('final-ledger', { body: JSON.stringify(activated), contentType: 'application/json' });
+      await info.attach('final-ledger', { body: JSON.stringify(verified), contentType: 'application/json' });
       expect(errors, 'real backend console/page errors').toEqual([]);
     } finally { await fixture.stop(); }
   });

@@ -178,21 +178,36 @@ pub fn persist_pending_update_manifest_in(
     let lock = open_pending_update_manifest_lock(dir)?;
     fs2::FileExt::lock_exclusive(&lock)
         .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
+    let _lock = PendingUpdateManifestLock { file: lock };
     let mut staged = manifest.clone();
     staged.auto_apply_deferred |= load_pending_update_manifest_in(dir)
         .is_some_and(|current| current.version == staged.version && current.auto_apply_deferred);
     write_pending_update_manifest_in(dir, &staged)
 }
 
+/// Releases the manifest lock at the end of its critical section, even when
+/// a concurrent fork retains an inherited descriptor until exec.
+pub struct PendingUpdateManifestLock {
+    file: fs::File,
+}
+
+impl Drop for PendingUpdateManifestLock {
+    fn drop(&mut self) {
+        // Closing only this File leaves flock held by inherited/duplicated
+        // descriptors. Explicit unlock releases the shared lock immediately.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
 /// Acquire without waiting for a concurrent manifest writer. Defer, cleanup,
 /// and apply-start callers fail closed when busy. Apply-start callers retain
 /// the guard through the authoritative check and resume marker publication,
 /// then release it before cleanup acquires the lock again.
-pub fn pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
+pub fn pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestLock, String> {
     let lock = open_pending_update_manifest_lock(dir)?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .map_err(|e| format!("Pending-update manifest is busy or cannot be locked: {e}"))?;
-    Ok(lock)
+    Ok(PendingUpdateManifestLock { file: lock })
 }
 
 fn open_pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
@@ -4524,6 +4539,25 @@ mod tests {
         assert!(mac_dmg_err.contains("mac_dmg installer can only run on macOS"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_manifest_lock_releases_while_an_inherited_descriptor_remains_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = pending_update_manifest_lock(dir.path()).unwrap();
+        // dup and fork share the same open file description. Retaining a
+        // clone models a parallel test's child before CLOEXEC closes its fd.
+        let inherited = lock.file.try_clone().unwrap();
+        assert!(pending_update_manifest_lock(dir.path()).is_err());
+        drop(lock);
+        let reacquired = pending_update_manifest_lock(dir.path());
+        drop(inherited);
+        assert!(
+            reacquired.is_ok(),
+            "a completed mutation must release its lock despite an inherited fd: {:?}",
+            reacquired.err(),
+        );
+    }
+
     // SPEC-2041 Phase 19 (T-126): pending-update manifest round trip.
     #[test]
     fn pending_manifest_persist_load_clear_round_trip() {
@@ -4571,14 +4605,7 @@ mod tests {
         };
         persist_pending_update_manifest_in(dir.path(), &manifest).unwrap();
         let before = fs::read(dir.path().join("manifest.json")).unwrap();
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(dir.path().join("manifest.lock"))
-            .unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = pending_update_manifest_lock(dir.path()).unwrap();
         let replacement = manifest.clone();
         assert!(defer_pending_update_in(dir.path(), "9.200.0").is_err());
         assert!(clear_pending_update_manifest_in(dir.path()).is_err());

@@ -1827,8 +1827,15 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 #[test]
 fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
     let js = app_js();
+    let apply_status_source = js
+        .split("function applyStatus(windowId, status, detail)")
+        .nth(1)
+        .expect("applyStatus function")
+        .split("\n      function ")
+        .next()
+        .expect("applyStatus body");
     let apply_status = regex::Regex::new(
-            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+            r#"(?s)const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);\s*publishWindowCatalogRuntime\(windowId, status\);.*?if \(!element\) \{\s*return;.*?label\.textContent = windowRuntimeLabel\(runtimeState\);"#,
         )
         .expect("valid regex");
 
@@ -1839,8 +1846,9 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
         "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
-            apply_status.is_match(js),
-            "expected applyStatus to retain source state, normalize display state once, and re-render the window list",
+            apply_status.is_match(apply_status_source)
+                && !apply_status_source.contains("renderWindowList();"),
+            "expected applyStatus to publish shared catalog state before an unmounted return and update mounted badges",
         );
 }
 
@@ -4360,10 +4368,9 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(js.contains("view.controller.update(state)"));
     assert!(js.contains("view.unsubscribe()"));
     assert!(js.contains("view.controller.dispose()"));
-    assert!(js.contains("kind: \"load_pm_conversation\", id: windowData.id"));
-    assert!(js.contains("window.setInterval(requestVisiblePmConversations, 5000)"));
-    assert!(js.contains("case \"pm_conversation\""));
-    assert!(js.contains("case \"pane_send_result\""));
+    assert!(js.contains("kind: \"load_pm_reports\", id: windowData.id"));
+    assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
+    assert!(js.contains("case \"pm_reports\""));
     assert!(
         js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
     );

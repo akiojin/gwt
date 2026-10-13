@@ -294,6 +294,29 @@ gwtd <<'JSON'
 JSON
 ```
 
+`actions.dispatch` は共有 GitHub API budget を使って workflow を起動します。
+既定ではすべて拒否します。`~/.gwt/config.toml` でリポジトリごとに
+workflow のファイル名を許可します。
+
+```toml
+[allowed_workflows]
+"akiojin/gwt" = ["prepare-release.yml"]
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
+JSON
+```
+
+`workflow` はファイル名または正の workflow ID を受け付けます。ID の場合も
+解決したファイル名が許可されている必要があります。checkout の
+`.github/workflows/` にファイルが存在し、指定した branch / tag 上で
+`workflow_dispatch` を宣言していることを検査します。`inputs` は省略可能な
+JSON object です。入力名、必須値、型、choice の選択肢を送信前に検査します。
+成功応答は送信の受付を示します。実際の run は GitHub Actions で確認してください。
+拒否時は修正すべき設定や入力契約を示し、入力値や GitHub の生エラー本文は出力しません。
+
 `workspace.update` の応答を失った場合は、表示された `operation_id` を同じ Session の
 `workspace.receipt`（`params: {"operation_id":"<UUID>"}`）に渡して確認できます。
 この読み取り専用照会は Host へ接続せず、更新も再送しません。`applied` は永続化の完了、
@@ -725,11 +748,14 @@ gwt は明示された値（`true` / `false` を問わず）を尊重し、変�
 config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
 error ledger（`errors.list`）に記録されます。
 
-`errors.list` は既定で project スコープのエラーを返し、`project_root` で
-プロジェクトを絞り込めます。起動時の共通設定などマシン全体のエラーは
+`errors.list` は既定で現在のプロジェクトのエラーだけを返し、同じプロジェクトの
+別 worktree の記録も含みます。`project_root` で記録済みの root を明示して
+絞り込めます。起動時の共通設定などマシン全体のエラーは
 `scope: "host"`、帰属不明の記録は `scope: "unknown"`、全スコープは
 `scope: "all"` を明示して取得します。`project_root` を指定した場合は
 host・unknown 行を含めず、所属プロジェクトを推測で補いません。
+破損した台帳行は、ファイル名と行番号を持つ `ledger_corruption` の host 診断として
+返します。timestamp は破損を検出した時刻で、元の行は変更しません。
 
 0.153.0 より前の Codex CLI は `[features]` 配下の table を読めません。
 `[features.context_management]` が 1 つあるだけで config 全体が読めなくなり
@@ -788,6 +814,36 @@ bare リポジトリを作り直し、各 worktree を新レイアウトに再�
 ストリーミング (Validate -> Backup -> Bareify -> Worktrees -> Submodules ->
 Tracking -> Cleanup -> Done) され、成功時はアプリを再起動せずに新しいブランチ
 worktree にプロジェクトタブが切り替わります。
+
+## GitHub Discussions でローカル Board の節目を共有する
+
+別マシンと `decision` / `blocked` / `handoff` を共有するには、Board provider を
+**Local** のままにして `.gwt/work/board.toml` に接続先を追加します。
+
+```toml
+provider = "local"
+
+[github_discussion]
+owner = "your-org"
+repo = "your-repo"
+number = 123
+```
+
+各マシンで同じ既存 Discussion を指定し、GitHub Discussions を有効にして、読み書き権限を
+持つ `gh` 認証を用意してください。Board の読み書き時に、最大1分に1回バックグラウンド同期を
+起動します。明示的な同期と直近の結果の確認は、
+`{"schema_version":1,"operation":"board.sync","params":{}}` を `gwtd` の標準入力へ送ります。
+`status` / `claim` はローカルに留まり、共有種別は設定で変更できません。
+受信した投稿は既存 Board のフィードに表示されます。
+GitHub が返す投稿者の所属が `OWNER` / `MEMBER` / `COLLABORATOR` のコメントだけを
+取り込み、それ以外や不明な所属は取り込みません。受信投稿は escalation を開閉できるため、
+所有者・組織メンバー・collaborator をローカルの調整相手として信頼できるリポジトリを指定してください。
+
+同期は best-effort で、ローカルの現在の表示範囲（最大500件）を送信します。
+長期障害中に表示範囲から外れた未送信投稿は遡って配送しません。レート制限・認証失効・
+ネットワーク障害でもローカル Board は利用でき、`board.sync` で診断を確認できます。
+失敗時は5分後に共有 GitHub budget を尊重して再試行します。停止中の相手は次回同期で保存済み
+コメントを受信します。共有を停止するには `[github_discussion]` を削除してください。
 
 ## Board プロバイダ (Local / Slack / Teams)
 
@@ -952,6 +1008,15 @@ Teams でチャンネル → **チャンネルへのリンクを取得**し、�
 gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
+
+PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
+**Copy** ボタン付きで表示します。閲覧専用で、ターミナル操作には **Execution log** を
+使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存し、
+再起動後も保持します。自動失効・件数制限はなく、空でない本文は 1 件 64 KiB までです。
+
+登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker`）と
+`body` で投稿し、`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
+使用します。投稿成功は保存と読み戻しの確認を意味し、失敗時は明示的なエラーを返します。
 
 常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
 hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には

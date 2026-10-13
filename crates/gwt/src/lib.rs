@@ -12,6 +12,7 @@ pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod autonomous_handoff;
 pub mod backend_service;
 pub mod board_audience;
+pub mod board_discussion_sync;
 pub mod board_provider;
 pub mod board_remote;
 pub mod branch_cleanup;

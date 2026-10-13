@@ -1519,6 +1519,40 @@ fn parse_related_time_millis(value: &str) -> i64 {
 }
 
 impl AppRuntime {
+    pub(crate) fn report_knowledge_error(&self, id: &str, stage: &str, message: &str) {
+        if !matches!(stage, "load" | "render") || message.trim().is_empty() {
+            return;
+        }
+        let Some(address) = self.window_lookup.get(id) else {
+            return;
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return;
+        };
+        if !tab
+            .workspace
+            .window(&address.raw_id)
+            .is_some_and(|window| window.preset == WindowPreset::Issue)
+        {
+            return;
+        }
+        let message = format!("Issue window {stage} failed: {message}");
+        let target = gwt_core::error_ledger::ErrorTarget {
+            window_id: Some(id.to_string()),
+            project_root: Some(tab.project_root.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            gwt::error_report::report_error(
+                gwt_core::error_ledger::ErrorKind::DaemonFault,
+                message,
+                target,
+            );
+        }) {
+            tracing::warn!(%error, "cannot schedule Issue window diagnostic");
+        }
+    }
+
     pub(crate) fn replace_knowledge_terminal_queue(
         &self,
         project_root: &Path,

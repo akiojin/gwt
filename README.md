@@ -305,6 +305,30 @@ gwtd <<'JSON'
 JSON
 ```
 
+`actions.dispatch` starts a workflow using GitHub's shared API budget. Dispatch
+is disabled by default. Allow individual workflow filenames for a repository
+in `~/.gwt/config.toml`:
+
+```toml
+[allowed_workflows]
+"akiojin/gwt" = ["prepare-release.yml"]
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
+JSON
+```
+
+`workflow` accepts a filename or positive workflow ID; IDs must resolve to an
+allowed filename. The file must exist in the checkout's `.github/workflows/`
+and declare `workflow_dispatch` at the selected branch or tag. `inputs` is an
+optional JSON object; declared input names, required values, types, and choice
+options are checked before dispatch. A successful response confirms submission;
+inspect GitHub Actions for the resulting run. Refused requests identify the
+configuration or input contract to fix without printing input values or raw
+GitHub error bodies.
+
 If `workspace.update` loses its response, use the reported `operation_id` with
 `workspace.receipt` (`params: {"operation_id":"<UUID>"}`) in the same Session.
 This read-only query does not contact the Host or resend the update. `applied`
@@ -784,11 +808,15 @@ gwt respects any explicit value (`true` or `false`) and does not change it. A
 config that cannot be parsed or written never blocks startup; the path and
 cause are recorded in the error ledger (`errors.list`).
 
-`errors.list` returns project-scoped errors by default. Set `project_root` to
-filter by project. Use `scope: "host"` for machine-wide errors such as startup
+`errors.list` returns only the current project's errors by default, including
+its other worktrees. Set `project_root` to filter by an explicit recorded root.
+Use `scope: "host"` for machine-wide errors such as startup
 configuration failures, `scope: "unknown"` for unattributed records, or
 `scope: "all"` to inspect every scope. A `project_root` filter always excludes
 host and unknown records; gwt never guesses their project.
+Damaged ledger rows appear as `ledger_corruption` host diagnostics with the
+ledger filename and line number. Their timestamp is when corruption is observed;
+the original rows remain intact.
 
 Codex CLIs before 0.153.0 cannot load a table under `[features]`: a single
 `[features.context_management]` table makes the whole config unreadable
@@ -845,6 +873,38 @@ Choose **Migrate** to run the migration now. Progress is streamed phase by
 phase (Validate -> Backup -> Bareify -> Worktrees -> Submodules -> Tracking ->
 Cleanup -> Done). On success the project tab reloads onto the new branch
 worktree without restarting the app.
+
+## Share local Board milestones through GitHub Discussions
+
+To share `decision`, `blocked`, and `handoff` posts across machines, keep the
+**Local** Board provider and add a binding to `.gwt/work/board.toml`:
+
+```toml
+provider = "local"
+
+[github_discussion]
+owner = "your-org"
+repo = "your-repo"
+number = 123
+```
+
+Use the same existing Discussion on each machine, with GitHub Discussions enabled
+and `gh` authenticated for read/write access. Board reads and posts schedule
+background synchronization at most once a minute. To synchronize explicitly and
+inspect the latest result, send `{"schema_version":1,"operation":"board.sync","params":{}}`
+to `gwtd` on stdin. `status` and `claim` stay local; the shared kinds cannot be
+changed through configuration. Imported posts appear in the existing Board feed.
+Only comments whose GitHub author association is `OWNER`, `MEMBER`, or
+`COLLABORATOR` are imported; other or unknown associations are ignored. Choose a
+repository whose owner, organization members, and collaborators you trust with
+local coordination, since imported posts can open and resolve escalations.
+
+Synchronization is best effort: it sends the current local window of up to 500
+posts, so older unsent posts that leave that window during a long outage are not
+backfilled. Rate limits, expired authentication, and network errors leave the
+local Board usable and are reported by `board.sync`; failures retry after five
+minutes, subject to the shared GitHub budget. An offline peer receives saved
+comments when it next synchronizes. Remove `[github_discussion]` to disable sharing.
 
 ## Board providers (Local / Slack / Teams)
 
@@ -1019,6 +1079,17 @@ delegated; app-only channel posting is not supported). You must be a
 gwt shows an actionable hint.
 
 ## PM project configuration
+
+The PM window's **Reports** view shows explicit Markdown reports with their kind,
+time, and a **Copy** button. It is read-only; use **Execution log** for terminal
+interaction. Reports survive restarts in
+`~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`, with no automatic
+expiry or count limit. Each non-empty report is limited to 64 KiB.
+
+A registered PM can publish through `pm.report.post` with `kind` (`progress`,
+`decision`, or `blocker`) and `body`; `pm.report.list` reads the saved history.
+These use the standard gwtd JSON envelope. A successful post confirms the report
+was saved and read back; failures return an explicit error.
 
 The resident PM starts in a gwt-owned runtime directory. Repository skills,
 hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are

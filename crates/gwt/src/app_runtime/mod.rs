@@ -1121,6 +1121,7 @@ pub struct LaunchFeedbackContext {
 }
 
 pub(super) struct PreparedIssueMonitorLaunchFailure {
+    retryable: bool,
     monitor: Option<gwt::IssueMonitorState>,
     error: Option<gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     committed: bool,
@@ -1289,6 +1290,9 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
     LaunchFailed {
         message: String,
         session_mode: gwt_agent::SessionMode,
+        retryable: bool,
+        // Retain the original candidate and pane generation across an unknown commit.
+        fresh_execution: Option<(String, Box<gwt_agent::SessionExecutionIdentity>, u64)>,
     },
 }
 
@@ -5657,26 +5661,58 @@ impl AppRuntime {
         delivery_id: Option<&str>,
         session_mode: gwt_agent::SessionMode,
     ) -> (Vec<OutboundEvent>, bool) {
+        self.issue_monitor_launch_failed_delivery_committed_events_with_retryability(
+            project_root,
+            issue_number,
+            message,
+            delivery_id,
+            session_mode,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn issue_monitor_launch_failed_delivery_committed_events_with_retryability(
+        &mut self,
+        project_root: Option<&Path>,
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
+        session_mode: gwt_agent::SessionMode,
+        retryable: bool,
+    ) -> (Vec<OutboundEvent>, bool) {
         let message = if gwt::issue_monitor::is_git_https_auth_error(message) {
             gwt::issue_monitor::git_https_auth_setup_message(message)
         } else {
             message.to_string()
         };
         if let Some(delivery_id) = delivery_id {
+            let fresh_execution = (!retryable)
+                .then(|| {
+                    self.failed_fresh_execution_monitor_candidate(
+                        project_root,
+                        issue_number,
+                        delivery_id,
+                    )
+                })
+                .flatten();
             self.issue_monitor_launch_deliveries.insert(
                 delivery_id.to_string(),
                 IssueMonitorLaunchDeliveryState::LaunchFailed {
                     message: message.clone(),
                     session_mode,
+                    retryable,
+                    fresh_execution,
                 },
             );
         }
-        let launch_failed = Self::issue_monitor_launch_failed_payload(
+        let launch_failed = Self::issue_monitor_launch_failed_payload_with_retryability(
             issue_number,
             &message,
             delivery_id,
             delivery_id.map(|_| self.issue_monitor_materializer_id.as_str()),
             session_mode,
+            retryable,
         );
         let publication = project_root.map_or_else(
             || {
@@ -5693,22 +5729,96 @@ impl AppRuntime {
                 )
             },
         );
-        self.issue_monitor_launch_failed_result_with_delivery(
+        let prepared = Self::prepare_issue_monitor_launch_failure(
             project_root,
             issue_number,
             &message,
             delivery_id,
             session_mode,
+            retryable,
+            &self.issue_monitor_materializer_id,
+            self.issue_monitor_fallback_commit_timeout,
             publication,
+        );
+        self.apply_issue_monitor_launch_failure(
+            project_root,
+            issue_number,
+            &message,
+            delivery_id,
+            prepared,
         )
     }
 
+    fn failed_fresh_execution_monitor_candidate(
+        &self,
+        project_root: Option<&Path>,
+        issue_number: u64,
+        delivery_id: &str,
+    ) -> Option<(String, Box<gwt_agent::SessionExecutionIdentity>, u64)> {
+        if let Some(IssueMonitorLaunchDeliveryState::LaunchFailed {
+            retryable: false,
+            fresh_execution,
+            ..
+        }) = self.issue_monitor_launch_deliveries.get(delivery_id)
+        {
+            return fresh_execution.clone();
+        }
+        let project_root = project_root?;
+        self.pending_fresh_execution_launches
+            .iter()
+            .find_map(|(window_id, pending)| {
+                let context = pending.launch_feedback_context.as_ref()?;
+                let window_generation = self
+                    .window_lifecycle_generations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(window_id)
+                    .copied()?;
+                (context.issue_monitor_launch_binding_issue_number() == Some(issue_number)
+                    && context.issue_monitor_delivery_id.as_deref() == Some(delivery_id)
+                    && context.issue_monitor_autonomous_handoff.is_none()
+                    && same_worktree_path(
+                        context
+                            .issue_monitor_project_root
+                            .as_deref()
+                            .unwrap_or(&pending.project_root),
+                        project_root,
+                    ))
+                .then(|| {
+                    (
+                        window_id.clone(),
+                        Box::new(pending.session_identity.clone()),
+                        window_generation,
+                    )
+                })
+            })
+    }
+
+    #[cfg(test)]
     pub(crate) fn issue_monitor_launch_failed_payload(
         issue_number: u64,
         message: &str,
         delivery_id: Option<&str>,
         materializer_id: Option<&str>,
         session_mode: gwt_agent::SessionMode,
+    ) -> serde_json::Value {
+        Self::issue_monitor_launch_failed_payload_with_retryability(
+            issue_number,
+            message,
+            delivery_id,
+            materializer_id,
+            session_mode,
+            true,
+        )
+    }
+
+    pub(super) fn issue_monitor_launch_failed_payload_with_retryability(
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+        session_mode: gwt_agent::SessionMode,
+        retryable: bool,
     ) -> serde_json::Value {
         let mut launch_failed = serde_json::json!({
             "issue_number": issue_number,
@@ -5720,7 +5830,12 @@ impl AppRuntime {
         if let Some(materializer_id) = materializer_id {
             launch_failed["materializer_id"] = serde_json::json!(materializer_id);
         }
-        if let Some(failure) = runtime_events::classify_issue_monitor_failure(message, session_mode)
+        if !retryable {
+            launch_failed["retryable"] = serde_json::json!(false);
+        }
+        if let Some(failure) = retryable
+            .then(|| runtime_events::classify_issue_monitor_failure(message, session_mode))
+            .flatten()
         {
             launch_failed["failure"] =
                 serde_json::to_value(failure).expect("Issue Monitor failure serializes");
@@ -5774,11 +5889,14 @@ impl AppRuntime {
         message: &str,
         delivery_id: Option<&str>,
         session_mode: gwt_agent::SessionMode,
+        retryable: bool,
         materializer_id: &str,
         fallback_timeout: std::time::Duration,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> PreparedIssueMonitorLaunchFailure {
-        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode);
+        let failure = retryable
+            .then(|| runtime_events::classify_issue_monitor_failure(message, session_mode))
+            .flatten();
         let (monitor, error, committed, retain_delivery) = match publication {
             Ok(()) => (
                 None,
@@ -5839,11 +5957,12 @@ impl AppRuntime {
                             IssueMonitorFailureCommit::Rejected
                         }
                         None => {
-                            if monitor.record_launch_failed_delivery(
+                            if monitor.record_launch_failed_delivery_with_retryability(
                                 issue_number,
                                 message.to_string(),
                                 delivery_id,
                                 delivery_id.map(|_| materializer_id),
+                                retryable,
                             ) {
                                 IssueMonitorFailureCommit::Committed(Some(issue_number))
                             } else {
@@ -5873,15 +5992,17 @@ impl AppRuntime {
             Err(error) => (None, Some(error), false, false),
         };
         PreparedIssueMonitorLaunchFailure {
+            retryable,
             monitor,
-            error,
             committed,
-            retain_delivery,
+            retain_delivery: retain_delivery || (!retryable && error.is_some()),
+            error,
             status: None,
             defer_wake: false,
         }
     }
 
+    #[cfg(test)]
     fn issue_monitor_launch_failed_result_with_delivery(
         &mut self,
         project_root: Option<&Path>,
@@ -5897,6 +6018,7 @@ impl AppRuntime {
             message,
             delivery_id,
             session_mode,
+            true,
             &self.issue_monitor_materializer_id,
             self.issue_monitor_fallback_commit_timeout,
             publication,
@@ -5919,6 +6041,7 @@ impl AppRuntime {
         prepared: PreparedIssueMonitorLaunchFailure,
     ) -> (Vec<OutboundEvent>, bool) {
         let PreparedIssueMonitorLaunchFailure {
+            retryable,
             monitor,
             error,
             committed,
@@ -5959,7 +6082,7 @@ impl AppRuntime {
                         });
                         proxy.send(crate::UserEvent::IssueMonitorDaemonInbox {
                             project_root: root.to_path_buf(),
-                            items: monitor.inbox,
+                            items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
                         });
                     }
                 }
@@ -5992,9 +6115,24 @@ impl AppRuntime {
                     issue_number: Some(issue_number),
                 },
             ));
-        } else if !retain_delivery {
-            if let Some(delivery_id) = delivery_id {
+        } else if let Some(delivery_id) = delivery_id {
+            if !retain_delivery {
                 self.issue_monitor_launch_deliveries.remove(delivery_id);
+            } else if !retryable {
+                let fresh_execution = self.failed_fresh_execution_monitor_candidate(
+                    project_root,
+                    issue_number,
+                    delivery_id,
+                );
+                self.issue_monitor_launch_deliveries.insert(
+                    delivery_id.to_string(),
+                    IssueMonitorLaunchDeliveryState::LaunchFailed {
+                        message: message.to_string(),
+                        session_mode: gwt_agent::SessionMode::Normal,
+                        retryable: false,
+                        fresh_execution,
+                    },
+                );
             }
         }
         (events, committed)
@@ -7075,7 +7213,7 @@ impl AppRuntime {
                             });
                             proxy.send(UserEvent::IssueMonitorDaemonInbox {
                                 project_root: project_root.to_path_buf(),
-                                items: monitor.inbox,
+                                items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
                             });
                         }
                         Vec::new()
@@ -7501,7 +7639,7 @@ impl AppRuntime {
                     events.push(OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::IssueMonitorInbox {
-                            items: monitor.inbox,
+                            items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
                         },
                     ));
                 }
@@ -8773,13 +8911,19 @@ impl AppRuntime {
 
     /// Issue #4584: why this window is held, when something is holding it.
     ///
-    /// The two causes that mean a pane stopped but its process did not: the
-    /// provider's account ran out (Issue #3616) or a provider API error ended
-    /// the turn. Both already store a rendered detail; this is where they are
-    /// handed to a reader who cannot see the pane.
+    /// Provider holds and pending authenticated readiness already store a
+    /// rendered detail. Share those with readers who cannot see the pane.
     pub(crate) fn pane_hold_reason(&self, window_id: &str) -> Option<String> {
+        let readiness_pending = (self
+            .pending_fresh_execution_launches
+            .contains_key(window_id)
+            || self.pending_continue_work.contains_key(window_id))
+            && self.window_details.get(window_id).is_some_and(|detail| {
+                detail.starts_with(gwt::issue_monitor::SESSION_START_READINESS_PENDING_PREFIX)
+            });
         if !self.provider_quota_holds.contains_key(window_id)
             && !self.provider_api_error_holds.contains_key(window_id)
+            && !readiness_pending
         {
             return None;
         }
@@ -8876,8 +9020,8 @@ impl AppRuntime {
                                 // Issue #4584: only a real hold explains itself here.
                                 // `window_details` also carries ordinary launch chatter,
                                 // and a row that always says something is a row nobody
-                                // reads, so the reason is taken from the two maps that
-                                // mean the pane actually stopped.
+                                // reads, so only a provider hold or pending readiness
+                                // is projected.
                                 hold_reason: self.pane_hold_reason(&window_id),
                                 // Issue #4608: the hook-independent liveness signal.
                                 last_output_at: self.window_last_output_at.get(&window_id).map(
@@ -9314,7 +9458,7 @@ impl AppRuntime {
         events.push(OutboundEvent::project(
             context.project_key,
             BackendEvent::IssueMonitorInbox {
-                items: monitor.inbox,
+                items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
             },
         ));
         events
@@ -9553,7 +9697,7 @@ impl AppRuntime {
             status: Box::new(status),
         };
         let inbox_event = BackendEvent::IssueMonitorInbox {
-            items: monitor.inbox,
+            items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
         };
         match client_id {
             Some(client_id) => vec![
@@ -10607,8 +10751,10 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
+            | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
             | FrontendEvent::LoadFileTree { id, .. }
             | FrontendEvent::ListFileTreeWorktrees { id, .. }
@@ -10623,6 +10769,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
@@ -10949,8 +11096,10 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::LoadPmReports { id }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
+            | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
             | FrontendEvent::LoadFileTree { id, .. }
             | FrontendEvent::ListFileTreeWorktrees { id, .. }
@@ -10965,6 +11114,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
@@ -11217,6 +11367,9 @@ impl AppRuntime {
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
             }
+            FrontendEvent::LoadPmReports { id } => {
+                self.load_pm_reports_events(context, client_id, &id)
+            }
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
@@ -11272,6 +11425,11 @@ impl AppRuntime {
                     )
                 }
             }
+            FrontendEvent::AttachmentUploadFailed {
+                id,
+                operation_id,
+                message,
+            } => self.attachment_upload_failed_events(&id, &operation_id, &message),
             FrontendEvent::AttachFiles {
                 id,
                 operation_id,
@@ -11375,6 +11533,10 @@ impl AppRuntime {
                     refresh,
                 },
             ),
+            FrontendEvent::ReportKnowledgeError { id, stage, message } => {
+                self.report_knowledge_error(&id, &stage, &message);
+                Vec::new()
+            }
             FrontendEvent::SearchKnowledgeBridge {
                 id,
                 knowledge_kind,

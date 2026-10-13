@@ -2250,6 +2250,13 @@ enum UserEvent {
         session_id: String,
         snapshot: gwt::pm_conversation::PmConversationSnapshot,
     },
+    PmReportsLoaded {
+        client_id: ClientId,
+        window_id: String,
+        session_id: String,
+        reports: Vec<gwt::protocol::PmReportView>,
+        error: Option<String>,
+    },
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
         agent: gwt_agent::BuiltinAgentId,
@@ -11649,7 +11656,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ProjectIndexRefreshRequested { project_key, project_root }) => {
                 if let Some(state) = app.project_states.get(&project_key) {
                     state.project_index_bootstrap.invalidate_full_status(&project_root);
-                    state.project_index_bootstrap.spawn(proxy.clone().for_project(state.context.clone()), project_root);
+                    state.project_index_bootstrap.refresh_after_completion(proxy.clone().for_project(state.context.clone()), project_root);
                 }
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {
@@ -11732,6 +11739,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
+            }
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, reports, error }) => {
+                clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, reports, error));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);

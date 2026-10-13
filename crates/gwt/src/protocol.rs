@@ -5,6 +5,50 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Render-only HTML is derived from durable report Markdown on the host.
+#[derive(Debug, Clone, Serialize)]
+pub struct PmReportView {
+    #[serde(flatten)]
+    pub report: gwt_core::pm_report::PmReport,
+    pub body_html: String,
+}
+
+impl From<gwt_core::pm_report::PmReport> for PmReportView {
+    fn from(report: gwt_core::pm_report::PmReport) -> Self {
+        let body_html = crate::board_remote::markdown::markdown_to_html(&report.body);
+        Self { report, body_html }
+    }
+}
+
+fn serialize_release_notes_entries<S: serde::Serializer>(
+    entries: &[gwt_core::release_notes::ReleaseEntry],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::board_remote::markdown::{render_markdown_html, MarkdownHtmlProfile};
+    let mut rendered = serde_json::to_value(entries).map_err(serde::ser::Error::custom)?;
+    for (entry, value) in entries
+        .iter()
+        .zip(rendered.as_array_mut().into_iter().flatten())
+    {
+        for (section, value) in entry
+            .sections
+            .iter()
+            .zip(value["sections"].as_array_mut().into_iter().flatten())
+        {
+            let markdown = section
+                .items
+                .iter()
+                .map(|item| format!("- {item}\n"))
+                .collect::<String>();
+            value["body_html"] = serde_json::Value::String(render_markdown_html(
+                &markdown,
+                MarkdownHtmlProfile::ReleaseNotes,
+            ));
+        }
+    }
+    rendered.serialize(serializer)
+}
+
 use crate::{
     branch_cleanup::{BranchCleanupProgressPhase, BranchCleanupResultEntry},
     branch_list::BranchListEntry,
@@ -539,6 +583,10 @@ pub enum FrontendEvent {
     LoadPmConversation {
         id: String,
     },
+    /// Read explicitly posted reports for the registered PM window.
+    LoadPmReports {
+        id: String,
+    },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
     /// window id so the event can only target the caller's own pane.
@@ -577,6 +625,12 @@ pub enum FrontendEvent {
         mime_type: String,
         filename: Option<String>,
         size: u64,
+    },
+    /// Browser-side upload failures use server-derived window/project scope.
+    AttachmentUploadFailed {
+        id: String,
+        operation_id: String,
+        message: String,
     },
     AttachFiles {
         id: String,
@@ -670,6 +724,12 @@ pub enum FrontendEvent {
         request_id: Option<u64>,
         selected_number: Option<u64>,
         refresh: bool,
+    },
+    /// Issue #5287: validated Issue-window failures enter the error ledger.
+    ReportKnowledgeError {
+        id: String,
+        stage: String,
+        message: String,
     },
     SearchKnowledgeBridge {
         id: String,
@@ -2025,6 +2085,12 @@ pub enum BackendEvent {
         session_id: Option<String>,
         snapshot: crate::pm_conversation::PmConversationSnapshot,
     },
+    PmReports {
+        id: String,
+        session_id: Option<String>,
+        reports: Vec<PmReportView>,
+        error: Option<String>,
+    },
     /// Origin-client completion receipt for one authenticated pane snapshot
     /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
     /// sets explain every authorized pane that produced no frame.
@@ -2805,6 +2871,7 @@ pub enum BackendEvent {
     /// round-trip. The value is the running binary's `CARGO_PKG_VERSION`.
     ReleaseNotesPayload {
         id: String,
+        #[serde(serialize_with = "serialize_release_notes_entries")]
         entries: Vec<gwt_core::release_notes::ReleaseEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         focus_version: Option<String>,
@@ -2864,6 +2931,11 @@ impl BackendEventPolicy {
 }
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
+    BackendEventPolicy::new(
+        "pm_reports",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
     BackendEventPolicy::new(
         "pm_conversation",
         BackendEventDeliveryClass::Snapshot,
@@ -3459,6 +3531,7 @@ impl BackendEvent {
             BackendEvent::TerminalPreview { .. } => "terminal_preview",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
+            BackendEvent::PmReports { .. } => "pm_reports",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
@@ -3640,6 +3713,71 @@ mod tests {
         ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
         RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn pm_reports_wire_uses_safe_shared_markdown_and_client_scoped_snapshot() {
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_reports", "id": "pm"
+        }))
+        .unwrap();
+        assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
+        let event = BackendEvent::PmReports {
+            id: "pm".into(), session_id: Some("session".into()), error: None,
+            reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress,
+                body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
+                created_at: chrono::Utc::now(),
+            })],
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        let html = value["reports"][0]["body_html"].as_str().unwrap();
+        for expected in [
+            "<h1>Report</h1>",
+            "<strong>Ready</strong>",
+            "<code>code</code>",
+            "<li>Item</li>",
+            "<pre><code",
+        ] {
+            assert!(html.contains(expected), "missing {expected}: {html}");
+        }
+        assert!(!html.contains("<script>"));
+        assert_eq!(value["reports"][0]["kind"], "progress");
+        assert_eq!(
+            event.delivery_policy().delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            event.delivery_policy().backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn release_notes_wire_uses_shared_markdown_preserving_literal_html() {
+        let event = BackendEvent::ReleaseNotesPayload {
+            id: "notes".into(),
+            focus_version: None,
+            current_version: "1.0.0".into(),
+            entries: vec![gwt_core::release_notes::ReleaseEntry {
+                version: "1.0.0".into(),
+                date: "2026-10-11".into(),
+                sections: vec![gwt_core::release_notes::Section {
+                    heading: "Fixed".into(),
+                    items: vec!["**Ready** and `code` <script>literal</script>".into()],
+                }],
+            }],
+        };
+        let value = serde_json::to_value(event).unwrap();
+        let section = &value["entries"][0]["sections"][0];
+        assert_eq!(section["heading"], "Fixed");
+        let html = section["body_html"]
+            .as_str()
+            .expect("derived Markdown HTML");
+        assert!(html.contains("<strong>Ready</strong>"));
+        assert!(html.contains("<code>code</code>"));
+        assert!(html.contains("&lt;script&gt;literal&lt;/script&gt;"));
+        assert!(!html.contains("<script>"));
+    }
 
     #[test]
     fn close_project_protocol_rejects_legacy_tab_operations_and_preserves_delivery() {

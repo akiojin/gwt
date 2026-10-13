@@ -792,9 +792,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
+        | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
-        | FrontendEvent::AttachFiles { .. } => return None,
+        | FrontendEvent::AttachmentUploadFailed { .. }
+        | FrontendEvent::AttachFiles { .. }
+        | FrontendEvent::ReportKnowledgeError { .. } => return None,
     };
     Some(log)
 }

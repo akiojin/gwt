@@ -882,6 +882,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "perf.violations"
             | "pm.capabilities"
             | "pm.status"
+            | "pm.report.list"
             | "search"
     )
 }
