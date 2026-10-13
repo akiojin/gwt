@@ -95,9 +95,23 @@ pub fn assert_test_path(path: &Path) {
 }
 
 fn is_isolated(path: &Path) -> bool {
-    std::env::temp_dir()
+    if std::env::temp_dir()
         .canonicalize()
         .is_ok_and(|temporary| is_isolated_under(path, &temporary))
+    {
+        return true;
+    }
+    // Socket fixtures deliberately use the OS short temp root when TMPDIR
+    // is a long per-user or per-verification directory. Resolve /tmp's macOS
+    // alias, and apply the same parent/leaf checks to this trusted root.
+    #[cfg(unix)]
+    if Path::new("/tmp")
+        .canonicalize()
+        .is_ok_and(|temporary| is_isolated_under(path, &temporary))
+    {
+        return true;
+    }
+    false
 }
 
 fn is_isolated_under(path: &Path, temporary: &Path) -> bool {
@@ -196,6 +210,17 @@ mod tests {
         assert_ne!(std::thread::spawn(user_home).join().unwrap(), user_home());
         drop(outer);
         assert_eq!(user_home(), initial);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn short_os_temp_home_is_isolated_too() {
+        // Unix socket fixtures need /tmp even when TMPDIR is a longer,
+        // per-verification directory (including macOS's per-user temp root).
+        let home = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        crate::Settings::default().save_global().unwrap();
+        assert!(home.path().join(".gwt/config.toml").is_file());
     }
 
     #[test]
