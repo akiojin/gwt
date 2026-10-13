@@ -32,6 +32,7 @@ pub enum PmCommand {
     ReportPost {
         project_root: Option<String>,
         kind: PmReportKind,
+        question: Option<String>,
         body: String,
     },
     /// Read the project's reports in posting order.
@@ -158,6 +159,7 @@ pub(super) fn run<E: CliEnv>(
         PmCommand::ReportPost {
             project_root,
             kind,
+            question,
             body,
         } => {
             let repo_path = resolve_repo_path(env, project_root);
@@ -166,11 +168,12 @@ pub(super) fn run<E: CliEnv>(
                     "pm.report.post requires the registered PM or a direct user CLI call".into(),
                 ));
             }
-            let report = pm_report::post_report(&repo_path, kind, &body).map_err(|error| {
-                SpecOpsError::from(ApiError::Unexpected(format!(
-                    "failed to persist PM report: {error}"
-                )))
-            })?;
+            let report = pm_report::post_report(&repo_path, kind, &body, question.as_deref())
+                .map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to persist PM report: {error}"
+                    )))
+                })?;
             out.push_str(
                 &serde_json::json!({"schema_version": 1, "ok": true, "report": report}).to_string(),
             );
