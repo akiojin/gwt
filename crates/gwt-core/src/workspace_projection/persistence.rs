@@ -5848,24 +5848,62 @@ pub fn current_work_id(
     branch: Option<&str>,
     worktree_path: Option<&Path>,
 ) -> Option<String> {
-    let canonical_id = canonical_work_id(project_root, branch, worktree_path)?;
-    Some(
-        current_canonical_work_item(projection, project_root, &canonical_id)
+    current_work_id_for_launch(projection, project_root, branch, worktree_path, None)
+        .ok()
+        .flatten()
+}
+
+/// Resolve a launch's current Work using its independently proven owner.
+/// Only authenticated launch coordinators may supply `launch_owner`: ordinary
+/// readers must not acquire authority from an ownerless active tail.
+pub fn current_work_id_for_launch(
+    projection: &WorkItemsProjection,
+    project_root: &Path,
+    branch: Option<&str>,
+    worktree_path: Option<&Path>,
+    launch_owner: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(canonical_id) = canonical_work_id(project_root, branch, worktree_path) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner)?
             .map(|item| item.id.clone())
             .unwrap_or(canonical_id),
-    )
+    ))
 }
 
 fn current_canonical_work_item<'a>(
     projection: &'a WorkItemsProjection,
     project_root: &Path,
     canonical_id: &str,
-) -> Option<&'a WorkItem> {
-    let mut current = projection
+    launch_owner: Option<&str>,
+) -> Result<Option<&'a WorkItem>> {
+    let Some(mut current) = projection
         .work_items
         .iter()
-        .find(|item| item.id == canonical_id)?;
-    let mut owner_anchor = current.owner.as_deref();
+        .find(|item| item.id == canonical_id)
+    else {
+        return Ok(None);
+    };
+    let owners_match = |left: &str, right: &str| {
+        left == right
+            || can_upgrade_work_owner(Some(left), Some(right))
+            || can_upgrade_work_owner(Some(right), Some(left))
+    };
+    let validate_launch_owner = |item: &WorkItem| -> Result<()> {
+        if let (Some(expected), Some(actual)) = (launch_owner, item.owner.as_deref()) {
+            if !owners_match(expected, actual) {
+                return Err(GwtError::Other(format!(
+                    "Work {} owner mismatch: expected {expected}, actual {actual}",
+                    item.id
+                )));
+            }
+        }
+        Ok(())
+    };
+    validate_launch_owner(current)?;
+    let mut owner_anchor = launch_owner.or(current.owner.as_deref());
     let mut authoritative = current;
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
@@ -5881,6 +5919,7 @@ fn current_canonical_work_item<'a>(
         let Some(successor) = candidates.next() else {
             break;
         };
+        validate_launch_owner(successor)?;
         // Historical terminal rows may lack owner metadata. Keep the last
         // known owner across that gap, and only publish a later Work once its
         // owner agrees. An ownerless tail must not gain adoption authority.
@@ -5890,9 +5929,15 @@ fn current_canonical_work_item<'a>(
                     || can_upgrade_work_owner(Some(anchor), Some(owner))
                     || can_upgrade_work_owner(Some(owner), Some(anchor))
             }
-            (Some(_), None) => successor.is_terminal(),
+            (Some(_), None) => successor.is_terminal() || launch_owner.is_some(),
             (None, None) => true,
-            (None, Some(_)) => false,
+            (None, Some(owner)) => successor.execution_containers.iter().any(|container| {
+                container
+                    .branch
+                    .as_deref()
+                    .and_then(work_owner_for_branch)
+                    .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
+            }),
         };
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
@@ -5918,12 +5963,12 @@ fn current_canonical_work_item<'a>(
             break;
         }
         current = successor;
-        if successor.owner.is_some() || owner_anchor.is_none() {
+        if launch_owner.is_some() || successor.owner.is_some() || owner_anchor.is_none() {
             authoritative = successor;
-            owner_anchor = successor.owner.as_deref();
+            owner_anchor = launch_owner.or(successor.owner.as_deref());
         }
     }
-    Some(authoritative)
+    Ok(Some(authoritative))
 }
 
 /// #3065: find the Work item that owns a given execution container. The
@@ -5941,10 +5986,11 @@ pub fn find_work_item_for_container<'a>(
 ) -> Option<&'a WorkItem> {
     let branch = branch.map(str::trim).filter(|value| !value.is_empty());
     let canonical_id = canonical_work_id(project_root, branch, worktree_path);
-    if let Some(current) = canonical_id
-        .as_deref()
-        .and_then(|id| current_canonical_work_item(projection, project_root, id))
-    {
+    if let Some(current) = canonical_id.as_deref().and_then(|id| {
+        current_canonical_work_item(projection, project_root, id, None)
+            .ok()
+            .flatten()
+    }) {
         return Some(current);
     }
     let branch_identity = branch.map(canonical_work_branch_identity);
@@ -5972,7 +6018,10 @@ pub fn find_work_item_for_container<'a>(
         projection,
         project_root,
         &workspace_group_key_for_item(project_root, matched),
+        None,
     )
+    .ok()
+    .flatten()
     .or(Some(matched))
 }
 

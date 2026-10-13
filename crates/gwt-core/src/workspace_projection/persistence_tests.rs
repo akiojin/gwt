@@ -13397,15 +13397,17 @@ fn current_work_preserves_owner_authority_across_missing_historical_owner() {
     let middle_id = successor_work_id(&root_id);
     let latest_id = successor_work_id(&middle_id);
 
-    for (middle_owner, latest_owner) in [
-        (None, Some("SPEC-4777")),
-        (None, Some("SPEC-4313")),
-        (None, None),
-        (Some("SPEC-4777"), Some("SPEC #4777")),
+    for (root_owner, middle_owner, latest_owner) in [
+        (Some("Issue #4777"), None, Some("SPEC-4777")),
+        (Some("Issue #4777"), None, Some("SPEC-4313")),
+        (Some("Issue #4777"), None, None),
+        (Some("Issue #4777"), Some("SPEC-4777"), Some("SPEC #4777")),
+        (None, None, Some("SPEC-4777")),
+        (None, None, Some("SPEC-4313")),
     ] {
         let mut projection = WorkItemsProjection::empty(now);
         let mut start = sample_work_event(&root_id, now);
-        start.owner = Some("Issue #4777".to_string());
+        start.owner = root_owner.map(str::to_string);
         start.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: branch.map(str::to_string),
             worktree_path: Some(worktree.to_path_buf()),
@@ -13431,8 +13433,10 @@ fn current_work_preserves_owner_authority_across_missing_historical_owner() {
         let before = projection.clone();
         let expected_id = if matches!(latest_owner, Some("SPEC-4777" | "SPEC #4777")) {
             &latest_id
+        } else if root_owner.is_none() {
+            // A historical gap cannot authorize a foreign tail.
+            &middle_id
         } else {
-            // A historical gap cannot authorize a foreign or ownerless tail.
             &root_id
         };
 
@@ -13452,6 +13456,26 @@ fn current_work_preserves_owner_authority_across_missing_historical_owner() {
             projection, before,
             "resolution must preserve historical Work"
         );
+        let launched = current_work_id_for_launch(
+            &projection,
+            project_root,
+            branch,
+            Some(worktree),
+            Some("SPEC-4777"),
+        );
+        if latest_owner == Some("SPEC-4313") {
+            let error = launched.unwrap_err().to_string();
+            assert!(
+                error.contains("expected SPEC-4777, actual SPEC-4313"),
+                "{error}"
+            );
+        } else {
+            assert_eq!(
+                launched.unwrap().as_ref(),
+                Some(&latest_id),
+                "authenticated launch may restore the ownerless current Work"
+            );
+        }
         if latest_owner.is_none() {
             projection.apply_event(WorkEvent::new(WorkEventKind::Discard, &latest_id, now));
             assert_eq!(

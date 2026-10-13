@@ -160,6 +160,22 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             gwt_core::workspace_projection::WorkEventKind::Discard,
         ),
         (
+            "4777-ownerless-root",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
+            "5082-ownerless-current",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
             "5257-idle-work-after-refused-adoption",
             gwt::cli::execution_state::ExecutionSettlement::Blocked {
                 reason: "adoption did not complete".to_string(),
@@ -181,6 +197,14 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             true,
             settlement,
         );
+        let unique_head = if case.contains("ownerless") {
+            fs::write(fixture.worktree.join("retained-source.txt"), case).unwrap();
+            run_git(&fixture.worktree, &["add", "retained-source.txt"]);
+            run_git(&fixture.worktree, &["commit", "-m", "retain unique source"]);
+            Some(git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]))
+        } else {
+            None
+        };
         let source_path = fixture
             .sessions_dir
             .join(format!("{}.toml", fixture.source_session_id));
@@ -243,7 +267,15 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             predecessor.execution_containers[0].worktree_path =
                 Some(PathBuf::from(r"E:\gwt\work\issue-3165"));
         }
-        if case.starts_with("4249") || case.starts_with("4777") {
+        if case == "4777-ownerless-root" {
+            history
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == predecessor_id)
+                .unwrap()
+                .owner = None;
+        }
+        if case.starts_with("4249") || case.starts_with("4777") || case.starts_with("5082") {
             let mut start = history
                 .work_items
                 .iter()
@@ -277,15 +309,29 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                     &predecessor_id,
                     Utc::now(),
                 ));
-                if case == "4777-missing-historical-owner" {
-                    // v9.116.0: the terminal middle generation lost its owner,
-                    // while both the root and active latest Work retain it.
+                if case == "4777-missing-historical-owner" || case.contains("ownerless") {
+                    // Real historical chains can lose owners at the root,
+                    // terminal middle generations, or active latest Work.
                     history
                         .work_items
                         .iter_mut()
                         .find(|work| work.id == predecessor_id)
                         .unwrap()
                         .owner = None;
+                    if case == "5082-ownerless-current" {
+                        start.id = format!("{case}-middle-start");
+                        start.work_item_id =
+                            gwt_core::workspace_projection::successor_work_id(&predecessor_id);
+                        start.related_work_item_id = Some(predecessor_id.clone());
+                        start.owner = None;
+                        history.apply_event(start.clone());
+                        predecessor_id = start.work_item_id.clone();
+                        history.apply_event(gwt_core::workspace_projection::WorkEvent::new(
+                            gwt_core::workspace_projection::WorkEventKind::Discard,
+                            &predecessor_id,
+                            Utc::now(),
+                        ));
+                    }
                     start.id = format!("{case}-latest-start");
                     start.work_item_id =
                         gwt_core::workspace_projection::successor_work_id(&predecessor_id);
@@ -346,16 +392,17 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             backfill.execution_container = work.execution_containers.first().cloned();
             history.apply_event(backfill);
         }
-        let terminal_history: Vec<_> = if case == "4777-missing-historical-owner" {
-            history
-                .work_items
-                .iter()
-                .filter(|work| work.is_terminal())
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let terminal_history: Vec<_> =
+            if case == "4777-missing-historical-owner" || case.contains("ownerless") {
+                history
+                    .work_items
+                    .iter()
+                    .filter(|work| work.is_terminal())
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &works_path,
             &history,
@@ -521,6 +568,13 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             "{case}: {after:?}"
         );
         assert_eq!(fs::read(&source_path).unwrap(), source_bytes, "{case}");
+        if let Some(unique_head) = unique_head {
+            assert_eq!(
+                git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]),
+                unique_head,
+                "{case}: retain unique commit"
+            );
+        }
         let updated =
             gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
                 .unwrap()
