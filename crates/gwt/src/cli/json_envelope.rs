@@ -3399,6 +3399,7 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
         // Confirmation authority is independent of the host's free disk space.
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         gwt_config::Settings::update_global(|settings| {
             settings.verification.disk_budget_bytes = Some(0);
             settings.build_artifact_gc.below_bytes = 0;
@@ -3406,7 +3407,13 @@ mod tests {
             Ok(())
         })
         .expect("fixture disk admission");
-        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        assert_eq!(
+            gwt_config::Settings::load()
+                .unwrap()
+                .verification
+                .disk_budget_bytes,
+            Some(0)
+        );
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
         let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
         let repo = temp.path().join("repo");

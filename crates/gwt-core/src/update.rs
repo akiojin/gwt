@@ -402,6 +402,7 @@ pub fn clear_update_resume_marker() -> Result<(), String> {
 
 /// Test-friendly variant of [`clear_update_resume_marker`].
 pub fn clear_update_resume_marker_in(dir: &Path) -> Result<(), String> {
+    gwt_config::home::assert_test_path(&dir.join("marker.json"));
     match fs::remove_file(dir.join("marker.json")) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -513,9 +514,11 @@ fn write_json_atomically<T: Serialize>(
     value: &T,
     what: &str,
 ) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {what} dir: {e}"))?;
     let path = dir.join(file_name);
     let tmp = dir.join(format!("{file_name}.tmp"));
+    gwt_config::home::assert_test_path(&path);
+    gwt_config::home::assert_test_path(&tmp);
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {what} dir: {e}"))?;
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| format!("Failed to serialize {what}: {e}"))?;
     fs::write(&tmp, json).map_err(|e| format!("Failed to write {what}: {e}"))?;
@@ -1252,6 +1255,7 @@ impl UpdateManager {
     }
 
     pub fn write_restart_args_file(&self, path: &Path, args: Vec<String>) -> Result<(), String> {
+        gwt_config::home::assert_test_path(path);
         let parent = path
             .parent()
             .ok_or_else(|| "Invalid args file path".to_string())?;
@@ -1734,6 +1738,7 @@ fn read_cache(path: &Path) -> Result<UpdateCacheFile, String> {
 }
 
 fn write_cache(path: &Path, cache: &UpdateCacheFile) -> Result<(), String> {
+    gwt_config::home::assert_test_path(path);
     let parent = path
         .parent()
         .ok_or_else(|| "Invalid update cache path".to_string())?;
@@ -1742,6 +1747,7 @@ fn write_cache(path: &Path, cache: &UpdateCacheFile) -> Result<(), String> {
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    gwt_config::home::assert_test_path(path);
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("invalid path"))?;
@@ -1751,6 +1757,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
             .and_then(|s| s.to_str())
             .unwrap_or("update")
     ));
+    gwt_config::home::assert_test_path(&tmp);
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
     fs::write(&tmp, bytes)?;
     let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
@@ -4945,6 +4952,23 @@ mod tests {
         assert!(!pending_version_is_newer("abc", "9.25.0"));
         assert!(!pending_version_is_newer("9.26.0", "not-a-version"));
         assert!(!pending_version_is_newer("abc", "def"));
+    }
+
+    #[test]
+    fn update_json_writers_reject_traversal_before_any_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("must-not-be-created");
+        let destination = missing.join("../metadata");
+        assert!(std::panic::catch_unwind(|| {
+            let _ = write_json_atomically(&destination, "marker.json", &true, "fixture");
+        })
+        .is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _ = write_json_atomic(&destination.join("cache.json"), &true);
+        })
+        .is_err());
+        assert!(!missing.exists());
+        assert!(!dir.path().join("metadata").exists());
     }
 
     // Issue #4038 (AC-3): resume marker persist / load / clear round trip.
