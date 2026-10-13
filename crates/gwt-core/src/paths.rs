@@ -827,6 +827,29 @@ mod tests {
         assert!(home.ends_with(".gwt"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_temporary_home_allows_missing_descendants() {
+        use crate::test_support::ScopedEnvVar;
+
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let canonical_temp = temp.path().canonicalize().unwrap();
+        for root in [temp.path(), canonical_temp.as_path()] {
+            let home = root.join("uncreated-profile");
+            let _home = ScopedEnvVar::set("HOME", &home);
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+            assert_eq!(
+                gwt_home(),
+                home.join(".gwt"),
+                "the requested temporary HOME must be accepted"
+            );
+            assert!(!home.exists(), "resolving a test HOME must not create it");
+        }
+    }
+
     #[test]
     fn normalize_windows_child_process_path_strips_drive_verbatim_prefix() {
         assert_eq!(

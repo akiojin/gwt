@@ -86,6 +86,19 @@ fn is_cargo_test_binary(exe: &Path) -> bool {
 #[track_caller]
 pub fn assert_test_path(path: &Path) {
     if is_test_process() || gwt_home_override().is_some() {
+        #[cfg(windows)]
+        assert!(
+            is_isolated(path),
+            "test HOME isolation: refusing access to {}; use TempDir and ScopedGwtHome; \
+             trusted_temp={:?}, resolved={:?}, parent={:?}, prefix_metadata={:?}, prefix_canonical={:?}",
+            path.display(),
+            dirs::data_local_dir().map(|root| root.join("Temp").canonicalize()),
+            resolved_path(path),
+            path.parent().and_then(resolved_path),
+            path.components().next().map(|prefix| std::fs::symlink_metadata(prefix.as_os_str()).map(|value| value.is_dir())),
+            path.components().next().map(|prefix| std::fs::canonicalize(prefix.as_os_str())),
+        );
+        #[cfg(not(windows))]
         assert!(
             is_isolated(path),
             "test HOME isolation: refusing access to {}; use TempDir and ScopedGwtHome",
