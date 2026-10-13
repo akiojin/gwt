@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.117.2] - 2026-10-13
+
+### Bug Fixes
+
+- **verify:** Preserve cargo target resolution errors
+- **gui:** Persist long-running dispatch diagnostics
+- **gui:** Establish Windows CPU baseline before stall sampling
+- **gui:** Isolate stall diagnostics from logging and ledger contention
+- **workspace:** 起動時のWork再構築をロック外で計算する
+- **workspace:** Repair startup intake rustdoc reference
+
+### Miscellaneous Tasks
+
+- **work:** Preserve issue 5096 relaunch records
+- **work:** Preserve issue 5335 acceptance review launch
+
 ## [9.117.1] - 2026-10-13
 
 ### Bug Fixes
