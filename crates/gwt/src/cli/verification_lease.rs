@@ -155,7 +155,11 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
     let Some(test_filter) = test_filter else {
         return CommandWeight::Heavy;
     };
-    classify_cargo_scope(&args.collect::<Vec<_>>(), test_filter)
+    classify_cargo_scope(
+        &args.collect::<Vec<_>>(),
+        test_filter,
+        subcommand == "nextest",
+    )
 }
 
 /// Issue #5086: the explicit short-gate allowlist also owns its execution bound.
@@ -275,10 +279,15 @@ fn has_libtest_filter(args: &[String]) -> Option<bool> {
 /// workspace with `default-members`, so `cargo test --lib` with no package
 /// selects the lib target of *every* default member — the workspace-wide build
 /// this classification exists to catch, wearing a narrowing flag.
-fn classify_cargo_scope(cargo_args: &[&str], mut test_filter: bool) -> CommandWeight {
+fn classify_cargo_scope(
+    cargo_args: &[&str],
+    mut test_filter: bool,
+    nextest: bool,
+) -> CommandWeight {
     let mut named_targets = 0usize;
     let mut lib_target = false;
     let mut packages = 0usize;
+    let mut nextest_filterset = false;
     let mut args = cargo_args.iter().copied();
     while let Some(arg) = args.next() {
         // `--test=name` and `--test name` select the same target.
@@ -290,6 +299,19 @@ fn classify_cargo_scope(cargo_args: &[&str], mut test_filter: bool) -> CommandWe
         }
         if flag == "--lib" {
             lib_target = true;
+            continue;
+        }
+        if nextest && matches!(flag, "-E" | "--filterset") {
+            let Some(value) = inline_value.or_else(|| args.next()) else {
+                return CommandWeight::Heavy;
+            };
+            // Nextest unions repeated filtersets. Only one simple equality
+            // is proven narrow here; general expressions stay fail-closed.
+            if nextest_filterset || !is_exact_nextest_filter(value) {
+                return CommandWeight::Heavy;
+            }
+            nextest_filterset = true;
+            test_filter = true;
             continue;
         }
         let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
@@ -357,6 +379,18 @@ fn classify_cargo_scope(cargo_args: &[&str], mut test_filter: bool) -> CommandWe
     } else {
         CommandWeight::Heavy
     }
+}
+
+fn is_exact_nextest_filter(value: &str) -> bool {
+    value
+        .strip_prefix("test(=")
+        .and_then(|name| name.strip_suffix(')'))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+        })
 }
 
 /// The first command of a matrix that needs the host to itself, if any.
@@ -1905,6 +1939,9 @@ mod tests {
             "cargo test -p gwt --all-features --test verification_lease",
             "cargo test -p gwt --all-features --lib verification_lease::tests",
             "cargo test -p gwt --all-features --lib -- verification_lease::tests --exact",
+            "cargo nextest run -p gwt --all-features --lib -E 'test(=module::case_1)'",
+            "cargo nextest run -p gwt --lib --filterset 'test(=module::case_1)'",
+            "cargo nextest run -p gwt --lib --filterset='test(=module::case_1)'",
             r#"cargo test -p gwt --lib verification_lease -- --skip """#,
             "markdownlint README.md",
             "markdownlint-cli2 README.md",
@@ -1922,6 +1959,22 @@ mod tests {
             "cargo test -p gwt --lib --features extra",
             "cargo test -p gwt --lib -- --skip ignored_case",
             "cargo test -p gwt --lib -- --test-threads 1",
+            "cargo nextest run -p gwt --lib -E 'all()'",
+            "cargo nextest run -p gwt --lib -E 'test(case)'",
+            "cargo nextest run -p gwt --lib -E 'not test(=case)'",
+            "cargo nextest run -p gwt --lib -E 'test(=case) or all()'",
+            "cargo nextest run -p gwt --lib -E 'test(=)'",
+            "cargo nextest run -p gwt --lib -E 'test(=case'",
+            "cargo nextest run -p gwt --lib -E",
+            "cargo nextest run -p gwt --lib -E 'test(=one)' --filterset 'test(=two)'",
+            "cargo nextest run -p gwt --lib -E 'test(=one)' -E 'all()'",
+            "cargo nextest run -p gwt --lib -E 'all()' -E 'test(=one)'",
+            "cargo nextest run --lib -E 'test(=case)'",
+            "cargo nextest run --workspace -p gwt --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt -p gwt-core --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt --all-targets --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt --lib --test admission -E 'test(=case)'",
+            "cargo test -p gwt --lib -E 'test(=case)'",
             r#"cargo test -p gwt --all-features --lib verification_lease -- """#,
             r#"cargo test -p gwt --lib -- verification_lease """#,
             r#"cargo test -p gwt --lib -- "" verification_lease"#,
