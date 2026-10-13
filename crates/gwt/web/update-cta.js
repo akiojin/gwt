@@ -152,11 +152,12 @@ export function createUpdateCtaController({
     return cta;
   }
 
-  function showReadyPending(version) {
+  function showReadyPending(version, reason = null) {
     if (!version) return null;
     removeLegacyUpdateSurfaces();
     pendingVersion = version;
-    const cta = renderCta("ready", `Update v${version} ready — Restart now`);
+    const detail = reason ? `${reason} — ` : "";
+    const cta = renderCta("ready", `Update v${version} ready — ${detail}Restart now`);
     announceUpdateAvailable();
     return cta;
   }
@@ -341,6 +342,10 @@ export function createUpdateCtaController({
       case "cancelled":
         pendingVersion = version;
         showReadyPending(version);
+        return;
+      case "elevation_required":
+        closeModal();
+        showReadyPending(version, "Administrator privileges required");
         return;
       case "applying":
         closeModal();
