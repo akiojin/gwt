@@ -323,7 +323,7 @@ pub(super) fn apply_workspace_launch_for_current_work(
     mut transition: WorkspaceLaunchTransition<'_>,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
     use gwt_core::workspace_projection::{
-        can_upgrade_work_owner, canonical_work_id, current_work_id, successor_work_id,
+        can_upgrade_work_owner, canonical_work_id, current_work_id_for_launch, successor_work_id,
         workspace_group_key_for_item, WorkEventKind, WorkspaceStatusCategory,
     };
     let canonical_id = canonical_work_id(
@@ -331,12 +331,14 @@ pub(super) fn apply_workspace_launch_for_current_work(
         Some(&session.branch_name),
         Some(&session.worktree_path),
     );
-    transition.work_id = current_work_id(
+    let owner = transition.owner();
+    transition.work_id = current_work_id_for_launch(
         work_items,
         project_root,
         Some(&session.branch_name),
         Some(&session.worktree_path),
-    );
+        transition.canonical_owner.and(owner.as_deref()),
+    )?;
     let mut predecessor_id = None;
     if let Some(current) = work_items
         .work_items
@@ -344,8 +346,8 @@ pub(super) fn apply_workspace_launch_for_current_work(
         .find(|item| Some(&item.id) == transition.work_id.as_ref())
         .filter(|item| item.is_terminal() || Some(&item.id) != canonical_id.as_ref())
     {
-        let owner = transition.owner();
         let owner_matches = current.owner == owner
+            || (current.owner.is_none() && transition.canonical_owner.is_some())
             || can_upgrade_work_owner(current.owner.as_deref(), owner.as_deref());
         // The authenticated launch proves this Session's local path. Work's
         // branch identity spans hosts, including history with no saved path.

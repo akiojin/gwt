@@ -272,6 +272,7 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const predecessor = fixture.inspect();
       const oldWork = predecessor.works.work_items.find(work => work.id === predecessor.workspace.id);
+      expect(oldWork.owner).toBeNull();
       expect(oldWork.status_category).toBe('done');
       expect(oldWork.execution_containers).toHaveLength(1);
       expect(oldWork.execution_containers[0].worktree_path).toBe(`E:\\gwt\\work\\issue-${OWNER}`);
