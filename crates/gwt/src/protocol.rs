@@ -2111,6 +2111,8 @@ pub enum BackendEvent {
         id: String,
         session_id: Option<String>,
         reports: Vec<PmReportView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     },
     /// Origin-client completion receipt for one authenticated pane snapshot
@@ -3760,6 +3762,7 @@ mod tests {
         assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None,
+            current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
                 id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),

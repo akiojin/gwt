@@ -1110,6 +1110,17 @@ PM Q&A posts include an `instruction` object with the full `original`, `kind`
 redacted before storage. Memory search includes the saved originals and outcomes;
 active standing instructions are reloaded at PM startup and each turn.
 
+The **PM の現在** card stays above the report history. It separates the PM's
+explanation from observed active windows, queue head, human handoffs, release PR,
+and pending update. Unavailable observations are shown as unknown. The PM updates
+its explanation with `pm.status.set`: supply 1–3 `items` (`kind`: `working` or
+`waiting`, `text`, and RFC3339 `started_at`), `next_trigger`, and optional
+`user_action`. Set `stale_after_minutes` to change the default 15-minute warning.
+`pm.status` returns the latest explanation, retained status history, and reporting
+diagnostics. Identical statements with unchanged Monitor state do not renew their
+timestamp. A human PM turn requires a successfully saved Q&A report before Stop;
+scheduled automatic cycles are exempt.
+
 The resident PM starts in a gwt-owned runtime directory. Repository skills,
 hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are
 not loaded as PM configuration. Implementation agents keep their normal

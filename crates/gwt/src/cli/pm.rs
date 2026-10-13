@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use gwt_core::paths::gwt_sessions_dir;
 use gwt_core::pm_report::{self, PmReportKind};
+use gwt_core::pm_status::{self, PmStatusInput};
 use gwt_github::{ApiError, SpecOpsError};
 use serde::Serialize;
 
@@ -38,6 +39,11 @@ pub enum PmCommand {
     },
     /// Read the project's reports in posting order.
     ReportList { project_root: Option<String> },
+    /// Replace the displayed PM status while retaining its authored history.
+    StatusSet {
+        project_root: Option<String>,
+        input: PmStatusInput,
+    },
     /// `pm.status` — optional explicit `project_root`; defaults to the
     /// current repository path (container/bare setups must pass it
     /// explicitly, same convention as the Issue Monitor queue operations).
@@ -175,6 +181,15 @@ pub(super) fn run<E: CliEnv>(
                     "PM Q&A reports require instruction capture; resubmit with instruction.original, kind, actions and issue_numbers".into(),
                 ));
             }
+            let qa_turn = if kind == PmReportKind::Qa {
+                super::hook::pm_reporting::capture_qa_turn(&repo_path).map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to capture PM reporting turn: {error}"
+                    )))
+                })?
+            } else {
+                None
+            };
             let (report, saved_instruction) = if let Some(mut input) = instruction {
                 pm_report::validate_report_input(kind, &body, question.as_deref()).map_err(
                     |error| {
@@ -211,6 +226,16 @@ pub(super) fn run<E: CliEnv>(
                 })?;
                 (report, None)
             };
+            // Acknowledge only after either durable report source succeeds.
+            if let Some(turn) = qa_turn {
+                super::hook::pm_reporting::acknowledge_qa(&repo_path, &turn, &report.id).map_err(
+                    |error| {
+                        SpecOpsError::from(ApiError::Unexpected(format!(
+                            "failed to acknowledge PM Q&A report: {error}"
+                        )))
+                    },
+                )?;
+            }
             let mut response =
                 serde_json::json!({"schema_version": 1, "ok": true, "report": report});
             if let Some(saved) = saved_instruction {
@@ -230,6 +255,32 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(
                 &serde_json::json!({"schema_version": 1, "ok": true, "reports": reports})
                     .to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::StatusSet {
+            project_root,
+            input,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.status.set requires the registered PM or a direct user CLI call".into(),
+                ));
+            }
+            let status = pm_status::set_status_from_path(
+                &crate::pm_current::status_path(&repo_path),
+                input,
+                crate::pm_current::monitor_fingerprint(&repo_path),
+            )
+            .map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to persist PM status: {error}"
+                )))
+            })?;
+            out.push_str(
+                &serde_json::json!({"schema_version": 1, "ok": true, "status": status}).to_string(),
             );
             out.push('\n');
             Ok(0)
@@ -282,6 +333,38 @@ pub(super) fn run<E: CliEnv>(
             );
             report.repository_registrations =
                 pm_registry::pm_repository_registration_views(&repo_path);
+            let status_path = crate::pm_current::status_path(&repo_path);
+            let history =
+                pm_status::load_status_history_from_path(&status_path).map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to load PM status history: {error}"
+                    )))
+                })?;
+            let reporting_prefs_path = status_path.with_file_name("pm.json");
+            let reporting_prefs =
+                pm_registry::load_pm_prefs(&reporting_prefs_path).map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to load PM reporting registration from {}: {error}",
+                        reporting_prefs_path.display()
+                    )))
+                })?;
+            let mut report = serde_json::to_value(&report).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to serialize pm.status report: {error}"
+                )))
+            })?;
+            report["current_status"] = serde_json::json!(history.last());
+            report["status_history"] = serde_json::json!(history);
+            report["reporting"] = reporting_prefs
+                .registration
+                .as_ref()
+                .map(|registration| {
+                    super::hook::pm_reporting::reporting_diagnostic(
+                        &repo_path,
+                        &registration.session_id,
+                    )
+                })
+                .into();
             let rendered = serde_json::to_string_pretty(&report).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to serialize pm.status report: {error}"

@@ -1034,6 +1034,16 @@ PM の Q&A 投稿には、原文 `original`、種別 `kind`（`standing` / `one_
 指定すると、旧レコードを残したまま `superseded_by` で置換先を記録します。秘密値は保存前に伏せます。
 Memory 検索で原文と結果を検索でき、取り消されていない常設指示は PM の起動時と各ターンに再読込します。
 
+**PM の現在** カードは報告履歴の上に常時表示されます。PM の説明と、稼働窓・キュー先頭・
+人への引き継ぎ件数・リリース PR・未適用の更新という自動の事実を分け、取得できない情報は
+不明と表示します。PM は `pm.status.set` で説明を更新します。`items` は 1〜3 件で、
+`kind`（`working` / `waiting`）、`text`、RFC3339 の `started_at` を指定します。
+`next_trigger` は必須、`user_action` は任意です。更新停止の警告は既定で 15 分後に表示し、
+`stale_after_minutes` で変更できます。`pm.status` は最新の説明・保持された状態履歴・
+報告の診断情報を返します。説明と Monitor の状態が同じ場合は時刻を更新しません。
+人間との PM の各ターンは、Q&A 報告の保存に成功してから終了します。定期的な自動サイクルは
+この終了条件の対象外です。
+
 常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
 hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には
 読み込まれません。実装 agent は従来どおり project 設定を使います。既存の PM 会話は

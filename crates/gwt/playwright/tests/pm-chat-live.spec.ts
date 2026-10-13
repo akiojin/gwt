@@ -1,6 +1,7 @@
 /* SPEC #5023: explicit durable reports -> backend -> read-only PM view. */
 import { expect, test } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
@@ -46,9 +47,43 @@ test.describe('PM reports', () => {
         const envelope = JSON.parse(result.stdout);
         expect(envelope.ok).toBe(true);
         const output = JSON.parse(envelope.output);
-        expect(output.ok).toBe(true);
+        if ('ok' in output) expect(output.ok).toBe(true);
         return output;
       };
+      const currentCard = pane.getByRole('region', { name: 'PM の現在', exact: true });
+      await expect(currentCard).toBeVisible();
+      // Seed only this owned isolated fixture's history to observe the real
+      // backend's default fifteen-minute threshold without a wall-clock wait.
+      const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
+      const oldStatus = {
+        items: [{ kind: 'waiting', text: 'リリースの公開待ち', started_at: new Date(Date.now() - 20 * 60_000).toISOString() }],
+        next_trigger: 'v9.117.2 の公開', user_action: null, stale_after_minutes: 15,
+        updated_at: new Date(Date.now() - 16 * 60_000).toISOString(), monitor_fingerprint: null,
+      };
+      writeFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-status.jsonl`, `${JSON.stringify(oldStatus)}\n`);
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(currentCard).toContainText('PM の更新が 16 分止まっています');
+      await expect(currentCard).toContainText('次に動く条件: v9.117.2 の公開');
+      await expect(currentCard).toContainText('ユーザーへの依頼: なし');
+      await expect(currentCard.getByRole('region', { name: '自動の事実' })).toContainText('Release v9.117.2');
+      await expect(currentCard.getByText('リリース: #5352 Release v9.117.2', { exact: true })).toBeInViewport();
+      await expect(currentCard).toContainText('稼働中の窓: 0');
+      const staleScreenshot = info.outputPath(`pm-current-stale-${info.project.name}.png`);
+      await pane.screenshot({ path: staleScreenshot });
+      await info.attach('PM current stale status', { path: staleScreenshot, contentType: 'image/png' });
+      pmOperation('pm.status.set', {
+        items: [{ kind: 'working', text: `公開結果を確認 ${info.project.name}`, started_at: new Date().toISOString() }],
+        next_trigger: '公開確認の完了', user_action: null,
+      });
+      const statusReadback = pmOperation('pm.status');
+      expect(statusReadback.status_history).toHaveLength(2);
+      expect(statusReadback.status_history[0].items[0].text).toBe(oldStatus.items[0].text);
+      expect(statusReadback.current_status.items[0].text).toContain('公開結果を確認');
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
+      await expect(currentCard).not.toContainText('更新が 16 分止まっています');
+      await expect(currentCard).not.toContainText('リリースの公開待ち');
+      await expect(reports).not.toContainText('公開結果を確認');
       const saved = pmOperation('pm.report.post', { kind: 'progress', body });
       expect(saved.report.body).toBe(body);
       expect(saved.report.id).toBeTruthy();
@@ -134,6 +169,7 @@ test.describe('PM reports', () => {
       await expect(report).toBeVisible();
       expect(await page.evaluate(() => (window as any).__pmReportAttachmentCalls)).toEqual([]);
       await page.reload();
+      await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
       await expect(report).toBeVisible();
       await expect(qaReport.locator('.pm-chat__question')).toHaveText(question);
       await expect(qaReport.locator('strong')).toHaveText('Confirmed');
