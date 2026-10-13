@@ -1778,8 +1778,8 @@ test("SPEC-3038 (2026-06-20): Windows popover renders the cross-tab window-list 
   const body = extractFunctionBody(projectShellSurfaceSource, "renderWindowList");
   assert.match(
     body,
-    /groupProjectWindowList\(getAppState\(\),\s*windowListEntries\)/,
-    "renderWindowList must source rows from the cross-tab model, not activeWorkspace() alone",
+    /groupProjectWindowList\(catalog.appState,\s*windowListEntries\)/,
+    "renderWindowList must source rows from the shared cross-tab catalog",
   );
   assert.match(
     body,
@@ -5310,7 +5310,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   const chipIndex = statusBody.indexOf("chip.classList.remove(");
   const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
   const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
-  const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
 
   assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
   assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
@@ -5318,7 +5317,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
     ["status chip class writes", chipIndex],
     ["overlay lookup/writes", overlayIndex],
     ["telemetry recompute", telemetryIndex],
-    ["Window List refresh", windowListIndex],
   ]) {
     assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
     assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
@@ -5330,19 +5328,16 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   );
 });
 
-test("Runtime status updates repaint the Window List when the target window is hidden", () => {
+test("Runtime status updates publish to catalog subscribers before an unmounted target returns", () => {
   const statusBody = extractFunctionBody(appSource, "applyStatus");
   const branchMatch = statusBody.match(
     /if\s*\(\s*!element\s*\)\s*\{([\s\S]*?)return\s*;\s*\}/,
   );
   assert.ok(branchMatch, "applyStatus must handle status events for unmounted windows");
 
-  const branchBody = branchMatch[1];
-  assert.match(
-    branchBody,
-    /renderWindowList\s*\(\s*\)\s*;/,
-    "hidden target status updates must still refresh the Window List",
-  );
+  assert.ok(statusBody.indexOf("publishWindowCatalogRuntime(windowId, status)") < statusBody.indexOf(branchMatch[0]),
+    "hidden target status updates must reach both catalog views before returning");
+  assert.doesNotMatch(statusBody, /renderWindowList\s*\(/);
 
 });
 

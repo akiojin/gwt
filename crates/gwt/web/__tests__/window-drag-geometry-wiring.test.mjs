@@ -40,7 +40,7 @@ test("titlebar drag pointerdown begins a local geometry edit and records the bas
   );
 });
 
-test("a shared commitWindowGeometryGesture helper commits, syncs the model, renders the minimap, and sends unconditionally", () => {
+test("a shared commitWindowGeometryGesture helper commits, publishes the catalog, and sends unconditionally", () => {
   const helper = appSource.match(
     /function\s+commitWindowGeometryGesture\(([\s\S]*?)\n\s{6}\}/,
   );
@@ -49,8 +49,8 @@ test("a shared commitWindowGeometryGesture helper commits, syncs the model, rend
   assert.match(body, /commitLocalGeometryEdit\(/, "helper must commit the local edit guard");
   assert.match(
     body,
-    /fleetMinimap\?\.renderCells\(\)/,
-    "helper must re-render the Fleet Minimap immediately (no echo wait)",
+    /publishWindowCatalog\(\)/,
+    "helper must publish the catalog to both subscribed views immediately (no echo wait)",
   );
   assert.match(
     body,

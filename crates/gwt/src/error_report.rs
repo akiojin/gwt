@@ -210,6 +210,7 @@ fn recently_recorded(record: &ErrorRecord) -> bool {
                     && row.message == record.message
                     && row.scope == record.scope
                     && row.target.project_root == record.target.project_root
+                    && row.target.window_id == record.target.window_id
             })
         })
 }
@@ -272,6 +273,26 @@ mod tests {
         }
         let rows = gwt_core::error_ledger::list_since(None).expect("list");
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn identical_window_errors_keep_window_attribution_and_suppress_same_window() {
+        let (_dir, _home) = isolated_home();
+        for window in ["issue-a", "issue-b", "issue-a"] {
+            report_error(
+                ErrorKind::DaemonFault,
+                "Issue window load failed: cache unavailable",
+                ErrorTarget {
+                    project_root: Some("/project".into()),
+                    window_id: Some(window.into()),
+                    ..ErrorTarget::default()
+                },
+            );
+        }
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].target.window_id.as_deref(), Some("issue-a"));
+        assert_eq!(rows[1].target.window_id.as_deref(), Some("issue-b"));
     }
 
     #[test]

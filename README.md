@@ -305,6 +305,30 @@ gwtd <<'JSON'
 JSON
 ```
 
+`actions.dispatch` starts a workflow using GitHub's shared API budget. Dispatch
+is disabled by default. Allow individual workflow filenames for a repository
+in `~/.gwt/config.toml`:
+
+```toml
+[allowed_workflows]
+"akiojin/gwt" = ["prepare-release.yml"]
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"actions.dispatch","params":{"workflow":"prepare-release.yml","ref":"develop","inputs":{"bump":"auto"}}}
+JSON
+```
+
+`workflow` accepts a filename or positive workflow ID; IDs must resolve to an
+allowed filename. The file must exist in the checkout's `.github/workflows/`
+and declare `workflow_dispatch` at the selected branch or tag. `inputs` is an
+optional JSON object; declared input names, required values, types, and choice
+options are checked before dispatch. A successful response confirms submission;
+inspect GitHub Actions for the resulting run. Refused requests identify the
+configuration or input contract to fix without printing input values or raw
+GitHub error bodies.
+
 If `workspace.update` loses its response, use the reported `operation_id` with
 `workspace.receipt` (`params: {"operation_id":"<UUID>"}`) in the same Session.
 This read-only query does not contact the Host or resend the update. `applied`

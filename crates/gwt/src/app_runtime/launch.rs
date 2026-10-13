@@ -2230,8 +2230,35 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
                 .fresh_execution
                 .as_ref()
                 .is_some_and(|(_, _, status)| *status != Some(false));
+        let monitor_startup_failure =
+            failure
+                .fresh_execution
+                .as_ref()
+                .is_some_and(|(pending, cleanup, status)| {
+                    *status == Some(false)
+                        && matches!(cleanup, Ok(true))
+                        && pending
+                            .launch_feedback_context
+                            .as_ref()
+                            .is_some_and(|context| {
+                                context
+                                    .issue_monitor_launch_binding_issue_number()
+                                    .is_some()
+                                    && context.issue_monitor_delivery_id.is_some()
+                                    && !context.issue_monitor_review_dispatch
+                                    && context.issue_monitor_autonomous_handoff.is_none()
+                            })
+                });
+        if monitor_startup_failure {
+            input.failure_input.retryable = false;
+            input.launch_feedback_context = failure
+                .fresh_execution
+                .as_ref()
+                .and_then(|(pending, _, _)| pending.launch_feedback_context.clone());
+        }
         if !preserved_authority
             && (answered_handoff
+                || monitor_startup_failure
                 || failure.continue_work.is_none() && failure.fresh_execution.is_none())
         {
             if let Some((active, _)) = failure_session.as_ref() {
@@ -2333,7 +2360,19 @@ fn rollback_worker_fresh_execution(
         }
         Err(error) => return Err(error.to_string()),
     }
-    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    if !pending
+        .launch_feedback_context
+        .as_ref()
+        .is_some_and(|context| {
+            context
+                .issue_monitor_launch_binding_issue_number()
+                .is_some()
+                && context.issue_monitor_delivery_id.is_some()
+                && context.issue_monitor_autonomous_handoff.is_none()
+        })
+    {
+        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    }
     Ok(true)
 }
 
@@ -5037,13 +5076,19 @@ impl AppRuntime {
                     ));
                 }
                 if let Some((pending, cleanup, status)) = failure.fresh_execution {
-                    events.extend(self.apply_prepared_fresh_execution_launch_failure(
-                        &window_id,
-                        &error.detail,
-                        &pending,
-                        cleanup,
-                        status,
-                    ));
+                    if failure
+                        .generic
+                        .as_ref()
+                        .is_none_or(|prepared| prepared.retryable)
+                    {
+                        events.extend(self.apply_prepared_fresh_execution_launch_failure(
+                            &window_id,
+                            &error.detail,
+                            &pending,
+                            cleanup,
+                            status,
+                        ));
+                    }
                 }
                 if let Some(generic) = failure.generic {
                     events.extend(self.launch_error_events_prepared(
