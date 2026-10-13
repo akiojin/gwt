@@ -40,6 +40,15 @@ pub fn handle_with_input(
         "Stop" => handle_stop(event, input, worktree_root, current_session),
         other => Err(HookError::InvalidEvent(other.to_string())),
     };
+    let result = result.map(|output| match IntentBoundaryEvent::from_name(event) {
+        Some(intent_event) => append_pm_standing_context(
+            output,
+            intent_event,
+            worktree_root,
+            super::is_resident_pm_worktree(worktree_root),
+        ),
+        None => output,
+    });
     let additional_context_bytes = result
         .as_ref()
         .ok()
@@ -621,6 +630,25 @@ fn append_pending_discussion_goal_context(
         return output;
     };
     append_additional_context(output, event, Some(pending_discussion_goal_context(&goal)))
+}
+
+fn append_pm_standing_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    worktree_root: &Path,
+    is_pm: bool,
+) -> HookOutput {
+    if !is_pm || event == IntentBoundaryEvent::Stop {
+        return output;
+    }
+    // Reload the machine-local source at every PM intent boundary; Board
+    // reminder throttling must never hide a newly recorded user instruction.
+    let text = gwt_core::user_instruction::standing_context(worktree_root).unwrap_or_else(|_| {
+        "Standing user instructions unavailable: the machine-local store could not be read. \
+         Do not assume there are no standing instructions."
+            .into()
+    });
+    append_additional_context(output, event, (!text.is_empty()).then_some(text))
 }
 
 fn append_additional_context(
@@ -1505,6 +1533,127 @@ mod tests {
             .expect("PreToolUse output");
 
         assert_eq!(output, HookOutput::Silent);
+    }
+
+    #[test]
+    fn session_start_injects_standing_user_instructions_for_the_pm() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(&worktree).unwrap();
+        let saved = gwt_core::user_instruction::record(
+            &worktree,
+            gwt_core::user_instruction::UserInstructionInput {
+                original: "報告には判断理由も記載してください。".into(),
+                summary: "判断理由を報告する".into(),
+                answer: "理由を報告します。".into(),
+                actions: vec![],
+                issue_numbers: vec![5342],
+                kind: gwt_core::user_instruction::UserInstructionKind::Standing,
+                supersedes: vec![],
+            },
+        )
+        .unwrap();
+
+        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+            panic!("PM startup must inject its standing instructions: {output:?}");
+        };
+        assert_eq!(event, IntentBoundaryEvent::SessionStart);
+        assert!(text.contains(&saved.id), "{text}");
+        assert!(text.contains(&saved.summary), "{text}");
+        assert!(!text.contains(&saved.original), "inject only the summary");
+
+        let store_path = gwt_core::user_instruction::instructions_path(&worktree);
+        std::fs::write(store_path, b"invalid instruction snapshot").unwrap();
+        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let mut stdout = Vec::new();
+        output.serialize_to(&mut stdout).unwrap();
+        let envelope: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            envelope["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert!(envelope["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("Standing user instructions unavailable"));
+    }
+
+    #[test]
+    fn standing_user_instructions_reload_at_each_pm_prompt() {
+        use gwt_core::user_instruction::{record, UserInstructionInput, UserInstructionKind};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let input = UserInstructionInput {
+            original: "報告には判断理由も記載してください。".into(),
+            summary: "判断理由を報告する".into(),
+            answer: "理由を報告します。".into(),
+            actions: vec![],
+            issue_numbers: vec![5342],
+            kind: UserInstructionKind::Standing,
+            supersedes: vec![],
+        };
+        let first = record(&repo, input.clone()).unwrap();
+        let initial = append_pm_standing_context(
+            HookOutput::Silent,
+            IntentBoundaryEvent::SessionStart,
+            &repo,
+            true,
+        );
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = initial else {
+            panic!("standing instructions must reach PM startup");
+        };
+        assert!(text.contains(&first.id), "{text}");
+
+        let latest = record(
+            &repo,
+            UserInstructionInput {
+                summary: "報告には根拠リンクを記載する".into(),
+                supersedes: vec![first.id.clone()],
+                ..input
+            },
+        )
+        .unwrap();
+        let base = HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::UserPromptSubmit,
+            "Board reminder",
+        );
+        let next = append_pm_standing_context(
+            base.clone(),
+            IntentBoundaryEvent::UserPromptSubmit,
+            &repo,
+            true,
+        );
+        let HookOutput::HookSpecificAdditionalContext { event, text } = next else {
+            panic!("standing instructions must reach each PM prompt");
+        };
+        assert_eq!(event, IntentBoundaryEvent::UserPromptSubmit);
+        assert!(text.contains("Board reminder"), "{text}");
+        assert!(
+            text.contains(&latest.id) && text.contains(&latest.summary),
+            "{text}"
+        );
+        assert!(!text.contains(&first.id), "superseded instruction: {text}");
+        assert_eq!(
+            append_pm_standing_context(base.clone(), event, &repo, false),
+            base
+        );
+        let stop = HookOutput::system_message("Stop reminder");
+        assert_eq!(
+            append_pm_standing_context(stop.clone(), IntentBoundaryEvent::Stop, &repo, true),
+            stop
+        );
     }
 
     /// AC-1/AC-2: the decision policy reaches the agent at every intent

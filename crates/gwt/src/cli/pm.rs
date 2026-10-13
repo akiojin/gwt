@@ -34,6 +34,7 @@ pub enum PmCommand {
         kind: PmReportKind,
         question: Option<String>,
         body: String,
+        instruction: Option<Box<gwt_core::user_instruction::UserInstructionInput>>,
     },
     /// Read the project's reports in posting order.
     ReportList { project_root: Option<String> },
@@ -161,6 +162,7 @@ pub(super) fn run<E: CliEnv>(
             kind,
             question,
             body,
+            instruction,
         } => {
             let repo_path = resolve_repo_path(env, project_root);
             if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
@@ -168,15 +170,48 @@ pub(super) fn run<E: CliEnv>(
                     "pm.report.post requires the registered PM or a direct user CLI call".into(),
                 ));
             }
-            let report = pm_report::post_report(&repo_path, kind, &body, question.as_deref())
-                .map_err(|error| {
+            if ambient_session_id().is_some() && kind == PmReportKind::Qa && instruction.is_none() {
+                return Err(refusal(
+                    "PM Q&A reports require instruction capture; resubmit with instruction.original, kind, actions and issue_numbers".into(),
+                ));
+            }
+            let (report, saved_instruction) = if let Some(mut input) = instruction {
+                // Preserve the existing post contract: reject damaged history
+                // before saving a report that the Reports reader cannot show.
+                pm_report::load_reports(&repo_path).map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to validate PM report history: {error}"
+                    )))
+                })?;
+                if kind != PmReportKind::Qa || body.len() > 64 * 1024 {
+                    return Err(refusal(
+                        "instruction capture requires a Q&A report body of at most 64 KiB".into(),
+                    ));
+                }
+                input.summary = question.unwrap_or_default();
+                input.answer = body;
+                let saved =
+                    gwt_core::user_instruction::record(&repo_path, *input).map_err(|error| {
+                        SpecOpsError::from(ApiError::Unexpected(format!(
+                            "failed to persist PM report: {error}"
+                        )))
+                    })?;
+                (pm_report::PmReport::from(&saved), Some(saved))
+            } else {
+                let report = pm_report::post_report(&repo_path, kind, &body, question.as_deref())
+                    .map_err(|error| {
                     SpecOpsError::from(ApiError::Unexpected(format!(
                         "failed to persist PM report: {error}"
                     )))
                 })?;
-            out.push_str(
-                &serde_json::json!({"schema_version": 1, "ok": true, "report": report}).to_string(),
-            );
+                (report, None)
+            };
+            let mut response =
+                serde_json::json!({"schema_version": 1, "ok": true, "report": report});
+            if let Some(saved) = saved_instruction {
+                response["instruction"] = serde_json::json!(saved);
+            }
+            out.push_str(&response.to_string());
             out.push('\n');
             Ok(0)
         }

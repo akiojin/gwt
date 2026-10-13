@@ -37,7 +37,7 @@ test.describe('PM reports', () => {
       for (const key of Object.keys(childEnv)) {
         if (key.startsWith('GWT_SESSION_') || key.startsWith('GWT_HOOK_FORWARD_')) delete childEnv[key];
       }
-      const pmOperation = (operation: string, params: Record<string, string> = {}) => {
+      const pmOperation = (operation: string, params: Record<string, unknown> = {}) => {
         const result = spawnSync(`${ROOT}/target/debug/gwtd`, [], {
           cwd: ROOT, env: childEnv, encoding: 'utf8',
           input: JSON.stringify({ schema_version: 1, operation, params }),
@@ -79,8 +79,14 @@ test.describe('PM reports', () => {
       const question = 'Why did PM recommend waiting?\nWhat should I do next?';
       const answerMarker = `PM answer ${info.project.name}`;
       const answerBody = `# ${answerMarker}\n\n**Confirmed**: use \`pm.report.post\`.\n\n- Keep the question\n- Read the answer`;
-      const qaSaved = pmOperation('pm.report.post', { kind: 'qa', question, body: answerBody });
+      const original = `${question}\nPlease keep the full original request.`;
+      const qaSaved = pmOperation('pm.report.post', {
+        kind: 'qa', question, body: answerBody,
+        instruction: { original, kind: 'question', actions: ['Explained the next steps'], issue_numbers: [5342] },
+      });
       expect(qaSaved.report).toMatchObject({ kind: 'qa', question, body: answerBody });
+      expect(qaSaved.instruction).toMatchObject({ original, summary: question, answer: answerBody, kind: 'question' });
+      expect(qaSaved.instruction.id).toBe(qaSaved.report.id);
       const listed = pmOperation('pm.report.list');
       expect(listed.reports.find((entry: { id: string }) => entry.id === qaSaved.report.id))
         .toMatchObject({ kind: 'qa', question, body: answerBody });

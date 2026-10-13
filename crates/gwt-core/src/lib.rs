@@ -41,6 +41,7 @@ pub mod skill_state;
 pub mod test_support;
 pub mod update;
 pub mod usage;
+pub mod user_instruction;
 pub mod verification_priority;
 pub mod work_events_intake;
 pub mod workspace_projection;

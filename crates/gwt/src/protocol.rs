@@ -166,13 +166,31 @@ impl IndexSearchScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IndexSearchTarget {
-    Issue { number: u64 },
-    Spec { spec_id: u64 },
-    Memory { heading: String, date: String },
-    Discussion { heading: String, date: String },
-    Board { entry_id: String },
-    Work { work_id: String },
-    File { path: String },
+    Issue {
+        number: u64,
+    },
+    Spec {
+        spec_id: u64,
+    },
+    Memory {
+        heading: String,
+        date: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_instruction: Option<Box<gwt_core::user_instruction::UserInstruction>>,
+    },
+    Discussion {
+        heading: String,
+        date: String,
+    },
+    Board {
+        entry_id: String,
+    },
+    Work {
+        work_id: String,
+    },
+    File {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
