@@ -450,7 +450,7 @@ gwtd_mutation_p95_ms = 350.0
     #[test]
     fn global_config_path_is_isolated_without_a_scoped_override() {
         let path = Settings::global_config_path().expect("test config path");
-        assert!(path.starts_with(std::env::temp_dir()));
+        crate::home::assert_test_path(&path);
     }
 
     #[test]

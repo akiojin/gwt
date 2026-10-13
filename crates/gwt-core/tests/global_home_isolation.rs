@@ -37,3 +37,16 @@ fn config_and_core_writers_panic_before_unisolated_io() {
     .is_err());
     assert!(!path.parent().unwrap().exists());
 }
+
+#[test]
+fn pending_update_guard_runs_before_creating_the_directory_or_lock() {
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("must-not-be-created");
+    let pending = missing.join("../pending-update");
+    assert!(std::panic::catch_unwind(|| {
+        let _ = gwt_core::update::pending_update_manifest_lock(&pending);
+    })
+    .is_err());
+    assert!(!missing.exists());
+    assert!(!home.path().join("pending-update").exists());
+}

@@ -780,7 +780,7 @@ mod poll_state_tests {
         spawned_portable: bool,
         spawned_installer: bool,
         portable_spawn_count: usize,
-        staged_replacement: Option<PendingUpdateManifest>,
+        staged_replacement: Option<(PathBuf, PendingUpdateManifest)>,
     }
 
     impl FakeUpdateApplyOps {
@@ -843,9 +843,9 @@ mod poll_state_tests {
         ) -> Result<(), String> {
             self.spawned_portable = true;
             self.portable_spawn_count += 1;
-            if let Some(replacement) = self.staged_replacement.take() {
-                gwt_core::update::persist_pending_update_manifest(&replacement)?;
-                gwt_core::update::defer_pending_update(&replacement.version)?;
+            if let Some((dir, replacement)) = self.staged_replacement.take() {
+                gwt_core::update::persist_pending_update_manifest_in(&dir, &replacement)?;
+                gwt_core::update::defer_pending_update_in(&dir, &replacement.version)?;
             }
             self.portable_spawn_result.clone()
         }
@@ -1106,7 +1106,8 @@ mod poll_state_tests {
             path: replacement_payload.clone(),
         };
         let mut ops = FakeUpdateApplyOps::portable(home.path().join("prepared-binary"));
-        ops.staged_replacement = Some(replacement.clone());
+        ops.staged_replacement =
+            Some((home.path().join(".gwt/pending-update"), replacement.clone()));
         let version = super::stage_graceful_update_apply_with_ops(
             &mut ops,
             manifest,

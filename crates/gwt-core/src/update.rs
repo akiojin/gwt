@@ -207,6 +207,8 @@ pub fn pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestL
 }
 
 fn open_pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
+    gwt_config::home::assert_test_path(&dir.join("manifest.json"));
+    gwt_config::home::assert_test_path(&dir.join("manifest.lock"));
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create pending-update dir: {e}"))?;
     fs::OpenOptions::new()
         .create(true)

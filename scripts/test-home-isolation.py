@@ -24,6 +24,8 @@ def main():
     global_dir.mkdir(parents=True, exist_ok=True)
     config = global_dir / "config.toml"
     before_config = fingerprint(config)
+    pending_manifest = global_dir / "pending-update" / "manifest.json"
+    before_pending_manifest = fingerprint(pending_manifest)
     with tempfile.NamedTemporaryFile(
         prefix=".test-home-sentinel-5339-", dir=global_dir, delete=False
     ) as fixture:
@@ -50,10 +52,15 @@ def main():
         result = subprocess.run(command, check=False, env=environment)
     finally:
         config_unchanged = fingerprint(config) == before_config
+        pending_unchanged = fingerprint(pending_manifest) == before_pending_manifest
         sentinel_unchanged = fingerprint(sentinel) == before_sentinel
-        unchanged = config_unchanged and sentinel_unchanged
+        unchanged = config_unchanged and pending_unchanged and sentinel_unchanged
         sentinel.unlink(missing_ok=True)
-        for name, passed in (("config", config_unchanged), ("sentinel", sentinel_unchanged)):
+        for name, passed in (
+            ("config", config_unchanged),
+            ("pending-update manifest", pending_unchanged),
+            ("sentinel", sentinel_unchanged),
+        ):
             print(
                 "Real HOME " + name + " contents/mtime: "
                 + ("PASS (unchanged)" if passed else "FAIL (changed)"),
