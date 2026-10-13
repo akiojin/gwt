@@ -298,8 +298,10 @@ mod tests {
 
     #[test]
     fn semantic_monitor_fingerprint_ignores_scan_time_and_tracks_lifecycle_changes() {
-        let mut prefs = crate::IssueMonitorPrefs::default();
-        prefs.priority_order = vec![5349, 5342];
+        let mut prefs = crate::IssueMonitorPrefs {
+            priority_order: vec![5349, 5342],
+            ..Default::default()
+        };
         let first = fingerprint_from_prefs(&prefs);
         prefs.last_scan_at = Some("2026-10-13T09:00:00Z".into());
         assert_eq!(fingerprint_from_prefs(&prefs), first);
