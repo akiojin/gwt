@@ -1169,13 +1169,23 @@ pub(super) fn effective_cargo_target(
         .output()
         .map_err(|error| format!("Cargo target resolution failed: {error}"))?;
     if !output.status.success() {
-        // A wrapper or unresolved metadata is safe on the legacy exclusive
-        // route; it must never silently receive a parallel slot.
-        return Ok(None);
+        return Err(format!(
+            "Cargo target resolution failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-    Ok(serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .ok()
-        .and_then(|metadata| metadata["target_directory"].as_str().map(PathBuf::from)))
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!("Cargo target resolution failed: invalid metadata JSON: {error}")
+    })?;
+    let target = metadata["target_directory"]
+        .as_str()
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| {
+            "Cargo target resolution failed: metadata target_directory must be a non-empty string"
+                .to_string()
+        })?;
+    Ok(Some(PathBuf::from(target)))
 }
 
 pub(super) fn command_temporary_base(worktree: &Path, command: &str) -> Result<PathBuf, String> {
@@ -1784,6 +1794,11 @@ mod tests {
             super::effective_cargo_target(dir.path(), "python runner.py", false).unwrap(),
             None
         );
+        std::fs::write(dir.path().join("Cargo.toml"), "invalid manifest").unwrap();
+        let error = super::effective_cargo_target(&root, "cargo test --workspace", false)
+            .expect_err("metadata failure must remain distinct from a command without artifacts");
+        assert!(error.contains("Cargo target resolution failed"), "{error}");
+        assert!(error.contains("Cargo.toml"), "{error}");
     }
 
     fn command_strings(parts: &[&str]) -> Vec<String> {
