@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.117.1] - 2026-10-13
+
+### Bug Fixes
+
+- **test:** Isolate monitor completion fixture from shared gh
+- **test:** Isolate unknown live evidence fixture from shared gh
+- **execution:** Launch through missing historical Work owners
+- **update:** Preserve defer and serialize host lease probes
+
+### Miscellaneous Tasks
+
+- **work:** Record workflow dispatch delivery history
+- **work:** Record delivery history pull request
+- **work:** Record PR delivery for issue 5332
+- **work:** Restore issue 5016 work authority
+- **work:** PM 操作 SPEC の配送照合を記録する
+- **work:** PR 5340 の配送記録を保存する
+- **work:** 重複起動の履歴を保全する
+
+### Refactor
+
+- **web:** Subscribe agents and split to window catalog
+
 ## [9.117.0] - 2026-10-12
 
 ### Bug Fixes

@@ -984,6 +984,11 @@ fn fresh_monitor_readiness_failure_stops_delivery_once() {
 }
 
 #[test]
+fn fresh_monitor_activation_failure_keeps_rejected_check_and_owners() {
+    assert_fresh_monitor_startup_failures_stop(&["activation"]);
+}
+
+#[test]
 fn fresh_monitor_failure_replay_closes_only_its_exact_candidate() {
     assert_fresh_monitor_startup_failures_stop(&[
         "replay",
@@ -1077,6 +1082,41 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             "fresh Session failed before authenticated SessionStart"
         }
         .to_string();
+        if failure == "activation" {
+            let work_id = gwt_core::workspace_projection::canonical_work_id(
+                &fixture.repo,
+                Some("work/issue-2359"),
+                Some(&fixture.repo),
+            )
+            .unwrap();
+            let mut start = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Start,
+                &work_id,
+                Utc::now(),
+            );
+            start.owner = Some("Issue #999".to_string());
+            start.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some("work/issue-2359".to_string()),
+                    worktree_path: Some(fixture.repo.clone()),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start)
+                .unwrap();
+            gwt_core::workspace_projection::record_workspace_work_event(
+                &fixture.repo,
+                gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Discard,
+                    &work_id,
+                    Utc::now(),
+                ),
+            )
+            .unwrap();
+            message = format!("the fresh generation activation transaction was rejected: Work {work_id} owner mismatch: expected Issue #2359, actual Issue #999");
+        }
         let deferred = matches!(
             failure,
             "replay" | "readiness-replay" | "prepty-replay" | "replacement"
@@ -1120,12 +1160,16 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                     .contains_key(&fixture.window_id));
                 events
             }
-            "readiness" | "readiness-replay" => {
+            "readiness" | "readiness-replay" | "activation" => {
                 fixture
                     .runtime
                     .finalize_fresh_execution_launch_session_start(
                         &fixture.window_id,
-                        Some("wrong-nonce"),
+                        Some(if failure == "activation" {
+                            "readiness-fresh-monitor-failure"
+                        } else {
+                            "wrong-nonce"
+                        }),
                     );
                 commit_pending_fresh_execution(&mut fixture.runtime)
             }

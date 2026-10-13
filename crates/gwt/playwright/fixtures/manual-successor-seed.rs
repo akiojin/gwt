@@ -48,7 +48,9 @@ fn main() {
             let work_id = canonical_work_id(worktree, Some(&branch), Some(worktree)).unwrap();
             let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, record.launched_at);
             start.title = Some("Manual successor retry fixture".into());
-            start.owner = Some(format!("Issue #{}", owner.number));
+            // Issue #5332: real terminal history can lack its owner even
+            // though fresh launch proves the exact linked execution owner.
+            start.owner = None;
             start.agent_session_id = Some(predecessor.clone());
             start.agent_id = Some("codex".into());
             start.execution_container = Some(WorkspaceExecutionContainerRef {

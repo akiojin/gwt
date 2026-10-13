@@ -517,8 +517,15 @@ import { createUiStateStore } from "/ui-state-store.js";
         listEntries: [],
         bounds: { x: 0, y: 0, width: 1, height: 1 },
       });
+      let reconcilingWindowCatalog = false;
+
+      function catalogActiveWindows(catalog) {
+        const state = catalog.appState;
+        return state.tabs.find(tab => tab.id === state.active_tab_id)?.workspace?.windows || [];
+      }
 
       function publishWindowCatalog() {
+        if (reconcilingWindowCatalog) return;
         // Camera echoes and other chrome updates do not invalidate the window
         // catalog. Keep its reference stable unless a catalog consumer changed.
         const catalogAppState = {
@@ -552,6 +559,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function publishWindowCatalogRuntime(windowId, status) {
+        if (reconcilingWindowCatalog) return;
         windowCatalogModel.update(state => state.catalog.runtimeStates[windowId] === status ? state : ({
           ...state, catalog: { ...state.catalog,
             runtimeStates: { ...state.catalog.runtimeStates, [windowId]: status },
@@ -561,6 +569,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function publishWindowCatalogFocus() {
+        if (reconcilingWindowCatalog) return;
         windowCatalogModel.update(state => state.catalog.focusedId === focusedId ? state : ({
           ...state, catalog: { ...state.catalog, focusedId, version: state.catalog.version + 1 },
         }));
@@ -6051,177 +6060,185 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function renderWorkspace(workspace) {
-        return traceMeasure(
-          UI_TRACE_EVENT.renderWorkspace,
-          { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
-          () => {
-            const pendingAgentKanbanPlacement =
-              agentKanbanPendingPlacement.consumePlacementMessage(
-                workspace?.windows || [],
-              );
-            if (pendingAgentKanbanPlacement) {
-              send(pendingAgentKanbanPlacement);
-            }
+        const wasReconciling = reconcilingWindowCatalog;
+        reconcilingWindowCatalog = true;
+        let result;
+        try {
+          result = traceMeasure(
+            UI_TRACE_EVENT.renderWorkspace,
+            { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
+            () => {
+              const pendingAgentKanbanPlacement =
+                agentKanbanPendingPlacement.consumePlacementMessage(
+                  workspace?.windows || [],
+                );
+              if (pendingAgentKanbanPlacement) {
+                send(pendingAgentKanbanPlacement);
+              }
 
-            // Issue #3364 — resolve local gesture guards BEFORE anything
-            // (render keys, minimap, telemetry, window elements) reads the
-            // incoming windows: while a gesture is active or a commit's echo
-            // is still in flight, a backlogged stale broadcast must neither
-            // snap the window back nor desync the Fleet Minimap. Suppressed
-            // windows (and their tab-group members, which share geometry
-            // server-side) are patched back to the local truth so the MODEL
-            // stays consistent with the DOM.
-            for (const incomingWindow of workspace?.windows || []) {
-              const decision = resolveIncomingGeometry(geometrySyncState, {
-                id: incomingWindow.id,
-                geometry: incomingWindow.geometry,
-              });
-              if (decision.apply) {
-                continue;
-              }
-              const localGeometry =
-                decision.patchGeometry || domWindowGeometry(incomingWindow.id);
-              if (!localGeometry) {
-                continue;
-              }
-              const suppressedGroupId = windowGroupId(incomingWindow);
-              for (const member of workspace.windows) {
-                if (windowGroupId(member) !== suppressedGroupId) {
+              // Issue #3364 — resolve local gesture guards BEFORE anything
+              // (render keys, minimap, telemetry, window elements) reads the
+              // incoming windows: while a gesture is active or a commit's echo
+              // is still in flight, a backlogged stale broadcast must neither
+              // snap the window back nor desync the Fleet Minimap. Suppressed
+              // windows (and their tab-group members, which share geometry
+              // server-side) are patched back to the local truth so the MODEL
+              // stays consistent with the DOM.
+              for (const incomingWindow of workspace?.windows || []) {
+                const decision = resolveIncomingGeometry(geometrySyncState, {
+                  id: incomingWindow.id,
+                  geometry: incomingWindow.geometry,
+                });
+                if (decision.apply) {
                   continue;
                 }
-                member.geometry = { ...localGeometry };
-              }
-            }
-
-            const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
-              scopeKey: activeViewportScopeKey(),
-            });
-            const viewportChanged = !sameViewportValues(viewport, nextViewport);
-            viewport = nextViewport;
-            if (!viewportDomApplied || viewportChanged) {
-              applyViewport();
-            }
-
-            // SPEC-2008 camera-focus: nothing to re-sync when the window set is
-            // unchanged — windows render at their own geometry and the camera
-            // is driven locally (frameWindow), not per-render. Issue #3365: the
-            // key diff + commit live in workspaceRenderSync so an exception
-            // mid-sync leaves the key uncommitted (the next workspace_state
-            // retries instead of freezing), one poisoned window cannot block
-            // the others, and the telemetry recompute always runs.
-            let activeWindowIdSet = null;
-            workspaceRenderSync.render({
-              key: workspaceWindowsRenderKey(workspace),
-              sync: (isolate) => {
-                activeWindowIdSet = workspaceWindowIdSet(workspace);
-                const visibility = classifyProjectWindowVisibility({
-                  activeWindowIdSet,
-                  allProjectWindowIdSet: allProjectWindowIdSet(),
-                  mountedWindowIds: windowMap.keys(),
-                });
-                isolate("hide_window", visibility.hidden, (windowId) => {
-                  const element = windowMap.get(windowId);
-                  applyVisibilityTransition({
-                    element,
-                    shouldHide: true,
-                    hasTerminal: terminalMap.has(windowId),
-                    onReveal: () => activateTerminalOnReveal(windowId),
-                  });
-                });
-                isolate("remove_window", visibility.removed, (windowId) => {
-                  const element = windowMap.get(windowId);
-                  if (!element) return;
-                  disposePmChat(windowId);
-                  removePmWindowState(windowId);
-                  renderedTerminalPackets.delete(windowId);
-                  const runtime = terminalMap.get(windowId);
-                  if (runtime && runtime.activationFrame !== null) {
-                    cancelAnimationFrame(runtime.activationFrame);
-                  }
-                  terminalViewportRefreshScheduler?.clear(windowId);
-                  runtime?.cleanup?.();
-                  runtime?.terminal.dispose();
-                  terminalMap.delete(windowId);
-                  decoderMap.delete(windowId);
-                  detailMap.delete(windowId);
-                  windowRuntimeStateMap.delete(windowId);
-                  windowRuntimeStateSinceMap.delete(windowId);
-                  agentCompletionNotifier.forgetWindow(windowId);
-                  agentAttentionToaster.forgetWindow(windowId);
-                  // SPEC #3206: dismiss this window's attention toast from the shared
-                  // alerts stack so a sticky error toast never orphans a gone window.
-                  alertsToasts.dismiss(`attention-${windowId}`);
-                  renderedWindowElementKeys.delete(windowId);
-                  renderedRuntimeStatusKeys.delete(windowId);
-                  renderedAgentKanbanBodyKeys.delete(windowId);
-                  renderedIssuePreviewBodyKeys.delete(windowId);
-                  renderedIssueWindowHeaderKeys.delete(windowId);
-                  pendingOutputMap.delete(windowId);
-                  pendingSnapshotMap.delete(windowId);
-                  terminalOutputBatcher.clear(windowId);
-                  const profileState = profileStateMap.get(windowId);
-                  if (profileState) {
-                    clearProfileSaveTimer(profileState);
-                  }
-                  fileTreeStateMap.delete(windowId);
-                  branchListStateMap.delete(windowId);
-                  profileStateMap.delete(windowId);
-                  boardStateMap.delete(windowId);
-                  logStateMap.delete(windowId);
-                  indexSearchStateMap.delete(windowId);
-                  clearKnowledgeBridgeState(windowId);
-                  workspaceOverviewSurface.deleteState(windowId);
-                  clearBranchCleanupForWindow(windowId);
-                  clearLocalGeometryEdit(geometrySyncState, windowId);
-                  element.remove();
-                  windowMap.delete(windowId);
-                });
-
-                // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
-                // for tab-grouped terminal windows so the newly visible terminal
-                // gets fit + viewport refresh + focus on the same animation frame
-                // cycle. Without this, scrollback wheel input requires a manual
-                // OS-level resize before xterm picks up the new measurement. The
-                // transition logic lives in `terminal-viewport-reflow.js` so a
-                // behavior test (linkedom + element stub) can exercise the
-                // hidden-to-visible activation path directly.
-                isolate("ensure_window", workspace.windows, (windowData) => {
-                  ensureWindow(windowData);
-                  const element = windowMap.get(windowData.id);
-                  if (!element) return;
-                  applyVisibilityTransition({
-                    element,
-                    shouldHide: !visibleWindowData(windowData),
-                    hasTerminal: terminalMap.has(windowData.id),
-                    onReveal: () => activateTerminalOnReveal(windowData.id),
-                  });
-                });
-              },
-              // SPEC-2008 camera-focus: keep the rail window-count badge and the
-              // empty-canvas state in sync with window mounts/unmounts, not only
-              // with agent status events.
-              recompute: recomputeOperatorTelemetry,
-              afterSync: () => {
-                if (splitSurfaces?.isOpen() || agentsHost) return;
-                const topmostId = topmostWindowId(workspace);
-                if (topmostId && activeWindowIdSet?.has(topmostId)) {
-                  focusWindowLocally(topmostId);
-                  scheduleTerminalFocusActivation(topmostId, {
-                    shouldPersistGeometry: false,
-                    reason: "topmost_focus",
-                  });
-                } else {
-                  focusedId = null;
-                  syncSurfaceRail();
+                const localGeometry =
+                  decision.patchGeometry || domWindowGeometry(incomingWindow.id);
+                if (!localGeometry) {
+                  continue;
                 }
-              },
-            });
-            splitSurfaces?.sync();
-            if (agentsHost) agentsSurface.sync(workspace.windows || []);
-            cleanupTextPreviews();
-            publishWindowCatalog();
-          },
-        );
+                const suppressedGroupId = windowGroupId(incomingWindow);
+                for (const member of workspace.windows) {
+                  if (windowGroupId(member) !== suppressedGroupId) {
+                    continue;
+                  }
+                  member.geometry = { ...localGeometry };
+                }
+              }
+
+              const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
+                scopeKey: activeViewportScopeKey(),
+              });
+              const viewportChanged = !sameViewportValues(viewport, nextViewport);
+              viewport = nextViewport;
+              if (!viewportDomApplied || viewportChanged) {
+                applyViewport();
+              }
+
+              // SPEC-2008 camera-focus: nothing to re-sync when the window set is
+              // unchanged — windows render at their own geometry and the camera
+              // is driven locally (frameWindow), not per-render. Issue #3365: the
+              // key diff + commit live in workspaceRenderSync so an exception
+              // mid-sync leaves the key uncommitted (the next workspace_state
+              // retries instead of freezing), one poisoned window cannot block
+              // the others, and the telemetry recompute always runs.
+              let activeWindowIdSet = null;
+              workspaceRenderSync.render({
+                key: workspaceWindowsRenderKey(workspace),
+                sync: (isolate) => {
+                  activeWindowIdSet = workspaceWindowIdSet(workspace);
+                  const visibility = classifyProjectWindowVisibility({
+                    activeWindowIdSet,
+                    allProjectWindowIdSet: allProjectWindowIdSet(),
+                    mountedWindowIds: windowMap.keys(),
+                  });
+                  isolate("hide_window", visibility.hidden, (windowId) => {
+                    const element = windowMap.get(windowId);
+                    applyVisibilityTransition({
+                      element,
+                      shouldHide: true,
+                      hasTerminal: terminalMap.has(windowId),
+                      onReveal: () => activateTerminalOnReveal(windowId),
+                    });
+                  });
+                  isolate("remove_window", visibility.removed, (windowId) => {
+                    const element = windowMap.get(windowId);
+                    if (!element) return;
+                    disposePmChat(windowId);
+                    removePmWindowState(windowId);
+                    renderedTerminalPackets.delete(windowId);
+                    const runtime = terminalMap.get(windowId);
+                    if (runtime && runtime.activationFrame !== null) {
+                      cancelAnimationFrame(runtime.activationFrame);
+                    }
+                    terminalViewportRefreshScheduler?.clear(windowId);
+                    runtime?.cleanup?.();
+                    runtime?.terminal.dispose();
+                    terminalMap.delete(windowId);
+                    decoderMap.delete(windowId);
+                    detailMap.delete(windowId);
+                    windowRuntimeStateMap.delete(windowId);
+                    windowRuntimeStateSinceMap.delete(windowId);
+                    agentCompletionNotifier.forgetWindow(windowId);
+                    agentAttentionToaster.forgetWindow(windowId);
+                    // SPEC #3206: dismiss this window's attention toast from the shared
+                    // alerts stack so a sticky error toast never orphans a gone window.
+                    alertsToasts.dismiss(`attention-${windowId}`);
+                    renderedWindowElementKeys.delete(windowId);
+                    renderedRuntimeStatusKeys.delete(windowId);
+                    renderedAgentKanbanBodyKeys.delete(windowId);
+                    renderedIssuePreviewBodyKeys.delete(windowId);
+                    renderedIssueWindowHeaderKeys.delete(windowId);
+                    pendingOutputMap.delete(windowId);
+                    pendingSnapshotMap.delete(windowId);
+                    terminalOutputBatcher.clear(windowId);
+                    const profileState = profileStateMap.get(windowId);
+                    if (profileState) {
+                      clearProfileSaveTimer(profileState);
+                    }
+                    fileTreeStateMap.delete(windowId);
+                    branchListStateMap.delete(windowId);
+                    profileStateMap.delete(windowId);
+                    boardStateMap.delete(windowId);
+                    logStateMap.delete(windowId);
+                    indexSearchStateMap.delete(windowId);
+                    clearKnowledgeBridgeState(windowId);
+                    workspaceOverviewSurface.deleteState(windowId);
+                    clearBranchCleanupForWindow(windowId);
+                    clearLocalGeometryEdit(geometrySyncState, windowId);
+                    element.remove();
+                    windowMap.delete(windowId);
+                  });
+
+                  // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+                  // for tab-grouped terminal windows so the newly visible terminal
+                  // gets fit + viewport refresh + focus on the same animation frame
+                  // cycle. Without this, scrollback wheel input requires a manual
+                  // OS-level resize before xterm picks up the new measurement. The
+                  // transition logic lives in `terminal-viewport-reflow.js` so a
+                  // behavior test (linkedom + element stub) can exercise the
+                  // hidden-to-visible activation path directly.
+                  isolate("ensure_window", workspace.windows, (windowData) => {
+                    ensureWindow(windowData);
+                    const element = windowMap.get(windowData.id);
+                    if (!element) return;
+                    applyVisibilityTransition({
+                      element,
+                      shouldHide: !visibleWindowData(windowData),
+                      hasTerminal: terminalMap.has(windowData.id),
+                      onReveal: () => activateTerminalOnReveal(windowData.id),
+                    });
+                  });
+                },
+                // SPEC-2008 camera-focus: keep the rail window-count badge and the
+                // empty-canvas state in sync with window mounts/unmounts, not only
+                // with agent status events.
+                recompute: recomputeOperatorTelemetry,
+                afterSync: () => {
+                  if (splitSurfaces?.isOpen() || agentsHost) return;
+                  const topmostId = topmostWindowId(workspace);
+                  if (topmostId && activeWindowIdSet?.has(topmostId)) {
+                    focusWindowLocally(topmostId);
+                    scheduleTerminalFocusActivation(topmostId, {
+                      shouldPersistGeometry: false,
+                      reason: "topmost_focus",
+                    });
+                  } else {
+                    focusedId = null;
+                    syncSurfaceRail();
+                  }
+                },
+              });
+              cleanupTextPreviews();
+            },
+          );
+        } finally {
+          reconcilingWindowCatalog = wasReconciling;
+        }
+        // Subscribers may mount runtimes: publish only after removal, creation
+        // and focus have settled, never with the previous membership.
+        publishWindowCatalog();
+        return result;
       }
 
       const socketTransport = Object.freeze({
@@ -7499,6 +7516,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       window.addEventListener("unload", () => {
         disposeProjectShellSurface();
         fleetMinimap.dispose();
+        agentsSurface?.dispose();
+        splitSurfaces?.dispose();
         windowCatalogModel.dispose();
       }, { once: true });
 
@@ -7658,7 +7677,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         area.classList.toggle("is-agents", host === area);
         agentsSurface.element.hidden = !host;
         (host || area).appendChild(agentsSurface.element);
-        if (host) agentsSurface.sync(activeWorkspace().windows || []);
+        if (host) agentsSurface.sync();
         else {
           for (const [id, previous] of agentPreviousHosts) {
             const runtime = terminalMap.get(id);
@@ -7675,6 +7694,11 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
       agentsSurface = createAgentsSurface({
         document,
+        windowCatalogModel,
+        getWindows: catalog => catalogActiveWindows(catalog).map(data => ({
+          ...data, status: catalog.runtimeStates[data.id] ?? data.status,
+        })),
+        isMounted: () => Boolean(agentsHost),
         mountTerminal: (id, root) => {
           const runtime = terminalMap.get(id);
           if (runtime && runtime.terminalContainer !== root && !agentPreviousHosts.get(id)?.container.isConnected) {
@@ -7706,7 +7730,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       splitSurfaces = createSplitSurfaces({
         document,
         stage,
-        getWindows: () => (activeWorkspace().windows || []).filter((data) => !isOffCanvasPlacement(data)),
+        windowCatalogModel,
+        getWindows: catalog => catalogActiveWindows(catalog).filter((data) => !isOffCanvasPlacement(data)),
         getElement: (id) => windowMap.get(id),
         onAgentsHost: setAgentsHost,
         restoreVisibility: (id, element) => { element.hidden = !visibleWindowData(workspaceWindowById(id)); },

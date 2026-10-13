@@ -378,7 +378,17 @@ fn prepare_fresh_execution_launch_session_start(
     };
     if !matches!(transaction_committed, Ok(true)) {
         if pending_fresh_execution_activation_status(pending) != Some(true) {
-            return Err("the fresh generation activation transaction was rejected".to_string());
+            let reason = match transaction_committed {
+                Err(error) => error.to_string(),
+                Ok(false) => {
+                    "exact Prepared successor Session or binding changed before activation"
+                        .to_string()
+                }
+                Ok(true) => unreachable!("successful transaction was excluded"),
+            };
+            return Err(format!(
+                "the fresh generation activation transaction was rejected: {reason}"
+            ));
         }
         // A response-loss retry owns any partial generation+Work repair.
         // It must reacquire the exact active Session lease and must never
