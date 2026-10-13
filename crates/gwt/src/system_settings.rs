@@ -44,6 +44,7 @@ pub const ALLOWED_BOARD_PROVIDERS: &[&str] = &["local", "slack", "teams"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemSettingsSnapshot {
+    pub auto_apply_updates: bool,
     pub language: String,
     pub codex_trust_managed_hooks: Option<bool>,
     pub board_provider: String,
@@ -90,6 +91,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
         Settings::default()
     };
     Ok(SystemSettingsSnapshot {
+        auto_apply_updates: settings.auto_apply_updates.unwrap_or(false),
         language: settings
             .ai
             .language
@@ -124,29 +126,22 @@ pub fn write_settings(
             .validate()
             .map_err(|error| SystemSettingsError::InvalidAgentResource(error.to_string()))?;
     }
-    let mut settings = if path.exists() {
-        Settings::load_from_path(path)
-            .map_err(|err| SystemSettingsError::Storage(err.to_string()))?
-    } else {
-        Settings::default()
-    };
-    settings.ai.language = Some(canonical.clone());
-    if let Some(value) = codex_trust_managed_hooks {
-        settings.agent.codex_trust_managed_hooks = Some(value);
-    }
-    if let Some((_, kind)) = provider {
-        settings.board.provider = kind;
-        // No in-memory cache to update: `board_provider::provider()` reads the
-        // selection fresh from config on each call, so the persisted value
-        // takes effect immediately (FR-008).
-    }
-    if let Some(resource) = agent_resource {
-        settings.agent.resource = resource.clone();
-    }
-    settings
-        .save(path)
-        .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
+    let settings = Settings::update_at_path(path, |settings| {
+        settings.ai.language = Some(canonical.clone());
+        if let Some(value) = codex_trust_managed_hooks {
+            settings.agent.codex_trust_managed_hooks = Some(value);
+        }
+        if let Some((_, kind)) = provider {
+            settings.board.provider = kind;
+        }
+        if let Some(resource) = agent_resource {
+            settings.agent.resource = resource.clone();
+        }
+        Ok(settings.clone())
+    })
+    .map_err(|error| SystemSettingsError::Storage(error.to_string()))?;
     Ok(SystemSettingsSnapshot {
+        auto_apply_updates: settings.auto_apply_updates.unwrap_or(false),
         language: canonical,
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
         board_provider: settings.board.provider.as_str().to_string(),
@@ -372,6 +367,7 @@ pub fn get_event(path: &Path) -> BackendEvent {
     match read_settings(path) {
         Ok(snapshot) => BackendEvent::SystemSettings {
             language: snapshot.language,
+            auto_apply_updates: snapshot.auto_apply_updates,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
             agent_resource: Some(AgentResourceSettings::from_config(&snapshot.agent_resource)),
@@ -411,6 +407,7 @@ pub fn update_event(
     ) {
         Ok(snapshot) => BackendEvent::SystemSettingsUpdated {
             language: snapshot.language,
+            auto_apply_updates: snapshot.auto_apply_updates,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
             agent_resource: Some(AgentResourceSettings::from_config(&snapshot.agent_resource)),

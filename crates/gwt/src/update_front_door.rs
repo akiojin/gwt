@@ -531,7 +531,7 @@ fn commit_pending_manifest_with_ops(
 /// manifest is cleared. A failed helper spawn rolls the marker back so the
 /// next launch is not mistaken for the tail of an apply. The caller then
 /// sends `UserEvent::QuitApp { reason: ApplyUpdate }`.
-// Keep the helper-copy and automatic-apply choices explicit at this test seam.
+// Keep the helper-copy and defer-guard choices explicit at this test seam.
 #[allow(clippy::too_many_arguments)]
 fn stage_graceful_update_apply_with_ops(
     ops: &mut impl UpdateApplyOps,
@@ -541,7 +541,7 @@ fn stage_graceful_update_apply_with_ops(
     restart_args: Vec<String>,
     old_pid: u32,
     use_helper_copy: bool,
-    automatic: bool,
+    respect_defer: bool,
 ) -> Result<String, String> {
     {
         // Defer and apply-start publish under the same lock. Whichever wins
@@ -549,7 +549,7 @@ fn stage_graceful_update_apply_with_ops(
         let _lock = gwt_core::update::pending_update_manifest_lock(
             &gwt_core::update::pending_update_dir(),
         )?;
-        if automatic {
+        if respect_defer {
             let current = gwt_core::update::load_pending_update_manifest().ok_or_else(|| {
                 "Pending update with a valid payload is no longer staged.".to_string()
             })?;
@@ -591,10 +591,12 @@ fn stage_graceful_update_apply_with_ops(
 /// Called on the event-loop thread by the `UserEvent::ApplyUpdateGraceful`
 /// handler; returns the committed version so the handler can quit with
 /// `GuiShutdownReason::ApplyUpdate { version }`.
+/// Scheduled drains respect operator defer, including manually requested
+/// drains; only an explicit Restart now bypasses that guard.
 pub fn stage_graceful_update_apply(
     manifest: gwt_core::update::PendingUpdateManifest,
     marker: &gwt_core::update::UpdateResumeMarker,
-    automatic: bool,
+    respect_defer: bool,
 ) -> Result<String, String> {
     let current_exe = std::env::current_exe()
         .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
@@ -607,7 +609,7 @@ pub fn stage_graceful_update_apply(
         marker.restart_args.clone(),
         std::process::id(),
         cfg!(windows),
-        automatic,
+        respect_defer,
     )
 }
 

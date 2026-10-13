@@ -366,6 +366,9 @@ fn admit_update_download(
     state: &gwt_core::update::UpdateState,
     client_id: &str,
 ) -> (bool, Vec<OutboundEvent>) {
+    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID && !app.automatic_updates_enabled() {
+        return (false, Vec::new());
+    }
     if app.update_download_in_flight.is_some() {
         let same_version = matches!(
             (app.pending_update.as_ref(), state),
@@ -835,7 +838,19 @@ fn admit_prepared_update(
     if !admission.begin_commit() {
         return (false, Vec::new());
     }
-    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID {
+    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID && !app.automatic_updates_enabled() {
+        admission.failed();
+        return (
+            false,
+            app.release_update_auto_apply_events(
+                &manifest.version,
+                app_runtime::UpdateAutoApplyRelease::Cancelled,
+            ),
+        );
+    }
+    if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+        || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID
+    {
         let release = match gwt_core::update::load_pending_update_manifest() {
             Some(current) if current.version == manifest.version => current
                 .auto_apply_deferred
@@ -2320,6 +2335,7 @@ enum UserEvent {
     /// the automatic path never touches `ApplyUpdateRestartNow`.
     ApplyUpdateDrained {
         version: String,
+        automatic: bool,
     },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
@@ -4997,6 +5013,65 @@ mod tests {
     }
 
     #[test]
+    fn automatic_update_global_off_blocks_queued_download_and_commit() {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        gwt::save_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+            &gwt::IssueMonitorPrefs {
+                autonomous_mode: true,
+                auto_apply_updates: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let config = gwt_core::paths::gwt_config_path();
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(config, "auto_apply_updates = false\n").unwrap();
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let state = gwt_core::update::UpdateState::Available {
+            current: "9.0.0".into(),
+            latest: "99.0.0".into(),
+            release_url: "https://example.invalid/release".into(),
+            asset_url: Some("https://example.invalid/gwt.tar.gz".into()),
+            checked_at: Utc::now(),
+        };
+        assert!(
+            !super::admit_update_download(
+                &mut runtime,
+                &state,
+                crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+            )
+            .0
+        );
+        let payload = temp.path().join("prepared");
+        fs::write(&payload, "payload").unwrap();
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "99.0.0".into(),
+            asset_url: "https://example.invalid/gwt.tar.gz".into(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+            downloaded_at: Utc::now().to_rfc3339(),
+            auto_apply_deferred: false,
+        };
+        gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+        let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
+        assert!(admission.begin_resolution());
+        assert!(
+            !super::admit_prepared_update(
+                &mut runtime,
+                &manifest,
+                &mut admission,
+                crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+            )
+            .0
+        );
+        assert!(!runtime.agent_maintenance.app_update_committing);
+    }
+
+    #[test]
     fn update_available_autonomous_download_requires_opt_in_and_starts_once() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -5022,6 +5097,7 @@ mod tests {
         for (autonomous_mode, auto_apply_updates) in
             [(false, Some(true)), (true, Some(false)), (true, None)]
         {
+            gwt::update_settings::set(Some(auto_apply_updates.unwrap_or(true))).unwrap();
             gwt::save_issue_monitor_prefs(
                 &prefs_path,
                 &gwt::IssueMonitorPrefs {
@@ -5165,6 +5241,7 @@ mod tests {
                     version: "9.107.0".into(),
                     since: Utc::now().to_rfc3339(),
                     reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                    automatic: None,
                     blocking: Vec::new(),
                 }),
                 ..Default::default()
@@ -5290,6 +5367,17 @@ mod tests {
         assert_eq!(
             fs::read(gwt_core::update::pending_update_manifest_path()).unwrap(),
             bytes
+        );
+        assert!(admission.begin_resolution());
+        assert!(
+            !super::admit_prepared_update(
+                &mut runtime,
+                &queued_manifest,
+                &mut admission,
+                "update-manual-drain",
+            )
+            .0,
+            "operator defer also cancels a manually requested drain"
         );
         assert!(
             admission.begin_resolution(),
@@ -10276,6 +10364,10 @@ fn main() -> std::io::Result<()> {
         .no_tray
         .then(gwt::cli::tray::lifetime::ParentProcess::capture);
 
+    if let Err(error) = gwt::update_settings::migrate() {
+        tracing::warn!(%error, "automatic-update preference migration failed; runtime auto-apply remains disabled");
+    }
+
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
     // update manifest (via the post-click modal's Later flow, or because the
     // user killed gwt before clicking Restart now), hand off to the helper
@@ -11943,7 +12035,7 @@ fn main() -> std::io::Result<()> {
                 events.extend(app.update_staged_events(&version));
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::ApplyUpdateDrained { version }) => {
+            Event::UserEvent(UserEvent::ApplyUpdateDrained { version, automatic }) => {
                 if !update_apply_admission.begin_resolution() {
                     return;
                 }
@@ -11968,7 +12060,7 @@ fn main() -> std::io::Result<()> {
                         if !record_update_dispatch_result(
                             proxy.send_event(UserEvent::ApplyUpdateGraceful {
                                 manifest,
-                                client_id: app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID.to_string(),
+                                client_id: if automatic { app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID } else { app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID }.to_string(),
                             }),
                             "dispatch_auto_apply_graceful",
                         ) {
@@ -12035,7 +12127,8 @@ fn main() -> std::io::Result<()> {
                 match update_front_door::stage_graceful_update_apply(
                     manifest,
                     &marker,
-                    client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+                    client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+                        || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID,
                 ) {
                     Ok(version) => {
                         gwt_core::update::log_update_event(
