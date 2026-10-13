@@ -506,7 +506,7 @@ fn publish_rebuilt_work_events(
 ///
 /// The store consolidation has to hold the `works.lock` of the canonical store
 /// *and* of every store it quarantines for the whole move-then-rebuild
-/// sequence. Re-entering [`crate::workspace_projection::with_workspace_work_items_lock`]
+/// sequence. Re-entering `with_workspace_work_items_lock`
 /// from inside that transaction would deadlock against the lock the caller
 /// already owns, so this entry point is lock-free by contract.
 ///
