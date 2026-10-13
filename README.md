@@ -427,6 +427,13 @@ Common windows include:
   the OS locale and falls back to English when the locale is `C` / `POSIX`
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
+  Application settings and project settings are labeled separately. Open
+  `Issues` for Autonomous, Max active, queue refill and allowed labels, or
+  `Agents` to edit launch profiles and candidate order/preferences. Each
+  project section names its target project; the Issue window's ⚙ opens its
+  `Issues` section. `System > Auto-apply updates` applies across all projects
+  when at least one open project has Autonomous enabled. Legacy project
+  values migrate once: any enabled value enables the application setting.
 - `PR` — pull-request workflow surface; detailed list support depends on the
   cache-backed PR source as it lands
 

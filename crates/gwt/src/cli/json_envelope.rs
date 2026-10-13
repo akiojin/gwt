@@ -978,6 +978,31 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 version: required_string(params, "version")?,
             })
         }
+        "pr.create_from_ci" => {
+            reject_unknown_params(
+                params,
+                &["base", "head", "head_sha", "title", "body", "labels"],
+                "pr.create_from_ci",
+            )?;
+            let head_sha = required_string(params, "head_sha")?;
+            if !matches!(head_sha.len(), 40 | 64)
+                || !head_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(CliParseError::InvalidJson(
+                    "head_sha must be a full commit SHA".into(),
+                ));
+            }
+            CliCommand::Pr(PrCommand::CreateFromCi(
+                super::pr::ci_delivery::CiCreateRequest {
+                    base: required_string(params, "base")?,
+                    head: required_string(params, "head")?,
+                    head_sha,
+                    title: required_string(params, "title")?,
+                    body: required_string(params, "body")?,
+                    labels: optional_string_vec(params, "labels")?,
+                },
+            ))
+        }
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -1366,6 +1391,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::NoAction {
                 reason,
             })
+        }
+        "execution.settle_delivered" => {
+            let reason = required_string(params, "reason")?;
+            reject_unknown_params(params, &["reason"], "execution.settle_delivered")?;
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::SettleDelivered { reason },
+            )
         }
         "execution.release_prepared" => {
             // Issue #4161: owner-addressed like `execution.status`, because the
@@ -6039,6 +6071,26 @@ mod tests {
             err("execution.reopen", json!({})),
             CliParseError::MissingFlag("reason")
         ));
+        // Issue #4214 AC-6: terminal delivered owners can settle leftover
+        // obligations without pretending to deliver or re-verify source.
+        assert!(matches!(
+            ok(
+                "execution.settle_delivered",
+                json!({"reason": "already delivered"})
+            ),
+            CliCommand::Execution(_)
+        ));
+        assert!(matches!(
+            err("execution.settle_delivered", json!({})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.settle_delivered",
+                json!({"reason": "delivered", "issue": 4214})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
         // Issue #4545 AC-2: `execution.no_action` takes a non-empty reason and
         // nothing else — an unknown parameter is refused rather than ignored,
         // so a caller cannot smuggle a scope the operation does not honour.
@@ -6352,6 +6404,7 @@ mod tests {
                 path: payload_path.clone(),
             },
             downloaded_at: "2026-10-01T00:00:00Z".into(),
+            origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         // Seed the format used before the explicit defer control existed.
@@ -7012,6 +7065,23 @@ mod tests {
             ),
             CliCommand::Discussion(_)
         ));
+    }
+
+    #[test]
+    fn ci_delivery_creation_requires_exact_head() {
+        let request = json!({"base":"develop","head":"work/issue-4214",
+            "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "title":"fix: delivery","body":"CI delivery"});
+        assert!(matches!(
+            ok("pr.create_from_ci", request.clone()),
+            CliCommand::Pr(_)
+        ));
+        let mut missing_sha = request.clone();
+        missing_sha.as_object_mut().unwrap().remove("head_sha");
+        let _ = err("pr.create_from_ci", missing_sha);
+        let mut draft = request;
+        draft["draft"] = json!(true);
+        let _ = err("pr.create_from_ci", draft);
     }
 
     #[test]

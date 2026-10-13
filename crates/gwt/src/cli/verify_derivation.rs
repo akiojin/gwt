@@ -377,7 +377,7 @@ fn is_frontend_test_path(path: &str) -> bool {
 /// Issue #4637: outside `crates/gwt/web/` a script extension alone proves
 /// nothing is rendered (`scripts/*.mjs` is tooling), so only markup and
 /// stylesheets keep the doubt-means-UI default there.
-fn is_ui_surface_path(path: &str) -> bool {
+pub(crate) fn is_ui_surface_path(path: &str) -> bool {
     is_frontend_path(path)
         && !is_frontend_test_path(path)
         && (path.starts_with("crates/gwt/web/")

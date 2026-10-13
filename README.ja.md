@@ -405,6 +405,13 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   (Auto は OS locale を参照し、`C` / `POSIX` や未設定時は English にフォール
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
+  アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
+  Autonomous、Max active、キュー補充、許可ラベルを、`Agents` では起動
+  プロファイルと候補の順序・優先条件を編集できます。プロジェクト欄には
+  編集対象の名前を表示し、Issue ウィンドウの ⚙ からその `Issues` 欄を
+  開けます。`System > Auto-apply updates` は全プロジェクト共通で、開いて
+  いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
+  旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
 - `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は

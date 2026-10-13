@@ -150,6 +150,9 @@ impl Default for PrInventoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// App-wide automatic gwt update preference. None is an unmigrated
+    /// installation; an explicit false must never import legacy project ON.
+    pub auto_apply_updates: Option<bool>,
     /// Branches that cannot be deleted.
     pub protected_branches: Vec<String>,
     /// Default base branch for new worktrees.
@@ -195,6 +198,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            auto_apply_updates: None,
             protected_branches: vec![
                 "main".to_string(),
                 "master".to_string(),
@@ -352,13 +356,65 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<()>,
     {
+        let path = Self::global_config_path().ok_or(ConfigError::NoConfigPath)?;
+        Self::update_at_path(&path, mutate)
+    }
+
+    /// Update an explicit settings file under the same process lock as the
+    /// global writer. Used by the Settings service and its isolated tests.
+    pub fn update_at_path<F, T>(path: &Path, mutate: F) -> Result<T>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
         let _guard = UPDATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let mut settings = Self::load()?;
-        mutate(&mut settings)?;
-        settings.save_global()
+        let mut settings = if path.exists() {
+            Self::load_from_path(path)?
+        } else {
+            Self::default()
+        };
+        let result = mutate(&mut settings)?;
+        settings.save(path)?;
+        Ok(result)
+    }
+
+    /// Merge only the app-wide update preference, retaining comments and
+    /// unknown keys. Decide migration while holding the settings writer lock.
+    pub fn persist_auto_apply_updates<F>(path: &Path, decide: F) -> Result<bool>
+    where
+        F: FnOnce(Option<bool>) -> Result<bool>,
+    {
+        let _guard = UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let target = resolve_existing_settings_target(path)?;
+        let content = match std::fs::read_to_string(&target) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ConfigError::ParseError {
+                    reason: error.to_string(),
+                })
+            }
+        };
+        let settings: Self = toml::from_str(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let enabled = decide(settings.auto_apply_updates)?;
+        if settings.auto_apply_updates == Some(enabled) {
+            return Ok(enabled);
+        }
+        let mut document =
+            content
+                .parse::<DocumentMut>()
+                .map_err(|error| ConfigError::ParseError {
+                    reason: error.to_string(),
+                })?;
+        document["auto_apply_updates"] = value(enabled);
+        write_atomic(&target, &document.to_string())?;
+        Ok(enabled)
     }
 }
 

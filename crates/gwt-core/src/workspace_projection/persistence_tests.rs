@@ -151,6 +151,285 @@ fn issue_5313_ensure_child() {
     .expect("another process ensures a Work while GUI decode is paused");
 }
 
+fn issue_5335_projection_and_source(work_count: usize) -> (WorkItemsProjection, String) {
+    let at = Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(at);
+    let mut source = String::new();
+    for index in 0..work_count {
+        let mut event = WorkEvent::new(WorkEventKind::Start, format!("work-{index}"), at);
+        event.id = format!("event-{index}");
+        source.push_str(&serde_json::to_string(&event).unwrap());
+        source.push('\n');
+        projection.apply_event(event);
+    }
+    (projection, source)
+}
+
+/// Public intake must release the lock before decoding a repository-scale snapshot.
+#[test]
+fn issue_5335_intake_decode_allows_another_process_to_ensure() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let _home = ScopedHome::set(&home);
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let (projection, _) = issue_5335_projection_and_source(1000);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let incoming = serde_json::to_string(&WorkEvent::new(
+        WorkEventKind::Start,
+        "intake-work",
+        Utc::now(),
+    ))
+    .unwrap();
+    let child_repo = repo.clone();
+    BEFORE_WORK_ITEMS_DECODE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            run_issue_5313_ensure_child(&child_repo, &home);
+        }));
+    });
+    let error = crate::work_events_intake::ingest_work_events_content(&works, &incoming)
+        .expect_err("the independent writer invalidates the prepared snapshot");
+    assert!(error.to_string().contains("changed"), "{error}");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.work_items.len(), 1001);
+    assert!(saved.work_items.iter().any(|item| item.id == "child-work"));
+    assert!(!saved.work_items.iter().any(|item| item.id == "intake-work"));
+
+    crate::work_events_intake::ingest_work_events_content(&works, &incoming)
+        .expect("the next intake retries with the writer's snapshot");
+    assert_eq!(
+        load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .len(),
+        1002
+    );
+}
+
+/// Public rebuild must release the lock before decoding its Works snapshot.
+#[test]
+fn issue_5335_rebuild_decode_allows_another_process_to_ensure() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let _home = ScopedHome::set(&home);
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let (projection, source) = issue_5335_projection_and_source(1000);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let child_repo = repo.clone();
+    BEFORE_WORK_ITEMS_DECODE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            run_issue_5313_ensure_child(&child_repo, &home);
+        }));
+    });
+    let error = crate::work_events_intake::rebuild_work_events_with_shared_loader(
+        &works,
+        || {
+            Ok((
+                vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                    source.clone(),
+                    None,
+                )],
+                (),
+            ))
+        },
+        None,
+    )
+    .expect_err("decode-time writer invalidates the rebuild snapshot");
+    assert!(error.to_string().contains("changed"), "{error}");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.work_items.len(), 1001);
+    assert!(saved.work_items.iter().any(|item| item.id == "child-work"));
+}
+
+/// Snapshot precedes the lock-free loader, so its writer can never be overwritten.
+#[test]
+fn issue_5335_rebuild_loader_allows_writer_and_refuses_older_source_snapshot() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let _home = ScopedHome::set(&home);
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let (projection, source) = issue_5335_projection_and_source(1000);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let before = fs::read(&works).unwrap();
+    let mut writer_bytes = None;
+    let error = crate::work_events_intake::rebuild_work_events_with_shared_loader(
+        &works,
+        || {
+            run_issue_5313_ensure_child(&repo, &home);
+            writer_bytes = Some(fs::read(&works).unwrap());
+            Ok((
+                vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                    source.clone(),
+                    None,
+                )],
+                (),
+            ))
+        },
+        None,
+    )
+    .expect_err("capturing Works after the loader would wrongly accept stale sources");
+    assert!(error.to_string().contains("changed"), "{error}");
+    let writer_bytes = writer_bytes.unwrap();
+    assert_ne!(writer_bytes, before);
+    assert_eq!(fs::read(&works).unwrap(), writer_bytes);
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let child = saved
+        .work_items
+        .iter()
+        .find(|item| item.id == "child-work")
+        .unwrap();
+    let retry_source = format!(
+        "{source}{}\n",
+        serde_json::to_string(&child.events[0]).unwrap()
+    );
+    crate::work_events_intake::rebuild_work_events_with_shared_loader(
+        &works,
+        || {
+            Ok((
+                vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                    retry_source,
+                    None,
+                )],
+                (),
+            ))
+        },
+        None,
+    )
+    .expect("the next complete-source snapshot includes the writer");
+    assert_eq!(
+        load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .len(),
+        1001
+    );
+}
+
+/// A durable close may advance without a corresponding projection save.
+#[test]
+fn issue_5335_rebuild_refuses_local_ledger_only_change_and_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let works = temp.path().join("works.json");
+    let ledger = temp.path().join("work-events-closed.jsonl");
+    let (projection, source) = issue_5335_projection_and_source(1);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let before = fs::read(&works).unwrap();
+    let close = WorkEvent::new(WorkEventKind::Done, "work-0", Utc::now());
+    let close_bytes = format!("{}\n", serde_json::to_string(&close).unwrap());
+    let error = crate::work_events_intake::rebuild_work_events_with_shared_loader(
+        &works,
+        || {
+            fs::write(&ledger, &close_bytes).unwrap();
+            Ok((
+                vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                    source.clone(),
+                    None,
+                )],
+                (),
+            ))
+        },
+        Some(&ledger),
+    )
+    .expect_err("ledger-only writes invalidate the prepared lifecycle snapshot");
+    assert!(error.to_string().contains("changed"), "{error}");
+    assert_eq!(fs::read(&works).unwrap(), before);
+    assert_eq!(fs::read(&ledger).unwrap(), close_bytes.as_bytes());
+    crate::work_events_intake::rebuild_work_events_with_shared_loader(
+        &works,
+        || {
+            Ok((
+                vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                    source, None,
+                )],
+                (),
+            ))
+        },
+        Some(&ledger),
+    )
+    .expect("retry folds the durable machine-local close");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.work_items[0].completed_at, Some(close.updated_at));
+}
+
+/// Write-ahead repair decisions must not be replaced by an earlier refold.
+#[test]
+fn issue_5335_rebuild_refuses_detachments_only_change_and_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let works = temp.path().join("works.json");
+    let receipt = container_detachments_path(&works);
+    let at = Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap();
+    let mut event = WorkEvent::new(WorkEventKind::Start, "work-0", at);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-5335".into()),
+        worktree_path: Some(temp.path().join("repo")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
+    event.execution_container = Some(container.clone());
+    let source = serde_json::to_string(&event).unwrap();
+    let mut projection = WorkItemsProjection::empty(at);
+    projection.apply_event(event);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let before = fs::read(&works).unwrap();
+    let receipt_bytes = serde_json::to_vec(&BTreeMap::from([("work-0", vec![container])])).unwrap();
+    let error = crate::work_events_intake::rebuild_work_events_with_shared_loader(
+        &works,
+        || {
+            fs::write(&receipt, &receipt_bytes).unwrap();
+            Ok((
+                vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                    source.clone(),
+                    None,
+                )],
+                (),
+            ))
+        },
+        None,
+    )
+    .expect_err("repair-only writes invalidate the prepared snapshot");
+    assert!(error.to_string().contains("changed"), "{error}");
+    assert_eq!(fs::read(&works).unwrap(), before);
+    assert_eq!(fs::read(&receipt).unwrap(), receipt_bytes);
+    crate::work_events_intake::rebuild_work_events_with_shared_loader(
+        &works,
+        || {
+            Ok((
+                vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                    source, None,
+                )],
+                (),
+            ))
+        },
+        None,
+    )
+    .expect("retry enforces the durable detachment receipt");
+    assert!(load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap()
+        .work_items[0]
+        .execution_containers
+        .is_empty());
+}
+
 /// Issue #4739: launch publication must repair the already-poisoned Work,
 /// not require a separate workspace.ensure before the first update.
 #[test]
@@ -4876,7 +5155,16 @@ fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
         workspace_id: Some(T812_TARGET_WORK_ID.to_string()),
         updated_at: seeded_at,
     });
-    save_workspace_projection(&project_state_root, &current).expect("seed shared current");
+    // Seed private inputs without durable publication; each scenario still uses
+    // the real transaction writers for the behavior it asserts.
+    let current_path = gwt_workspace_projection_path_for_repo_path(&project_state_root);
+    fs::create_dir_all(current_path.parent().expect("current directory")).unwrap();
+    fs::write(
+        &current_path,
+        serde_json::to_vec_pretty(&current).expect("current fixture JSON"),
+    )
+    .expect("seed shared current");
+    fs::write(current_path.with_file_name("works.lock"), []).expect("seed current lock");
 
     let target_container = WorkspaceExecutionContainerRef {
         branch: Some(T812_TARGET_BRANCH.to_string()),
@@ -4906,36 +5194,51 @@ fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
         WorkEventApplyOutcome::Applied
     );
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
-    save_workspace_work_items_projection_to_path(&work_items_path, &work_items)
-        .expect("seed target Work");
+    fs::write(
+        &work_items_path,
+        serde_json::to_vec_pretty(&work_items).expect("Work fixture JSON"),
+    )
+    .expect("seed target Work");
 
     let events_path =
         repo_local_work_events_path_with_migration(&work_event_root).expect("resolve event log");
-    append_workspace_work_event_to_path(&events_path, &target_start).expect("seed target event");
+    fs::create_dir_all(events_path.parent().expect("event directory")).unwrap();
+    fs::write(
+        &events_path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&target_start).expect("event fixture JSON")
+        ),
+    )
+    .expect("seed target event");
 
     let journal_path = gwt_workspace_journal_path_for_repo_path(&project_state_root);
-    append_workspace_journal_entry_to_path(
+    let journal = WorkspaceJournalEntry {
+        id: "journal-foreign-shared-current".to_string(),
+        project_root: project_state_root.clone(),
+        title: Some(T812_FOREIGN_TITLE.to_string()),
+        status_category: Some(WorkspaceStatusCategory::Blocked),
+        status_text: Some("Foreign shared-current blocked status".to_string()),
+        owner: Some(T812_FOREIGN_OWNER.to_string()),
+        next_action: Some("Foreign shared-current next action".to_string()),
+        summary: Some(T812_FOREIGN_SUMMARY.to_string()),
+        progress_summary: Some(T812_FOREIGN_PROGRESS.to_string()),
+        agent_session_id: None,
+        agent_current_focus: None,
+        agent_title_summary: None,
+        updated_at: seeded_at,
+    };
+    fs::write(
         &journal_path,
-        &WorkspaceJournalEntry {
-            id: "journal-foreign-shared-current".to_string(),
-            project_root: project_state_root.clone(),
-            title: Some(T812_FOREIGN_TITLE.to_string()),
-            status_category: Some(WorkspaceStatusCategory::Blocked),
-            status_text: Some("Foreign shared-current blocked status".to_string()),
-            owner: Some(T812_FOREIGN_OWNER.to_string()),
-            next_action: Some("Foreign shared-current next action".to_string()),
-            summary: Some(T812_FOREIGN_SUMMARY.to_string()),
-            progress_summary: Some(T812_FOREIGN_PROGRESS.to_string()),
-            agent_session_id: None,
-            agent_current_focus: None,
-            agent_title_summary: None,
-            updated_at: seeded_at,
-        },
+        format!(
+            "{}\n",
+            serde_json::to_string(&journal).expect("journal fixture JSON")
+        ),
     )
     .expect("seed shared-current journal");
 
     T812Fixture {
-        current_path: gwt_workspace_projection_path_for_repo_path(&project_state_root),
+        current_path,
         target: T812ResolvedMutationTarget {
             project_state_root,
             work_event_root: work_event_root.clone(),
@@ -11145,15 +11448,14 @@ fn init_test_git_repo(path: &Path) {
 }
 
 fn configure_test_git_identity(path: &Path) {
-    for args in [
-        ["config", "user.email", "test@example.com"],
-        ["config", "user.name", "Test User"],
-    ] {
-        let mut cmd = crate::process::hidden_command("git");
-        cmd.args(args).current_dir(path);
-        crate::process::scrub_git_env(&mut cmd);
-        assert!(cmd.output().expect("git config").status.success());
-    }
+    // All callers use fresh normal repositories. Preserve Git's generated
+    // core/remote configuration and avoid two child processes for fixed inputs.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path.join(".git/config"))
+        .expect("open fixture Git config")
+        .write_all(b"\n[user]\n\temail = test@example.com\n\tname = Test User\n")
+        .expect("seed fixture Git identity");
 }
 
 fn test_git_output(path: &Path, args: &[&str]) -> std::process::Output {

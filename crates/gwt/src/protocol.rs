@@ -981,15 +981,17 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
-    /// Issue #3906 AC-1: explicit auto-apply-updates override. Persisted as
-    /// `auto_apply_updates` in the Issue Monitor prefs; without an override
-    /// the setting follows `autonomous_mode`.
+    /// Issue #5322: update the global auto-apply-updates preference shared
+    /// by every project and the Hub.
     SetIssueMonitorAutoApplyUpdates {
         enabled: bool,
     },
+    /// Read the current project's complete saved launch profile pool.
+    GetIssueMonitorProfiles,
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
+        request_id: Option<u64>,
     },
     SetIssueMonitorMaxActiveAgents {
         #[serde(deserialize_with = "deserialize_positive_capacity_override")]
@@ -1988,6 +1990,8 @@ pub enum UpdateAutoApplyPhase {
     Scheduled,
     Postponed,
     Cancelled,
+    /// Automatic apply needs an administrator; retain the staged manual action.
+    ElevationRequired,
     Applying,
 }
 
@@ -2208,6 +2212,13 @@ pub enum BackendEvent {
         /// Boxed: the view is by far the largest payload in this enum
         /// (clippy `large_enum_variant`), and every broadcast clones it.
         status: Box<IssueMonitorStatusView>,
+    },
+    /// Client-scoped Settings snapshot, in saved launch candidate order.
+    IssueMonitorProfiles {
+        project_root: String,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
     },
     /// Client-scoped failure for one label save; uncertain writes can still commit.
     IssueMonitorAllowedLabelsWriteFailed {
@@ -2756,6 +2767,7 @@ pub enum BackendEvent {
     /// Settings > System > Language select.
     SystemSettings {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
@@ -2822,6 +2834,7 @@ pub enum BackendEvent {
     /// optimistic UI with the authoritative config state.
     SystemSettingsUpdated {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
@@ -3090,6 +3103,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "pm_status",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_profiles",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "issue_monitor_status",
@@ -3561,6 +3579,7 @@ impl BackendEvent {
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
+            BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
             BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
                 "issue_monitor_allowed_labels_write_failed"
             }
@@ -3857,6 +3876,26 @@ mod tests {
         assert!(
             errors.contains("project_context_for_root"),
             "control errors must resolve their explicit project owner"
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_elevation_required_serializes_without_a_grace() {
+        let phase: super::UpdateAutoApplyPhase =
+            serde_json::from_value(serde_json::json!("elevation_required"))
+                .expect("administrator-required phase is part of the update protocol");
+        let event = BackendEvent::UpdateAutoApply {
+            version: "9.106.0".into(),
+            phase,
+            grace_secs: None,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "update_auto_apply",
+                "version": "9.106.0",
+                "phase": "elevation_required",
+            })
         );
     }
 

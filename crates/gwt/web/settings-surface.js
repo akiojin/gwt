@@ -185,7 +185,201 @@ export function mountProjectManagerSettingsPanel(
   return panel;
 }
 
-export function switchSettingsTab(body, target) {
+export function renderIssuesSettingsPanel(panel, options) {
+  const { project, status, send } = options;
+  const document = panel.ownerDocument;
+  panel.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.className = "settings-section-heading";
+  heading.textContent = `Project settings · ${project?.name || project?.project_root || "No project"}`;
+  panel.appendChild(heading);
+  const description = document.createElement("p");
+  description.className = "settings-help";
+  description.textContent = project?.project_root || "Open a project to configure Issues.";
+  panel.appendChild(description);
+  const section = document.createElement("fieldset");
+  section.className = "settings-section";
+  section.disabled = !status;
+  const legend = document.createElement("legend");
+  legend.textContent = "Issues";
+  section.appendChild(legend);
+  panel.appendChild(section);
+  const field = (name, type, value) => {
+    const label = document.createElement("label");
+    label.className = "settings-field";
+    const caption = document.createElement("span");
+    caption.textContent = name;
+    label.appendChild(caption);
+    const input = document.createElement("input");
+    input.type = type;
+    input.className = type === "checkbox" ? "settings-checkbox" : "settings-input";
+    input.setAttribute("aria-label", name);
+    if (type === "checkbox") input.checked = value === true;
+    else input.value = String(value ?? "");
+    label.appendChild(input);
+    section.appendChild(label);
+    return input;
+  };
+  const button = (name, action, callback) => {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "wizard-button";
+    node.dataset.action = action;
+    node.textContent = name;
+    node.addEventListener("click", callback);
+    section.appendChild(node);
+    return node;
+  };
+  const autonomous = field("Autonomous", "checkbox", status?.autonomous_mode);
+  autonomous.addEventListener("change", () => send({ kind: "set_issue_monitor_autonomous_mode", enabled: autonomous.checked }));
+  const max = field("Max active", "number", status?.max_active_agents ?? 0);
+  max.min = "1";
+  max.step = "1";
+  const mode = document.createElement("span");
+  mode.textContent = status?.max_active_agents_override == null ? "Auto" : "Manual";
+  max.closest("label").appendChild(mode);
+  max.addEventListener("change", () => {
+    const value = Number(max.value);
+    if (Number.isInteger(value) && value > 0) send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
+  });
+  button("Use Auto", "settings-use-auto", () => send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: null }));
+  button(status?.enabled ? "Stop" : "Start", "settings-monitor-stop", () => send({ kind: "set_issue_monitor_enabled", enabled: !status?.enabled }));
+  const refill = field("Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
+  const limit = field("Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  limit.min = "0";
+  limit.step = "1";
+  const saveRefill = () => {
+    const value = Number(limit.value);
+    if (Number.isInteger(value) && value >= 0) send({ kind: "set_issue_monitor_auto_refill", enabled: refill.checked, limit: value });
+  };
+  refill.addEventListener("change", saveRefill);
+  limit.addEventListener("change", saveRefill);
+  const labels = field("Allowed labels", "text", (status?.allowed_labels || []).join(", "));
+  labels.addEventListener("change", () => send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: [...new Set(labels.value.split(",").map(v => v.trim()).filter(Boolean))] }));
+}
+
+export function renderAgentsSettingsPanel(panel, options) {
+  const { project, profiles, status, send } = options;
+  const document = panel.ownerDocument;
+  panel.replaceChildren();
+  panel.dataset.dirty = "false";
+  panel.oninput = panel.onchange = () => {
+    panel.dataset.dirty = "true";
+    panel.dataset.saving = "false";
+  };
+  const heading = document.createElement("h3");
+  heading.className = "settings-section-heading";
+  heading.textContent = `Project settings · ${project?.name || project?.project_root || "No project"}`;
+  panel.appendChild(heading);
+  const help = document.createElement("p");
+  help.className = "settings-help";
+  help.textContent = `${project?.project_root || "Open a project"} · Candidates are tried in order. Changes apply to future launches.`;
+  panel.appendChild(help);
+  if (!profiles) {
+    help.textContent += " Loading launch profiles…";
+    return;
+  }
+  const rows = [];
+  const field = (parent, name, key, value, type = "text", choices = null) => {
+    const label = document.createElement("label");
+    label.className = "settings-field";
+    const span = document.createElement("span");
+    span.textContent = name;
+    label.appendChild(span);
+    const input = document.createElement(choices ? "select" : "input");
+    if (choices) {
+      for (const choice of new Set([...choices, value ?? ""])) {
+        const option = document.createElement("option");
+        option.value = choice;
+        option.textContent = choice || "Auto";
+        option.selected = choice === String(value ?? "");
+        input.appendChild(option);
+      }
+    } else input.type = type;
+    input.className = choices ? "settings-select" : type === "checkbox" ? "settings-checkbox" : "settings-input";
+    input.dataset.profileField = key;
+    input.setAttribute("aria-label", `${name} ${parent.dataset.agentId || "candidate"}`);
+    if (type === "checkbox") input.checked = value === true;
+    else if (!choices) input.value = String(value ?? "");
+    label.appendChild(input);
+    parent.appendChild(label);
+    return input;
+  };
+  const draft = () => rows.map(({ row, profile }) => {
+    const next = { ...profile };
+    for (const input of row.querySelectorAll("[data-profile-field]")) {
+      const key = input.dataset.profileField;
+      next[key] = input.type === "checkbox" ? input.checked
+        : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
+          : input.value.trim() || null;
+    }
+    return next;
+  });
+  const submit = next => {
+    const value = Number(threshold.value);
+    if (Number.isInteger(value) && value >= 1 && value <= 100) send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
+  };
+  const button = (parent, title, action, callback) => {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "wizard-button";
+    node.textContent = title;
+    node.dataset.action = action;
+    node.setAttribute("aria-label", title);
+    node.addEventListener("click", callback);
+    parent.appendChild(node);
+    return node;
+  };
+  const poolHeading = document.createElement("h3");
+  poolHeading.className = "settings-section-heading";
+  poolHeading.textContent = "Candidates";
+  panel.appendChild(poolHeading);
+  const threshold = field(panel, "Usage threshold (%)", "threshold", status?.usage_threshold_percent ?? 80, "number");
+  threshold.min = "1";
+  threshold.max = "100";
+  threshold.step = "1";
+  for (const [index, profile] of profiles.entries()) {
+    const row = document.createElement("fieldset");
+    row.className = "settings-section";
+    row.dataset.agentId = profile.agent_id;
+    const legend = document.createElement("legend");
+    legend.textContent = `${index + 1}. ${profile.agent_id}`;
+    row.appendChild(legend);
+    panel.appendChild(row);
+    rows.push({ row, profile });
+    for (const [name, key, fallback] of [
+      ["Agent", "agent_id", ""], ["Model", "model", ""], ["Reasoning", "reasoning", ""],
+      ["Docker service", "docker_service", ""],
+      ["Prefer for", "prefer_for", ""],
+    ]) field(row, name, key, key === "prefer_for" ? (profile[key] || []).join(", ") : profile[key] ?? fallback);
+    field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", ["Normal", "Continue", "Resume"]);
+    field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
+    field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
+    field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
+    field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
+    for (const [direction, offset] of [["up", -1], ["down", 1]]) {
+      const move = button(row, `Move ${direction} ${profile.agent_id}`, direction, () => {
+        const next = draft();
+        [next[index], next[index + offset]] = [next[index + offset], next[index]];
+        submit(next);
+      });
+      move.disabled = index + offset < 0 || index + offset >= profiles.length;
+    }
+    const remove = button(row, `Remove ${profile.agent_id}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
+    remove.disabled = profiles.length <= 1;
+  }
+  button(panel, "Save profiles", "save-profiles", () => submit(draft()));
+  const add = document.createElement("section");
+  add.className = "settings-section";
+  panel.appendChild(add);
+  const candidate = field(add, "Add candidate", "new", "");
+  button(add, "Add candidate", "add-candidate", () => {
+    const agent = candidate.value.trim();
+    if (agent && !profiles.some(p => p.agent_id === agent)) submit([...draft(), { agent_id: agent }]);
+  });
+}
+
+export function switchSettingsTab(body, target, focus = false) {
   const tabs = body.querySelectorAll(".settings-tab");
   tabs.forEach((tab) => {
     const isSelected = tab.dataset.settingsTab === target;
@@ -195,6 +389,11 @@ export function switchSettingsTab(body, target) {
   const panels = body.querySelectorAll(".settings-panel");
   panels.forEach((panel) => {
     panel.classList.toggle("hidden", panel.dataset.settingsPanel !== target);
+    if (focus && panel.dataset.settingsPanel === target) {
+      panel.tabIndex = -1;
+      panel.scrollIntoView?.({ block: "start" });
+      panel.focus({ preventScroll: true });
+    }
   });
 }
 
@@ -204,18 +403,20 @@ export function installSettingsOpenHandler(options) {
     settingsWindowBodies,
     focusOrSpawnPreset,
     setPendingTarget,
+    activeProjectTab,
   } = options;
   document.addEventListener("settings:open", (event) => {
-    const target = event?.detail?.target || "system";
+    const target = event?.detail?.section || event?.detail?.target || "system";
+    const projectRoot = event?.detail?.project_root || activeProjectTab?.()?.project_root || "";
     if (target === "index") {
       focusOrSpawnPreset("index");
       return;
     }
     const existingBody = Array.from(settingsWindowBodies).find(
-      (settingsBody) => settingsBody.isConnected,
+      (settingsBody) => settingsBody.isConnected && (settingsBody.dataset.settingsProjectRoot || "") === projectRoot,
     );
     if (existingBody) {
-      switchSettingsTab(existingBody, target);
+      switchSettingsTab(existingBody, target, true);
       focusOrSpawnPreset("settings");
       return;
     }
@@ -427,6 +628,81 @@ export function createSettingsSurface({
         statusKind: "",
       };
       const settingsWindowBodies = new Set();
+      let nextProfilesRequest = 0;
+      const issueSettingsModel = createUiStateStore({});
+      const globalUpdateModel = createUiStateStore({ enabled: false, loaded: false });
+      globalUpdateModel.subscribe(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) {
+          const toggle = body.querySelector('[aria-label="Auto-apply updates"]');
+          if (toggle) {
+            toggle.checked = state.enabled;
+            toggle.disabled = !state.loaded;
+          }
+        }
+      });
+      function applyGlobalUpdateSettings(event) {
+        globalUpdateModel.update(() => ({ enabled: event.auto_apply_updates === true, loaded: true }));
+      }
+      function projectSettingsSnapshot(body) {
+        const root = body.dataset.settingsProjectRoot || "";
+        return issueSettingsModel.read()[root] || {};
+      }
+      function renderProjectSettings(body) {
+        const root = body.dataset.settingsProjectRoot || "";
+        const current = projectSettingsSnapshot(body);
+        const project = { project_root: root, name: body.dataset.settingsProjectName };
+        const agentsPanel = body.querySelector('[data-settings-panel="agents"]');
+        if (current.profilesRequestId != null
+          && Number(agentsPanel?.dataset.pendingRequest) === current.profilesRequestId && agentsPanel?.dataset.saving === "true") {
+          agentsPanel.dataset.dirty = "false";
+          agentsPanel.dataset.saving = "false";
+          delete agentsPanel.dataset.pendingRequest;
+          body.querySelector('[data-settings-tab="agents"]')?.focus();
+        }
+        const dispatch = message => {
+          // Project WebSockets own mutation authority. Never replay this
+          // window's edit through a different active project's connection.
+          if (!root || activeProjectTab()?.project_root !== root) return;
+          if (message.kind === "issue_monitor_profiles_set") {
+            message.request_id = ++nextProfilesRequest;
+            const panel = body.querySelector('[data-settings-panel="agents"]');
+            if (panel) {
+              panel.dataset.dirty = "true";
+              panel.dataset.saving = "true";
+              panel.dataset.pendingRequest = String(message.request_id);
+            }
+          }
+          send(message);
+        };
+        for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
+          const panel = body.querySelector(`[data-settings-panel="${section}"]`);
+          const editing = panel?.contains(document.activeElement)
+            && document.activeElement?.matches("input:not([type=checkbox]), select, textarea");
+          if (editing && section === "issues") body.dataset.issuesRenderDeferred = "true";
+          if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
+            project, status: current.status, profiles: current.profiles, send: dispatch,
+          });
+        }
+      }
+      function applyIssueSettingsStatus(status, projectRoot) {
+        if (typeof status.auto_apply_updates === "boolean") applyGlobalUpdateSettings(status);
+        if (!projectRoot) return;
+        issueSettingsModel.update(state => ({ ...state, [projectRoot]: { ...state[projectRoot], status } }));
+      }
+      function applyIssueMonitorProfiles(event) {
+        const root = event.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => ({ ...state, [root]: {
+          ...state[root], profiles: event.profiles, profilesRequestId: event.request_id,
+        } }));
+      }
+      issueSettingsModel.subscribe(state => state, () => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) {
+          renderProjectSettings(body);
+        }
+      });
       const supportedAgentsModel = createUiStateStore({
         agents: null,
         autoUpdate: false,
@@ -520,6 +796,9 @@ export function createSettingsSurface({
         // not accumulate references.
         purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
+        const project = activeProjectTab();
+        body.dataset.settingsProjectRoot = project?.project_root || "";
+        body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
         const root = createDiv("settings-root");
 
@@ -532,6 +811,8 @@ export function createSettingsSurface({
         const tabs = document.createElement("nav");
         tabs.className = "settings-tabs";
         tabs.setAttribute("role", "tablist");
+        const appScope = createNode("span", "settings-label", "Application settings");
+        tabs.appendChild(appScope);
         tabs.appendChild(buildSettingsTab("system", "System", true, windowData.id));
         tabs.appendChild(
           buildSettingsTab("supported-agents", "Supported Agents", false, windowData.id),
@@ -558,6 +839,11 @@ export function createSettingsSurface({
         tabs.appendChild(
           buildSettingsTab("usage", "Usage & Limits", false, windowData.id),
         );
+        tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
+        tabs.appendChild(buildSettingsTab("issues", "Issues", false, windowData.id));
+        tabs.appendChild(buildSettingsTab("agents", "Agents", false, windowData.id));
+        // PM settings are also project-owned; keep all project tabs together.
+        tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
         toolbar.appendChild(heading);
         toolbar.appendChild(tabs);
@@ -569,6 +855,25 @@ export function createSettingsSurface({
         panelSystem.setAttribute("role", "tabpanel");
         panelSystem.dataset.settingsPanel = "system";
         linkSettingsPanel(panelSystem, windowData.id, "system");
+        panelSystem.appendChild(createNode("h3", "settings-section-heading", "Application settings"));
+        const updateSection = createDiv("settings-section");
+        const updateLabel = createNode("label", "settings-checkbox-label");
+        const updateToggle = document.createElement("input");
+        updateToggle.type = "checkbox";
+        updateToggle.className = "settings-checkbox";
+        updateToggle.setAttribute("aria-label", "Auto-apply updates");
+        updateToggle.checked = globalUpdateModel.read().enabled;
+        updateToggle.disabled = !globalUpdateModel.read().loaded;
+        updateToggle.addEventListener("change", () => send({ kind: "set_issue_monitor_auto_apply_updates", enabled: updateToggle.checked }));
+        updateLabel.appendChild(updateToggle);
+        updateLabel.appendChild(document.createTextNode("Auto-apply updates"));
+        updateSection.appendChild(updateLabel);
+        updateSection.appendChild(createNode("p", "settings-help", "Applies across all projects when at least one open project has Autonomous enabled. Updates wait until agents finish."));
+        panelSystem.appendChild(updateSection);
+        const systemContent = createDiv();
+        systemContent.id = `${panelSystem.id}-content`;
+        systemContent.dataset.systemSettingsContent = "";
+        panelSystem.appendChild(systemContent);
 
         const panelSupportedAgents = document.createElement("section");
         panelSupportedAgents.className = "settings-panel hidden";
@@ -610,6 +915,14 @@ export function createSettingsSurface({
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
+        for (const target of ["issues", "agents"]) {
+          const panel = document.createElement("section");
+          panel.className = "settings-panel hidden";
+          panel.setAttribute("role", "tabpanel");
+          panel.dataset.settingsPanel = target;
+          linkSettingsPanel(panel, windowData.id, target);
+          bodyEl.appendChild(panel);
+        }
 
         root.appendChild(toolbar);
         root.appendChild(bodyEl);
@@ -633,8 +946,19 @@ export function createSettingsSurface({
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
+        body.addEventListener("focusout", () => queueMicrotask(() => {
+          if (body.dataset.issuesRenderDeferred === "true") {
+            delete body.dataset.issuesRenderDeferred;
+            renderProjectSettings(body);
+          }
+        }));
+        renderProjectSettings(body);
+        if (project?.project_root) {
+          send({ kind: "list_issue_monitor" });
+          send({ kind: "get_issue_monitor_profiles" });
+        }
 
-        renderSystemPanel(panelSystem);
+        renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
         send({ kind: "list_supported_agents" });
         renderUsagePanel(panelUsage);
@@ -664,7 +988,7 @@ export function createSettingsSurface({
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
         if (pendingSettingsTabTarget) {
-          switchSettingsTab(body, pendingSettingsTabTarget);
+          switchSettingsTab(body, pendingSettingsTabTarget, true);
           pendingSettingsTabTarget = null;
         }
       }
@@ -781,6 +1105,7 @@ export function createSettingsSurface({
         document,
         settingsWindowBodies,
         focusOrSpawnPreset,
+        activeProjectTab,
         setPendingTarget: (target) => {
           pendingSettingsTabTarget = target;
         },
@@ -1511,7 +1836,7 @@ export function createSettingsSurface({
             continue;
           }
           const panel = body.querySelector(
-            "[data-settings-panel='system']",
+            "[data-system-settings-content]",
           );
           if (panel) renderSystemPanel(panel);
         }
@@ -1741,6 +2066,9 @@ export function createSettingsSurface({
       }
 
       return {
+        applyGlobalUpdateSettings,
+        applyIssueSettingsStatus,
+        applyIssueMonitorProfiles,
         customAgentsState,
         agentBackendsState,
         systemSettingsState,
