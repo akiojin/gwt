@@ -73,27 +73,27 @@ impl Capture {
                 Event::Start(element) | Event::Empty(element) => {
                     if depth == 0 {
                         if root_seen
-                            || !matches!(element.name().as_ref(), b"testsuites" | b"testsuite")
+                            || !matches!(element.name().as_ref(), "testsuites" | "testsuite")
                         {
                             return Err("nextest JUnit must have one testsuites or testsuite root"
                                 .to_string());
                         }
                         root_seen = true;
                     }
-                    if element.name().as_ref() == b"testcase" {
+                    if element.name().as_ref() == "testcase" {
                         let mut classname = String::new();
                         let mut name = None;
                         let mut duration = None;
                         for attribute in element.attributes() {
                             let attribute = attribute.map_err(|error| error.to_string())?;
-                            let value = attribute
-                                .decode_and_unescape_value(reader.decoder())
+                            // Preserve attribute whitespace as well as expanding XML references.
+                            let value = quick_xml::escape::unescape(&attribute.value)
                                 .map_err(|error| error.to_string())?
                                 .into_owned();
                             match attribute.key.as_ref() {
-                                b"classname" => classname = value,
-                                b"name" => name = Some(value),
-                                b"time" => duration = Some(value),
+                                "classname" => classname = value,
+                                "name" => name = Some(value),
+                                "time" => duration = Some(value),
                                 _ => {}
                             }
                         }
@@ -125,9 +125,8 @@ impl Capture {
                         .ok_or("unexpected JUnit closing element")?;
                 }
                 Event::Text(text) => {
-                    let decoded = text.decode().map_err(|error| error.to_string())?;
                     let unescaped =
-                        quick_xml::escape::unescape(&decoded).map_err(|error| error.to_string())?;
+                        quick_xml::escape::unescape(&text).map_err(|error| error.to_string())?;
                     if depth == 0 && !unescaped.trim().is_empty() {
                         return Err("text outside nextest JUnit root".to_string());
                     }

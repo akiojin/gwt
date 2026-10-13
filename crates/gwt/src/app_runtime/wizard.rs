@@ -148,8 +148,9 @@ fn manual_generation_operation_id(
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     binding: &gwt_agent::ExecutionBindingIdentity,
     predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+    attempts: &[gwt::cli::execution_state::ContinuationAttempt],
 ) -> String {
-    manual_holder_operation_id(
+    let base = manual_holder_operation_id(
         &format!(
             "{}:{}:{}:{}",
             owner.kind.as_str(),
@@ -158,7 +159,22 @@ fn manual_generation_operation_id(
             binding.ledger_head_hash
         ),
         predecessor_kind,
-    )
+    );
+    let mut operation_id = base.clone();
+    // A new user launch advances only past a durably cancelled operation.
+    // Deriving its identity from that candidate preserves retries across Host
+    // restarts; Prepared/Activated operations still replay their exact request.
+    while let Some(attempt) = attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == operation_id)
+    {
+        if attempt.status != gwt::cli::execution_state::ContinuationAttemptStatus::Aborted {
+            break;
+        }
+        operation_id = format!("{base}:retry:{}", attempt.candidate_generation_id);
+    }
+    operation_id
 }
 
 fn manual_successor_stable_component(prefix: &str, operation_id: &str) -> String {
@@ -365,6 +381,7 @@ fn prepare_issue_monitor_answer(
         &request.project_root,
         &branch,
         request.issue_number,
+        request.linked_issue_kind,
         agent_id,
         sessions_dir,
         cache,
@@ -408,6 +425,7 @@ fn prepare_issue_monitor_launch(
             project_root,
             &branch,
             request.issue_number,
+            request.linked_issue_kind,
             &profile.agent_id,
             sessions_dir,
             cache,
@@ -2478,15 +2496,24 @@ impl AppRuntime {
             previous_profiles,
         ) {
             Ok(()) => {
+                let target_branch =
+                    knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
+                let delivery = gwt::issue_monitor_owner_branch_delivery(
+                    &project_root,
+                    &base_branch_name,
+                    &target_branch,
+                );
                 if let Some(session) = self.launch_wizard_for_mut(&context) {
                     session.issue_monitor_launch_issue_number = Some(issue_number);
                     session.origin = super::LaunchWizardOrigin::IssueMonitor;
                     session
                         .wizard
                         .apply(gwt::LaunchWizardAction::SetInitialPrompt {
-                            value: gwt::issue_monitor_launch_prompt(
+                            value: gwt::issue_monitor_launch_prompt_for_base(
                                 linked_issue_kind,
                                 issue_number,
+                                &base_branch_name,
+                                delivery,
                             ),
                         });
                 }
@@ -3093,14 +3120,65 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed {
                     message,
                     session_mode,
+                    retryable,
+                    fresh_execution,
                 }) => {
-                    return self.issue_monitor_launch_failed_delivery_events_with_mode(
-                        Some(project_root),
-                        issue_number,
-                        &message,
-                        Some(delivery_id),
-                        session_mode,
-                    );
+                    let (mut events, committed) = self
+                        .issue_monitor_launch_failed_delivery_committed_events_with_retryability(
+                            Some(project_root),
+                            issue_number,
+                            &message,
+                            Some(delivery_id),
+                            session_mode,
+                            retryable,
+                        );
+                    if committed && !retryable {
+                        if let Some((window_id, identity, generation)) = fresh_execution {
+                            let exact_window = self
+                                .window_lifecycle_generations
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .get(&window_id)
+                                .copied()
+                                == Some(generation);
+                            let exact_pending = self.pending_fresh_execution_launches.get(&window_id).is_some_and(|pending| {
+                                pending.session_identity == *identity
+                                    && super::continuation::pending_fresh_execution_activation_status(pending) == Some(false)
+                                    && pending.launch_feedback_context.as_ref().is_some_and(|feedback| {
+                                        feedback.issue_monitor_launch_binding_issue_number() == Some(issue_number)
+                                            && feedback.issue_monitor_delivery_id.as_deref() == Some(delivery_id)
+                                    })
+                            });
+                            let exact_session =
+                                self.active_agent_sessions.get(&window_id).map_or_else(
+                                    || !self.runtimes.contains_key(&window_id),
+                                    |active| {
+                                        active.session_id == identity.session_id
+                                            && active.worktree_path == identity.worktree_path
+                                            && active.branch_name == identity.branch
+                                    },
+                                );
+                            if exact_window && exact_pending && exact_session {
+                                events.extend(self.fresh_execution_launch_failed_events_with_pane(
+                                    &window_id,
+                                    &message,
+                                    super::launch::LaunchPaneDisposition::Retain,
+                                ));
+                                if !self
+                                    .pending_fresh_execution_launches
+                                    .contains_key(&window_id)
+                                {
+                                    self.active_agent_sessions.remove(&window_id);
+                                    events.extend(
+                                        self.close_window_after_issue_monitor_finalize_events(
+                                            &window_id,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    return events;
                 }
                 None => {}
             }
@@ -3308,12 +3386,17 @@ impl AppRuntime {
             .filter(|window| window.preset == WindowPreset::Agent)
             .map(|window| (combined_window_id(tab_id, &window.id), window))
             .find(|(window_id, window)| {
-                let linked_issue = window.linked_issue_number.or_else(|| {
-                    let session_id = window.session_id.as_deref()?;
-                    self.launch_wizard_cache
-                        .session_by_id(session_id)
-                        .and_then(|session| session.linked_issue_number)
-                });
+                let pending =
+                    self.issue_monitor_pending_feedback_for_window(window_id, &tab.project_root);
+                let linked_issue = pending
+                    .and_then(|context| context.issue_monitor_issue_number)
+                    .or(window.linked_issue_number)
+                    .or_else(|| {
+                        let session_id = window.session_id.as_deref()?;
+                        self.launch_wizard_cache
+                            .session_by_id(session_id)
+                            .and_then(|session| session.linked_issue_number)
+                    });
                 let in_issue_worktree =
                     self.active_agent_sessions
                         .get(window_id)
@@ -3321,6 +3404,7 @@ impl AppRuntime {
                             normalize_branch_name(&active.branch_name) == target_branch
                         });
                 (linked_issue == Some(issue_number) || in_issue_worktree)
+                    && !pending.is_some_and(|context| context.issue_monitor_review_dispatch)
                     && !self
                         .issue_monitor_review_dispatch_windows
                         .contains(window_id)
@@ -3440,6 +3524,12 @@ impl AppRuntime {
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };
+        match self.host_update_drain_launch_hold() {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => {
+                return self.defer_issue_monitor_review_dispatch_events(&context, &dispatch);
+            }
+        }
         let prompt = build_review_dispatch_prompt(&dispatch);
         tracing::info!(
             issue = dispatch.issue_number,
@@ -3485,10 +3575,35 @@ impl AppRuntime {
                     issue_number: Some(dispatch.issue_number),
                 },
             )],
+            Err(error) if error.contains("update_drain") => {
+                self.defer_issue_monitor_review_dispatch_events(&context, &dispatch)
+            }
             Err(error) => self.issue_monitor_launch_failed_events(
                 Some(project_root),
                 dispatch.issue_number,
                 &error,
+            ),
+        }
+    }
+
+    fn defer_issue_monitor_review_dispatch_events(
+        &self,
+        context: &super::ProjectContext,
+        dispatch: &gwt::AutonomousReviewDispatch,
+    ) -> Vec<OutboundEvent> {
+        match self.publish_project_issue_monitor_control(
+            context,
+            serde_json::json!({
+                "review_dispatch_deferred": dispatch,
+            }),
+        ) {
+            Ok(()) => Vec::new(),
+            Err(error) => self.issue_monitor_control_error_events(
+                Some(&context.project_root),
+                None,
+                error,
+                "review-update-drain",
+                Some(dispatch.issue_number),
             ),
         }
     }
@@ -3529,11 +3644,24 @@ impl AppRuntime {
             )
         };
         if let Some(delivery_id) = delivery_id.as_deref() {
+            // Claim the existing pane when adopting it: a proposed new ID
+            // would incorrectly ask for another slot at a saturated cap.
+            let claim_window_id = review_prompt
+                .is_none()
+                .then(|| {
+                    self.live_issue_agent_window(
+                        &tab_id,
+                        issue_number,
+                        &knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
+                    )
+                })
+                .flatten()
+                .unwrap_or_else(|| proposed_window_id.clone());
             match self.claim_issue_monitor_launch_delivery(
                 &project_root,
                 issue_number,
                 delivery_id,
-                &proposed_window_id,
+                &claim_window_id,
             ) {
                 Ok(true) => {}
                 Ok(false) => return Ok(Some(Vec::new())),
@@ -3568,6 +3696,7 @@ impl AppRuntime {
                     &project_root,
                     &target_branch,
                     issue_number,
+                    linked_issue_kind,
                     delivery_id,
                     &agent_id,
                     Some(Ok(Some(*resume))),
@@ -3621,6 +3750,7 @@ impl AppRuntime {
                 &project_root,
                 &target_branch,
                 issue_number,
+                linked_issue_kind,
                 delivery_id,
                 agent_id,
                 None,
@@ -3746,6 +3876,7 @@ impl AppRuntime {
                 &project_root,
                 &target_branch,
                 issue_number,
+                linked_issue_kind,
                 delivery_id.clone(),
                 &profile_agent_id,
                 prepared
@@ -3964,6 +4095,7 @@ impl AppRuntime {
         project_root: &Path,
         target_branch: &str,
         issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         profile_agent_id: &str,
         prepared: Option<Result<Option<PreparedIssueMonitorResume>, String>>,
@@ -3978,6 +4110,7 @@ impl AppRuntime {
                 project_root,
                 target_branch,
                 issue_number,
+                linked_issue_kind,
                 profile_agent_id,
                 &self.sessions_dir,
                 &self.launch_wizard_cache,
@@ -4676,7 +4809,12 @@ impl AppRuntime {
             return Ok(super::ManualLaunchGenerationDisposition::Prepare(
                 super::ManualLaunchPreparation {
                     owner,
-                    operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+                    operation_id: manual_generation_operation_id(
+                        owner,
+                        &current,
+                        predecessor_kind,
+                        &ledger.continuation_attempts,
+                    ),
                     expected_binding: current,
                     expected_session: None,
                     expected_runtime: None,
@@ -4773,7 +4911,12 @@ impl AppRuntime {
         };
         let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
         let intent = super::ManualLaunchHolderIntent {
-            operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+            operation_id: manual_generation_operation_id(
+                owner,
+                &current,
+                predecessor_kind,
+                &ledger.continuation_attempts,
+            ),
             fingerprint,
             owner,
             predecessor,
@@ -6225,11 +6368,13 @@ mod manual_successor_identity_tests {
             owner,
             &binding,
             gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+            &[],
         );
         let after_runtime_replacement = manual_generation_operation_id(
             owner,
             &binding,
             gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+            &[],
         );
 
         assert_eq!(before_runtime_replacement, after_runtime_replacement);
@@ -6700,6 +6845,7 @@ fn prepare_issue_monitor_resume(
     project_root: &Path,
     target_branch: &str,
     issue_number: u64,
+    linked_issue_kind: gwt::LinkedIssueKind,
     profile_agent_id: &str,
     sessions_dir: &Path,
     cache: &LaunchWizardMemoryCache,
@@ -6785,7 +6931,18 @@ fn prepare_issue_monitor_resume(
     }
     // Building a resume config resolves its working directory's Git remote and runner.
     // Keep that work with the other launch facts, before returning to the GUI.
-    let config = super::launch_config_from_persisted_session(&session);
+    let mut config = super::launch_config_from_persisted_session(&session);
+    if autonomous_handoff.is_none() && linked_issue_kind == gwt::LinkedIssueKind::Issue {
+        let base_branch = gwt::start_work::resolve_launch_agent_base_branch(project_root)?;
+        let delivery =
+            gwt::issue_monitor_owner_branch_delivery(project_root, &base_branch, target_branch);
+        config.args.push(gwt::issue_monitor_launch_prompt_for_base(
+            linked_issue_kind,
+            issue_number,
+            &base_branch,
+            delivery,
+        ));
+    }
     let workspace_resume_context = workspace_resume_context_for_work_item(
         project_root,
         Some(session.branch.as_str()),

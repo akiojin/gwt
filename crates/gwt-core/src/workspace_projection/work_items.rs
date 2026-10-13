@@ -31,6 +31,8 @@ fn bool_is_false(value: &bool) -> bool {
 /// The retained window must stay wide enough for the readers of inline history:
 /// event-id dedup on re-ingest, [`WorkItem::latest_next_action`], the derived
 /// progress summary, and terminal-close detection all look at the recent tail.
+/// A successor also retains its explicit Start/predecessor anchor within this
+/// cap, so routine heartbeats cannot erase its current-lifetime authority.
 pub const MAX_INLINE_WORK_EVENTS: usize = 50;
 
 /// Issue #4508: most recent Board entry ids retained per Work item.
@@ -784,7 +786,22 @@ fn compact_work_item(item: &mut WorkItem) -> usize {
         .max()
         .unwrap_or(item.updated_at);
 
+    let lineage_start = item.events[..dropped_events]
+        .iter()
+        .find(|event| {
+            event.kind == WorkEventKind::Start
+                && event
+                    .related_work_item_id
+                    .as_deref()
+                    .is_some_and(|predecessor| successor_work_id(predecessor) == item.id)
+        })
+        .cloned();
     item.events.drain(..dropped_events);
+    if let Some(start) = lineage_start {
+        // Keep one provenance anchor and the newest remaining events; the
+        // history bound and folded-state watermark stay unchanged.
+        item.events[0] = start;
+    }
     let retained_ids = item
         .events
         .iter()

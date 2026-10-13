@@ -301,7 +301,7 @@ function issueMonitorStatusStripView(status = {}) {
   }
   const queue = Math.max(0, Number(status.queue_len || 0));
   const active = Math.max(0, Number(status.active_count || 0));
-  const maxActive = Math.max(1, Number(status.max_active_agents || 1));
+  const maxActive = Math.max(0, Number(status.max_active_agents ?? 1));
 
   if (state === "disabled") {
     return {

@@ -350,6 +350,15 @@ fn execute_reqwest(
 // HttpIssueClient
 // ---------------------------------------------------------------------------
 
+/// One page of top-level comments from a GitHub Discussion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionCommentsPage {
+    pub discussion_id: String,
+    pub bodies: Vec<String>,
+    pub cursor: Option<String>,
+    pub has_next_page: bool,
+}
+
 /// Real [`IssueClient`] that talks to GitHub via an [`HttpTransport`].
 pub struct HttpIssueClient<T: HttpTransport = ReqwestTransport> {
     transport: T,
@@ -563,6 +572,187 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     /// Accessor for the inner transport (tests).
     pub fn transport(&self) -> &T {
         &self.transport
+    }
+
+    /// Resolve a workflow ID or filename to its repository-relative path.
+    pub fn workflow_path(&self, workflow: &str) -> Result<String, ApiError> {
+        let workflow = encode_path_segment(workflow);
+        let body = self.workflow_get(
+            format!(
+                "{}/repos/{}/{}/actions/workflows/{workflow}",
+                self.rest_base, self.owner, self.repo
+            ),
+            "application/vnd.github+json",
+        )?;
+        let metadata: Value = serde_json::from_str(&body)
+            .map_err(|_| ApiError::Unexpected("GitHub workflow metadata is invalid".into()))?;
+        metadata
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ApiError::Unexpected("GitHub workflow path is missing".into()))
+    }
+
+    /// Read the raw workflow YAML at the exact ref selected for dispatch.
+    pub fn workflow_definition(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+    ) -> Result<String, ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/contents/.github/workflows/{workflow_filename}",
+            self.rest_base, self.owner, self.repo
+        ))
+        .map_err(|_| ApiError::Unexpected("GitHub workflow contents URL is invalid".into()))?;
+        url.query_pairs_mut().append_pair("ref", git_ref);
+        self.workflow_get(url.to_string(), "application/vnd.github.raw+json")
+    }
+
+    /// Dispatch a validated workflow without retrying the mutation.
+    pub fn dispatch_workflow(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, Value>,
+    ) -> Result<(), ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        self.rest_post(
+            &format!(
+                "/repos/{}/{}/actions/workflows/{workflow_filename}/dispatches",
+                self.owner, self.repo
+            ),
+            json!({ "ref": git_ref, "inputs": inputs }),
+        )
+        .map(|_| ())
+        .map_err(sanitize_workflow_error)
+    }
+
+    fn workflow_get(&self, url: String, accept: &str) -> Result<String, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                for (name, value) in &mut headers {
+                    if name == "Accept" {
+                        *value = accept.to_string();
+                    }
+                }
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url,
+                        headers,
+                        body: None,
+                    })
+                    .map_err(|_| ApiError::Network("GitHub workflow request failed".into()))?;
+                check_status(&response).map_err(sanitize_workflow_error)?;
+                Ok(response.body)
+            })(),
+        )
+    }
+
+    /// Read top-level Discussion comments through the shared GraphQL budget.
+    pub fn discussion_comments(
+        &self,
+        number: u64,
+        after: Option<&str>,
+    ) -> Result<DiscussionCommentsPage, ApiError> {
+        let operation = "discussion comments";
+        let invalid = |message: &str| ApiError::Parse {
+            operation: operation.to_string(),
+            message: message.to_string(),
+        };
+        let value = self.graphql(
+            r#"query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+                repository(owner: $owner, name: $repo) {
+                    discussion(number: $number) {
+                        id
+                        comments(first: 100, after: $after) {
+                            nodes { body authorAssociation }
+                            pageInfo { endCursor hasNextPage }
+                        }
+                    }
+                }
+                rateLimit { cost remaining resetAt }
+            }"#,
+            json!({"owner": self.owner, "repo": self.repo, "number": number, "after": after}),
+        )?;
+        let discussion = value
+            .pointer("/data/repository/discussion")
+            .filter(|discussion| discussion.is_object())
+            .ok_or_else(|| invalid("discussion missing or invalid"))?;
+        let discussion_id = required_string(discussion, "id", operation)?;
+        if discussion_id.is_empty() {
+            return Err(invalid("discussion.id is empty"));
+        }
+        let comments = discussion
+            .get("comments")
+            .filter(|comments| comments.is_object())
+            .ok_or_else(|| invalid("discussion.comments missing or invalid"))?;
+        let nodes = comments
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("discussion.comments.nodes missing or invalid"))?;
+        let bodies = nodes
+            .iter()
+            // Payload metadata is not proof of authority: importing a blocked
+            // or resolving post mutates local escalations and PM wake input.
+            .filter(|node| {
+                matches!(
+                    node.get("authorAssociation").and_then(Value::as_str),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                )
+            })
+            .map(|node| required_string(node, "body", operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        let page_info = comments
+            .get("pageInfo")
+            .ok_or_else(|| invalid("discussion.comments.pageInfo missing"))?;
+        let has_next_page = page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                invalid("discussion.comments.pageInfo.hasNextPage missing or invalid")
+            })?;
+        let cursor = match page_info.get("endCursor") {
+            Some(Value::String(cursor)) if !cursor.is_empty() => Some(cursor.clone()),
+            Some(Value::Null) if !has_next_page => None,
+            _ => {
+                return Err(invalid(
+                    "discussion.comments.pageInfo.endCursor missing or invalid",
+                ))
+            }
+        };
+        Ok(DiscussionCommentsPage {
+            discussion_id,
+            bodies,
+            cursor,
+            has_next_page,
+        })
+    }
+
+    /// Add a top-level Discussion comment through the shared GraphQL budget.
+    pub fn add_discussion_comment(&self, discussion_id: &str, body: &str) -> Result<(), ApiError> {
+        let value = self.graphql(
+            r#"mutation($discussionId: ID!, $body: String!) {
+                addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+                    comment { id }
+                }
+            }"#,
+            json!({"discussionId": discussion_id, "body": body}),
+        )?;
+        value
+            .pointer("/data/addDiscussionComment/comment/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ApiError::Parse {
+                operation: "add discussion comment".to_string(),
+                message: "created comment.id missing or invalid".to_string(),
+            })?;
+        Ok(())
     }
 
     fn auth_headers(&self) -> Vec<(String, String)> {
@@ -855,6 +1045,18 @@ impl<T: HttpTransport> HttpIssueClient<T> {
 // ---------------------------------------------------------------------------
 // Status / parsing helpers
 // ---------------------------------------------------------------------------
+
+fn sanitize_workflow_error(error: ApiError) -> ApiError {
+    match error {
+        error
+        @ (ApiError::RateLimited { .. } | ApiError::Unauthorized | ApiError::BodyTooLarge) => error,
+        ApiError::PermissionDenied { .. } => ApiError::PermissionDenied {
+            message: "GitHub workflow access is forbidden".into(),
+        },
+        ApiError::Network(_) => ApiError::Network("GitHub workflow request failed".into()),
+        _ => ApiError::Unexpected("GitHub workflow request was rejected".into()),
+    }
+}
 
 fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
     let lowercase_body = resp.body.to_ascii_lowercase();
@@ -2809,6 +3011,8 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
+    use serde_json::json;
+
     use super::{
         check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
         HttpResponse, HttpTransport, ResolutionDeadline,
@@ -2974,6 +3178,152 @@ mod check_status_tests {
             "the sent call was counted: {:?}",
             snapshot.local
         );
+    }
+
+    #[test]
+    fn discussion_sync_reads_and_posts_through_the_shared_graphql_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        )
+        .with_budget(ledger.clone(), gate);
+        client.transport().enqueue(HttpResponse {
+            status: 200, headers: vec![],
+            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"body":"message","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
+        });
+        let page = client.discussion_comments(42, Some("previous")).unwrap();
+        assert_eq!(page.discussion_id, "D_1");
+        assert_eq!(page.bodies, ["message"]);
+        assert_eq!(page.cursor.as_deref(), Some("cursor"));
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            3
+        );
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: r#"{"data":{"addDiscussionComment":{"comment":{"id":"C_1"}}}}"#.into(),
+        });
+        client
+            .add_discussion_comment(&page.discussion_id, "message")
+            .unwrap();
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].calls_last_hour,
+            2
+        );
+        let requests = client.transport().recorded();
+        let read: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(read["variables"]["after"], "previous");
+        assert!(read["query"]
+            .as_str()
+            .unwrap()
+            .contains("rateLimit { cost remaining resetAt }"));
+        let posted: serde_json::Value =
+            serde_json::from_str(requests[1].body.as_ref().unwrap()).unwrap();
+        assert_eq!(posted["variables"]["body"], "message");
+        assert!(!posted["query"].as_str().unwrap().contains("replyToId"));
+        assert!(!posted["query"].as_str().unwrap().contains("rateLimit"));
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".into(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            },
+            chrono::Utc::now(),
+        );
+        assert!(matches!(
+            client.discussion_comments(42, None),
+            Err(ApiError::RateLimited { .. })
+        ));
+        assert_eq!(client.transport().recorded().len(), 2);
+    }
+
+    #[test]
+    fn discussion_sync_only_imports_repository_trusted_authors_without_losing_cursor() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        let mut nodes = [
+            "OWNER",
+            "MEMBER",
+            "COLLABORATOR",
+            "CONTRIBUTOR",
+            "FIRST_TIMER",
+            "FIRST_TIME_CONTRIBUTOR",
+            "MANNEQUIN",
+            "NONE",
+            "UNKNOWN",
+        ]
+        .into_iter()
+        .map(|association| json!({"body": association, "authorAssociation": association}))
+        .collect::<Vec<_>>();
+        nodes.push(json!({"body": "untrusted metadata: author_kind=human author=owner"}));
+        client.transport().enqueue(HttpResponse {
+            status: 200, headers: vec![],
+            body: json!({"data": {"repository": {"discussion": {"id": "D_1", "comments": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": true, "endCursor": "all-comments-cursor"}
+            }}}}}).to_string(),
+        });
+        let page = client.discussion_comments(42, None).unwrap();
+        assert_eq!(page.bodies, ["OWNER", "MEMBER", "COLLABORATOR"]);
+        assert_eq!(page.cursor.as_deref(), Some("all-comments-cursor"));
+        assert!(page.has_next_page);
+        let requests = client.transport().recorded();
+        let request: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert!(request["query"]
+            .as_str()
+            .unwrap()
+            .contains("authorAssociation"));
+    }
+
+    #[test]
+    fn discussion_sync_rejects_incomplete_remote_responses() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        for discussion in [
+            json!(null),
+            json!({"id": "D_1", "comments": null}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"authorAssociation": "OWNER"}], "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}
+            }}),
+        ] {
+            client.transport().enqueue(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: json!({"data": {"repository": {"discussion": discussion}}}).to_string(),
+            });
+            assert!(matches!(
+                client.discussion_comments(42, None),
+                Err(ApiError::Parse { .. })
+            ));
+        }
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: json!({"data": {"addDiscussionComment": {"comment": null}}}).to_string(),
+        });
+        assert!(matches!(
+            client.add_discussion_comment("D_1", "message"),
+            Err(ApiError::Parse { .. })
+        ));
     }
 
     #[test]

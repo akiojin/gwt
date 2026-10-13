@@ -262,7 +262,7 @@ test("AC-24: + New opens a modal-primitive popover that registers and launches",
 
 // --- T-034 / AC-24 ---------------------------------------------------------
 
-test("AC-24: a monitor error turns the pill ⚠ with the latest line, adds no row, and reaches the center", async (t) => {
+test("AC-24: a monitor error links the pill to its center item without adding a row", async (t) => {
   const { body, surface, reported } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const root = body.querySelector(".issue-bridge-root");
@@ -276,7 +276,8 @@ test("AC-24: a monitor error turns the pill ⚠ with the latest line, adds no ro
   });
   assert.equal(pill.textContent, "⚠ Error");
   assert.equal(pill.dataset.tone, "blocked");
-  assert.equal(pill.title, "issue #3785: scan failed");
+  assert.equal(pill.title, "Details in notifications");
+  assert.equal(pill.dataset.notificationKey, "issue-monitor:last_error");
   assert.equal(root.childElementCount, childCount, "no row is added to the toolbar");
   assert.deepEqual(reported.at(-1), {
     key: "issue-monitor:last_error",
@@ -293,7 +294,8 @@ test("AC-24: a fleet outage is announced through the pill and the center, not a 
 
   surface.applyIssueMonitorStatus({ ...STATUS, agent_blackout: outage });
   assert.equal(pill.textContent, "⚠ Error");
-  assert.equal(pill.title, outage);
+  assert.equal(pill.title, "Details in notifications");
+  assert.equal(pill.dataset.notificationKey, "issue-monitor:agent_blackout");
   assert.deepEqual(reported.at(-1), {
     key: "issue-monitor:agent_blackout",
     title: "Issue Monitor",
@@ -484,6 +486,24 @@ test("AC-28: the Phase 5 CSS uses Operator tokens only", () => {
   assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/, "no raw hex");
   assert.doesNotMatch(block, /\brgba?\(/, "no raw rgb");
   assert.doesNotMatch(block, /\bposition:\s*fixed/, "no private overlay shell");
+});
+
+test("Issue #5284: capacity uses a linked badge and Operator tokens without an overlay", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const badge = body.querySelector(".knowledge-monitor-capacity-badge");
+  assert.equal(badge?.tagName, "BUTTON");
+  assert.equal(badge.getAttribute("aria-haspopup"), "dialog");
+  assert.equal(body.querySelector(".knowledge-monitor-capacity"), null);
+  assert.equal(body.querySelector(".knowledge-monitor-capacity-warning"), null);
+  const css = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+  const block = css.split("/* Issue #5284: linked status only; diagnostics live in notifications. */")[1]?.split(".issue-new-body")[0];
+  assert.ok(block, "linked capacity and center Details styles are present");
+  assert.match(block, /white-space:\s*nowrap/);
+  assert.match(block, /var\(--color-state-needs-input\)/);
+  assert.match(block, /var\(--space-/);
+  assert.match(block, /var\(--type-/);
+  assert.doesNotMatch(block, /#[\da-f]{3,8}\b|\brgba?\(|\bposition:\s*(?:fixed|absolute)/i);
 });
 
 test("queue detail provenance follows authoritative terminal queue", async (t) => {

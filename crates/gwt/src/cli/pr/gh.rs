@@ -485,13 +485,13 @@ pub fn fetch_pr_head_sha_via_gh(
         .map(str::to_string))
 }
 
-/// Edit a PR's title / body / labels via the REST API rather than `gh pr edit`.
+/// Edit a PR's base / title / body / labels via REST rather than `gh pr edit`.
 ///
 /// `gh pr edit` prefetches repository + assignee metadata whose query touches an
 /// org-scoped `login` field, so it fails with
 /// `The 'login' field requires one of the following scopes: ['read:org']` when
 /// the token lacks `read:org` — even though `gh pr create` succeeds with the
-/// same token (Issue #3201). Routing title/body through
+/// same token (Issue #3201). Routing base/title/body through
 /// `PATCH /repos/{owner}/{repo}/pulls/{number}` and additive labels through
 /// `POST /repos/{owner}/{repo}/issues/{number}/labels` only requires the `repo`
 /// scope, keeping `pr.edit` scope-symmetric with `pr.create`.
@@ -499,6 +499,7 @@ pub fn edit_pr_via_gh(
     repo_slug: &str,
     repo_path: &std::path::Path,
     number: u64,
+    base: Option<&str>,
     title: Option<&str>,
     body: Option<&str>,
     add_labels: &[String],
@@ -521,7 +522,7 @@ pub fn edit_pr_via_gh(
         }
     }
 
-    if title.is_some() || body.is_some() {
+    if base.is_some() || title.is_some() || body.is_some() {
         let endpoint = format!("repos/{repo_slug}/pulls/{number}");
         let mut args = vec![
             "api".to_string(),
@@ -529,6 +530,10 @@ pub fn edit_pr_via_gh(
             "PATCH".to_string(),
             endpoint,
         ];
+        if let Some(base) = base {
+            args.push("-f".to_string());
+            args.push(format!("base={base}"));
+        }
         if let Some(title) = title {
             args.push("-f".to_string());
             args.push(format!("title={title}"));
@@ -567,6 +572,58 @@ pub fn edit_pr_via_gh(
         }
     }
 
+    gwt_git::pr_status::fetch_pr_status(repo_slug, number)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+/// Close a PR without deleting its branch, recording any supplied comment first.
+pub fn close_pr_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    number: u64,
+    comment: Option<&str>,
+) -> io::Result<PrStatus> {
+    if let Some(comment) = comment {
+        let number = number.to_string();
+        let output = run_gh_in(
+            "gh pr close comment",
+            Some(repo_path),
+            [
+                "pr",
+                "comment",
+                number.as_str(),
+                "--repo",
+                repo_slug,
+                "--body",
+                comment,
+            ],
+        )?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "gh pr close comment: {}",
+                output.stderr.trim()
+            )));
+        }
+    }
+    let endpoint = format!("repos/{repo_slug}/pulls/{number}");
+    let output = run_gh_in(
+        "gh pr close",
+        Some(repo_path),
+        [
+            "api",
+            "--method",
+            "PATCH",
+            endpoint.as_str(),
+            "-f",
+            "state=closed",
+        ],
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh pr close: {}",
+            output.stderr.trim()
+        )));
+    }
     gwt_git::pr_status::fetch_pr_status(repo_slug, number)
         .map_err(|err| io::Error::other(err.to_string()))
 }

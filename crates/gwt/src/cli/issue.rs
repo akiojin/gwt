@@ -398,6 +398,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            max_active_auto,
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent,
@@ -409,6 +410,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            max_active_auto,
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent.as_deref(),
@@ -589,7 +591,7 @@ fn attach_issue_cache_status(
 fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
-) {
+) -> serde_json::Value {
     let escalated = match gwt_core::coordination::load_escalation_store(project_root) {
         Ok(store) => store.open_owner_issue_numbers(),
         Err(error) => {
@@ -669,6 +671,10 @@ fn merge_board_escalations_into_needs_human(
     }) {
         status.last_error = None;
     }
+    // Keep the two inputs separate: an open Board request does not change
+    // the monitor's lifecycle or mean that its running launch has failed.
+    let monitor_needs_human = status.needs_human.clone();
+    let mut board_escalations = Vec::new();
     for issue_number in escalated {
         // Issue #3602: Board is immutable coordination history, while
         // `needs_human` is a current-action projection. Suppress only when the
@@ -681,11 +687,18 @@ fn merge_board_escalations_into_needs_human(
         {
             continue;
         }
+        board_escalations.push(issue_number);
         if !status.needs_human.contains(&issue_number) {
             status.needs_human.push(issue_number);
         }
     }
     status.needs_human.sort_unstable();
+    serde_json::json!({
+        "monitor": monitor_needs_human,
+        "board_escalations": board_escalations,
+        "runtime_fields": ["inbox", "active_launches"],
+        "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Do not requeue an active launch to clear a Board request; resolve its escalation.",
+    })
 }
 
 /// Issue #4413 AC-4: the `gui_status.state` of a projection this process
@@ -714,8 +727,13 @@ fn run_monitor_status<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let mut status = load_monitor_agent_status(&project_root)?;
-    merge_board_escalations_into_needs_human(&project_root, &mut status);
+    // Physical observations are separate from Monitor admission reservations.
+    let inventory = crate::session_inventory::observe_sessions(
+        &project_root,
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let (mut status, capacity) =
+        load_monitor_agent_status(&project_root, inventory.sessions.len())?;
     attach_github_budget(&mut status);
     attach_disk_space(&project_root, &mut status);
     attach_build_artifact_gc(&project_root, &mut status);
@@ -723,19 +741,53 @@ fn run_monitor_status<E: CliEnv>(
     attach_spotlight(&mut status);
     attach_provider_usage(&mut status);
     attach_issue_cache_status(&project_root, &mut status);
-    // Keep the existing owner slots and add physical observations without
-    // changing the meaning of active_launches or feeding admission.
-    let inventory = crate::session_inventory::observe_sessions(
-        &project_root,
-        &gwt_core::paths::gwt_sessions_dir(),
-    );
+    let needs_human_authority =
+        merge_board_escalations_into_needs_human(&project_root, &mut status);
     let mut output =
         serde_json::to_value(&status).map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    if !status.needs_human.is_empty() {
+        output["needs_human_authority"] = needs_human_authority;
+    }
     output["project_root"] = serde_json::json!(project_root);
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
+    if let Some(mut drain) = status.update_drain.clone() {
+        let wait = gwt_core::update::load_update_wait_observation(&project_root).filter(|wait| {
+            wait.version == drain.version
+                && matches!((
+                    chrono::DateTime::parse_from_rfc3339(&wait.observed_at),
+                    chrono::DateTime::parse_from_rfc3339(&drain.since),
+                ), (Ok(observed), Ok(since)) if observed >= since)
+        });
+        if let Some(blockers) = wait.as_ref().and_then(|wait| {
+            serde_json::from_str::<Vec<crate::update_drain::UpdateBlocker>>(&wait.reason).ok()
+        }) {
+            drain.blocking = blockers;
+        }
+        let notify_at = chrono::DateTime::parse_from_rfc3339(&drain.since)
+            .ok()
+            .filter(|_| prefs.autonomous_tuning.update_drain_notify_after_secs > 0)
+            .zip(chrono::Duration::try_seconds(
+                i64::try_from(prefs.autonomous_tuning.update_drain_notify_after_secs)
+                    .unwrap_or(i64::MAX),
+            ))
+            .and_then(|(since, delay)| since.checked_add_signed(delay))
+            .map(|at| at.to_rfc3339());
+        output["update_drain_evaluation"] = serde_json::json!({
+            "observed_at": wait.as_ref().map(|wait| &wait.observed_at),
+            "next_evaluation_at": wait.as_ref().and_then(|wait| wait.next_evaluation_at.as_ref()),
+            "notify_at": notify_at,
+            "waiting_window_count": drain.blocking.iter().filter(|blocker| matches!(
+                blocker, crate::update_drain::UpdateBlocker::ActivePane { .. }
+            )).count(),
+            "release": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
+            } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
+        });
+        output["update_drain"] = serde_json::to_value(drain).expect("update drain serializes");
+    }
     let mut effective_queue = prefs
         .terminal_queues
         .get(&crate::process::current_hostname())
@@ -747,6 +799,9 @@ fn run_monitor_status<E: CliEnv>(
     output["urgent_queue"] = serde_json::to_value(prefs.urgent_queue.projection(&effective_queue))
         .expect("urgent queue serializes");
     output["active_session_count"] = serde_json::json!(inventory.sessions.len());
+    if let Some(capacity) = capacity {
+        output["launch_capacity"] = capacity;
+    }
     output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
     output["session_observation"] = serde_json::json!({
         "complete": inventory.uncertainties.is_empty(),
@@ -761,6 +816,38 @@ fn run_monitor_status<E: CliEnv>(
     );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #4248 AC-5: show saturation and its inputs without changing admission
+/// or mistaking physical process observations for the monitor's reservations.
+fn launch_capacity(
+    status: &crate::IssueMonitorAgentStatus,
+    active_session_count: usize,
+    configured_max_active: usize,
+) -> Option<serde_json::Value> {
+    let occupied = status
+        .occupied_slot_count
+        .unwrap_or_else(|| status.active_launches.len() + status.review_windows.len());
+    let reserved = occupied + status.pending_claim_issues.as_ref().map_or(0, Vec::len);
+    let admission_saturated = reserved >= configured_max_active;
+    if !admission_saturated && active_session_count < configured_max_active {
+        return None;
+    }
+    Some(serde_json::json!({
+        "reason": if admission_saturated { "max_active_saturated" } else { "active_sessions_at_capacity" },
+        "reported_max_active": status.max_active,
+        "configured_max_active": configured_max_active,
+        "source": status.source,
+        "reserved_slot_count": reserved,
+        "admission_saturated": admission_saturated,
+        "active_session_count": active_session_count,
+        "implementation_launches": status.active_launches,
+        "review_windows": status.review_windows,
+        "pending_claim_issues": status.pending_claim_issues,
+        "reservation_snapshot": "before_control_and_closed_issue_reconciliation",
+        "session_details_field": "active_sessions",
+        "guidance": "Reservations and reported_max_active come from one Monitor snapshot before control identity and closed-Issue action reconciliation. Reservations are occupied_slot_count plus pending_claim_issues (older publishers use active_launches plus review_windows). Top-level active_launches and inbox remain the control authority; configured_max_active is the current effective limit from durable mode and current machine capacity. Reported owners may include stale or closed rows. Physical active_sessions are separate observations, not an admission counter. Inspect active_sessions and session_row_mismatch; do not requeue running work to free capacity.",
+    }))
 }
 
 /// Issue #4862: where the inbox row and the live sessions disagree.
@@ -820,13 +907,16 @@ fn session_row_mismatch(
 /// prefs and the local Issue cache.
 fn load_monitor_agent_status(
     project_root: &std::path::Path,
-) -> Result<crate::IssueMonitorAgentStatus, SpecOpsError> {
+    active_session_count: usize,
+) -> Result<(crate::IssueMonitorAgentStatus, Option<serde_json::Value>), SpecOpsError> {
     let published = crate::daemon_publisher::read_issue_monitor_status(project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let authority =
+    let mut authority =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    authority.refresh_agent_capacity(project_root);
+    let configured_max_active = authority.effective_max_active_agents();
     if let Some(published) = published {
         let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(published)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
@@ -834,8 +924,20 @@ fn load_monitor_agent_status(
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
         status.source = crate::IssueMonitorStatusSource::Daemon;
+        // Keep reported counts and owners together before current capacity,
+        // durable identity, and closed-Issue action reconciliation.
+        let capacity = launch_capacity(&status, active_session_count, configured_max_active);
+        let capacity_status = authority.agent_status();
+        status.agent_capacity = capacity_status.agent_capacity.clone();
+        status.max_active_agents_override = capacity_status.max_active_agents_override;
+        status.max_active = capacity_status.max_active;
+        if let Some(gui) = status.gui_status.as_mut() {
+            gui.agent_capacity = capacity_status.agent_capacity;
+            gui.max_active_agents_override = capacity_status.max_active_agents_override;
+            gui.max_active_agents = capacity_status.max_active;
+        }
         attach_monitor_control_identity(&authority, &mut status);
-        return Ok(status);
+        return Ok((status, capacity));
     }
     // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
     // Reaching this branch at all means no live daemon holds the projection.
@@ -857,9 +959,11 @@ fn load_monitor_agent_status(
     // field added to the snapshot had to be added twice or the two branches
     // would silently disagree about what a caller can rely on.
     let mut status = monitor.agent_status_at(&now);
+    status.source = crate::IssueMonitorStatusSource::DegradedCache;
+    let capacity = launch_capacity(&status, active_session_count, configured_max_active);
     attach_monitor_control_identity(&authority, &mut status);
     mark_degraded_cache_projection(&mut status);
-    Ok(status)
+    Ok((status, capacity))
 }
 
 /// Issue #4413: label a projection this process rebuilt from preferences and
@@ -1138,7 +1242,7 @@ fn monitor_priority_reply(
         "priority_order": priority_order,
         "note": "priority_order only orders Issues already in the Issue Monitor inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
     });
-    if let Ok(status) = load_monitor_agent_status(project_root) {
+    if let Ok((status, _)) = load_monitor_agent_status(project_root, 0) {
         let not_in_inbox = placed
             .iter()
             .filter(|number| !status.inbox.iter().any(|row| row.issue_number == **number))
@@ -1635,6 +1739,13 @@ fn run_monitor_launch_now<E: CliEnv>(
     // ends, so say so — with the resume time — instead of answering as if the
     // instruction will take effect now.
     let github_backoff = github_backoff_windows(chrono::Utc::now());
+    // Issue #5062 AC-4: an update drain holds every new launch, this one
+    // included, so name it and its release instead of answering as if the
+    // Issue will start.
+    let (admission_hold, admission_error) = match monitor_launch_admission_hold(&prefs) {
+        Ok(hold) => (hold, None),
+        Err(error) => (None, Some(error.to_string())),
+    };
 
     out.push_str(
         &serde_json::json!({
@@ -1646,11 +1757,88 @@ fn run_monitor_launch_now<E: CliEnv>(
             "scan_delivery": delivery.scan_delivery,
             "scan_error": delivery.scan_error,
             "github_backoff": github_backoff,
+            "admission_hold": admission_hold,
+            "admission_error": admission_error,
+            // A scan acknowledgement is not a confirmed window admission.
+            // GUI-only fallback projects are checked at actual host dispatch.
+            "admission_confirmed": false,
         })
         .to_string(),
     );
     out.push('\n');
-    Ok(if delivery.scan_requested { 0 } else { 1 })
+    Ok(
+        if delivery.scan_requested && admission_hold.is_none() && admission_error.is_none() {
+            0
+        } else {
+            1
+        },
+    )
+}
+
+/// Project prefs and live Monitor authorities provide known admission holds.
+/// GUI-only fallback has no durable host-wide authority projection; the GUI
+/// checks all its open projects before creating the actual window.
+fn monitor_launch_admission_hold(
+    prefs: &crate::IssueMonitorPrefs,
+) -> Result<Option<serde_json::Value>, SpecOpsError> {
+    let mut drain = prefs.update_drain.clone();
+    let mut project_state_path = None;
+    if drain.is_none() {
+        let entries = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(io_as_api_error(error)),
+        };
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(1),
+        );
+        for entry in entries.into_iter().flatten() {
+            let entry = entry.map_err(io_as_api_error)?;
+            if !entry.file_type().map_err(io_as_api_error)?.is_dir() {
+                continue;
+            }
+            let path = entry.path().join("project-state/issue-monitor.json");
+            let Some(candidate) = crate::load_issue_monitor_prefs(&path)
+                .map_err(io_as_api_error)?
+                .update_drain
+            else {
+                continue;
+            };
+            let crate::IssueMonitorAuthorityFenceState::Active(fence) =
+                crate::load_issue_monitor_authority_fence(&path).map_err(io_as_api_error)?
+            else {
+                continue;
+            };
+            let live = if fence.version == 2 {
+                crate::issue_monitor::issue_monitor_daemon_lease_is_held(&path)
+                    .map_err(io_as_api_error)?
+            } else {
+                crate::process::is_process_alive(fence.pid)
+            };
+            if live {
+                drain = Some(candidate);
+                project_state_path = Some(path);
+                break;
+            }
+        }
+    }
+    Ok(drain.as_ref().map(|drain| {
+        serde_json::json!({
+            "reason": "update_drain",
+            "drain_reason": drain.reason,
+            "version": drain.version,
+            "since": drain.since,
+            "project_state_path": project_state_path,
+            "release_scope": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                "host"
+            } else if project_state_path.is_some() {
+                "drain_owner_project"
+            } else { "current_project" },
+            "release": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
+            } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
+        })
+    }))
 }
 
 /// The GitHub refusal windows still open on this machine (per resource), as
@@ -3066,6 +3254,7 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3077,6 +3266,7 @@ fn apply_monitor_config_set(
         enabled,
         autonomous_mode,
         max_active,
+        max_active_auto,
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
@@ -3100,6 +3290,9 @@ fn apply_monitor_config_set(
     }
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
+    }
+    if max_active_auto {
+        candidate.set_max_active_agents_override(None);
     }
     if let Some(auto_close_merged_issues) = auto_close_merged_issues {
         candidate
@@ -3148,6 +3341,7 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3164,6 +3358,7 @@ fn validate_monitor_config_set(
         && enabled.is_none()
         && autonomous_mode.is_none()
         && max_active.is_none()
+        && !max_active_auto
         && auto_close_merged_issues.is_none()
         && auto_apply_updates.is_none()
         && launch_agent.is_none()
@@ -3188,7 +3383,7 @@ fn validate_monitor_config_set(
              resident PM for this repository",
         ));
     }
-    if max_active == Some(0) {
+    if max_active == Some(0) || (max_active_auto && max_active.is_some()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "max_active must be greater than zero",
@@ -3208,6 +3403,7 @@ fn run_monitor_config_set<E: CliEnv>(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
@@ -3223,6 +3419,7 @@ fn run_monitor_config_set<E: CliEnv>(
         enabled,
         autonomous_mode,
         max_active,
+        max_active_auto,
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
@@ -3254,6 +3451,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "max_active_mode": max_active_auto.then_some("auto"),
                 "auto_close_merged_issues": auto_close_merged_issues,
                 "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
@@ -3280,6 +3478,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 enabled,
                 autonomous_mode,
                 max_active,
+                max_active_auto,
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
@@ -3293,12 +3492,18 @@ fn run_monitor_config_set<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.refresh_agent_capacity(&project_root);
     out.push_str(
         &serde_json::json!({
             "allowed_labels": prefs.allowed_labels,
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
-            "max_active": prefs.max_active_agents.max(1),
+            "max_active": monitor.effective_max_active_agents(),
+            "max_active_agents_override": monitor.max_active_agents_override(),
+            "max_active_mode": prefs.max_active_agents_mode,
+            "agent_capacity": monitor.status_view().agent_capacity,
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
@@ -4535,9 +4740,9 @@ fn run_issue_edit<E: CliEnv>(
 /// guards `issue.edit` on `gwt-spec` Issues nor the `auto-merge` acceptance
 /// block guard applies — both exist to protect a body rewrite.
 ///
-/// An Issue already in the target state is reported with `changed: false` and
-/// nothing reaches the API, not even `comment`: replaying the same envelope
-/// after a lost response must not duplicate the rationale on the Issue.
+/// An Issue already in the target state is reported with `changed: false`.
+/// Replays reconcile Monitor/queue-label cleanup without resubmitting the
+/// state change or duplicating the rationale after a lost response.
 fn run_issue_set_state<E: CliEnv>(
     env: &mut E,
     number: u64,
@@ -4553,7 +4758,7 @@ fn run_issue_set_state<E: CliEnv>(
     if current.state == target {
         // A replay after a lost response still reaches the Monitor, so a
         // notification that failed the first time is repaired here.
-        notify_monitor_of_reopen(env, &current)?;
+        reconcile_issue_state(env, &current)?;
         // `reason` describes what was written, and nothing was: echoing the
         // requested one here would claim a rationale GitHub never recorded.
         write_issue_state_result(out, number, target, false, None, None, None);
@@ -4614,7 +4819,7 @@ fn run_issue_set_state<E: CliEnv>(
     // One-way flow: the cache is refreshed from the post-write server state so
     // the UI and the Monitor never read a state this operation already changed.
     let written = refresh_issue_cache(env, issue)?.snapshot;
-    notify_monitor_of_reopen(env, &written)?;
+    reconcile_issue_state(env, &written)?;
     write_issue_state_result(
         out,
         number,
@@ -4627,17 +4832,49 @@ fn run_issue_set_state<E: CliEnv>(
     Ok(0)
 }
 
-/// Issue #4770: lift the Monitor's durable `Closed` record for an Issue that is
-/// now Open, so `issue.monitor.requeue` right after `issue.reopen` is not
-/// refused. Only this Issue's record moves — no candidate scan runs — and the
-/// prefs file is written only when a `Closed` record was actually lifted.
-fn notify_monitor_of_reopen<E: CliEnv>(
+/// Retire admission before label cleanup so a failed GitHub DELETE cannot
+/// leave a confirmed Closed Issue launchable. Replays repair either step.
+fn reconcile_issue_state<E: CliEnv>(
+    env: &mut E,
+    snapshot: &IssueSnapshot,
+) -> Result<(), SpecOpsError> {
+    notify_monitor_of_issue_state(env, snapshot)?;
+    let cleanup =
+        crate::issue_monitor_settlement::remove_closed_queue_label(env.client(), snapshot);
+    match cleanup {
+        Ok(false) => Ok(()),
+        outcome => {
+            // Also resolve a lost DELETE response from authoritative readback;
+            // never submit the mutation twice in the same operation.
+            let written = refresh_issue_cache(env, snapshot.number)?.snapshot;
+            notify_monitor_of_issue_state(env, &written)?;
+            if written.state == IssueState::Closed
+                && !written
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+            {
+                Ok(())
+            } else {
+                let message = match outcome {
+                    Err(
+                        OwnerMutationError::PreSubmit(error)
+                        | OwnerMutationError::RemoteOutcomeUnknown(error),
+                    ) => error.to_string(),
+                    _ => "closed queue-label cleanup was not confirmed".to_string(),
+                };
+                Err(ApiError::Network(message).into())
+            }
+        }
+    }
+}
+
+/// Deliver the revision to the live daemon before its ACK. Only a definitely
+/// unsent control may fall back to the fenced, locked prefs writer.
+fn notify_monitor_of_issue_state<E: CliEnv>(
     env: &E,
     snapshot: &IssueSnapshot,
 ) -> Result<(), SpecOpsError> {
-    if snapshot.state != IssueState::Open {
-        return Ok(());
-    }
     // No resolvable project root means no Monitor store to hold the Issue.
     let Ok(project_root) = issue_monitor_project_root(env, None) else {
         return Ok(());
@@ -4646,14 +4883,43 @@ fn notify_monitor_of_reopen<E: CliEnv>(
     if !prefs_path.exists() {
         return Ok(());
     }
-    crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "issue_state": {
+            "number": snapshot.number.0,
+            "state": match snapshot.state {
+                IssueState::Closed => "closed",
+                IssueState::Open => "open",
+            },
+            "updated_at": snapshot.updated_at.0,
+        }}),
+        std::process::id(),
+    );
+    // GitHub has already committed this revision. Allow scope resolution and
+    // durable acknowledgment beyond the GUI's 200ms hot-path budget.
+    match crate::daemon_publisher::publish_issue_monitor_control_with_timeout(
+        &project_root,
+        payload,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.allows_local_fallback() => {}
+        Err(error) => return Err(io_as_api_error(io::Error::other(error.to_string()))),
+    }
+    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        if monitor.record_reopened(snapshot.number.0, Some(snapshot.updated_at.0.clone())) {
-            *prefs = monitor.prefs();
+        match snapshot.state {
+            IssueState::Closed => {
+                monitor.record_closed(snapshot.number.0, Some(snapshot.updated_at.0.clone()))
+            }
+            IssueState::Open => {
+                monitor.record_reopened(snapshot.number.0, Some(snapshot.updated_at.0.clone()));
+            }
         }
+        *prefs = monitor.prefs();
         Ok(())
     })
     .map_err(io_as_api_error)?;
@@ -5544,6 +5810,7 @@ mod tests {
             completion_reason: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            claim_diagnostics: Default::default(),
             blocked_by_claim_id: None,
             exclusion_reason: None,
             launched_window_id: launched_window_id.map(str::to_string),
@@ -6850,6 +7117,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_close_immediately_retires_monitor_membership_and_queue_label() {
+        for reason in [
+            gwt_github::client::IssueCloseReason::Completed,
+            gwt_github::client::IssueCloseReason::NotPlanned,
+        ] {
+            let (tmp, mut env) = seeded_edit_env(&["bug", "gwt-queued"]);
+            env.client.use_rfc3339_timestamps();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(tmp.path());
+            let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+            monitor.terminal_queue_push(&[7, 8], "operator", "2026-09-01T00:00:00Z");
+            monitor.complete_active_launch_at(7, "tab::agent", "2026-09-01T00:00:00Z");
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+
+            run(
+                &mut env,
+                IssueCommand::Close {
+                    number: 7,
+                    reason: Some(reason),
+                    comment: None,
+                },
+                &mut String::new(),
+            )
+            .expect("close");
+
+            let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let mut restarted = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                persisted.clone(),
+            );
+            assert_eq!(restarted.local_terminal_queue_numbers(), vec![8]);
+            assert!(restarted.active_issue_numbers().is_empty());
+            assert!(restarted.inbox_item(7).is_none());
+            monitor.rebase_daemon_driver_prefs(&persisted);
+            assert!(monitor.active_issue_numbers().is_empty());
+            assert_eq!(monitor.local_terminal_queue_numbers(), vec![8]);
+            let closed = fetched(&env, 7);
+            assert_eq!(closed.state, IssueState::Closed);
+            assert_eq!(closed.labels, vec!["bug"]);
+            assert_eq!(
+                Cache::new(env.cache_root())
+                    .load_entry(IssueNumber(7))
+                    .unwrap()
+                    .snapshot,
+                closed
+            );
+            assert!(restarted
+                .claim_next_launch_requests_with_probe(
+                    &env.client,
+                    "host",
+                    "2026-09-01T00:01:00Z",
+                    1,
+                    |_| false,
+                )
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn reopened_issue_can_be_explicitly_pushed_after_closed_scan() {
+        let home = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (_tmp, repo, mut env) = close_scan_reopen(crate::IssueMonitorPrefs::default());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorQueuePush {
+                    project_root: Some(repo.clone()),
+                    issue_numbers: vec![7],
+                    position: None,
+                    force: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "{out}"
+        );
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![8, 7]);
+        let open = fetched(&env, 7);
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[crate::IssueMonitorIssue {
+                number: 7,
+                title: open.title,
+                labels: open.labels,
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+                readiness: crate::IssueMonitorReadiness::default(),
+                updated_at: Some(open.updated_at.0),
+            }],
+            "2026-09-01T00:01:00Z",
+        );
+        assert!(monitor.queued_issue_numbers().contains(&7));
+    }
+
     /// SPEC #4249 FR-001: the close reason reaches the client, and an explaining
     /// comment is posted *before* the close so a reader who finds the Issue
     /// closed already sees why.
@@ -7115,11 +7486,8 @@ mod tests {
         );
     }
 
-    /// SPEC #4249 AC-2: closing and reopening an Issue leaves the Monitor's
-    /// local queue accounting alone, so a `issue.monitor.requeue` right after a
-    /// reopen still returns the Issue to the queue. The operations write GitHub
-    /// and the Issue cache only; if either ever started writing a durable
-    /// closure hold, this test is the one that catches it.
+    /// SPEC #4249 AC-2: an authoritative reopen lifts the close hold so an
+    /// explicit `issue.monitor.requeue` can return the Issue to the queue.
     #[test]
     fn reopened_issue_still_requeues_into_the_monitor_queue() {
         let _env_lock = crate::env_test_lock()
@@ -7145,6 +7513,7 @@ mod tests {
         .expect("save prefs");
 
         let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),
@@ -7204,6 +7573,7 @@ mod tests {
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
 
         let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),
@@ -7658,6 +8028,181 @@ mod tests {
         assert!(prefs.enabled);
     }
 
+    /// Issue #5062 AC-4: an update drain refuses every new launch, so
+    /// `launch_now` names it (with its release operation) instead of answering
+    /// as if the Issue will start.
+    #[test]
+    fn issue_5062_monitor_status_exposes_host_drain_evaluation_and_deadline() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            "2026-10-10T00:00:00Z",
+        );
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &monitor.prefs(),
+        )
+        .unwrap();
+        let blockers =
+            serde_json::to_string(&vec![crate::update_drain::UpdateBlocker::ActivePane {
+                window_id: "other::agent-14".into(),
+                label: "llmlb: SPEC #821 T012c".into(),
+                state: crate::persistence::WindowState::Running,
+            }])
+            .unwrap();
+        gwt_core::update::log_update_event(
+            "pending_waiting",
+            &[
+                ("project_root", repo.to_str().unwrap()),
+                ("version", "9.110.0"),
+                ("reason", &blockers),
+                ("observed_at", "2026-10-10T00:01:00Z"),
+                ("next_evaluation_at", "2026-10-10T00:01:15Z"),
+            ],
+        );
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(status["update_drain_evaluation"]["waiting_window_count"], 1);
+        assert_eq!(
+            status["update_drain_evaluation"]["observed_at"],
+            "2026-10-10T00:01:00Z"
+        );
+        assert_eq!(
+            status["update_drain_evaluation"]["next_evaluation_at"],
+            "2026-10-10T00:01:15Z"
+        );
+        assert_eq!(
+            status["update_drain_evaluation"]["notify_at"],
+            "2026-10-10T00:30:00+00:00"
+        );
+        assert!(status["update_drain"]["blocking"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("llmlb"));
+        assert!(status["update_drain_evaluation"]["release"]
+            .as_str()
+            .unwrap()
+            .contains("release.update.defer"));
+    }
+
+    #[test]
+    fn issue_5062_launch_now_reports_the_update_drain_that_holds_admission() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            "2026-10-05T17:00:24Z",
+        );
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 5061,
+            },
+            &mut out,
+        )
+        .expect("launch_now");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 1, "a held launch is not success");
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["admission_hold"]["reason"], "update_drain");
+        assert_eq!(result["admission_hold"]["version"], "9.110.0");
+        assert_eq!(result["admission_hold"]["since"], "2026-10-05T17:00:24Z");
+        assert_eq!(
+            result["admission_hold"]["release"],
+            "release.update.defer {\"version\":\"9.110.0\"}"
+        );
+    }
+
+    #[test]
+    fn issue_5062_launch_now_uses_live_host_authority_and_manual_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let other_repo = tmp.path().join("other-repo");
+        std::fs::create_dir_all(&other_repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&other_repo);
+        let (_, lease) = crate::establish_issue_monitor_authority_fence(
+            &path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            "2026-10-05T17:00:24Z",
+        );
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let prefs = crate::IssueMonitorPrefs::default();
+        let hold = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        assert_eq!(hold["version"], "9.110.0");
+        assert_eq!(
+            hold["release"],
+            "release.update.defer {\"version\":\"9.110.0\"}"
+        );
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        assert_eq!(
+            run_monitor_launch_now(&env, None, 5061, &mut out).unwrap(),
+            1
+        );
+        let response: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(response["admission_hold"]["version"], "9.110.0");
+        assert_eq!(response["admission_confirmed"], false);
+
+        monitor.clear_update_drain();
+        monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Manual,
+            "9.110.0",
+            "2026-10-05T17:00:24Z",
+        );
+        let hold = monitor_launch_admission_hold(&monitor.prefs())
+            .unwrap()
+            .unwrap();
+        assert_eq!(hold["release"], crate::UPDATE_DRAIN_RELEASE_OPERATION);
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let host_manual = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        assert_eq!(host_manual["release_scope"], "drain_owner_project");
+        assert_eq!(host_manual["project_state_path"], serde_json::json!(path));
+        drop(lease);
+        assert!(
+            monitor_launch_admission_hold(&prefs).unwrap().is_none(),
+            "a stale same-PID fence cannot hold admission"
+        );
+        let authority_path = path.with_extension("authority.lock");
+        std::fs::remove_file(&authority_path).unwrap();
+        assert!(monitor_launch_admission_hold(&prefs).unwrap().is_none());
+        assert!(
+            !authority_path.exists(),
+            "an admission probe must not create a daemon authority lock"
+        );
+    }
+
     // ---- Issue #4819: `queue.push` must never refuse silently ----
 
     #[test]
@@ -8059,6 +8604,7 @@ mod tests {
             crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
                 .expect("persisted queue");
         prefs.enabled = true;
+        prefs.max_active_agents_mode = crate::issue_monitor::IssueMonitorMaxActiveMode::Manual;
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
@@ -8297,6 +8843,164 @@ mod tests {
             serde_json::json!([2338]),
             "an agent blocked on #2338 must be findable without reading its pane: {out}"
         );
+    }
+
+    /// Issue #4248 AC-1 / AC-3: an unresolved Board request may coexist
+    /// with a running launch, but must not masquerade as a runtime failure.
+    #[test]
+    fn issue_monitor_status_explains_board_escalation_on_a_launched_issue() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &crate::IssueMonitorPrefs {
+                max_active_agents: 1,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 2338,
+                    window_id: "project::running".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed monitor");
+        let cache =
+            Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo));
+        let cached = IssueSnapshot {
+            number: IssueNumber(2338),
+            title: "Running Issue".to_string(),
+            body: String::new(),
+            labels: vec![],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-10-05T00:00:00Z"),
+            comments: vec![],
+        };
+        cache.write_snapshot(&cached).expect("cache issue");
+        gwt_core::coordination::post_entry(
+            &repo,
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Codex",
+                gwt_core::coordination::BoardEntryKind::Blocked,
+                "事象: 判断待ち\n原因: scope\n依頼: 裁定\n再開条件: 裁定済み",
+                None,
+                None,
+                vec![],
+                vec!["2338".to_string()],
+            ),
+        )
+        .expect("post escalation");
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).expect("status");
+        let status: serde_json::Value = serde_json::from_str(&out).expect("status JSON");
+
+        assert_eq!(status["active_launches"], serde_json::json!([2338]));
+        assert_eq!(status["needs_human"], serde_json::json!([2338]));
+        let running = status["inbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["issue_number"] == 2338)
+            .expect("running row");
+        assert_eq!(running["state"], "launched");
+        assert_eq!(status["launch_capacity"]["reason"], "max_active_saturated");
+        assert_eq!(status["launch_capacity"]["reserved_slot_count"], 1);
+        assert_eq!(
+            status["launch_capacity"]["implementation_launches"],
+            serde_json::json!([2338])
+        );
+        let authority = &status["needs_human_authority"];
+        assert_eq!(authority["monitor"], serde_json::json!([]));
+        assert_eq!(authority["board_escalations"], serde_json::json!([2338]));
+        assert_eq!(
+            authority["runtime_fields"],
+            serde_json::json!(["inbox", "active_launches"])
+        );
+        assert!(authority["guidance"]
+            .as_str()
+            .is_some_and(|text| text.contains("does not override") && text.contains("requeue")));
+    }
+
+    /// Issue #3620 / #4248 integration: the current configuration is an
+    /// effective limit, so an unmeasured Auto mode must remain zero in the
+    /// launch-capacity diagnosis as well as the status projection.
+    #[test]
+    fn agent_capacity_auto_zero_is_the_configured_launch_capacity_limit() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Auto,
+                max_active_agents: 9,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save Auto prefs");
+        let saved = std::fs::read(&prefs_path).expect("saved prefs");
+
+        let (status, diagnosis) = load_monitor_agent_status(&repo, 0).expect("status");
+
+        assert_eq!(status.max_active, 0, "unknown Auto capacity fails closed");
+        assert_eq!(status.max_active_agents_override, None);
+        assert!(!status.agent_capacity.measurement_complete);
+        assert!(status
+            .agent_capacity
+            .reason
+            .contains("snapshot_unavailable"));
+        let diagnosis = diagnosis.expect("zero capacity must be explained");
+        assert_eq!(diagnosis["configured_max_active"], 0);
+        assert_eq!(diagnosis["reported_max_active"], 0);
+        assert_eq!(diagnosis["admission_saturated"], true);
+        assert_eq!(diagnosis["reserved_slot_count"], 0);
+        assert_eq!(diagnosis["active_session_count"], 0);
+        assert_eq!(diagnosis["source"], "degraded_cache");
+        let gui = status.gui_status.expect("GUI projection");
+        assert_eq!(gui.max_active_agents, 0);
+        assert_eq!(gui.max_active_agents_override, None);
+        assert_eq!(gui.agent_capacity, status.agent_capacity);
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs after status"),
+            saved,
+            "status must not persist an effective Auto limit"
+        );
+    }
+
+    /// AC-5: physical saturation must be visible even when the admission
+    /// projection has fewer reservations, without changing slot accounting.
+    #[test]
+    fn launch_capacity_distinguishes_observed_sessions_from_admission() {
+        let status: crate::IssueMonitorAgentStatus = serde_json::from_value(serde_json::json!({
+            "queue": [42], "active_launches": [7], "occupied_slot_count": 1,
+            "pending_claim_issues": [], "max_active": 2, "enabled": true,
+            "autonomous_mode": true, "has_launch_profile": true, "stall_reason": null,
+        }))
+        .expect("monitor snapshot");
+        let before = status.clone();
+        let capacity = launch_capacity(&status, 2, status.max_active).expect("observed saturation");
+        assert_eq!(capacity["reason"], "active_sessions_at_capacity");
+        assert_eq!(capacity["admission_saturated"], false);
+        assert_eq!(capacity["active_session_count"], 2);
+        assert_eq!(capacity["reserved_slot_count"], 1);
+        assert_eq!(capacity["session_details_field"], "active_sessions");
+        assert_eq!(status, before, "diagnosis must not change admission");
+        assert!(
+            launch_capacity(&status, 1, status.max_active).is_none(),
+            "free capacity stays free"
+        );
+        let mut stale = status.clone();
+        stale.max_active = 8;
+        stale.occupied_slot_count = Some(3);
+        let capacity = launch_capacity(&stale, 1, 2).expect("refreshed capacity is saturated");
+        assert_eq!(capacity["admission_saturated"], true);
+        assert_eq!(capacity["reported_max_active"], 8);
+        assert_eq!(capacity["configured_max_active"], 2);
+        assert_eq!(capacity["reserved_slot_count"], 3);
     }
 
     #[test]
@@ -8650,6 +9354,8 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8668,6 +9374,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -8707,6 +9414,8 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8725,6 +9434,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -8745,6 +9455,7 @@ mod tests {
                 completion_reason: None,
                 blocked_by_owner: None,
                 claim_expires_at: None,
+                claim_diagnostics: Default::default(),
                 blocked_by_claim_id: None,
                 exclusion_reason: None,
                 launched_window_id: None,
@@ -8849,6 +9560,8 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                agent_capacity: Default::default(),
+                max_active_agents_override: Some(1),
                 source: crate::IssueMonitorStatusSource::Daemon,
                 active_launches_incomplete: false,
                 queue: vec![2338],
@@ -8867,6 +9580,7 @@ mod tests {
                 has_launch_profile: true,
                 quota_hold: None,
                 update_drain: None,
+                update_drain_release: None,
                 launch_profile_summary: String::new(),
                 launch_profile_candidates: Vec::new(),
                 effective_launch_profile: None,
@@ -8887,6 +9601,7 @@ mod tests {
                     completion_reason: None,
                     blocked_by_owner: None,
                     claim_expires_at: None,
+                    claim_diagnostics: Default::default(),
                     blocked_by_claim_id: None,
                     exclusion_reason: None,
                     launched_window_id: None,
@@ -8965,6 +9680,8 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -8983,6 +9700,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -9079,6 +9797,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 max_active_agents: 3,
                 priority_order: vec![2, 1],
@@ -9175,6 +9894,40 @@ mod tests {
             status["active_launches"].as_array().unwrap().len()
         );
         assert_eq!(gui_status["max_active_agents"], status["max_active"]);
+        let expected_unclaimed_claim = serde_json::json!({
+            "state": "unclaimed",
+            "claim_id": null,
+            "owner": null,
+            "expires_at": null,
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "last_failure_at": null,
+            "last_failure": null,
+        });
+        // Issue #5140 AC-3: the legacy launching row reports its stalled
+        // deadline too. Check the live-time diagnostic before comparing the
+        // remaining stable projection.
+        let diagnostic = status["inbox"][2]
+            .as_object_mut()
+            .expect("launching row")
+            .remove("error_message")
+            .expect("stalled launch diagnostic");
+        let diagnostic = diagnostic.as_str().expect("diagnostic text");
+        assert!(diagnostic.starts_with("Launch stalled: no window for "));
+        assert!(diagnostic.ends_with("s (deadline 120s; issue #9)"));
+        assert_eq!(gui_status["agent_capacity"], status["agent_capacity"]);
+        assert_eq!(gui_status["max_active_agents_override"], 3);
+        assert_eq!(status["max_active_agents_override"], 3);
+        assert_eq!(status["agent_capacity"]["measurement_complete"], false);
+        assert!(status["agent_capacity"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("snapshot_unavailable"));
+        status.as_object_mut().unwrap().remove("agent_capacity");
+        status
+            .as_object_mut()
+            .unwrap()
+            .remove("max_active_agents_override");
         assert_eq!(
             status,
             serde_json::json!({
@@ -9245,6 +9998,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 1,
@@ -9255,6 +10009,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                     {
                         "issue_number": 9,
@@ -9264,6 +10019,7 @@ mod tests {
                         "recoverable_merged": false,
                         "non_agent_attempts": 0,
                         "tier_input": 0,
+                        "claim_diagnostics": expected_unclaimed_claim,
                     },
                 ],
                 "inbox_coverage": {
@@ -9517,7 +10273,8 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
-                max_active_agents: 2,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                max_active_agents: 3,
                 launched_issues: vec![
                     crate::IssueMonitorLaunchedIssue {
                         issue_number: 43,
@@ -9526,6 +10283,10 @@ mod tests {
                     crate::IssueMonitorLaunchedIssue {
                         issue_number: 44,
                         window_id: "tab-1::missing".to_string(),
+                    },
+                    crate::IssueMonitorLaunchedIssue {
+                        issue_number: 46,
+                        window_id: "tab-1::closed".to_string(),
                     },
                 ],
                 launched_claims: [
@@ -9543,7 +10304,7 @@ mod tests {
         )
         .expect("save prefs");
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
-        gwt_github::Cache::new(cache_root)
+        gwt_github::Cache::new(cache_root.clone())
             .write_snapshot(&IssueSnapshot {
                 number: IssueNumber(42),
                 title: "Claimed elsewhere".to_string(),
@@ -9554,6 +10315,17 @@ mod tests {
                 comments: Vec::new(),
             })
             .expect("write stale cache candidate");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(46),
+                title: "Closed but still reserved".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Closed,
+                updated_at: UpdatedAt::new("2026-08-03T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write closed cache entry");
 
         let scope = gwt_core::daemon::RuntimeScope::from_project_root(
             &repo,
@@ -9632,7 +10404,9 @@ mod tests {
                         "connections": 1,
                         "issue_monitor": {
                             "queue": [],
-                            "active_launches": [43, 45],
+                            "active_launches": [43, 45, 46, 47],
+                            "occupied_slot_count": 4,
+                            "pending_claim_issues": [],
                             "needs_human": [43, 45],
                             "inbox": [{
                                 "issue_number": 43,
@@ -9645,6 +10419,11 @@ mod tests {
                                 "state": "launched",
                                 "claim_id": "released-claim",
                                 "launched_window_id": "tab-1::released"
+                            }, {
+                                "issue_number": 46,
+                                "state": "launched",
+                                "github_state": "closed",
+                                "launched_window_id": "tab-1::closed"
                             }],
                             "max_active": 1,
                             "enabled": false,
@@ -9678,7 +10457,29 @@ mod tests {
         assert!(status["inbox"][0]["delivery_id"].is_null());
         assert_eq!(status["inbox"][0]["state"], "launched");
         assert_eq!(status["active_launches"], serde_json::json!([43, 44]));
-        assert_eq!(status["max_active"], 2);
+        assert_eq!(status["max_active"], 3);
+        // The legacy publisher omitted capacity fields. Current durable mode
+        // and the shared measurement still govern the actionable projection.
+        assert_eq!(status["source"], "daemon");
+        assert_eq!(status["max_active_agents_override"], 3);
+        assert_eq!(status["agent_capacity"]["measurement_complete"], false);
+        assert!(status["agent_capacity"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("snapshot_unavailable")));
+        assert_eq!(status["launch_capacity"]["admission_saturated"], true);
+        assert_eq!(status["launch_capacity"]["reserved_slot_count"], 4);
+        assert_eq!(
+            status["launch_capacity"]["reservation_snapshot"],
+            "before_control_and_closed_issue_reconciliation"
+        );
+        assert_eq!(status["launch_capacity"]["reported_max_active"], 1);
+        assert_eq!(status["launch_capacity"]["configured_max_active"], 3);
+        assert_eq!(status["launch_capacity"]["source"], "daemon");
+        assert_eq!(
+            status["launch_capacity"]["implementation_launches"],
+            serde_json::json!([43, 45, 46, 47]),
+            "control identity and closed-Issue action filtering must not hide reported reservations"
+        );
         assert_eq!(status["needs_human"], serde_json::json!([]));
         let rows = status["inbox"].as_array().expect("inbox rows");
         let missing = rows
@@ -9856,6 +10657,7 @@ mod tests {
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
                 crate::IssueMonitorPrefs {
+                    max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                     enabled: true,
                     ..Default::default()
                 },
@@ -10084,6 +10886,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
@@ -10116,6 +10919,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
@@ -10159,6 +10963,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -10185,6 +10990,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
@@ -10194,6 +11000,62 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+    }
+
+    #[test]
+    fn agent_capacity_config_set_persists_auto_reset_without_daemon() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create project");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                max_active_agents: 7,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                ..Default::default()
+            },
+        )
+        .expect("manual preferences");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: None,
+                allowed_labels: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                max_active_auto: true,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
+            },
+            &mut out,
+        )
+        .expect("Auto reset");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("saved Auto preferences");
+        assert_eq!(
+            prefs.max_active_agents_mode,
+            crate::issue_monitor::IssueMonitorMaxActiveMode::Auto
+        );
+        assert_eq!(
+            prefs.max_active_agents, 1,
+            "resource observations are not project preferences"
+        );
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply");
+        assert_eq!(reply["max_active_mode"], "auto");
+        assert!(reply["max_active_agents_override"].is_null());
+        assert_eq!(
+            reply["max_active"], 0,
+            "unknown Auto measurement is visibly closed"
+        );
+        assert!(reply["agent_capacity"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()));
     }
 
     fn pool_profile(agent_id: &str, prefer_for: &[&str]) -> crate::IssueMonitorLaunchProfile {
@@ -10532,6 +11394,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: false,
                 autonomous_mode: false,
                 max_active_agents: 3,
@@ -10567,6 +11430,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    max_active_auto: false,
                     auto_close_merged_issues: None,
                     auto_apply_updates: None,
                     launch_agent: None,
@@ -10615,6 +11479,7 @@ mod tests {
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: false,
                 autonomous_mode: false,
                 max_active_agents: 3,
@@ -10652,6 +11517,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    max_active_auto: false,
                     auto_close_merged_issues: None,
                     auto_apply_updates: None,
                     launch_agent: None,
@@ -11491,6 +12357,8 @@ mod tests {
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: Vec::new(),
@@ -11509,6 +12377,7 @@ mod tests {
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -11529,6 +12398,7 @@ mod tests {
                 completion_reason: None,
                 blocked_by_owner: Some("akiojin:77083".to_string()),
                 claim_expires_at: Some("2026-09-07T02:37:00Z".to_string()),
+                claim_diagnostics: Default::default(),
                 blocked_by_claim_id: Some("gwt-auto-improve:df524fc5".to_string()),
                 exclusion_reason: Some("blocked by claim".to_string()),
                 launched_window_id: None,
@@ -12844,6 +13714,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
@@ -12886,6 +13757,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                max_active_auto: false,
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),

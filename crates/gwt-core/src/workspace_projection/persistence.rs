@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -974,7 +974,7 @@ fn record_launch_container_detachments_locked(
         }
         for item in &work_items.work_items {
             if item.id == event.work_item_id
-                || item.discarded
+                || item.is_terminal()
                 || projection.agents.iter().any(|agent| {
                     agent.workspace_id.as_deref() == Some(item.id.as_str())
                         || item
@@ -3936,33 +3936,40 @@ pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkIte
     ensure_supported_workspace_layout(path)?;
     match fs::read(path) {
         Ok(bytes) => {
-            #[cfg(debug_assertions)]
-            mark_playwright_work_items_decode_started(path);
-            let mut items: WorkItemsProjection = serde_json::from_slice(&bytes)
-                .map_err(|error| WorkspaceStateLoadError::json(path, error))?;
-            for item in &mut items.work_items {
-                if item.title == "Workspace" {
-                    item.title = "Work".to_string();
-                } else if item.title.starts_with("Workspace ") {
-                    let suffix = &item.title["Workspace ".len()..];
-                    item.title = format!("Work {suffix}");
-                } else if item.title.ends_with(" workspace") {
-                    let prefix = &item.title[..item.title.len() - " workspace".len()];
-                    item.title = format!("{prefix} work");
-                }
-            }
-            items.refresh_derived_progress_summaries();
-            apply_workspace_container_detachments(path, &mut items)?;
-            // Issue #4508: bound the resident projection before any caller can
-            // hold on to it. Derived summaries are refreshed first so a legacy
-            // file's complete history still decides them once, and the
-            // authoritative snapshot compaction freezes carries that result.
-            items.compact_inline_events();
-            Ok(Some(items))
+            decode_workspace_work_items(path, &bytes, &load_container_detachments(path)?).map(Some)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(WorkspaceStateLoadError::io(path, error).into()),
     }
+}
+
+fn decode_workspace_work_items(
+    path: &Path,
+    bytes: &[u8],
+    detachments: &ContainerDetachments,
+) -> Result<WorkItemsProjection> {
+    #[cfg(test)]
+    run_before_work_items_decode();
+    #[cfg(debug_assertions)]
+    mark_playwright_work_items_decode_started(path);
+    let mut items: WorkItemsProjection = serde_json::from_slice(bytes)
+        .map_err(|error| WorkspaceStateLoadError::json(path, error))?;
+    for item in &mut items.work_items {
+        if item.title == "Workspace" {
+            item.title = "Work".to_string();
+        } else if item.title.starts_with("Workspace ") {
+            let suffix = &item.title["Workspace ".len()..];
+            item.title = format!("Work {suffix}");
+        } else if item.title.ends_with(" workspace") {
+            let prefix = &item.title[..item.title.len() - " workspace".len()];
+            item.title = format!("{prefix} work");
+        }
+    }
+    items.refresh_derived_progress_summaries();
+    remove_detached_containers(&mut items, detachments);
+    // Issue #4508: derive summaries before compaction freezes the replay base.
+    items.compact_inline_events();
+    Ok(items)
 }
 
 #[cfg(debug_assertions)]
@@ -4016,34 +4023,158 @@ fn load_or_synthesize_workspace_work_items_profiled(
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    with_workspace_current_and_work_items_lock_profiled(
-        &current_path,
-        &work_items_path,
-        |lock_wait_micros| {
-            let parse_started = Instant::now();
-
-            let projection = load_or_synthesize_workspace_work_items_from_paths(
-                &work_items_path,
-                &current_path,
-                &journal_path,
-                repo_path,
-            )?;
-            // Bind the cache signature to the exact projection read while the
-            // project lock is still held. A writer may publish a new file as
-            // soon as this closure returns, so metadata must not be re-read by
-            // the later cache-store step.
-            let signature = work_items_file_signature(&work_items_path);
-            Ok((
-                projection,
-                WorkItemsLoadProfile {
-                    cache_hit: false,
-                    lock_wait_micros,
-                    parse_micros: parse_started.elapsed().as_micros() as u64,
-                },
-                signature,
-            ))
+    let started = Instant::now();
+    let (snapshot, lock_wait_micros, signature) =
+        with_workspace_current_and_work_items_lock_profiled(
+            &current_path,
+            &work_items_path,
+            |lock_wait_micros| {
+                let snapshot = match fs::read(&work_items_path) {
+                    Ok(bytes) => WorkItemsReadSnapshot::Persisted {
+                        bytes,
+                        detachments: load_container_detachments(&work_items_path)?,
+                    },
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        WorkItemsReadSnapshot::Synthesized(
+                            load_or_synthesize_workspace_work_items_from_paths(
+                                &work_items_path,
+                                &current_path,
+                                &journal_path,
+                                repo_path,
+                            )?,
+                        )
+                    }
+                    Err(error) => {
+                        return Err(WorkspaceStateLoadError::io(&work_items_path, error).into())
+                    }
+                };
+                // Bind both Works and repair state to the immutable snapshot while
+                // locked. Decode/derive/compact after release so GUI reads do not
+                // hold up workspace.ensure (#5313).
+                let signature = work_items_file_signature(&work_items_path);
+                Ok((snapshot, lock_wait_micros, signature))
+            },
+        )?;
+    let projection = match snapshot {
+        WorkItemsReadSnapshot::Persisted { bytes, detachments } => {
+            decode_workspace_work_items(&work_items_path, &bytes, &detachments)?
+        }
+        WorkItemsReadSnapshot::Synthesized(projection) => projection,
+    };
+    Ok((
+        projection,
+        WorkItemsLoadProfile {
+            cache_hit: false,
+            lock_wait_micros,
+            parse_micros: (started.elapsed().as_micros() as u64).saturating_sub(lock_wait_micros),
         },
-    )
+        signature,
+    ))
+}
+
+enum WorkItemsReadSnapshot {
+    Persisted {
+        bytes: Vec<u8>,
+        detachments: ContainerDetachments,
+    },
+    Synthesized(WorkItemsProjection),
+}
+
+/// Startup intake snapshots authoritative bytes briefly, then prepares outside
+/// the lock. Missing files and empty files are deliberately distinct CAS inputs.
+pub(crate) struct WorkItemsIntakeSnapshot {
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl WorkItemsIntakeSnapshot {
+    pub(crate) fn capture(works_path: &Path, local_path: Option<&Path>) -> Result<Self> {
+        with_workspace_work_items_lock(works_path, || {
+            let mut paths = vec![
+                works_path.to_path_buf(),
+                container_detachments_path(works_path),
+            ];
+            paths.extend(local_path.map(Path::to_path_buf));
+            let files = paths
+                .into_iter()
+                .map(|path| {
+                    let bytes = read_intake_snapshot_file(&path)?;
+                    Ok((path, bytes))
+                })
+                .collect::<Result<_>>()?;
+            Ok(Self { files })
+        })
+    }
+
+    fn detachments(&self) -> Result<ContainerDetachments> {
+        let (path, bytes) = &self.files[1];
+        match bytes {
+            Some(bytes) => serde_json::from_slice(bytes).map_err(|error| {
+                GwtError::Other(format!("container detachments {}: {error}", path.display()))
+            }),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    pub(crate) fn projection(&self) -> Result<Option<WorkItemsProjection>> {
+        let detachments = self.detachments()?;
+        let (path, bytes) = &self.files[0];
+        bytes
+            .as_ref()
+            .map(|bytes| decode_workspace_work_items(path, bytes, &detachments))
+            .transpose()
+    }
+
+    pub(crate) fn local_content(&self) -> Result<Option<&str>> {
+        self.files
+            .get(2)
+            .and_then(|(_, bytes)| bytes.as_ref())
+            .map(|bytes| {
+                std::str::from_utf8(bytes).map_err(|error| {
+                    GwtError::Other(format!("work events local lifecycle is not UTF-8: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    pub(crate) fn apply_detachments(&self, projection: &mut WorkItemsProjection) -> Result<()> {
+        remove_detached_containers(projection, &self.detachments()?);
+        Ok(())
+    }
+
+    pub(crate) fn prepare(&self, mut projection: WorkItemsProjection) -> Result<Vec<u8>> {
+        self.apply_detachments(&mut projection)?;
+        projection.compact_inline_events();
+        serde_json::to_vec_pretty(&projection)
+            .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))
+    }
+
+    /// The caller strictly decoded the snapshot (or proved complete-source
+    /// malformed recovery). Exact byte comparison protects that admission and
+    /// concurrent writers without re-decoding/serializing under the lock.
+    pub(crate) fn commit(&self, prepared: Option<&[u8]>) -> Result<()> {
+        let works_path = &self.files[0].0;
+        with_workspace_work_items_lock(works_path, || {
+            for (path, expected) in &self.files {
+                if read_intake_snapshot_file(path)? != *expected {
+                    return Err(GwtError::Other(
+                        "work events intake snapshot changed; retry on the next poll".into(),
+                    ));
+                }
+            }
+            if let Some(bytes) = prepared {
+                write_atomic(works_path, bytes)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn read_intake_snapshot_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(WorkspaceStateLoadError::io(path, error).into()),
+    }
 }
 
 pub fn load_or_synthesize_workspace_work_items_from_paths(
@@ -4084,8 +4215,20 @@ pub struct WorkItemsCache {
 
 #[cfg(test)]
 thread_local! {
+    static BEFORE_WORK_ITEMS_DECODE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     static AFTER_PROFILED_WORK_ITEMS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_before_work_items_decode() {
+    BEFORE_WORK_ITEMS_DECODE.with(|slot| {
+        let operation = slot.borrow_mut().take();
+        if let Some(operation) = operation {
+            operation();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -4346,9 +4489,28 @@ fn with_workspace_work_items_locks_profiled<T>(
         .collect::<Vec<_>>();
     lock_paths.sort();
     lock_paths.dedup();
+    // Issue #5208: these are per-handle OS locks, so a thread that already
+    // holds one of them would wait on itself forever. Refuse instead.
+    if let Some(held) = lock_paths
+        .iter()
+        .find(|path| workspace_work_items_lock_held_by_current_thread(path))
+    {
+        return Err(GwtError::Other(format!(
+            "{WORKSPACE_WORK_ITEMS_LOCK_OPERATION} lock {} is already held by this thread; re-acquiring it would self-deadlock",
+            held.display()
+        )));
+    }
+    // Issue #5208: without an ambient deadline the OS wait used to be
+    // unbounded, so one long holder silently stalled every Work writer. Bound
+    // only the acquisition; the operation keeps the caller's own deadline.
+    let acquisition_deadline = crate::operation_deadline::current().is_none().then(|| {
+        crate::operation_deadline::ScopedOperationDeadline::enter(
+            crate::operation_deadline::now() + workspace_work_items_lock_default_wait(),
+        )
+    });
     let mut locks = Vec::with_capacity(lock_paths.len());
     let mut lock_wait_micros = 0u64;
-    for lock_path in lock_paths {
+    for lock_path in &lock_paths {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -4358,19 +4520,75 @@ fn with_workspace_work_items_locks_profiled<T>(
         // operation / since) instead of only that the deadline expired.
         // Ordinary contention is routine here and is not logged.
         let lock = crate::operation_deadline::NamedFileLock::acquire_quiet(
-            &lock_path,
+            lock_path,
             WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
         )?;
         lock_wait_micros =
             lock_wait_micros.saturating_add(lock_started.elapsed().as_micros() as u64);
         locks.push(lock);
     }
+    drop(acquisition_deadline);
+    let held = HeldWorkspaceWorkItemsLocks::register(lock_paths);
     let result = operation(lock_wait_micros);
+    drop(held);
     drop(locks);
     result
 }
 
-pub(crate) fn with_workspace_current_and_work_items_lock<T>(
+/// Issue #5208: the longest a Work items lock acquisition waits when the
+/// caller set no operation deadline. The error names the observed holder.
+const WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+thread_local! {
+    static WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn workspace_work_items_lock_default_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE.with(std::cell::Cell::get) {
+        return wait;
+    }
+    WORKSPACE_WORK_ITEMS_LOCK_DEFAULT_WAIT
+}
+
+thread_local! {
+    /// Work items lock files the current thread holds, innermost last.
+    static HELD_WORKSPACE_WORK_ITEMS_LOCKS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn workspace_work_items_lock_held_by_current_thread(lock_path: &Path) -> bool {
+    HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow().iter().any(|path| path == lock_path))
+}
+
+/// Records the locks for the duration of the operation, including unwinding.
+struct HeldWorkspaceWorkItemsLocks {
+    count: usize,
+}
+
+impl HeldWorkspaceWorkItemsLocks {
+    fn register(lock_paths: Vec<PathBuf>) -> Self {
+        let count = lock_paths.len();
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| held.borrow_mut().extend(lock_paths));
+        Self { count }
+    }
+}
+
+impl Drop for HeldWorkspaceWorkItemsLocks {
+    fn drop(&mut self) {
+        HELD_WORKSPACE_WORK_ITEMS_LOCKS.with(|held| {
+            let mut held = held.borrow_mut();
+            let keep = held.len().saturating_sub(self.count);
+            held.truncate(keep);
+        });
+    }
+}
+
+/// Run an authority operation under the Workspace assignment and WorkItems
+/// locks, recovering any pending Workspace transaction first.
+pub fn with_workspace_current_and_work_items_lock<T>(
     current_path: &Path,
     work_items_path: &Path,
     operation: impl FnOnce() -> Result<T>,
@@ -4862,6 +5080,23 @@ pub fn workspace_state_external_commit_resolution_at(
     operation_id: &str,
 ) -> Result<ExternalWorkspaceCommitResolution> {
     validate_external_workspace_operation_id(operation_id)?;
+    if workspace_state_transaction_is_pending_at(current_path, work_items_path)? {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    }
+    Ok(
+        load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
+            .map_or(ExternalWorkspaceCommitResolution::Missing, |receipt| {
+                receipt.resolution
+            }),
+    )
+}
+
+/// Inspect publication markers, including split-root coordinators, without
+/// acquiring recovery locks or publishing any state (Issue #3838).
+pub fn workspace_state_transaction_is_pending_at(
+    current_path: &Path,
+    work_items_path: &Path,
+) -> Result<bool> {
     let base_lock_targets = vec![
         current_path.with_file_name("works.json"),
         work_items_path.to_path_buf(),
@@ -4875,15 +5110,7 @@ pub fn workspace_state_external_commit_resolution_at(
     )?);
     marker_paths.sort();
     marker_paths.dedup();
-    if find_pending_workspace_state_transaction(&marker_paths)?.is_some() {
-        return Ok(ExternalWorkspaceCommitResolution::Busy);
-    }
-    Ok(
-        load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
-            .map_or(ExternalWorkspaceCommitResolution::Missing, |receipt| {
-                receipt.resolution
-            }),
-    )
+    Ok(find_pending_workspace_state_transaction(&marker_paths)?.is_some())
 }
 
 pub fn resolve_workspace_state_external_commit_at(
@@ -5718,26 +5945,67 @@ pub fn current_work_id(
     branch: Option<&str>,
     worktree_path: Option<&Path>,
 ) -> Option<String> {
-    let canonical_id = canonical_work_id(project_root, branch, worktree_path)?;
-    Some(
-        current_canonical_work_item(projection, &canonical_id)
+    current_work_id_for_launch(projection, project_root, branch, worktree_path, None)
+        .ok()
+        .flatten()
+}
+
+/// Resolve a launch's current Work using its independently proven owner.
+/// Only authenticated launch coordinators may supply `launch_owner`: ordinary
+/// readers must not acquire authority from an ownerless active tail.
+pub fn current_work_id_for_launch(
+    projection: &WorkItemsProjection,
+    project_root: &Path,
+    branch: Option<&str>,
+    worktree_path: Option<&Path>,
+    launch_owner: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(canonical_id) = canonical_work_id(project_root, branch, worktree_path) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner)?
             .map(|item| item.id.clone())
             .unwrap_or(canonical_id),
-    )
+    ))
 }
 
 fn current_canonical_work_item<'a>(
     projection: &'a WorkItemsProjection,
+    project_root: &Path,
     canonical_id: &str,
-) -> Option<&'a WorkItem> {
-    let mut current = projection
+    launch_owner: Option<&str>,
+) -> Result<Option<&'a WorkItem>> {
+    let Some(mut current) = projection
         .work_items
         .iter()
-        .find(|item| item.id == canonical_id)?;
+        .find(|item| item.id == canonical_id)
+    else {
+        return Ok(None);
+    };
+    let owners_match = |left: &str, right: &str| {
+        left == right
+            || can_upgrade_work_owner(Some(left), Some(right))
+            || can_upgrade_work_owner(Some(right), Some(left))
+    };
+    let validate_launch_owner = |item: &WorkItem| -> Result<()> {
+        if let (Some(expected), Some(actual)) = (launch_owner, item.owner.as_deref()) {
+            if !owners_match(expected, actual) {
+                return Err(GwtError::Other(format!(
+                    "Work {} owner mismatch: expected {expected}, actual {actual}",
+                    item.id
+                )));
+            }
+        }
+        Ok(())
+    };
+    validate_launch_owner(current)?;
+    let mut owner_anchor = launch_owner.or(current.owner.as_deref());
+    let mut authoritative = current;
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
     for _ in 0..projection.work_items.len() {
-        if !current.discarded {
+        if !current.is_terminal() {
             break;
         }
         let successor_id = successor_work_id(&current.id);
@@ -5748,45 +6016,56 @@ fn current_canonical_work_item<'a>(
         let Some(successor) = candidates.next() else {
             break;
         };
+        validate_launch_owner(successor)?;
+        // Historical terminal rows may lack owner metadata. Keep the last
+        // known owner across that gap, and only publish a later Work once its
+        // owner agrees. An ownerless tail must not gain adoption authority.
+        let owner_matches = match (owner_anchor, successor.owner.as_deref()) {
+            (Some(anchor), Some(owner)) => {
+                anchor == owner
+                    || can_upgrade_work_owner(Some(anchor), Some(owner))
+                    || can_upgrade_work_owner(Some(owner), Some(anchor))
+            }
+            (Some(_), None) => successor.is_terminal() || launch_owner.is_some(),
+            (None, None) => true,
+            (None, Some(owner)) => successor.execution_containers.iter().any(|container| {
+                container
+                    .branch
+                    .as_deref()
+                    .and_then(work_owner_for_branch)
+                    .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
+            }),
+        };
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
             || !successor.events.iter().any(|event| {
                 event.kind == WorkEventKind::Start
                     && event.related_work_item_id.as_deref() == Some(current.id.as_str())
             })
-            // Owner display normalization may arrive on either Work first;
-            // its arrival order must not change lineage. This read-only
-            // equivalence does not authorize a reverse owner mutation.
-            || !(current.owner == successor.owner
-                || can_upgrade_work_owner(current.owner.as_deref(), successor.owner.as_deref())
-                || can_upgrade_work_owner(successor.owner.as_deref(), current.owner.as_deref()))
+            || !owner_matches
             || successor.execution_containers.is_empty()
             || !successor.execution_containers.iter().all(|container| {
-                current.execution_containers.iter().any(|predecessor| {
-                    container
-                        .branch
-                        .as_deref()
-                        .map(canonical_work_branch_identity)
-                        == predecessor
-                            .branch
-                            .as_deref()
-                            .map(canonical_work_branch_identity)
-                        && container
-                            .worktree_path
-                            .as_deref()
-                            .map(canonical_worktree_identity)
-                            == predecessor
-                                .worktree_path
-                                .as_deref()
-                                .map(canonical_worktree_identity)
-                })
+                // Branch-backed Work identity spans hosts. Old paths may be
+                // foreign or absent; the Start link and canonical identity
+                // establish lineage, not a historical host's checkout path.
+                canonical_work_id(
+                    project_root,
+                    container.branch.as_deref(),
+                    container.worktree_path.as_deref(),
+                )
+                .as_deref()
+                    == Some(canonical_id)
             })
         {
             break;
         }
         current = successor;
+        if launch_owner.is_some() || successor.owner.is_some() || owner_anchor.is_none() {
+            authoritative = successor;
+            owner_anchor = launch_owner.or(successor.owner.as_deref());
+        }
     }
-    Some(current)
+    Ok(Some(authoritative))
 }
 
 /// #3065: find the Work item that owns a given execution container. The
@@ -5804,10 +6083,11 @@ pub fn find_work_item_for_container<'a>(
 ) -> Option<&'a WorkItem> {
     let branch = branch.map(str::trim).filter(|value| !value.is_empty());
     let canonical_id = canonical_work_id(project_root, branch, worktree_path);
-    if let Some(current) = canonical_id
-        .as_deref()
-        .and_then(|id| current_canonical_work_item(projection, id))
-    {
+    if let Some(current) = canonical_id.as_deref().and_then(|id| {
+        current_canonical_work_item(projection, project_root, id, None)
+            .ok()
+            .flatten()
+    }) {
         return Some(current);
     }
     let branch_identity = branch.map(canonical_work_branch_identity);
@@ -5833,8 +6113,12 @@ pub fn find_work_item_for_container<'a>(
     // uses the branch ID. Resolve that same lifetime after the legacy match.
     current_canonical_work_item(
         projection,
+        project_root,
         &workspace_group_key_for_item(project_root, matched),
+        None,
     )
+    .ok()
+    .flatten()
     .or(Some(matched))
 }
 
@@ -6706,9 +6990,45 @@ fn recover_unprojected_workspace_work_events_locked(
         .iter()
         .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
         .collect::<HashSet<_>>();
+    let compacted_through = projection
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            item.events_compacted_through()
+                .map(|through| (item.id.as_str(), through))
+        })
+        .collect::<HashMap<_, _>>();
+    let terminal_close_times = projection
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            crate::work_events_intake::terminal_close_time(item)
+                .map(|closed_at| (item.id.as_str(), closed_at))
+        })
+        .collect::<HashMap<_, _>>();
     let mut durable_events = Vec::new();
     for event in events {
         if seen_event_ids.contains(&event.id) {
+            continue;
+        }
+        // Intake already rejects unknown IDs at or before a terminal cutoff.
+        // Apply the same rule here before refolding all retained history.
+        if terminal_close_times
+            .get(event.work_item_id.as_str())
+            .is_some_and(|closed_at| event.updated_at <= *closed_at)
+        {
+            continue;
+        }
+        // A missing inline ID can mean compaction, not an interrupted writer.
+        // Match intake's watermark contract; an unprojected terminal close
+        // still owns lifecycle truth even when stamped before that boundary.
+        if !matches!(
+            event.kind,
+            WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+        ) && compacted_through
+            .get(event.work_item_id.as_str())
+            .is_some_and(|through| event.updated_at <= *through)
+        {
             continue;
         }
         durable_events.push(event);
@@ -7764,6 +8084,51 @@ fn canonical_workspace_work_event_bytes(event: &WorkEvent) -> Result<Vec<u8>> {
         .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
     canonical.push(b'\n');
     Ok(canonical)
+}
+
+/// Read-only proof of an exact immutable source event. Refuse redirected
+/// managed directories just as the canonical shard writer does.
+pub fn workspace_work_event_shard_matches(repo_path: &Path, event: &WorkEvent) -> Result<bool> {
+    let events_dir = gwt_repo_local_work_events_dir(repo_path);
+    if !validate_workspace_work_event_store_path(&events_dir)? {
+        return Ok(false);
+    }
+    let shard = gwt_work_event_shard_path(&events_dir, &event.id);
+    let bucket = shard
+        .parent()
+        .ok_or_else(|| GwtError::Other("Work event shard has no bucket directory".to_string()))?;
+    if !validate_workspace_work_event_bucket_path(&events_dir, bucket)? {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(&shard) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            Ok(fs::read(shard)? == canonical_workspace_work_event_bytes(event)?)
+        }
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn receipt_source_proof_refuses_redirected_bucket() {
+    let repo = tempfile::tempdir().unwrap();
+    let events = gwt_repo_local_work_events_dir(repo.path());
+    let event = WorkEvent::new(WorkEventKind::Update, "receipt-work", Utc::now());
+    write_workspace_work_event_shards_to_dir(&events, std::slice::from_ref(&event)).unwrap();
+    assert!(workspace_work_event_shard_matches(repo.path(), &event).unwrap());
+    let shard = gwt_work_event_shard_path(&events, &event.id);
+    let bucket = shard.parent().unwrap();
+    let redirected = repo.path().join("redirected-source");
+    fs::rename(bucket, &redirected).unwrap();
+    std::os::unix::fs::symlink(&redirected, bucket).unwrap();
+    let before = fs::read(redirected.join(shard.file_name().unwrap())).unwrap();
+    assert!(workspace_work_event_shard_matches(repo.path(), &event).is_err());
+    assert_eq!(
+        fs::read(redirected.join(shard.file_name().unwrap())).unwrap(),
+        before
+    );
 }
 
 fn divergent_workspace_work_event_shard_error(event_id: &str, shard_path: &Path) -> GwtError {

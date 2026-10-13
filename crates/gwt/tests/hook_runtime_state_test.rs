@@ -110,18 +110,12 @@ fn unknown_event_surfaces_as_invalid_event_error() {
 
 #[test]
 fn handle_is_noop_when_env_var_is_unset() {
-    // SAFETY: this test manipulates a process-global env var. It runs in
-    // the same binary as other `hook_runtime_state_test` cases but none
-    // of them look at the env var, so there is no cross-test interaction.
-    // We use a short helper that saves/restores the prior value.
-    let prev = std::env::var_os("GWT_SESSION_RUNTIME_PATH");
-    std::env::remove_var("GWT_SESSION_RUNTIME_PATH");
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _runtime_path = gwt_core::test_support::ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
 
     let result = runtime_state::handle("PreToolUse");
-
-    if let Some(v) = prev {
-        std::env::set_var("GWT_SESSION_RUNTIME_PATH", v);
-    }
 
     assert!(
         result.is_ok(),

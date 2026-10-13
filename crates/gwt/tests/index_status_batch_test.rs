@@ -9,7 +9,6 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
 };
 
 use gwt_core::test_support::ScopedEnvVar;
@@ -18,9 +17,8 @@ use sha2::{Digest, Sha256};
 
 type ByteSnapshot = BTreeMap<PathBuf, Option<Vec<u8>>>;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 #[test]

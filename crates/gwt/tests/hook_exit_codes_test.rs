@@ -24,9 +24,8 @@ fn argv(strs: &[&str]) -> Vec<String> {
     strs.iter().map(std::string::ToString::to_string).collect()
 }
 
-fn env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 use gwt_core::test_support::ScopedEnvVar;

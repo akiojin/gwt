@@ -11,7 +11,9 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
 // browser-check supplies an isolated checkout server; fixture mode remains
 // useful for fast development while both modes exercise the same UI code.
-const surfaceAppUrl = process.env.GWT_PLAYWRIGHT_BASE_URL || APP_URL;
+const surfaceAppUrl = process.env.GWT_PLAYWRIGHT_BASE_URL
+  ? new URL(new URL(APP_URL).pathname, process.env.GWT_PLAYWRIGHT_BASE_URL).href
+  : APP_URL;
 async function installSurfaceAssets(page: Page) {
   if (!process.env.GWT_PLAYWRIGHT_BASE_URL) await installEmbeddedRoutes(page);
 }
@@ -137,8 +139,31 @@ test.describe("Surface rail", () => {
     await page.evaluate(text => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-one", data_base64: btoa(text + "\r\n") }), output);
     await expect(left.locator('.agent-tile[data-agent-id="agent-one"] pre')).toContainText(output);
     await expect(right.locator('.agent-tile[data-agent-id="agent-one"] .xterm-rows')).toContainText(output);
-    await page.evaluate(() => (window as any).__updateSurfaceAgent("agent-one", { dynamic_title: "Updated agent" }));
+    const previousRevision = Number(await right.locator(".agents-surface:not(.agents-surface--preview)").getAttribute("data-catalog-version"));
+    await page.evaluate(() => {
+      (window as any).__catalogRaf = window.requestAnimationFrame;
+      window.requestAnimationFrame = () => 0;
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      (window as any).__updateSurfaceAgent("agent-one", { dynamic_title: "Updated agent" });
+    });
     await expect(right.getByRole("tab", { name: "Updated agent", exact: true })).toBeVisible();
+    await expect(left.locator('.agent-tile[data-agent-id="agent-one"] h3')).toHaveText("Updated agent", { timeout: 1000 });
+    const expectCatalogRevision = async () => {
+      await expect.poll(() => page.evaluate(() => {
+        const nodes = document.querySelectorAll(".agents-surface, #split-surfaces, #fleet-minimap");
+        const revisions = [...nodes].map(node => Number((node as HTMLElement).dataset.catalogVersion));
+        return revisions.length === 4 && revisions.every(value => value > 0 && value === revisions[0]) ? revisions[0] : 0;
+      }), { timeout: 1000 }).toBeGreaterThan(previousRevision);
+    };
+    await expectCatalogRevision();
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_status", id: "agent-one", status: "stopped" }));
+    await expect(right.locator('.agent-tile[data-agent-id="agent-one"] .agent-tile__header span')).toHaveText("Input unavailable", { timeout: 1000 });
+    await expectCatalogRevision();
+    await page.evaluate(() => {
+      window.requestAnimationFrame = (window as any).__catalogRaf;
+      delete (document as any).visibilityState;
+      (window as any).__surfaceRailSocket().emit({ kind: "terminal_status", id: "agent-one", status: "running" });
+    });
     await expect(right).toHaveAttribute("data-active", "true");
     await left.locator('.agent-tile[data-agent-id="agent-one"]').click();
     await expect(left.locator('.agent-tile[data-agent-id="agent-one"] .xterm-helper-textarea')).toBeFocused();
@@ -156,8 +181,10 @@ test.describe("Surface rail", () => {
     await right.getByRole("button", { name: "Close Updated agent tab", exact: true }).click();
     await expect(left.locator('.agent-tile[data-agent-id="agent-two"]')).toBeVisible();
     await right.getByRole("button", { name: "Open Updated agent tab", exact: true }).click();
-    await page.evaluate(() => (window as any).__removeSurfaceAgent("agent-one"));
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("agent-one", { id: "agent-two", status: "stopped" }));
     await expect(left.locator('.agent-tile[data-agent-id="agent-one"]')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("agent-one").hasRuntime)).toBe(false);
+    await expect(right.locator('.agent-tile[data-agent-id="agent-two"] .agent-tile__header span')).toHaveText("Input unavailable");
     await expect(right.getByRole("tab", { name: "All agents", exact: true })).toHaveAttribute("aria-selected", "true");
     await page.getByRole("button", { name: "Close split", exact: true }).click();
     await expect(page.locator(".agents-surface--preview")).toHaveCount(0);
@@ -492,6 +519,7 @@ async function clearMessages(page: Page): Promise<void> {
 
 async function installSurfaceRailBackend(page: Page, groupedSettings = false): Promise<void> {
   await page.addInitScript((groupedSettings) => {
+    (window as any).__gwtPlaywrightTestBridge = true;
     const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
       title: id,
@@ -659,9 +687,11 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       value: FixtureWebSocket,
     });
     (window as any).__surfaceRailSocket = () => socket;
-    (window as any).__removeSurfaceAgent = (id: string) => {
+    (window as any).__removeSurfaceAgent = (id: string, update?: Record<string, unknown>) => {
       const index = windows.findIndex(data => data.id === id);
       if (index >= 0) windows.splice(index, 1);
+      const changed = update && windows.find(data => data.id === update.id);
+      if (changed) Object.assign(changed, update);
       socket?.emit(workspaceState());
     };
     (window as any).__updateSurfaceAgent = (id: string, updates: Record<string, unknown>) => {

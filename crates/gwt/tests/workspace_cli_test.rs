@@ -499,6 +499,7 @@ impl DisconnectServer {
 #[derive(Debug)]
 struct AppliedDisconnectObservation {
     accepted: usize,
+    operation_id: String,
     work_id: String,
     journal_entry_id: String,
 }
@@ -511,7 +512,13 @@ struct ApplyThenDisconnectServer {
 }
 
 impl ApplyThenDisconnectServer {
-    fn start(home: &Path, project_root: &Path, session_id: &str, bearer_token: &str) -> Self {
+    fn start(
+        home: &Path,
+        project_root: &Path,
+        session_id: &str,
+        bearer_token: &str,
+        partial_body: bool,
+    ) -> Self {
         let listener =
             StdTcpListener::bind(("127.0.0.1", 0)).expect("bind apply-then-disconnect server");
         let port = listener
@@ -543,7 +550,8 @@ impl ApplyThenDisconnectServer {
                             .expect("apply-then-disconnect stream timeout");
                         accepted += 1;
                         if applied_receipt.is_none() {
-                            let (authorization, body) = read_http_json_request(&mut stream);
+                            let (authorization, operation_id, body) =
+                                read_http_json_request(&mut stream);
                             assert_eq!(authorization, format!("Bearer {bearer_token}"));
                             let request =
                                 serde_json::from_slice::<gwt::AgentWorkspaceUpdateRequest>(&body)
@@ -552,13 +560,27 @@ impl ApplyThenDisconnectServer {
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             let _home = gwt_core::test_support::ScopedGwtHome::set(&home);
-                            let receipt = gwt::apply_authenticated_workspace_update(
-                                &project_root,
-                                &session_id,
-                                request,
+                            let session = Session::load(
+                                &home
+                                    .join(".gwt/sessions")
+                                    .join(format!("{session_id}.toml")),
                             )
-                            .expect("apply Host update before dropping response");
-                            applied_receipt = Some((receipt.work_id, receipt.journal_entry_id));
+                            .unwrap();
+                            let receipt =
+                                gwt::apply_bound_authenticated_workspace_update_with_operation_id(
+                                    &project_root,
+                                    &session_id,
+                                    session.execution_binding.as_ref().unwrap(),
+                                    request,
+                                    Some(&operation_id),
+                                )
+                                .expect("apply Host update before dropping response");
+                            applied_receipt =
+                                Some((operation_id, receipt.work_id, receipt.journal_entry_id));
+                            if partial_body {
+                                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{").unwrap();
+                                stream.flush().unwrap();
+                            }
                         } else {
                             let mut request_prefix = [0_u8; 1024];
                             let _ = stream.read(&mut request_prefix);
@@ -566,10 +588,11 @@ impl ApplyThenDisconnectServer {
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         if shutdown_rx.try_recv().is_ok() {
-                            let (work_id, journal_entry_id) = applied_receipt
+                            let (operation_id, work_id, journal_entry_id) = applied_receipt
                                 .expect("the accepted Host request must be applied exactly once");
                             tx.send(AppliedDisconnectObservation {
                                 accepted,
+                                operation_id,
                                 work_id,
                                 journal_entry_id,
                             })
@@ -609,7 +632,7 @@ impl ApplyThenDisconnectServer {
     }
 }
 
-fn read_http_json_request(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
+fn read_http_json_request(stream: &mut std::net::TcpStream) -> (String, String, Vec<u8>) {
     let mut request = Vec::new();
     let (body_start, content_length) = loop {
         let mut buffer = [0_u8; 4096];
@@ -653,6 +676,14 @@ fn read_http_json_request(stream: &mut std::net::TcpStream) -> (String, Vec<u8>)
         .expect("Host request Authorization header");
     (
         authorization,
+        headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("x-gwt-workspace-operation-id")
+                    .then(|| value.trim().to_string())
+            })
+            .expect("operation ID header"),
         request[body_start..body_start + content_length].to_vec(),
     )
 }
@@ -2285,7 +2316,31 @@ fn workspace_update_proxy_response_loss_never_replays_locally_or_to_the_host() {
 }
 
 #[test]
+fn workspace_receipt_missing_is_read_only_and_unconfirmed() {
+    let fixture = fixture();
+    prepare_exact_ensured_host(&fixture);
+    let before = workspace_delivery_state_snapshot(&fixture);
+    let result = run_ws(
+        &fixture,
+        r#"{"schema_version":1,"operation":"workspace.receipt","params":{"operation_id":"aafc5f24-e5a5-4270-956d-86ac31dafb88"}}"#,
+    );
+    assert_ok(&result, "read-only receipt query");
+    let receipt: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["status"], "unconfirmed");
+    assert_eq!(workspace_delivery_state_snapshot(&fixture), before);
+}
+
+#[test]
 fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
+    assert_applied_response_loss_delivers_once(false);
+}
+
+#[test]
+fn workspace_update_proxy_body_loss_after_host_apply_delivers_once() {
+    assert_applied_response_loss_delivers_once(true);
+}
+
+fn assert_applied_response_loss_delivers_once(partial_body: bool) {
     let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
@@ -2294,11 +2349,12 @@ fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
         fixture.project.path(),
         SESSION,
         FORWARD_TOKEN,
+        partial_body,
     );
     let output = run_ws_raw_with_forward_env(
         &fixture,
         &format!(
-            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","summary":"Host applied before response loss"}}}}"#
+            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","status":"done","summary":"Host applied before response loss"}}}}"#
         ),
         SESSION,
         Some(&server.forward_url),
@@ -2306,13 +2362,23 @@ fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
     );
 
     assert!(
-        !output.status.success(),
-        "response loss after Host apply must remain an unknown outcome: {}",
+        output.status.success(),
+        "response loss after Host apply must recover the durable operation receipt: {}",
         output_text(&output)
     );
     assert_secret_redacted(&output, FORWARD_TOKEN);
     let observation = server.receive();
     assert_eq!(observation.work_id, exact.work_id);
+    let before_query = workspace_delivery_state_snapshot(&fixture);
+    let query = run_ws(&fixture, &serde_json::json!({"schema_version":1,"operation":"workspace.receipt","params":{"operation_id":observation.operation_id}}).to_string());
+    let receipt: Value = serde_json::from_str(query["output"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["status"], "applied");
+    assert_eq!(workspace_delivery_state_snapshot(&fixture), before_query);
+    let settlement: Value = serde_json::from_slice(
+        &work_event_settlement_state_snapshot(&fixture).expect("terminal settlement retained"),
+    )
+    .unwrap();
+    assert_eq!(settlement["obligation_open"], true);
 
     let events = load_tracked_work_events(fixture.project.path());
     let delivered = events

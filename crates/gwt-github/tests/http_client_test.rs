@@ -1884,3 +1884,249 @@ fn issue_labels_honor_and_settle_rest_budget() {
         );
     }
 }
+
+#[test]
+fn workflow_reads_metadata_and_raw_yaml_at_the_specified_ref() {
+    let transport = FakeTransport::new();
+    let filename = "日本語 Release#?%.yml";
+    let workflow_path = format!(".github/workflows/{filename}");
+    let metadata = serde_json::json!({"path": workflow_path}).to_string();
+    transport.enqueue(ok_body(&metadata));
+    transport.enqueue(ok_body(&metadata));
+    let yaml = "name: Release\non: workflow_dispatch\n";
+    transport.enqueue(ok_body(yaml));
+    transport.enqueue(HttpResponse {
+        status: 204,
+        headers: vec![],
+        body: String::new(),
+    });
+    let client = client_with(transport);
+
+    assert_eq!(client.workflow_path("1234").unwrap(), workflow_path);
+    assert_eq!(client.workflow_path(filename).unwrap(), workflow_path);
+    let git_ref = "feature/release &input=value#fragment";
+    assert_eq!(client.workflow_definition(filename, git_ref).unwrap(), yaml);
+    client
+        .dispatch_workflow(filename, git_ref, &serde_json::Map::new())
+        .unwrap();
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/1234"
+    );
+    let encoded_filename = "%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release%23%3F%25.yml";
+    assert_eq!(
+        requests[1].url,
+        format!("https://api.github.com/repos/octo/gwt/actions/workflows/{encoded_filename}")
+    );
+    assert_eq!(
+        requests[2].url,
+        format!("https://api.github.com/repos/octo/gwt/contents/.github/workflows/{encoded_filename}?ref=feature%2Frelease+%26input%3Dvalue%23fragment")
+    );
+    assert_eq!(
+        requests[3].url,
+        format!(
+            "https://api.github.com/repos/octo/gwt/actions/workflows/{encoded_filename}/dispatches"
+        )
+    );
+    assert_eq!(requests[3].method, HttpMethod::Post);
+    let contents_url = reqwest::Url::parse(&requests[2].url).unwrap();
+    assert_eq!(
+        contents_url.path(),
+        format!("/repos/octo/gwt/contents/.github/workflows/{encoded_filename}")
+    );
+    assert_eq!(
+        contents_url.query_pairs().collect::<Vec<_>>(),
+        vec![("ref".into(), git_ref.into())]
+    );
+    assert!(contents_url.fragment().is_none());
+    for request in requests.iter().take(3) {
+        assert_eq!(request.method, HttpMethod::Get);
+        assert!(request.body.is_none());
+        assert!(request
+            .headers
+            .contains(&("Authorization".into(), "Bearer test-token".into())));
+        assert!(request
+            .headers
+            .contains(&("X-GitHub-Api-Version".into(), "2022-11-28".into())));
+    }
+    assert!(requests[0]
+        .headers
+        .contains(&("Accept".into(), "application/vnd.github+json".into())));
+    assert!(requests[2]
+        .headers
+        .contains(&("Accept".into(), "application/vnd.github.raw+json".into())));
+}
+
+#[test]
+fn workflow_dispatch_posts_inputs_and_accepts_no_content() {
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 204,
+        headers: vec![],
+        body: String::new(),
+    });
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"environment": "staging", "enabled": true})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    client
+        .dispatch_workflow("release.yml", "feature/release", &inputs)
+        .unwrap();
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, HttpMethod::Post);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/release.yml/dispatches"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[0].body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"ref": "feature/release", "inputs": inputs})
+    );
+    assert!(requests[0]
+        .headers
+        .contains(&("Authorization".into(), "Bearer test-token".into())));
+    assert!(requests[0]
+        .headers
+        .contains(&("Content-Type".into(), "application/json".into())));
+}
+
+#[test]
+fn workflow_errors_do_not_expose_remote_response_bodies_or_inputs() {
+    let transport = FakeTransport::new();
+    for status in [403, 404, 422] {
+        transport.enqueue(HttpResponse {
+            status,
+            headers: vec![],
+            body: r#"{"message":"secret-input-value"}"#.into(),
+        });
+    }
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"token": "secret-input-value"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let errors = [
+        client.workflow_path("1234").unwrap_err(),
+        client
+            .workflow_definition("release.yml", "main")
+            .unwrap_err(),
+        client
+            .dispatch_workflow("release.yml", "main", &inputs)
+            .unwrap_err(),
+    ];
+    assert!(matches!(errors[0], ApiError::PermissionDenied { .. }));
+    for error in errors {
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+    assert_eq!(
+        client.transport().recorded().len(),
+        3,
+        "failures are not retried"
+    );
+}
+
+#[test]
+fn workflow_path_rejects_malformed_metadata_without_exposing_the_body() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body("secret-input-value"));
+    transport.enqueue(ok_body(r#"{"message":"secret-input-value"}"#));
+    let client = client_with(transport);
+    for _ in 0..2 {
+        let error = client.workflow_path("1234").unwrap_err();
+        assert!(matches!(error, ApiError::Unexpected(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+}
+
+struct SecretWorkflowFailureTransport;
+
+impl HttpTransport for SecretWorkflowFailureTransport {
+    fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        Err(HttpError::Transport("secret-input-value".into()))
+    }
+
+    fn execute_with_deadline(
+        &self,
+        request: HttpRequest,
+        _deadline: &ResolutionDeadline,
+    ) -> Result<HttpResponse, HttpError> {
+        self.execute(request)
+    }
+}
+
+#[test]
+fn workflow_errors_do_not_expose_transport_messages() {
+    let client = HttpIssueClient::with_transport(
+        SecretWorkflowFailureTransport,
+        "test-token".into(),
+        "octo",
+        "gwt",
+    );
+    let errors = [
+        client.workflow_path("1234").unwrap_err(),
+        client
+            .workflow_definition("release.yml", "main")
+            .unwrap_err(),
+        client
+            .dispatch_workflow("release.yml", "main", &serde_json::Map::new())
+            .unwrap_err(),
+    ];
+    for error in errors {
+        assert!(matches!(error, ApiError::Network(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+}
+
+#[test]
+fn workflow_requests_honor_and_settle_the_shared_rest_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+    let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(r#"{"path":".github/workflows/release.yml"}"#));
+    transport.enqueue(ok_body("on: workflow_dispatch\n"));
+    transport.enqueue(HttpResponse {
+        status: 429,
+        headers: vec![("Retry-After".into(), "60".into())],
+        body: "secret-input-value".into(),
+    });
+    let client = client_with(transport).with_budget(ledger.clone(), gate);
+    client.workflow_path("1234").unwrap();
+    client.workflow_definition("release.yml", "main").unwrap();
+    assert!(matches!(
+        client.dispatch_workflow("release.yml", "main", &serde_json::Map::new()),
+        Err(ApiError::RateLimited {
+            retry_after: Some(60)
+        })
+    ));
+    assert!(ledger
+        .active_block(
+            gwt_core::github_quota::GitHubQuota::Rest,
+            chrono::Utc::now()
+        )
+        .is_some());
+    assert!(matches!(
+        client.workflow_path("1234"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.workflow_definition("release.yml", "main"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.dispatch_workflow("release.yml", "main", &serde_json::Map::new()),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert_eq!(client.transport().recorded().len(), 3);
+    assert_eq!(
+        ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+        3
+    );
+}

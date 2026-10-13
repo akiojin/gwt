@@ -39,8 +39,8 @@ METADATA_ARGS = ["metadata", "--offline", "--no-deps", "--format-version", "1"]
 # with the guard armed. Only used when the artifact is not already armed.
 ARM_COMMAND = [
     "cargo", "test", "-p", "gwt", "--all-features",
-    "--test", "gwtd_cli_test",
-    "gwtd_help_describes_the_headless_cli_surface", "--", "--exact",
+    "--test", "cli_contracts",
+    "gwtd_cli_test::gwtd_help_describes_the_headless_cli_surface", "--", "--exact",
 ]
 
 
@@ -189,7 +189,10 @@ def deferred_restore():
                 )
                 raise AssertionError(f"deferred verify.run timed out after 1800s:\n{output}") from error
         output = result.stdout + result.stderr
-        assert result.returncode != 0 and "deferred" in output, output
+        assert result.returncode == 0, output
+        response = json.loads(result.stdout)
+        assert response["ok"] and response["exit_code"] == 0, response
+        assert response["status"] == "deferred", response
         reached = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
         ok, after, github_calls = probe("after deferred verify.run")
         assert ok and GUARD_ERROR_CODE not in after, after
