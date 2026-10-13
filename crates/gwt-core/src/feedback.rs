@@ -243,7 +243,8 @@ impl FeedbackStore {
 
 fn durable_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     crate::atomic_file::write_atomic(path, bytes)?;
-    File::open(path)?.sync_all()?;
+    // Windows FlushFileBuffers requires write access; preserve the payload.
+    OpenOptions::new().write(true).open(path)?.sync_all()?;
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         File::open(parent)?.sync_all()?;
