@@ -21832,6 +21832,8 @@ mod tests {
 
     #[test]
     fn agent_status_projects_blocked_claim_from_one_live_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
             max_active: 3,
@@ -21864,7 +21866,7 @@ mod tests {
                 enabled: true,
                 gui_status: Some(monitor.status_view_at("2026-08-03T00:00:00Z")),
                 autonomous_mode: false,
-                auto_apply_updates: None,
+                auto_apply_updates: Some(false),
                 auto_apply_updates_effective: Some(false),
                 has_launch_profile: false,
                 quota_hold: None,
