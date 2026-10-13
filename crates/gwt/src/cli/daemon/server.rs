@@ -5257,7 +5257,7 @@ fn scan_issue_monitor_once_blocking(
     // the prefs file — so without this the daemon keeps its stale startup view
     // (`has_launch_profile()==false` ⇒ active cap 0) and can never act as the
     // launch driver, leaving refills to the GUI's racy re-entrant scans.
-    if let Ok(disk) = crate::load_issue_monitor_prefs(
+    if let Ok(disk) = crate::issue_monitor::load_issue_monitor_prefs_for_running_version(
         &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
     ) {
         monitor.rebase_daemon_driver_prefs(&disk);

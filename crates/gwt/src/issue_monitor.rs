@@ -6361,6 +6361,34 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
     load_issue_monitor_prefs_unlocked(path)
 }
 
+/// Reconcile an applied update's admission hold at runtime scan/launch boundaries.
+/// Recheck under the prefs writer lock so a concurrently staged newer drain survives.
+/// Ordinary prefs readers and the monitor's explicit hold primitive stay unchanged.
+pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<IssueMonitorPrefs> {
+    fn applied(prefs: &IssueMonitorPrefs) -> bool {
+        prefs.update_drain.as_ref().is_some_and(|drain| {
+            semver::Version::parse(drain.version.trim().trim_start_matches('v'))
+                .ok()
+                .zip(semver::Version::parse(env!("CARGO_PKG_VERSION")).ok())
+                .is_some_and(|(drained, running)| drained <= running)
+        })
+    }
+    let prefs = load_issue_monitor_prefs(path)?;
+    if !applied(&prefs) {
+        return Ok(prefs);
+    }
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + std::time::Duration::from_secs(1),
+    );
+    try_mutate_issue_monitor_prefs(path, |latest| {
+        if applied(latest) {
+            latest.update_drain = None;
+        }
+        Ok(())
+    })
+    .map(|(prefs, ())| prefs)
+}
+
 /// Replace a complete prefs snapshot while holding the stable writer lock.
 /// Production read-modify-write callers should use
 /// [`mutate_issue_monitor_prefs_recovering`] so their mutation is based on the
@@ -25236,12 +25264,23 @@ mod tests {
         let json = serde_json::to_string(&monitor.prefs()).expect("serialize prefs");
         let restored: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload prefs");
         assert_eq!(restored.update_drain, monitor.prefs().update_drain);
-        let reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored);
+        let mut reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored);
         assert_eq!(reloaded.update_drain(), monitor.update_drain());
         assert_eq!(
             reloaded.active_issue_numbers(),
             monitor.active_issue_numbers()
         );
+
+        // #5351: runtime cleanup is durable and daemon rebase cannot resurrect
+        // the applied drain or alter an in-flight launch/effect ledger.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let reconciled = load_issue_monitor_prefs_for_running_version(&path).unwrap();
+        assert_eq!(reconciled, before);
+        reloaded.rebase_daemon_driver_prefs(&reconciled);
+        assert_eq!(reloaded.prefs(), before);
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), before);
 
         monitor.clear_update_drain();
         assert!(monitor.update_drain().is_none());
