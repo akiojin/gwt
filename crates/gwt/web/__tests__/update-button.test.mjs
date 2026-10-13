@@ -1083,6 +1083,32 @@ test("issue #5343: elevation_required keeps the staged update manual and explain
   assert.equal(modal.dataset.state, "ready");
   assert.equal(modal.dataset.version, "9.106.0");
   assert.deepEqual(fixture.sent, []);
-  modal.querySelector("[data-update-modal-restart-now]").click();
-  assert.deepEqual(fixture.sent, [{ kind: "apply_update_restart_now" }]);
+  modal.querySelector("[data-update-modal-later]").click();
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.equal(cta.dataset.status, "ready");
+  assert.match(cta.textContent, /Administrator privileges required/);
+
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  assert.match(cta.textContent, /Administrator privileges required/);
+  assert.equal(cta.title, cta.textContent);
+  assert.equal(cta.getAttribute("aria-label"), cta.textContent);
+  cta.click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_later" },
+    { kind: "apply_update_restart_now" },
+  ]);
+});
+
+test("issue #5343: a different ready target clears the administrator reason", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateAutoApply({ version: "9.106.0", phase: "elevation_required" });
+
+  // cancelled assigns pendingVersion before asking showReadyPending to render.
+  controller.handleUpdateAutoApply({ version: "9.107.0", phase: "cancelled" });
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.textContent, "Update v9.107.0 ready — Restart now");
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  assert.equal(cta.textContent, "Update v9.106.0 ready — Restart now");
 });

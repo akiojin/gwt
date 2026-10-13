@@ -23,6 +23,7 @@ export function createUpdateCtaController({
   const modalId = "update-modal";
   let latestVersion = null;
   let pendingVersion = null;
+  let pendingReadyReason = null;
   let status = "idle";
   let lastProgress = null;
   // Issue #3906 AC-12: the version whose draining CTA the user dismissed, so
@@ -146,6 +147,7 @@ export function createUpdateCtaController({
   function showAvailable(version) {
     if (!version) return null;
     removeLegacyUpdateSurfaces();
+    if (pendingReadyReason?.version !== version) pendingReadyReason = null;
     latestVersion = version;
     const cta = renderCta("available", `Update available: v${version} - Click to update`);
     announceUpdateAvailable();
@@ -155,8 +157,13 @@ export function createUpdateCtaController({
   function showReadyPending(version, reason = null) {
     if (!version) return null;
     removeLegacyUpdateSurfaces();
+    if (reason) {
+      pendingReadyReason = { version, reason };
+    } else if (pendingReadyReason?.version !== version) {
+      pendingReadyReason = null;
+    }
     pendingVersion = version;
-    const detail = reason ? `${reason} — ` : "";
+    const detail = pendingReadyReason ? `${pendingReadyReason.reason} — ` : "";
     const cta = renderCta("ready", `Update v${version} ready — ${detail}Restart now`);
     announceUpdateAvailable();
     return cta;
@@ -757,6 +764,7 @@ export function createUpdateCtaController({
   // path, without sending `apply_update_start` themselves.
   function beginDownloadingFor(version) {
     if (!version) return;
+    if (pendingReadyReason?.version !== version) pendingReadyReason = null;
     pendingVersion = null;
     lastProgress = null;
     latestVersion = version;

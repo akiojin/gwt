@@ -57,6 +57,15 @@ test.describe("Update drain CTA", () => {
       if (message.type() === "error") errors.push(message.text());
     });
     page.on("pageerror", (error) => errors.push(error.message));
+    // The staged release is injected, so Later must not persist a nonexistent
+    // manifest. Its acknowledgement is injected below, as in update-modal.spec.
+    await page.addInitScript(() => {
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string" && JSON.parse(data).kind === "apply_update_later") return;
+        return originalSend.call(this, data);
+      };
+    });
     await gotoLiveGwt(page, BASE, { enableTestBridge: true, suppressUpdateApplyStart: true });
     const inject = (detail: Record<string, unknown>) =>
       page.evaluate((payload) => {
@@ -93,6 +102,12 @@ test.describe("Update drain CTA", () => {
     await expect(modal).toHaveAttribute("data-version", "9.106.0");
     // Observe the manual action without invoking an actual installer/restart.
     await expect(modal.locator("[data-update-modal-restart-now]")).toHaveText("Restart now");
+    await modal.locator("[data-update-modal-later]").click();
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await expect(cta).toContainText("Administrator privileges required");
+    await inject({ kind: "update_apply_pending_persisted", version: "9.106.0" });
+    await expect(cta).toContainText("Administrator privileges required");
     expect(errors).toEqual([]);
   });
 
