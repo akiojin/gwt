@@ -27,6 +27,7 @@ impl AppRuntime {
                     id: window_id.to_owned(),
                     session_id: None,
                     reports: Vec::new(),
+                    current: None,
                     error: Some("This window has no registered PM.".to_owned()),
                 },
             )];
@@ -38,6 +39,7 @@ impl AppRuntime {
             return Vec::new();
         };
         let project_root = tab.project_root.clone();
+        let pending_update = self.pending_update.clone();
         let window_id = window_id.to_owned();
         let proxy = self.proxy.for_project(context.clone());
         self.blocking_tasks.spawn(move || {
@@ -54,11 +56,17 @@ impl AppRuntime {
                     Some(format!("PM reports could not be loaded: {error}")),
                 ),
             };
+            let (current, error) =
+                match gwt::pm_current::snapshot(&project_root, pending_update.as_ref()) {
+                    Ok(current) => (Some(current), error),
+                    Err(current_error) => (None, Some(error.unwrap_or(current_error))),
+                };
             proxy.send(UserEvent::PmReportsLoaded {
                 client_id,
                 window_id,
                 session_id,
                 reports,
+                current,
                 error,
             });
         });
@@ -71,6 +79,7 @@ impl AppRuntime {
         window_id: &str,
         session_id: &str,
         reports: Vec<gwt::protocol::PmReportView>,
+        current: Option<gwt::pm_current::PmCurrentSnapshot>,
         error: Option<String>,
     ) -> Vec<OutboundEvent> {
         if self.pm_chat_session_id(window_id) != Some(session_id) {
@@ -82,6 +91,7 @@ impl AppRuntime {
                 id: window_id.to_owned(),
                 session_id: Some(session_id.to_owned()),
                 reports,
+                current,
                 error,
             },
         )]
