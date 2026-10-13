@@ -171,6 +171,8 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const controlMessages = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
     message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")));
   const before = await controlMessages();
+  // Keep native hover from competing with this keyboard-only phase.
+  await page.mouse.move(1590, 1090);
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
   await page.keyboard.press("Tab");
