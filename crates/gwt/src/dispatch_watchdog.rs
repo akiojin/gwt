@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Condvar, Mutex},
+    sync::{mpsc, Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -13,6 +13,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 const STALL_THRESHOLD: Duration = Duration::from_millis(100);
 const PERSIST_THRESHOLD: Duration = Duration::from_secs(5);
+const LEDGER_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct ActiveDispatch {
     event: String,
@@ -51,7 +52,7 @@ impl ActiveDispatch {
 
 /// A rare, on-demand process sample, never a second periodic resource poller.
 /// The CPU value measures this interval after detection (1 core = 100%).
-fn persist_stall(event: &str, elapsed: Duration, started_at: DateTime<Utc>) {
+fn persist_stall(event: &str, elapsed: Duration, started_at: DateTime<Utc>) -> std::io::Result<()> {
     let detected_at = Utc::now();
     let pid = sysinfo::Pid::from_u32(std::process::id());
     let mut system = System::new();
@@ -98,9 +99,12 @@ fn persist_stall(event: &str, elapsed: Duration, started_at: DateTime<Utc>) {
         ),
     )
     .with_context(context);
-    if let Err(error) = gwt_core::error_ledger::record(record) {
-        tracing::warn!(%error, "cannot persist GUI dispatch stall");
-    }
+    // Shutdown joins this observer, so another ledger writer cannot hold it
+    // indefinitely. Uncontended appends still use the existing ledger contract.
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + LEDGER_LOCK_TIMEOUT,
+    );
+    gwt_core::error_ledger::record(record).map(|_| ())
 }
 
 #[derive(Default)]
@@ -118,21 +122,54 @@ impl DispatchWatchdog {
     pub(crate) fn start() -> Self {
         #[cfg(test)]
         let home = gwt_core::test_support::gwt_home_override();
+        Self::with_reporters(
+            |event, elapsed, error| {
+                if let Some(error) = error {
+                    tracing::warn!(%error, "cannot persist GUI dispatch stall");
+                }
+                tracing::warn!(
+                    target: "gwt.frontend.timing",
+                    event,
+                    elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+                    "frontend dispatch still running"
+                );
+            },
+            move |event, elapsed, started_at| {
+                #[cfg(test)]
+                let _home = home
+                    .as_ref()
+                    .map(gwt_core::test_support::ScopedGwtHome::set);
+                persist_stall(event, elapsed, started_at)
+            },
+        )
+    }
+
+    fn with_reporters(
+        warning: impl Fn(&str, Duration, Option<&std::io::Error>) + Send + 'static,
+        persist: impl Fn(&str, Duration, DateTime<Utc>) -> std::io::Result<()> + Send + 'static,
+    ) -> Self {
+        let (warning_tx, warning_rx) =
+            mpsc::sync_channel::<(String, Duration, Option<std::io::Error>)>(1);
+        // A subscriber may never return. Detach this single bounded warning
+        // worker so neither observation nor GUI shutdown waits for logging.
+        drop(
+            thread::Builder::new()
+                .name("frontend-dispatch-warnings".into())
+                .spawn(move || {
+                    while let Ok((event, elapsed, error)) = warning_rx.recv() {
+                        warning(&event, elapsed, error.as_ref());
+                    }
+                })
+                .expect("spawn frontend dispatch warning worker"),
+        );
         Self::with_reporter(move |event, elapsed, started_at| {
-            #[cfg(test)]
-            let _home = home
-                .as_ref()
-                .map(gwt_core::test_support::ScopedGwtHome::set);
-            if elapsed >= PERSIST_THRESHOLD {
-                // Persist before entering tracing's project-router lock.
-                persist_stall(event, elapsed, started_at);
-            }
-            tracing::warn!(
-                target: "gwt.frontend.timing",
-                event,
-                elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-                "frontend dispatch still running"
-            );
+            let error = if elapsed >= PERSIST_THRESHOLD {
+                persist(event, elapsed, started_at).err()
+            } else {
+                None
+            };
+            // Warnings are best effort if the subscriber or its queue is stuck.
+            let _ = warning_tx.try_send((event.to_owned(), elapsed, error));
         })
     }
 
@@ -221,7 +258,6 @@ impl Drop for DispatchGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     #[test]
     fn threshold_reports_once_and_only_after_one_hundred_ms() {
@@ -251,30 +287,82 @@ mod tests {
     }
 
     #[test]
-    fn blocked_reporter_does_not_block_dispatch_completion() {
+    fn blocked_warning_does_not_block_persistence_or_dispatch_shutdown() {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let (persisted_tx, persisted_rx) = mpsc::channel();
         let (completed_tx, completed_rx) = mpsc::channel();
-        let mut watchdog = DispatchWatchdog::with_reporter(move |_, _, _| {
-            entered_tx.send(()).unwrap();
-            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        });
+        let mut watchdog = DispatchWatchdog::with_reporters(
+            move |_, elapsed, _| {
+                if elapsed < PERSIST_THRESHOLD {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+            },
+            move |event, elapsed, _| {
+                persisted_tx.send((event.to_owned(), elapsed)).unwrap();
+                Ok(())
+            },
+        );
         let guard = watchdog.enter("refresh");
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Observe the long-stall threshold while the initial warning is blocked.
+        guard
+            .watchdog
+            .shared
+            .0
+            .lock()
+            .unwrap()
+            .active
+            .as_mut()
+            .unwrap()
+            .started -= Duration::from_secs(6);
+        guard.watchdog.shared.1.notify_one();
+        let persisted = persisted_rx.recv_timeout(Duration::from_secs(5));
+        drop(guard);
         let progressed = thread::scope(|scope| {
             scope.spawn(move || {
-                drop(guard);
+                drop(watchdog);
                 completed_tx.send(()).unwrap();
             });
             let progressed = completed_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-            // Always release the reporter before asserting, including the RED case.
+            // Always release the warning before asserting, including the RED case.
             release_tx.send(()).unwrap();
             progressed
         });
         assert!(
-            progressed,
-            "diagnostic I/O held the GUI dispatch state lock"
+            persisted.is_ok(),
+            "blocked warning prevented durable reporting"
         );
+        assert_eq!(persisted.unwrap().0, "refresh");
+        assert!(progressed, "GUI shutdown waited for the warning worker");
+    }
+
+    #[test]
+    fn stall_append_returns_when_another_writer_keeps_the_ledger_locked() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let ledger_dir = gwt_core::paths::gwt_error_ledger_dir();
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        let holder = std::fs::File::create(ledger_dir.join("errors.lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&holder).unwrap();
+        let home_path = home.path().to_owned();
+        let (tx, rx) = mpsc::channel();
+        let result = thread::scope(|scope| {
+            scope.spawn(move || {
+                let _home = gwt_core::test_support::ScopedGwtHome::set(&home_path);
+                tx.send(persist_stall("refresh", Duration::from_secs(6), Utc::now()))
+                    .unwrap();
+            });
+            let result = rx.recv_timeout(Duration::from_secs(10));
+            // Release our holder before joining, including the unbounded RED case.
+            fs2::FileExt::unlock(&holder).unwrap();
+            result
+        });
+        let error = result
+            .expect("diagnostic append waited indefinitely for another ledger writer")
+            .expect_err("contended diagnostic append should report its expired deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]
