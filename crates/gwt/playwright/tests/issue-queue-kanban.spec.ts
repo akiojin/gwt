@@ -354,6 +354,8 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await expect(popup).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(popup).not.toBeVisible();
+  // Leave the hover target before checking keyboard-only focus explanations.
+  await page.mouse.move(1590, 1090);
   for (const selector of [
     '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
     '[data-action="monitor-settings"]', '[data-action="monitor-toggle"]',
