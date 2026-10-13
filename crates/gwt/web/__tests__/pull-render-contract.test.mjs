@@ -147,6 +147,21 @@ test("Window List receiver updates the catalog model and rejects direct renderin
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 
+test("workspace receivers cannot manually sync Agents or Split outside the catalog", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const workspace = app.slice(app.indexOf('function renderWorkspace('), app.indexOf('const socketTransport'));
+  assert.doesNotMatch(workspace, /(?:splitSurfaces|agentsSurface)\??\.sync\s*\(/);
+  const bypasses = source => {
+    const lines = source.split('\n');
+    return scanModule(source, 'crates/gwt/web/app.js').filter(finding =>
+      /(?:splitSurfaces|agentsSurface).*\.sync\s*\(/.test(lines[finding.line - 1]));
+  };
+  assert.deepEqual(bypasses(app), []);
+  const bypass = app.replace('case "workspace_state":',
+    'case "workspace_state": splitSurfaces.sync(); agentsSurface.sync(event.windows);');
+  assert.ok(bypasses(bypass).length > 0, "the old fan-out must be detected even inside an allowed receiver");
+});
+
 test("unrelated remote advances leave the default comparison stable; explicit CI bases still apply", t => {
   const root = mkdtempSync(join(tmpdir(), "gwt-pull-render-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

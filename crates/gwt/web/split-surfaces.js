@@ -5,7 +5,7 @@ const PRESETS = { issues: "issue", board: "board", settings: "settings" };
 // split dimensions as canvas geometry. The canvas remains the single-view
 // layout until the later #4777 migration slices retire it.
 export function createSplitSurfaces({
-  document, stage, getWindows, getElement, openSurface, onChange, onLayout,
+  document, stage, windowCatalogModel, getWindows, getElement, openSurface, onChange, onLayout,
   restoreVisibility = () => {}, onAgentsHost = () => {},
 }) {
   const host = document.getElementById("split-surfaces");
@@ -50,7 +50,9 @@ export function createSplitSurfaces({
   }
 
   function sync() {
-    const windows = getWindows();
+    const catalog = windowCatalogModel.read().catalog;
+    const windows = getWindows(catalog);
+    host.dataset.catalogVersion = String(catalog.version);
     for (const [surface, existingIds] of requested) {
       if (windows.some(data => data.preset === PRESETS[surface] && !existingIds.has(data.id))) {
         requested.delete(surface);
@@ -163,7 +165,9 @@ export function createSplitSurfaces({
     onChange(null);
   }
 
+  const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
   return {
+    dispose: unsubscribe,
     open, close, sync, select: choose,
     isOpen: () => opened,
     activeSurface: () => opened ? selections[active] : null,
