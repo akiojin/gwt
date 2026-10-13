@@ -95,9 +95,12 @@ pub fn assert_test_path(path: &Path) {
 }
 
 fn is_isolated(path: &Path) -> bool {
-    if std::env::temp_dir()
-        .canonicalize()
-        .is_ok_and(|temporary| is_isolated_under(path, &temporary))
+    // Environment temp roots can be set to / or HOME. Only OS-owned roots
+    // may authorize test IO; nested verification directories remain covered.
+    #[cfg(windows)]
+    if dirs::data_local_dir()
+        .and_then(|directory| directory.join("Temp").canonicalize().ok())
+        .is_some_and(|temporary| is_isolated_under(path, &temporary))
     {
         return true;
     }
@@ -114,10 +117,11 @@ fn is_isolated(path: &Path) -> bool {
     // is a long per-user or per-verification directory. Resolve /tmp's macOS
     // alias, and apply the same parent/leaf checks to this trusted root.
     #[cfg(unix)]
-    if Path::new("/tmp")
-        .canonicalize()
-        .is_ok_and(|temporary| is_isolated_under(path, &temporary))
-    {
+    if ["/tmp", "/var/tmp"].iter().any(|root| {
+        Path::new(root)
+            .canonicalize()
+            .is_ok_and(|temporary| is_isolated_under(path, &temporary))
+    }) {
         return true;
     }
     false
@@ -219,6 +223,26 @@ impl Drop for ScopedGwtHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_temp_root_cannot_disable_the_guard() {
+        // The child only constructs a protected path; it never writes to HOME.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings::tests::explicit_global_config_path_rejects_an_unisolated_home",
+            ])
+            .env("TMPDIR", "/")
+            .env("TMP", "/")
+            .env("TEMP", "/")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 
     #[test]
     fn recognizes_cargo_tests_but_not_the_application() {
