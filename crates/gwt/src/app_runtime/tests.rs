@@ -8732,6 +8732,7 @@ fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
         version: "9.99.0".to_string(),
         since: "2026-09-07T00:00:00Z".to_string(),
         reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+        automatic: None,
         blocking: Vec::new(),
     });
     // Issue #3906 AC-4 / #4076 AC-3: the monitor state the apply left behind

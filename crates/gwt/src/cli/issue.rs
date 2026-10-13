@@ -924,6 +924,11 @@ fn load_monitor_agent_status(
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
         status.source = crate::IssueMonitorStatusSource::Daemon;
+        status.auto_apply_updates = authority.auto_apply_updates();
+        status.auto_apply_updates_effective = Some(authority.auto_apply_updates_enabled());
+        if let Some(gui) = status.gui_status.as_mut() {
+            gui.auto_apply_updates = authority.auto_apply_updates_enabled();
+        }
         // Keep reported counts and owners together before current capacity,
         // durable identity, and closed-Issue action reconciliation.
         let capacity = launch_capacity(&status, active_session_count, configured_max_active);
@@ -3305,13 +3310,13 @@ fn apply_monitor_config_set(
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
-    if let Some(auto_apply_updates) = auto_apply_updates {
-        candidate.set_auto_apply_updates(Some(auto_apply_updates));
-    }
     if let Some(launch_agent) = launch_agent {
         candidate
             .switch_launch_profile_agent(launch_agent)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    }
+    if let Some(auto_apply_updates) = auto_apply_updates {
+        candidate.set_auto_apply_updates(Some(auto_apply_updates))?;
     }
     apply_update_drain(&mut candidate, update_drain);
     *prefs = candidate.prefs();
@@ -3333,9 +3338,11 @@ pub(crate) fn apply_update_drain(
             &now,
         ),
         // Issue #3906 AC-3: the update mechanism names the staged version.
-        Some(crate::IssueMonitorUpdateDrainControl::Raise { reason, version }) => {
-            monitor.set_update_drain(reason, &version, &now)
-        }
+        Some(crate::IssueMonitorUpdateDrainControl::Raise {
+            reason,
+            version,
+            automatic,
+        }) => monitor.set_update_drain_with_origin(reason, &version, &now, automatic),
         Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)) => monitor.clear_update_drain(),
         None => {}
     }
@@ -3514,10 +3521,8 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
                 .unwrap_or(prefs.autonomous_mode),
-            "auto_apply_updates": prefs.auto_apply_updates,
-            "auto_apply_updates_effective": prefs
-                .auto_apply_updates
-                .unwrap_or(prefs.autonomous_mode),
+            "auto_apply_updates": monitor.auto_apply_updates_enabled(),
+            "auto_apply_updates_effective": monitor.auto_apply_updates_enabled(),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
             }),
@@ -10794,6 +10799,58 @@ mod tests {
         assert_eq!(ledgers(&cleared), ledgers(&before));
         let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
         assert!(reply["update_drain"].is_null());
+    }
+
+    #[test]
+    fn issue_monitor_config_set_auto_apply_updates_writes_global_setting() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                allowed_labels: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                max_active_auto: false,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+                update_drain: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let path = gwt_core::paths::gwt_config_path();
+        assert!(
+            path.exists(),
+            "legacy config setter must persist app-wide config"
+        );
+        let saved: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .get("auto_apply_updates")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
+                .status_view()
+                .auto_apply_updates
+        );
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        assert!(
+            !prefs.autonomous_mode,
+            "global setting cannot authorize autonomous operation"
+        );
     }
 
     #[test]

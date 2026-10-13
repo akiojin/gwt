@@ -5706,6 +5706,9 @@ import { createUiStateStore } from "/ui-state-store.js";
       // document-level <select> guard listeners, wired through this
       // factory.
       const {
+        applyGlobalUpdateSettings,
+        applyIssueSettingsStatus,
+        applyIssueMonitorProfiles,
         customAgentsState,
         agentBackendsState,
         systemSettingsState,
@@ -6503,7 +6506,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
+            applyIssueSettingsStatus(event.status || {}, activeProjectTab()?.project_root);
             // Issue #3906 AC-12: the update CTA shows the drain progress.
+            break;
+          case "issue_monitor_profiles":
+            applyIssueMonitorProfiles(event);
             break;
           case "issue_monitor_allowed_labels_write_failed":
             applyKnowledgeReceiveEvent(event);
@@ -6912,6 +6919,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings":
+            applyGlobalUpdateSettings(event);
             // SPEC-1933 US-4: backend echoed the on-disk language value.
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
@@ -6941,6 +6949,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_updated":
+            applyGlobalUpdateSettings(event);
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
               systemSettingsInteractionGuard.defer({

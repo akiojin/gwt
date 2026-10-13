@@ -538,18 +538,15 @@ impl AppRuntime {
     }
 
     pub(super) fn system_settings_get_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
-        let path = match gwt_config::Settings::global_config_path() {
-            Some(p) => p,
-            None => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::SystemSettingsError {
-                        message: "unable to resolve home directory (`~/.gwt/config.toml`)"
-                            .to_string(),
-                    },
-                )];
-            }
-        };
+        if let Err(error) = gwt::update_settings::migrate() {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::SystemSettingsError {
+                    message: error.to_string(),
+                },
+            )];
+        }
+        let path = gwt_core::paths::gwt_config_path();
         vec![OutboundEvent::reply(
             client_id,
             gwt::system_settings::get_event(&path),
@@ -564,18 +561,7 @@ impl AppRuntime {
         board_provider: Option<String>,
         agent_resource: Option<gwt::protocol::AgentResourceSettings>,
     ) -> Vec<OutboundEvent> {
-        let path = match gwt_config::Settings::global_config_path() {
-            Some(p) => p,
-            None => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::SystemSettingsError {
-                        message: "unable to resolve home directory (`~/.gwt/config.toml`)"
-                            .to_string(),
-                    },
-                )];
-            }
-        };
+        let path = gwt_core::paths::gwt_config_path();
         vec![OutboundEvent::reply(
             client_id,
             gwt::system_settings::update_event(
@@ -734,15 +720,62 @@ impl AppRuntime {
         {
             return;
         }
-        let enabled = self.project_contexts().iter().any(|context| {
-            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
-                &context.project_root,
-            ))
-            .is_ok_and(|prefs| prefs.autonomous_mode && prefs.auto_apply_updates.unwrap_or(true))
-        });
-        if enabled {
+        if self.automatic_updates_enabled() {
             self.apply_update_start_events(super::UPDATE_AUTO_APPLY_CLIENT_ID);
         }
+    }
+
+    pub(crate) fn automatic_updates_enabled(&self) -> bool {
+        gwt::update_settings::migrate().unwrap_or(false)
+            && self.project_contexts().iter().any(|context| {
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                    &context.project_root,
+                ))
+                .is_ok_and(|prefs| prefs.autonomous_mode)
+            })
+    }
+
+    pub(super) fn set_global_auto_apply_updates_events(
+        &mut self,
+        client_id: &str,
+        enabled: bool,
+    ) -> Vec<OutboundEvent> {
+        if let Err(error) = gwt::update_settings::set(Some(enabled)) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::SystemSettingsError {
+                    message: error.to_string(),
+                },
+            )];
+        }
+        let mut events = Vec::new();
+        for context in self.project_contexts() {
+            if !enabled {
+                if let Some((prefs, drain)) = self.project_auto_update_drain(&context) {
+                    if drain.automatic.unwrap_or(prefs.autonomous_mode) {
+                        events.extend(
+                            self.release_update_auto_apply_for_project(&context, &drain.version),
+                        );
+                    }
+                }
+            }
+            if let Ok(prefs) = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+            ) {
+                let monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                events.extend(self.issue_monitor_snapshot_events_without_wake(
+                    None,
+                    Some(&context.project_root),
+                    monitor,
+                ));
+            }
+        }
+        let path = gwt_core::paths::gwt_config_path();
+        events.push(OutboundEvent::broadcast(gwt::system_settings::get_event(
+            &path,
+        )));
+        events
     }
 
     /// Shared staging request for the update CTA and automatic discovery.

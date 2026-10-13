@@ -349,6 +349,7 @@ impl AppEventProxy {
 /// Issue #3906 AC-2: the client id the automatic apply commits under; no
 /// frontend client owns it, so failures are broadcast, never replied.
 pub(crate) const UPDATE_AUTO_APPLY_CLIENT_ID: &str = "update-auto-apply";
+pub(crate) const UPDATE_MANUAL_DRAIN_CLIENT_ID: &str = "update-manual-drain";
 
 /// Why [`AppRuntime::release_update_auto_apply_events`] released the drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7901,6 +7902,7 @@ impl AppRuntime {
         client_id: &str,
         patches: Vec<gwt::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
+        request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let resolve = |prefs: &gwt::IssueMonitorPrefs| {
             let pool = prefs.launch_profile_pool();
@@ -7936,7 +7938,7 @@ impl AppRuntime {
                 "usage_threshold_percent": usage_threshold_percent,
             }}),
         );
-        self.issue_monitor_authorizing_control_result_events(
+        let mut events = self.issue_monitor_authorizing_control_result_events(
             context,
             client_id,
             publication,
@@ -7954,7 +7956,22 @@ impl AppRuntime {
                 }
                 Ok(())
             },
-        )
+        );
+        if !events.iter().any(|outbound| {
+            matches!(&outbound.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error")
+        }) {
+            if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+                events.push(OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorProfiles {
+                        project_root: context.project_root.display().to_string(),
+                        profiles: prefs.launch_profile_pool(),
+                        request_id,
+                    },
+                ));
+            }
+        }
+        events
     }
 
     fn issue_monitor_authorizing_control_result_events(
@@ -8383,6 +8400,7 @@ impl AppRuntime {
                         .gui_status
                         .map(|mut status| {
                             self.retain_missing_issue_monitor_capacity(project_root, &mut status);
+                            status.auto_apply_updates = gwt::update_settings::enabled();
                             self.remember_issue_monitor_status(Some(project_root), &status);
                             vec![OutboundEvent::reply(
                                 client_id,
@@ -9949,11 +9967,19 @@ impl AppRuntime {
         version: &str,
         refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
     ) -> Vec<OutboundEvent> {
+        let automatic = self
+            .update_download_in_flight
+            .as_deref()
+            .map(|client_id| client_id == UPDATE_AUTO_APPLY_CLIENT_ID)
+            .unwrap_or_else(|| self.automatic_updates_enabled());
         if gwt_core::update::load_pending_update_manifest()
             .is_some_and(|manifest| manifest.version == version && manifest.auto_apply_deferred)
         {
             return self
                 .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Cancelled);
+        }
+        if automatic && !self.automatic_updates_enabled() {
+            return Vec::new();
         }
         let mut events = Vec::new();
         let contexts = self.project_contexts();
@@ -9972,6 +9998,7 @@ impl AppRuntime {
                 &context,
                 version,
                 refusal.clone(),
+                automatic,
             ));
         }
         Self::deduplicate_update_host_events(events)
@@ -9982,6 +10009,7 @@ impl AppRuntime {
         context: &ProjectContext,
         version: &str,
         refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
+        automatic: bool,
     ) -> Vec<OutboundEvent> {
         let project_root = context.project_root.clone();
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
@@ -10005,8 +10033,7 @@ impl AppRuntime {
                 return Vec::new();
             }
         };
-        let auto_apply = prefs.auto_apply_updates.unwrap_or(prefs.autonomous_mode);
-        if !(prefs.autonomous_mode && auto_apply) {
+        if !automatic {
             // Issue #4376 AC-1 / AC-2 / AC-3: a manual Update click waits for
             // the agents that are running. The payload is staged; when the
             // host is not quiescent right now, the click joins the `Auto`
@@ -10059,7 +10086,7 @@ impl AppRuntime {
             context,
             serde_json::json!({
                 "config_set": {
-                    "update_drain": { "reason": "auto", "version": version },
+                    "update_drain": { "reason": "auto", "version": version, "automatic": automatic },
                 }
             }),
         );
@@ -10068,10 +10095,11 @@ impl AppRuntime {
             Err(error) if error.allows_local_fallback() => {
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 match self.commit_local_issue_monitor_control(context, |monitor| {
-                    monitor.set_update_drain(
+                    monitor.set_update_drain_with_origin(
                         gwt::IssueMonitorUpdateDrainReason::Auto,
                         &version,
                         &now,
+                        Some(automatic),
                     );
                 }) {
                     Ok((monitor, ())) => {
@@ -10273,8 +10301,15 @@ impl AppRuntime {
                 ..
             } = &event.event
             {
+                let automatic = self
+                    .project_contexts()
+                    .iter()
+                    .filter_map(|context| self.project_auto_update_drain(context))
+                    .filter(|(_, drain)| drain.version == *version)
+                    .all(|(prefs, drain)| drain.automatic.unwrap_or(prefs.autonomous_mode));
                 self.proxy.send(UserEvent::ApplyUpdateDrained {
                     version: version.clone(),
+                    automatic,
                 });
             }
         }
@@ -10293,6 +10328,9 @@ impl AppRuntime {
             }
             return Vec::new();
         };
+        if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
+            return self.release_update_auto_apply_for_project(context, &drain.version);
+        }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
         let wait_reason = match &outcome {
             Ok(()) => "waiting for consecutive quiet observations or apply grace".to_string(),
@@ -10919,6 +10957,9 @@ impl AppRuntime {
                 self.apply_update_restart_now_events(&client_id)
             }
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
+            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+                self.set_global_auto_apply_updates_events(&client_id, enabled)
+            }
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)
             }
@@ -11854,21 +11895,7 @@ impl AppRuntime {
                 )
             }
             FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
-                // Issue #3906 AC-1: the override rides the same `config_set`
-                // control the CLI uses, so daemon and local fallback agree.
-                let publication = self.publish_project_issue_monitor_control(
-                    context,
-                    serde_json::json!({ "config_set": { "auto_apply_updates": enabled } }),
-                );
-                self.issue_monitor_control_result_events(
-                    context,
-                    &client_id,
-                    publication,
-                    "auto-apply-updates",
-                    |monitor| {
-                        monitor.set_auto_apply_updates(Some(enabled));
-                    },
-                )
+                self.set_global_auto_apply_updates_events(&client_id, enabled)
             }
             FrontendEvent::SetIssueMonitorAllowedLabels {
                 allowed_labels,
@@ -11886,14 +11913,38 @@ impl AppRuntime {
                     request_id,
                 )
             }
+            FrontendEvent::GetIssueMonitorProfiles => {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
+                match gwt::load_issue_monitor_prefs(&prefs_path) {
+                    Ok(prefs) => vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorProfiles {
+                            project_root: context.project_root.display().to_string(),
+                            profiles: prefs.launch_profile_pool(),
+                            request_id: None,
+                        },
+                    )],
+                    Err(error) => self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        Some(&client_id),
+                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
+                            format!("failed to load Issue Monitor profiles: {error}"),
+                        ),
+                        "profiles-get",
+                        None,
+                    ),
+                }
+            }
             FrontendEvent::IssueMonitorProfilesSet {
                 profiles,
                 usage_threshold_percent,
+                request_id,
             } => self.issue_monitor_profiles_set_events(
                 context,
                 &client_id,
                 profiles,
                 usage_threshold_percent,
+                request_id,
             ),
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
                 let publication = self.publish_project_issue_monitor_control(
